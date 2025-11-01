@@ -221,8 +221,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const result = await response.json();
             
             if (result.success) {
-                alert('✅ ' + result.message);
-                loadTapeConfig();
+                alert('✅ 配置已保存');
             } else {
                 alert('❌ 保存失败：' + result.message);
             }
