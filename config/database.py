@@ -7,6 +7,7 @@ Database Management Module
 
 import asyncio
 import logging
+import re
 from typing import AsyncGenerator, Optional
 from sqlalchemy import create_engine, MetaData
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
@@ -15,7 +16,6 @@ from sqlalchemy.pool import StaticPool
 
 from .settings import get_settings
 from models.base import Base
-from config.database_init import DatabaseInitializer
 
 logger = logging.getLogger(__name__)
 
@@ -142,18 +142,24 @@ class DatabaseManager:
         from models import backup, tape, user, system_log, system_config
         
         # 解析数据库URL获取连接信息
-        db_init = DatabaseInitializer()
-        db_info = db_init._parse_database_url(self.settings.DATABASE_URL)
-        if not db_info:
-            raise ValueError("无法解析数据库连接信息")
+        database_url = self.settings.DATABASE_URL
+        if database_url.startswith("opengauss://"):
+            database_url = database_url.replace("opengauss://", "postgresql://", 1)
+        
+        pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
+        match = re.match(pattern, database_url)
+        if not match:
+            raise ValueError("无法解析数据库连接URL")
+        
+        username, password, host, port, database = match.groups()
         
         # 使用psycopg2直接连接
         conn = psycopg2.connect(
-            host=db_info['host'],
-            port=db_info['port'],
-            user=db_info['user'],
-            password=db_info['password'],
-            database=db_info['database']
+            host=host,
+            port=port,
+            user=username,
+            password=password,
+            database=database
         )
         
         try:
