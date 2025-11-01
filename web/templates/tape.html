@@ -462,20 +462,30 @@
             </div>
             <div class="modal-body">
                 <form>
+                    <div class="mb-3">
+                        <button type="button" class="btn btn-sm btn-outline-info" id="scanForAddTapeBtn">
+                            <i class="bi bi-search me-1"></i>从磁带机扫描信息
+                        </button>
+                    </div>
                     <div class="row">
                         <div class="col-md-6 mb-3">
                             <label class="form-label">磁带标签</label>
-                            <input type="text" class="form-control" placeholder="TAP001" required>
+                            <input type="text" class="form-control" id="tapeLabel" placeholder="TAP001" required>
                         </div>
                         <div class="col-md-6 mb-3">
                             <label class="form-label">序列号</label>
-                            <input type="text" class="form-control" placeholder="STK123456789" required>
+                            <div class="input-group">
+                                <input type="text" class="form-control" id="tapeSerial" placeholder="STK123456789" required>
+                                <button type="button" class="btn btn-outline-secondary" id="generateSerialBtn" title="自动生成">
+                                    <i class="bi bi-arrow-clockwise"></i>
+                                </button>
+                            </div>
                         </div>
                     </div>
                     <div class="row">
                         <div class="col-md-6 mb-3">
                             <label class="form-label">磁带类型</label>
-                            <select class="form-select" required>
+                            <select class="form-select" id="tapeType" required>
                                 <option value="">选择类型</option>
                                 <option value="LTO-9">LTO-9</option>
                                 <option value="LTO-8">LTO-8</option>
@@ -485,7 +495,7 @@
                         </div>
                         <div class="col-md-6 mb-3">
                             <label class="form-label">容量</label>
-                            <select class="form-select" required>
+                            <select class="form-select" id="tapeCapacity" required>
                                 <option value="">选择容量</option>
                                 <option value="18TB">18 TB (LTO-9)</option>
                                 <option value="12TB">12 TB (LTO-8)</option>
@@ -496,11 +506,11 @@
                     </div>
                     <div class="mb-3">
                         <label class="form-label">位置</label>
-                        <input type="text" class="form-control" placeholder="存储柜 A-1">
+                        <input type="text" class="form-control" id="tapeLocation" placeholder="存储柜 A-1">
                     </div>
                     <div class="mb-3">
                         <label class="form-label">备注</label>
-                        <textarea class="form-control" rows="3" placeholder="可选的备注信息"></textarea>
+                        <textarea class="form-control" rows="3" id="tapeRemark" placeholder="可选的备注信息"></textarea>
                     </div>
                 </form>
             </div>
@@ -556,6 +566,80 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             } catch (error) {
                 modalBody.innerHTML = '<div class="alert alert-danger"><i class="bi bi-x-circle me-2"></i>扫描失败: ' + error.message + '</div>';
+            }
+        });
+    }
+    
+    // 生成序列号
+    const generateSerialBtn = document.getElementById('generateSerialBtn');
+    if (generateSerialBtn) {
+        generateSerialBtn.addEventListener('click', function() {
+            // 生成基于时间戳的序列号
+            const prefix = 'STK';
+            const timestamp = Date.now().toString();
+            const serial = prefix + timestamp.substring(timestamp.length - 9);
+            document.getElementById('tapeSerial').value = serial;
+        });
+    }
+    
+    // 从磁带机扫描信息
+    const scanForAddTapeBtn = document.getElementById('scanForAddTapeBtn');
+    if (scanForAddTapeBtn) {
+        scanForAddTapeBtn.addEventListener('click', async function() {
+            const btn = this;
+            const originalHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-1"></i>扫描中...';
+            
+            try {
+                const response = await fetch('/api/system/tape/scan');
+                const result = await response.json();
+                
+                if (result.success && result.devices && result.devices.length > 0) {
+                    // 使用第一个设备的信息填充表单
+                    const device = result.devices[0];
+                    
+                    // 如果有LTO信息，自动选择类型和容量
+                    if (device.is_ibm_lto && device.lto_generation) {
+                        const ltoGen = device.lto_generation;
+                        document.getElementById('tapeType').value = `LTO-${ltoGen}`;
+                        
+                        // 根据LTO代数设置容量
+                        const capacityMap = {
+                            9: '18TB',
+                            8: '12TB',
+                            7: '6TB',
+                            6: '2.5TB',
+                            5: '1.5TB'
+                        };
+                        if (capacityMap[ltoGen]) {
+                            document.getElementById('tapeCapacity').value = capacityMap[ltoGen];
+                        }
+                    }
+                    
+                    // 生成磁带标签（基于当前日期和索引）
+                    const now = new Date();
+                    const dateStr = now.getFullYear().toString().substring(2) + 
+                                   String(now.getMonth() + 1).padStart(2, '0') + 
+                                   String(now.getDate()).padStart(2, '0');
+                    const randomPart = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+                    document.getElementById('tapeLabel').value = `TAP${dateStr}${randomPart}`;
+                    
+                    // 生成序列号
+                    const prefix = 'STK';
+                    const timestamp = Date.now().toString();
+                    const serial = prefix + timestamp.substring(timestamp.length - 9);
+                    document.getElementById('tapeSerial').value = serial;
+                    
+                    alert('✅ 扫描成功，已自动填充信息');
+                } else {
+                    alert('⚠️ 未检测到磁带设备');
+                }
+            } catch (error) {
+                alert('❌ 扫描失败：' + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = originalHtml;
             }
         });
     }
