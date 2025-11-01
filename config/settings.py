@@ -34,11 +34,11 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = 20
 
     # 数据库配置（兼容格式）
-    DB_HOST: str = "localhost"
-    DB_PORT: int = 5432
-    DB_USER: str = "username"
-    DB_PASSWORD: str = "password"
-    DB_DATABASE: str = "backup_db"
+    DB_HOST: Optional[str] = "localhost"
+    DB_PORT: Optional[int] = 5432
+    DB_USER: Optional[str] = "username"
+    DB_PASSWORD: Optional[str] = "password"
+    DB_DATABASE: Optional[str] = "backup_db"
 
     # 安全配置
     SECRET_KEY: str = "your-jwt-secret-key-change-in-production"
