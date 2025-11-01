@@ -52,50 +52,68 @@
     <!-- 统计信息 -->
     <div class="row mb-4">
         <div class="col-md-2">
-            <div class="card bg-primary text-white">
+            <div class="service-card">
                 <div class="card-body text-center">
-                    <h2 class="mb-0">12</h2>
-                    <small>总磁带数</small>
+                    <div class="ai-icon mb-2">
+                        <i class="bi bi-collection"></i>
+                    </div>
+                    <h3 class="mb-0">12</h3>
+                    <small class="text-secondary">总磁带数</small>
                 </div>
             </div>
         </div>
         <div class="col-md-2">
-            <div class="card bg-success text-white">
+            <div class="service-card">
                 <div class="card-body text-center">
-                    <h2 class="mb-0">8</h2>
-                    <small>可用</small>
+                    <div class="ai-icon mb-2">
+                        <i class="bi bi-circle"></i>
+                    </div>
+                    <h3 class="mb-0">8</h3>
+                    <small class="text-secondary">可用</small>
                 </div>
             </div>
         </div>
         <div class="col-md-2">
-            <div class="card bg-info text-white">
+            <div class="service-card">
                 <div class="card-body text-center">
-                    <h2 class="mb-0">2</h2>
-                    <small>使用中</small>
+                    <div class="ai-icon mb-2">
+                        <i class="bi bi-play-circle"></i>
+                    </div>
+                    <h3 class="mb-0">2</h3>
+                    <small class="text-secondary">使用中</small>
                 </div>
             </div>
         </div>
         <div class="col-md-2">
-            <div class="card bg-warning text-white">
+            <div class="service-card">
                 <div class="card-body text-center">
-                    <h2 class="mb-0">1</h2>
-                    <small>已满</small>
+                    <div class="ai-icon mb-2">
+                        <i class="bi bi-exclamation-triangle"></i>
+                    </div>
+                    <h3 class="mb-0">1</h3>
+                    <small class="text-secondary">已满</small>
                 </div>
             </div>
         </div>
         <div class="col-md-2">
-            <div class="card bg-secondary text-white">
+            <div class="service-card">
                 <div class="card-body text-center">
-                    <h2 class="mb-0">1</h2>
-                    <small>已过期</small>
+                    <div class="ai-icon mb-2">
+                        <i class="bi bi-clock"></i>
+                    </div>
+                    <h3 class="mb-0">1</h3>
+                    <small class="text-secondary">已过期</small>
                 </div>
             </div>
         </div>
         <div class="col-md-2">
-            <div class="card bg-danger text-white">
+            <div class="service-card">
                 <div class="card-body text-center">
-                    <h2 class="mb-0">0</h2>
-                    <small>故障</small>
+                    <div class="ai-icon mb-2">
+                        <i class="bi bi-x-circle"></i>
+                    </div>
+                    <h3 class="mb-0">0</h3>
+                    <small class="text-secondary">故障</small>
                 </div>
             </div>
         </div>
@@ -104,7 +122,7 @@
     <!-- 筛选和搜索 -->
     <div class="row mb-4">
         <div class="col">
-            <div class="card">
+            <div class="service-card">
                 <div class="card-body">
                     <div class="row">
                         <div class="col-md-2">
@@ -140,7 +158,7 @@
                         </div>
                         <div class="col-md-2">
                             <button class="btn btn-outline-secondary w-100">
-                                <i class="fas fa-search me-1"></i>搜索
+                                <i class="bi bi-search me-1"></i>搜索
                             </button>
                         </div>
                     </div>
@@ -152,15 +170,12 @@
     <!-- 磁带列表 -->
     <div class="row">
         <div class="col-12">
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="card-title mb-0">磁带库存</h5>
-                </div>
+            <div class="service-card">
                 <div class="card-body">
                     <div class="row">
                         <!-- 磁带卡片 1 -->
                         <div class="col-lg-3 col-md-4 col-sm-6 mb-3">
-                            <div class="card tape-card tape-available">
+                            <div class="service-card">
                                 <div class="card-body">
                                     <div class="d-flex justify-content-between align-items-start mb-2">
                                         <div>
@@ -197,10 +212,10 @@
                                     </div>
                                     <div class="d-flex justify-content-between">
                                         <button class="btn btn-sm btn-outline-primary">
-                                            <i class="fas fa-info-circle"></i> 详情
+                                            <i class="bi bi-info-circle"></i> 详情
                                         </button>
                                         <button class="btn btn-sm btn-outline-warning">
-                                            <i class="fas fa-edit"></i> 编辑
+                                            <i class="bi bi-pencil"></i> 编辑
                                         </button>
                                     </div>
                                 </div>
@@ -209,7 +224,7 @@
 
                         <!-- 磁带卡片 2 -->
                         <div class="col-lg-3 col-md-4 col-sm-6 mb-3">
-                            <div class="card tape-card tape-in-use">
+                            <div class="service-cardin-use">
                                 <div class="card-body">
                                     <div class="d-flex justify-content-between align-items-start mb-2">
                                         <div>
@@ -246,10 +261,10 @@
                                     </div>
                                     <div class="d-flex justify-content-between">
                                         <button class="btn btn-sm btn-outline-primary">
-                                            <i class="fas fa-info-circle"></i> 详情
+                                            <i class="bi bi-info-circle"></i> 详情
                                         </button>
                                         <button class="btn btn-sm btn-outline-danger">
-                                            <i class="fas fa-stop"></i> 停止
+                                            <i class="bi bi-stop-circle"></i> 停止
                                         </button>
                                     </div>
                                 </div>
@@ -258,7 +273,7 @@
 
                         <!-- 磁带卡片 3 -->
                         <div class="col-lg-3 col-md-4 col-sm-6 mb-3">
-                            <div class="card tape-card tape-full">
+                            <div class="service-cardfull">
                                 <div class="card-body">
                                     <div class="d-flex justify-content-between align-items-start mb-2">
                                         <div>
@@ -295,10 +310,10 @@
                                     </div>
                                     <div class="d-flex justify-content-between">
                                         <button class="btn btn-sm btn-outline-primary">
-                                            <i class="fas fa-info-circle"></i> 详情
+                                            <i class="bi bi-info-circle"></i> 详情
                                         </button>
                                         <button class="btn btn-sm btn-outline-warning">
-                                            <i class="fas fa-eraser"></i> 擦除
+                                            <i class="bi bi-backspace"></i> 擦除
                                         </button>
                                     </div>
                                 </div>
@@ -307,7 +322,7 @@
 
                         <!-- 磁带卡片 4 -->
                         <div class="col-lg-3 col-md-4 col-sm-6 mb-3">
-                            <div class="card tape-card tape-expired">
+                            <div class="service-cardexpired">
                                 <div class="card-body">
                                     <div class="d-flex justify-content-between align-items-start mb-2">
                                         <div>
@@ -344,10 +359,10 @@
                                     </div>
                                     <div class="d-flex justify-content-between">
                                         <button class="btn btn-sm btn-outline-primary">
-                                            <i class="fas fa-info-circle"></i> 详情
+                                            <i class="bi bi-info-circle"></i> 详情
                                         </button>
                                         <button class="btn btn-sm btn-outline-success">
-                                            <i class="fas fa-recycle"></i> 回收
+                                            <i class="bi bi-arrow-counterclockwise"></i> 回收
                                         </button>
                                     </div>
                                 </div>
@@ -365,7 +380,7 @@
             <div class="card">
                 <div class="card-header">
                     <h5 class="card-title mb-0">
-                        <i class="fas fa-history me-2"></i>
+                        <i class="bi bi-clock-history me-2"></i>
                         磁带操作历史
                     </h5>
                 </div>
