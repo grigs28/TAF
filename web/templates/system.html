@@ -903,6 +903,22 @@ async function loadDatabaseStatus() {
 // 定期刷新数据库状态
 setInterval(loadDatabaseStatus, 30000); // 每30秒刷新一次
 
+// 处理URL hash，自动打开对应的标签页
+document.addEventListener('DOMContentLoaded', function() {
+    const hash = window.location.hash;
+    if (hash) {
+        // 移除#号，获取标签页ID
+        const tabId = hash.substring(1);
+        // 查找对应的tab按钮（ID格式为 {tabId}-tab）
+        const tabButton = document.getElementById(tabId + '-tab');
+        if (tabButton) {
+            // 使用Bootstrap的tab API切换标签页
+            const tab = new bootstrap.Tab(tabButton);
+            tab.show();
+        }
+    }
+});
+
 // ===== 磁带机配置JavaScript =====
 document.addEventListener('DOMContentLoaded', function() {
     loadTapeConfig();
