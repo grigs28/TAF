@@ -15,6 +15,7 @@ from sqlalchemy.pool import StaticPool
 
 from .settings import get_settings
 from models.base import Base
+from config.database_init import DatabaseInitializer
 
 logger = logging.getLogger(__name__)
 
@@ -55,28 +56,19 @@ class DatabaseManager:
                 )
             else:
                 # PostgreSQL/openGauss支持连接池
-                # openGauss使用兼容配置，禁用版本检测
-                if database_url.startswith("postgresql://") and "opengauss" in self.settings.DATABASE_URL.lower():
-                    logger.info("检测到openGauss数据库，使用兼容配置...")
-                    connect_args = {"server_version_check": False}
-                else:
-                    connect_args = {}
-                
                 self.engine = create_engine(
                     database_url,
                     pool_size=self.settings.DB_POOL_SIZE,
                     max_overflow=self.settings.DB_MAX_OVERFLOW,
                     echo=self.settings.DEBUG,
-                    pool_pre_ping=True,
-                    connect_args=connect_args
+                    pool_pre_ping=True
                 )
                 self.async_engine = create_async_engine(
                     async_database_url,
                     pool_size=self.settings.DB_POOL_SIZE,
                     max_overflow=self.settings.DB_MAX_OVERFLOW,
                     echo=self.settings.DEBUG,
-                    pool_pre_ping=True,
-                    connect_args=connect_args
+                    pool_pre_ping=True
                 )
 
             # 创建会话工厂
@@ -129,29 +121,58 @@ class DatabaseManager:
             # 导入所有模型以确保它们被注册
             from models import backup, tape, user, system_log, system_config
 
-            # 处理openGauss版本检测问题
-            try:
-                async with self.async_engine.begin() as conn:
-                    await conn.run_sync(Base.metadata.create_all)
+            # 处理openGauss版本检测问题，使用psycopg2直接连接创建表
+            database_url = self.settings.DATABASE_URL
+            if "opengauss" in database_url.lower():
+                logger.info("检测到openGauss数据库，使用psycopg2创建表...")
+                await self._create_tables_with_psycopg2()
+            else:
+                # 普通PostgreSQL/SQLite使用SQLAlchemy
+                with self.engine.begin() as conn:
+                    Base.metadata.create_all(conn)
                 logger.info("数据库表创建完成")
-            except Exception as version_error:
-                if "Could not determine version" in str(version_error):
-                    # 忽略版本检测错误，继续创建表
-                    logger.warning("检测到openGauss版本解析问题，尝试继续创建表...")
-                    try:
-                        # 使用同步引擎创建表
-                        with self.engine.begin() as conn:
-                            Base.metadata.create_all(conn)
-                        logger.info("使用同步引擎成功创建数据库表")
-                    except Exception as sync_error:
-                        logger.error(f"同步创建表失败: {str(sync_error)}")
-                        raise version_error
-                else:
-                    raise
 
         except Exception as e:
             logger.error(f"创建数据库表失败: {str(e)}")
             raise
+    
+    async def _create_tables_with_psycopg2(self):
+        """使用psycopg2直接连接创建表（解决openGauss版本解析问题）"""
+        import psycopg2
+        from models import backup, tape, user, system_log, system_config
+        
+        # 解析数据库URL获取连接信息
+        db_init = DatabaseInitializer()
+        db_info = db_init._parse_database_url(self.settings.DATABASE_URL)
+        if not db_info:
+            raise ValueError("无法解析数据库连接信息")
+        
+        # 使用psycopg2直接连接
+        conn = psycopg2.connect(
+            host=db_info['host'],
+            port=db_info['port'],
+            user=db_info['user'],
+            password=db_info['password'],
+            database=db_info['database']
+        )
+        
+        try:
+            with conn.cursor() as cur:
+                # 使用SQLAlchemy的metadata生成SQL
+                from sqlalchemy.schema import CreateTable
+                for table in Base.metadata.sorted_tables:
+                    create_sql = str(CreateTable(table).compile(compile_kwargs={"literal_binds": True}))
+                    # 执行创建表语句
+                    cur.execute(create_sql)
+                    logger.info(f"创建表: {table.name}")
+            
+            conn.commit()
+            logger.info("使用psycopg2成功创建数据库表")
+        except Exception as e:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def get_sync_session(self) -> Session:
         """获取同步数据库会话"""
