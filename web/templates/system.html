@@ -321,8 +321,8 @@
                                                 <div class="col-md-6 mb-3">
                                                     <label class="form-label">最大卷大小</label>
                                                     <div class="input-group">
-                                                        <input type="number" class="form-control" id="maxVolumeSize" value="322122547200" step="1024">
-                                                        <span class="input-group-text">Bytes</span>
+                                                        <input type="number" class="form-control" id="maxVolumeSize" value="300" step="1">
+                                                        <span class="input-group-text">GB</span>
                                                     </div>
                                                     <small class="text-muted">单个备份卷的最大大小</small>
                                                 </div>
@@ -963,7 +963,9 @@ function loadTapeConfig() {
                     document.getElementById('blockSize').value = config.default_block_size;
                 }
                 if (config.max_volume_size) {
-                    document.getElementById('maxVolumeSize').value = config.max_volume_size;
+                    // 将字节转换为GB显示
+                    const gb = Math.round(config.max_volume_size / (1024 ** 3));
+                    document.getElementById('maxVolumeSize').value = gb;
                 }
                 if (config.tape_pool_size) {
                     document.getElementById('tapePoolSize').value = config.tape_pool_size;
@@ -985,7 +987,7 @@ function getTapeConfig() {
         tape_device_path: document.getElementById('tapeDevicePath').value,
         tape_drive_letter: document.getElementById('tapeDriveLetter').value,
         default_block_size: parseInt(document.getElementById('blockSize').value),
-        max_volume_size: parseInt(document.getElementById('maxVolumeSize').value),
+        max_volume_size: parseInt(document.getElementById('maxVolumeSize').value) * (1024 ** 3), // GB转字节
         tape_pool_size: parseInt(document.getElementById('tapePoolSize').value),
         tape_check_interval: parseInt(document.getElementById('tapeCheckInterval').value),
         auto_tape_cleanup: document.getElementById('autoTapeCleanup').checked
@@ -1021,10 +1023,24 @@ function displayDetectedDevices(devices) {
     
     let html = '<ul class="list-unstyled mb-0">';
     devices.forEach(device => {
+        // 格式化容量显示
+        let capacityDisplay = '';
+        if (device.native_capacity) {
+            const tb = (device.native_capacity / (1024 ** 4)).toFixed(1);
+            capacityDisplay = `<small class="text-muted d-block"><i class="fas fa-hdd"></i> 容量: ${tb} TB</small>`;
+        }
+        
+        // LTO代数显示
+        let ltoDisplay = '';
+        if (device.is_ibm_lto && device.lto_generation) {
+            ltoDisplay = `<span class="badge bg-info ms-1">LTO-${device.lto_generation}</span>`;
+        }
+        
         html += `
             <li class="mb-2 p-2 border rounded">
-                <div class="fw-bold">${device.vendor} ${device.model}</div>
-                <small class="text-muted d-block">${device.path}</small>
+                <div class="fw-bold">${device.vendor} ${device.model}${ltoDisplay}</div>
+                <small class="text-muted d-block"><i class="fas fa-map-marker-alt"></i> ${device.path}</small>
+                ${capacityDisplay}
                 ${device.status === 'online' ? 
                     '<span class="badge bg-success">在线</span>' : 
                     '<span class="badge bg-danger">离线</span>'}
