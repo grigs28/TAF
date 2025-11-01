@@ -7,7 +7,7 @@
     --card-bg: rgba(13, 22, 38, 0.7);
     --card-border: rgba(0, 170, 255, 0.3);
     --text-primary: #ffffff;
-    --text-secondary: #e2e7ec;
+    --text-secondary: #f5f8fa;
     --success: #00cc88;
     --warning: #ffaa00;
     --danger: #ff5577;
@@ -450,7 +450,7 @@ body {
 .log-entry .timestamp {
     color: var(--text-secondary);
     margin-right: 8px;
-    opacity: 0.8;
+    opacity: 1;
 }
 
 .log-entry .message {
@@ -973,7 +973,7 @@ body {
 /* 添加placeholder样式 */
 .form-control::placeholder {
     color: var(--text-secondary);
-    opacity: 0.8;
+    opacity: 0.9;
 }
 
 .form-control:focus::placeholder {
@@ -1006,6 +1006,11 @@ body {
 
 .alert-light strong {
     color: var(--text-primary) !important;
+}
+
+/* text-muted 样式覆盖 */
+.text-muted {
+    color: var(--text-secondary) !important;
 }
 
 /* 表格样式 */
@@ -1728,7 +1733,7 @@ body.modal-open {
     color: var(--text-secondary);
     font-size: var(--font-size-base);
     margin-top: 0.5rem;
-    opacity: 0.9;
+    opacity: 1;
     display: flex;
     align-items: center;
     gap: 0.5rem;
