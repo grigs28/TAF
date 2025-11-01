@@ -1648,10 +1648,6 @@ body.modal-open {
     margin: 2rem 0;
 }
 
-/* Modal Backdrop */
-.modal-backdrop {
-    background-color: rgba(0, 0, 0, 0.8) !important;
-}
 
 #readmeModal {
     z-index: 1051 !important;
