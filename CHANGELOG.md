@@ -166,6 +166,35 @@
   - 错误处理增强
   - 日志记录完善
 
+#### 磁带机配置UI
+
+- ✅ 新增磁带机配置标签页
+  - 设备路径配置
+  - 块大小和卷大小配置
+  - 磁带池配置
+- ✅ 实现配置API
+  - GET /api/system/tape/config - 获取配置
+  - POST /api/system/tape/test - 测试连接
+  - PUT /api/system/tape/config - 保存配置
+  - GET /api/system/tape/scan - 扫描设备
+- ✅ 设备扫描和测试
+  - 实时扫描磁带设备
+  - 连接状态测试
+  - 设备列表显示
+
+#### Bug修复
+
+- ✅ 数据库健康检查修复（text导入）
+- ✅ Recovery API Request参数修复
+- ✅ 数据库配置密码自动填充
+- ✅ 磁带连接测试逻辑优化
+- ✅ 错误处理改进
+
+#### 文档
+
+- ✅ `SCSI接口重构总结.md` - SCSI重构文档
+- ✅ `Build_Summary_20241101.md` - 构建总结
+
 ## [未发布]
 
 ### 计划
