@@ -132,6 +132,15 @@ def create_app(system_instance=None) -> FastAPI:
             "version": app_version
         })
 
+    @app.get("/tapedrive", response_class=HTMLResponse)
+    async def tapedrive_page(request: Request):
+        """磁带机配置页面"""
+        return templates.TemplateResponse("tapedrive.html", {
+            "request": request,
+            "app_name": settings.APP_NAME,
+            "version": app_version
+        })
+
     @app.get("/health")
     async def health_check():
         """健康检查"""
