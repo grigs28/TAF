@@ -114,6 +114,66 @@ async def erase_tape(request: Request, tape_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/format")
+async def format_tape(request: Request, tape_id: str, format_type: int = 0):
+    """格式化磁带"""
+    try:
+        system = request.app.state.system
+        if not system:
+            raise HTTPException(status_code=500, detail="系统未初始化")
+
+        # 使用SCSI接口格式化
+        success = await system.tape_manager.scsi_interface.format_tape(format_type=format_type)
+        if success:
+            return {"success": True, "message": f"磁带 {tape_id} 格式化成功"}
+        else:
+            raise HTTPException(status_code=500, detail="磁带格式化失败")
+
+    except Exception as e:
+        logger.error(f"格式化磁带失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/rewind")
+async def rewind_tape(request: Request, tape_id: str = None):
+    """倒带"""
+    try:
+        system = request.app.state.system
+        if not system:
+            raise HTTPException(status_code=500, detail="系统未初始化")
+
+        # 使用SCSI接口倒带
+        success = await system.tape_manager.scsi_interface.rewind_tape()
+        if success:
+            return {"success": True, "message": "磁带倒带成功"}
+        else:
+            raise HTTPException(status_code=500, detail="磁带倒带失败")
+
+    except Exception as e:
+        logger.error(f"倒带失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/space")
+async def space_tape_blocks(request: Request, blocks: int = 1, direction: str = "forward"):
+    """按块定位磁带"""
+    try:
+        system = request.app.state.system
+        if not system:
+            raise HTTPException(status_code=500, detail="系统未初始化")
+
+        # 使用SCSI接口定位
+        success = await system.tape_manager.scsi_interface.space_blocks(blocks=blocks, direction=direction)
+        if success:
+            return {"success": True, "message": f"磁带定位成功：{blocks} 块 (方向: {direction})"}
+        else:
+            raise HTTPException(status_code=500, detail="磁带定位失败")
+
+    except Exception as e:
+        logger.error(f"磁带定位失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/health")
 async def check_tape_health(request: Request):
     """检查磁带健康状态"""
