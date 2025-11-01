@@ -64,6 +64,21 @@ class NotificationUser(BaseModel):
     enabled: bool = Field(True, description="是否启用")
 
 
+class NotificationEvents(BaseModel):
+    """通知事件配置模型"""
+    notify_backup_success: bool = Field(True, description="备份成功")
+    notify_backup_started: bool = Field(True, description="备份开始")
+    notify_backup_failed: bool = Field(True, description="备份失败")
+    notify_recovery_success: bool = Field(True, description="恢复成功")
+    notify_recovery_failed: bool = Field(True, description="恢复失败")
+    notify_tape_change: bool = Field(True, description="磁带更换")
+    notify_tape_expired: bool = Field(True, description="磁带过期")
+    notify_tape_error: bool = Field(True, description="磁带错误")
+    notify_capacity_warning: bool = Field(True, description="容量预警")
+    notify_system_error: bool = Field(True, description="系统错误")
+    notify_system_started: bool = Field(True, description="系统启动")
+
+
 @router.get("/info")
 async def get_system_info():
     """获取系统信息"""
@@ -870,4 +885,102 @@ async def test_notification(phone: str = ""):
             
     except Exception as e:
         logger.error(f"测试通知失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/notification/events")
+async def get_notification_events():
+    """获取通知事件配置"""
+    try:
+        from pathlib import Path
+        import json
+        from config.settings import get_settings
+        
+        # 从.env文件读取
+        env_file = Path(".env")
+        if env_file.exists():
+            with open(env_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("NOTIFICATION_EVENTS="):
+                        events_json = line.split("=", 1)[1]
+                        events_dict = json.loads(events_json)
+                        return {
+                            "success": True,
+                            "events": events_dict
+                        }
+        
+        # 如果.env中没有，返回默认配置
+        default_events = {
+            "notify_backup_success": True,
+            "notify_backup_started": True,
+            "notify_backup_failed": True,
+            "notify_recovery_success": True,
+            "notify_recovery_failed": True,
+            "notify_tape_change": True,
+            "notify_tape_expired": True,
+            "notify_tape_error": True,
+            "notify_capacity_warning": True,
+            "notify_system_error": True,
+            "notify_system_started": True
+        }
+        
+        return {
+            "success": True,
+            "events": default_events
+        }
+        
+    except Exception as e:
+        logger.error(f"获取通知事件配置失败: {str(e)}")
+        return {
+            "success": False,
+            "message": str(e)
+        }
+
+
+@router.put("/notification/events")
+async def update_notification_events(events: NotificationEvents):
+    """更新通知事件配置"""
+    try:
+        from pathlib import Path
+        import json
+        
+        # 保存配置到.env文件
+        env_file = Path(".env")
+        env_lines = []
+        
+        if env_file.exists():
+            with open(env_file, "r", encoding="utf-8") as f:
+                env_lines = f.readlines()
+        
+        # 将事件配置转换为JSON字符串
+        events_dict = events.dict()
+        events_json = json.dumps(events_dict, ensure_ascii=False)
+        
+        # 更新或添加通知事件配置
+        key = "NOTIFICATION_EVENTS"
+        updated = False
+        for i, line in enumerate(env_lines):
+            if line.startswith(f"{key}="):
+                env_lines[i] = f"{key}={events_json}\n"
+                updated = True
+                break
+        
+        # 如果未找到，添加新行
+        if not updated:
+            env_lines.append(f"{key}={events_json}\n")
+        
+        # 写入.env文件
+        with open(env_file, "w", encoding="utf-8") as f:
+            f.writelines(env_lines)
+        
+        logger.info("通知事件配置已更新")
+        
+        return {
+            "success": True,
+            "message": "通知事件配置更新成功"
+        }
+        
+    except Exception as e:
+        logger.error(f"更新通知事件配置失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

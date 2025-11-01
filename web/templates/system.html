@@ -883,6 +883,29 @@ document.addEventListener('DOMContentLoaded', function() {
                 const result = await response.json();
                 
                 if (result.success) {
+                    // 保存通知事件配置
+                    const eventConfig = {
+                        notify_backup_success: document.getElementById('notifyBackupSuccess').checked,
+                        notify_backup_started: document.getElementById('notifyBackupStarted').checked,
+                        notify_backup_failed: document.getElementById('notifyBackupFailed').checked,
+                        notify_recovery_success: document.getElementById('notifyRecoverySuccess').checked,
+                        notify_recovery_failed: document.getElementById('notifyRecoveryFailed').checked,
+                        notify_tape_change: document.getElementById('notifyTapeChange').checked,
+                        notify_tape_expired: document.getElementById('notifyTapeExpired').checked,
+                        notify_tape_error: document.getElementById('notifyTapeError').checked,
+                        notify_capacity_warning: document.getElementById('notifyCapacityWarning').checked,
+                        notify_system_error: document.getElementById('notifySystemError').checked,
+                        notify_system_started: document.getElementById('notifySystemStarted').checked
+                    };
+                    
+                    // 保存事件配置到数据库
+                    const eventResponse = await fetch('/api/system/notification/events', {
+                        method: 'PUT',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(eventConfig)
+                    });
+                    const eventResult = await eventResponse.json();
+                    
                     alert('✅ 配置已保存');
                 } else {
                     alert('❌ 保存失败：' + result.message);
@@ -917,6 +940,27 @@ function loadNotificationConfig() {
             }
         })
         .catch(error => console.error('加载通知配置失败:', error));
+    
+    // 加载通知事件配置
+    fetch('/api/system/notification/events')
+        .then(response => response.json())
+        .then(data => {
+            if (data.success && data.events) {
+                const events = data.events;
+                document.getElementById('notifyBackupSuccess').checked = events.notify_backup_success ?? true;
+                document.getElementById('notifyBackupStarted').checked = events.notify_backup_started ?? true;
+                document.getElementById('notifyBackupFailed').checked = events.notify_backup_failed ?? true;
+                document.getElementById('notifyRecoverySuccess').checked = events.notify_recovery_success ?? true;
+                document.getElementById('notifyRecoveryFailed').checked = events.notify_recovery_failed ?? true;
+                document.getElementById('notifyTapeChange').checked = events.notify_tape_change ?? true;
+                document.getElementById('notifyTapeExpired').checked = events.notify_tape_expired ?? true;
+                document.getElementById('notifyTapeError').checked = events.notify_tape_error ?? true;
+                document.getElementById('notifyCapacityWarning').checked = events.notify_capacity_warning ?? true;
+                document.getElementById('notifySystemError').checked = events.notify_system_error ?? true;
+                document.getElementById('notifySystemStarted').checked = events.notify_system_started ?? true;
+            }
+        })
+        .catch(error => console.error('加载通知事件配置失败:', error));
 }
 
 // 系统信息标签页的版本链接
