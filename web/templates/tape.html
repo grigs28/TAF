@@ -516,7 +516,7 @@
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                <button type="button" class="btn btn-primary">添加磁带</button>
+                <button type="button" class="btn btn-primary" id="confirmAddTapeBtn">添加磁带</button>
             </div>
         </div>
     </div>
@@ -664,6 +664,84 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             } catch (error) {
                 alert('❌ 扫描失败：' + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = originalHtml;
+            }
+        });
+    }
+    
+    // 确认添加磁带
+    const confirmAddTapeBtn = document.getElementById('confirmAddTapeBtn');
+    if (confirmAddTapeBtn) {
+        confirmAddTapeBtn.addEventListener('click', async function() {
+            const btn = this;
+            const originalHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-2"></i>添加中...';
+            
+            try {
+                // 获取表单数据
+                const tapeLabel = document.getElementById('tapeLabel').value;
+                const tapeSerial = document.getElementById('tapeSerial').value;
+                const tapeType = document.getElementById('tapeType').value;
+                const tapeCapacity = document.getElementById('tapeCapacity').value;
+                const tapeLocation = document.getElementById('tapeLocation').value;
+                const tapeRemark = document.getElementById('tapeRemark').value;
+                
+                // 验证必填字段
+                if (!tapeLabel || !tapeSerial || !tapeType || !tapeCapacity) {
+                    alert('❌ 请填写所有必填字段');
+                    btn.disabled = false;
+                    btn.innerHTML = originalHtml;
+                    return;
+                }
+                
+                // 从类型中提取代数 (LTO-9 -> 9)
+                const generation = parseInt(tapeType.replace('LTO-', ''));
+                
+                // 从容量中提取GB (18TB -> 18)
+                const capacityGB = parseInt(tapeCapacity.replace('TB', ''));
+                
+                // 构建请求数据
+                const requestData = {
+                    tape_id: tapeLabel,  // 使用label作为tape_id
+                    label: tapeLabel,
+                    serial_number: tapeSerial,
+                    media_type: 'LTO',
+                    generation: generation,
+                    capacity_gb: capacityGB,
+                    location: tapeLocation,
+                    notes: tapeRemark,
+                    retention_months: 6
+                };
+                
+                // 发送创建请求
+                const response = await fetch('/api/tape/create', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(requestData)
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert('✅ ' + result.message);
+                    // 关闭模态框
+                    const modal = bootstrap.Modal.getInstance(document.getElementById('addTapeModal'));
+                    modal.hide();
+                    // 清空表单
+                    document.getElementById('tapeLabel').value = '';
+                    document.getElementById('tapeSerial').value = '';
+                    document.getElementById('tapeType').value = '';
+                    document.getElementById('tapeCapacity').value = '';
+                    document.getElementById('tapeLocation').value = '';
+                    document.getElementById('tapeRemark').value = '';
+                } else {
+                    alert('❌ 添加失败：' + result.message);
+                }
+            } catch (error) {
+                alert('❌ 添加失败：' + error.message);
             } finally {
                 btn.disabled = false;
                 btn.innerHTML = originalHtml;
