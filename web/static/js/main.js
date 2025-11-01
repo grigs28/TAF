@@ -4,7 +4,37 @@
 document.addEventListener('DOMContentLoaded', function() {
     // 初始化版本点击事件
     initVersionModal();
+    
+    // 修复模态框z-index问题
+    fixModalZIndex();
 });
+
+// 修复模态框z-index，确保所有模态框显示在最上层
+function fixModalZIndex() {
+    // 监听所有模态框的显示事件
+    const modals = document.querySelectorAll('.modal');
+    modals.forEach(modal => {
+        modal.addEventListener('show.bs.modal', function() {
+            // 模态框显示时，确保正确的z-index
+            this.style.zIndex = '9999';
+            
+            // 为所有modal-backdrop设置正确的z-index
+            const backdrops = document.querySelectorAll('.modal-backdrop');
+            backdrops.forEach(backdrop => {
+                backdrop.style.zIndex = '9998';
+            });
+        });
+        
+        // 如果模态框已经显示，也要修复
+        if (modal.classList.contains('show')) {
+            modal.style.zIndex = '9999';
+            const backdrops = document.querySelectorAll('.modal-backdrop');
+            backdrops.forEach(backdrop => {
+                backdrop.style.zIndex = '9998';
+            });
+        }
+    });
+}
 
 /**
  * 初始化版本模态框
