@@ -54,39 +54,30 @@ class DatabaseManager:
                     pool_pre_ping=True
                 )
             else:
-                # PostgreSQL/openGauss支持连接池，处理版本检测问题
-                try:
-                    # 首先尝试使用标准配置创建引擎
-                    self.engine = create_engine(
-                        database_url,
-                        pool_size=self.settings.DB_POOL_SIZE,
-                        max_overflow=self.settings.DB_MAX_OVERFLOW,
-                        echo=self.settings.DEBUG,
-                        pool_pre_ping=True
-                    )
-                    self.async_engine = create_async_engine(
-                        async_database_url,
-                        pool_size=self.settings.DB_POOL_SIZE,
-                        max_overflow=self.settings.DB_MAX_OVERFLOW,
-                        echo=self.settings.DEBUG,
-                        pool_pre_ping=True
-                    )
-                except Exception as version_error:
-                    if "Could not determine version" in str(version_error):
-                        logger.warning("检测到openGauss版本解析问题，使用简化配置...")
-                        # 使用简化配置，禁用一些特性
-                        self.engine = create_engine(
-                            database_url,
-                            echo=self.settings.DEBUG,
-                            connect_args={"application_name": "enterprise_tape_backup"}
-                        )
-                        self.async_engine = create_async_engine(
-                            async_database_url,
-                            echo=self.settings.DEBUG,
-                            connect_args={"application_name": "enterprise_tape_backup"}
-                        )
-                    else:
-                        raise
+                # PostgreSQL/openGauss支持连接池
+                # openGauss使用兼容配置，禁用版本检测
+                if database_url.startswith("postgresql://") and "opengauss" in self.settings.DATABASE_URL.lower():
+                    logger.info("检测到openGauss数据库，使用兼容配置...")
+                    connect_args = {"server_version_check": False}
+                else:
+                    connect_args = {}
+                
+                self.engine = create_engine(
+                    database_url,
+                    pool_size=self.settings.DB_POOL_SIZE,
+                    max_overflow=self.settings.DB_MAX_OVERFLOW,
+                    echo=self.settings.DEBUG,
+                    pool_pre_ping=True,
+                    connect_args=connect_args
+                )
+                self.async_engine = create_async_engine(
+                    async_database_url,
+                    pool_size=self.settings.DB_POOL_SIZE,
+                    max_overflow=self.settings.DB_MAX_OVERFLOW,
+                    echo=self.settings.DEBUG,
+                    pool_pre_ping=True,
+                    connect_args=connect_args
+                )
 
             # 创建会话工厂
             self.SessionLocal = sessionmaker(
