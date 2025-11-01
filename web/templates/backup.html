@@ -296,17 +296,49 @@
                         </div>
                         <div class="col-md-6 mb-3">
                             <label class="form-label">备份类型</label>
-                            <select class="form-select">
-                                <option>完整备份</option>
-                                <option>增量备份</option>
-                                <option>差异备份</option>
+                            <select class="form-select" id="backupType">
+                                <option value="full">完整备份 (Full Backup)</option>
+                                <option value="incremental">增量备份 (Incremental)</option>
+                                <option value="differential">差异备份 (Differential)</option>
+                                <option value="mirror">镜像备份 (Mirror)</option>
+                                <option value="archive">归档备份 (Archive)</option>
+                                <option value="snapshot">快照备份 (Snapshot)</option>
                             </select>
                         </div>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">源路径</label>
-                        <input type="text" class="form-control" placeholder="/data,/home,/var">
-                        <small class="text-muted">多个路径用逗号分隔</small>
+                        <div class="input-group mb-2">
+                            <input type="text" class="form-control" id="sourcePathInput" placeholder="/data,/home,/var">
+                            <button class="btn btn-outline-secondary" type="button" onclick="showSourcePathDialog()">
+                                <i class="fas fa-folder-open me-1"></i>浏览
+                            </button>
+                        </div>
+                        <div id="sourcePathsList" class="mb-2"></div>
+                        <small class="text-muted">多个路径用逗号分隔，或使用浏览按钮添加</small>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">备份目标</label>
+                        <div class="form-check mb-2">
+                            <input class="form-check-input" type="radio" name="backupTarget" id="targetDisk" value="disk" checked>
+                            <label class="form-check-label" for="targetDisk">
+                                <i class="fas fa-hdd me-1"></i>磁盘存储
+                            </label>
+                        </div>
+                        <div class="form-check mb-2">
+                            <input class="form-check-input" type="radio" name="backupTarget" id="targetTape" value="tape">
+                            <label class="form-check-label" for="targetTape">
+                                <i class="fas fa-database me-1"></i>磁带机
+                            </label>
+                        </div>
+                        <div id="targetTapeOptions" class="ms-4 mt-2" style="display:none;">
+                            <select class="form-select form-select-sm">
+                                <option>自动选择磁带</option>
+                                <option>TAP001 - LTO-8</option>
+                                <option>TAP002 - LTO-8</option>
+                                <option>TAP003 - LTO-8</option>
+                            </select>
+                        </div>
                     </div>
                     <div class="row">
                         <div class="col-md-6 mb-3">
@@ -340,4 +372,26 @@
         </div>
     </div>
 </div>
+
+<script>
+// 源路径列表
+let sourcePaths = [];
+
+// 显示源路径选择对话框
+function showSourcePathDialog() {
+    alert('功能开发中：将打开文件选择对话框');
+    // TODO: 实现文件选择对话框
+}
+
+// 切换备份目标
+document.addEventListener('DOMContentLoaded', function() {
+    document.getElementById('targetDisk').addEventListener('change', function() {
+        document.getElementById('targetTapeOptions').style.display = 'none';
+    });
+    document.getElementById('targetTape').addEventListener('change', function() {
+        document.getElementById('targetTapeOptions').style.display = 'block';
+    });
+});
+</script>
+
 {% endblock %}
