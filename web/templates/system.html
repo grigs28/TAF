@@ -45,22 +45,17 @@
 {% endblock %}
 
 {% block content %}
-<div class="container-fluid mt-4">
-    <!-- 页面标题 -->
-    <div class="row mb-4">
-        <div class="col">
-            <h1 class="h3 mb-0">
-                <i class="fas fa-cog me-2"></i>
-                系统设置
-            </h1>
-            <p class="text-muted">配置系统参数和管理系统服务</p>
-        </div>
-        <div class="col-auto">
-            <button class="btn btn-primary" id="saveSettingsBtn">
-                <i class="fas fa-save me-2"></i>保存设置
+<div class="console-panel">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h5 class="mb-0">
+            <i class="bi bi-gear me-2"></i>系统设置
+        </h5>
+        <div>
+            <button class="btn btn-primary me-2" id="saveSettingsBtn">
+                <i class="bi bi-check-circle me-2"></i>保存设置
             </button>
             <button class="btn btn-secondary" id="restartSystemBtn">
-                <i class="fas fa-redo me-2"></i>重启系统
+                <i class="bi bi-arrow-clockwise me-2"></i>重启系统
             </button>
         </div>
     </div>
