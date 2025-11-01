@@ -886,7 +886,7 @@ body {
 
 /* 模态框调整 */
 .modal {
-    z-index: 1050;
+    z-index: 9999 !important;
 }
 
 .modal-content {
@@ -1448,7 +1448,7 @@ select.form-select:focus {
   width: 100%;
   height: 100%;
   background-color: rgba(0, 0, 0, 0.5);
-  z-index: 1040 !important;
+  z-index: 9998 !important;
   pointer-events: auto !important;
   user-select: none; /* 防止文本选择 */
 }
