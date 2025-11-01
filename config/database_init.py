@@ -87,6 +87,13 @@ class DatabaseInitializer:
             
             # 授予用户在 public schema 上的权限
             try:
+                # 先尝试将public schema的所有者设置为当前用户
+                cursor.execute(f'ALTER SCHEMA public OWNER TO "{username}"')
+                logger.info(f"已将 public schema 的所有者设置为 {username}")
+            except Exception as e:
+                logger.warning(f"设置public schema所有者时出现警告: {str(e)}")
+            
+            try:
                 cursor.execute(f'GRANT ALL ON SCHEMA public TO "{username}"')
                 cursor.execute(f'GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO "{username}"')
                 cursor.execute(f'GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO "{username}"')
