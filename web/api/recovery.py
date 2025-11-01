@@ -8,7 +8,7 @@ Recovery Management API
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Request
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -24,6 +24,7 @@ class RecoveryRequest(BaseModel):
 
 @router.get("/backup-sets")
 async def search_backup_sets(
+    request: Request,
     backup_group: Optional[str] = None,
     tape_id: Optional[str] = None,
     date_from: Optional[datetime] = None,
@@ -34,7 +35,7 @@ async def search_backup_sets(
         # 获取系统实例
         system = request.app.state.system
         if not system:
-            raise HTTPException(status_code=500, detail="系统未初始化")
+            return {"backup_sets": []}
 
         filters = {}
         if backup_group:
@@ -51,11 +52,11 @@ async def search_backup_sets(
 
     except Exception as e:
         logger.error(f"搜索备份集失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"backup_sets": []}
 
 
 @router.get("/backup-sets/{backup_set_id}/files")
-async def get_backup_set_files(backup_set_id: str):
+async def get_backup_set_files(backup_set_id: str, request: Request):
     """获取备份集文件列表"""
     try:
         system = request.app.state.system
@@ -72,8 +73,9 @@ async def get_backup_set_files(backup_set_id: str):
 
 @router.post("/tasks")
 async def create_recovery_task(
-    request: RecoveryRequest,
-    background_tasks: BackgroundTasks
+    recovery_request: RecoveryRequest,
+    background_tasks: BackgroundTasks,
+    request: Request
 ):
     """创建恢复任务"""
     try:
@@ -82,9 +84,9 @@ async def create_recovery_task(
             raise HTTPException(status_code=500, detail="系统未初始化")
 
         recovery_id = await system.recovery_engine.create_recovery_task(
-            backup_set_id=request.backup_set_id,
-            files=request.files,
-            target_path=request.target_path
+            backup_set_id=recovery_request.backup_set_id,
+            files=recovery_request.files,
+            target_path=recovery_request.target_path
         )
 
         if not recovery_id:
@@ -108,7 +110,7 @@ async def create_recovery_task(
 
 
 @router.get("/tasks/{recovery_id}/status")
-async def get_recovery_status(recovery_id: str):
+async def get_recovery_status(recovery_id: str, request: Request):
     """获取恢复状态"""
     try:
         system = request.app.state.system
@@ -129,16 +131,16 @@ async def get_recovery_status(recovery_id: str):
 
 
 @router.get("/backup-groups")
-async def get_backup_groups():
+async def get_backup_groups(request: Request):
     """获取备份组列表"""
     try:
         system = request.app.state.system
         if not system:
-            raise HTTPException(status_code=500, detail="系统未初始化")
+            return {"backup_groups": []}
 
         groups = await system.recovery_engine.get_backup_groups()
         return {"backup_groups": groups}
 
     except Exception as e:
         logger.error(f"获取备份组列表失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"backup_groups": []}

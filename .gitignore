@@ -67,6 +67,7 @@ htmlcov/
 .tox/
 .hypothesis/
 .claude/
+.sample/
 
 # Documentation
 docs/_build/

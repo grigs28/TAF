@@ -292,7 +292,12 @@ async def get_database_config():
         
     except Exception as e:
         logger.error(f"获取数据库配置失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "db_type": "sqlite",
+            "db_path": "./data/backup_system.db",
+            "pool_size": 10,
+            "max_overflow": 20
+        }
 
 
 @router.post("/database/test")
@@ -355,6 +360,10 @@ async def update_database_config(config: DatabaseConfig):
     try:
         import os
         from pathlib import Path
+        from config.settings import get_settings
+        
+        # 获取当前配置，用于填充缺失的密码
+        current_settings = get_settings()
         
         # 验证配置
         if config.db_type == "sqlite":
@@ -364,6 +373,26 @@ async def update_database_config(config: DatabaseConfig):
             Path(config.db_path).parent.mkdir(parents=True, exist_ok=True)
             db_url = f"sqlite:///{config.db_path}"
         elif config.db_type in ["postgresql", "opengauss"]:
+            # 如果密码为空，使用当前配置的密码
+            if not config.db_password:
+                # 从当前URL提取密码
+                current_url = current_settings.DATABASE_URL
+                if "@" in current_url:
+                    try:
+                        # 解析当前URL获取密码
+                        parts = current_url.split("@")
+                        auth_part = parts[0].split("://")[1]
+                        if ":" in auth_part:
+                            _, existing_password = auth_part.split(":", 1)
+                            config.db_password = existing_password
+                    except:
+                        pass
+                
+                # 如果仍然没有密码，使用当前设置的DB_PASSWORD
+                if not config.db_password:
+                    config.db_password = current_settings.DB_PASSWORD
+            
+            # 验证必需参数
             if not all([config.db_host, config.db_port, config.db_user, config.db_password, config.db_database]):
                 raise ValueError("PostgreSQL/openGauss数据库需要完整的连接参数")
             db_url = f"{config.db_type}://{config.db_user}:{config.db_password}@{config.db_host}:{config.db_port}/{config.db_database}"
