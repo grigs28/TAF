@@ -55,6 +55,11 @@ class TapeBackupSystem:
 
             # 初始化数据库
             try:
+                # 先检查并创建数据库
+                from config.database_init import DatabaseInitializer
+                db_init = DatabaseInitializer()
+                await db_init.ensure_database_exists()
+                
                 await self.db_manager.initialize()
                 logger.info("数据库连接初始化完成")
             except Exception as db_error:
