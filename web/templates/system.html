@@ -68,42 +68,42 @@
                     <ul class="nav nav-tabs" id="settingsTabs" role="tablist">
                         <li class="nav-item" role="presentation">
                             <button class="nav-link active" id="tapedrive-tab" data-bs-toggle="tab" data-bs-target="#tapedrive" type="button" role="tab">
-                                <i class="fas fa-server me-2"></i>磁带机配置
+                                <i class="bi bi-server me-2"></i>磁带机配置
                             </button>
                         </li>
                         <li class="nav-item" role="presentation">
                             <button class="nav-link" id="general-tab" data-bs-toggle="tab" data-bs-target="#general" type="button" role="tab">
-                                <i class="fas fa-cogs me-2"></i>常规设置
+                                <i class="bi bi-gear me-2"></i>常规设置
                             </button>
                         </li>
                         <li class="nav-item" role="presentation">
                             <button class="nav-link" id="database-tab" data-bs-toggle="tab" data-bs-target="#database" type="button" role="tab">
-                                <i class="fas fa-database me-2"></i>数据库
+                                <i class="bi bi-database me-2"></i>数据库
                             </button>
                         </li>
                         <li class="nav-item" role="presentation">
                             <button class="nav-link" id="notification-tab" data-bs-toggle="tab" data-bs-target="#notification" type="button" role="tab">
-                                <i class="fas fa-bell me-2"></i>通知设置
+                                <i class="bi bi-bell me-2"></i>通知设置
                             </button>
                         </li>
                         <li class="nav-item" role="presentation">
                             <button class="nav-link" id="backup-tab" data-bs-toggle="tab" data-bs-target="#backup" type="button" role="tab">
-                                <i class="fas fa-tape me-2"></i>备份策略
+                                <i class="bi bi-database me-2"></i>备份策略
                             </button>
                         </li>
                         <li class="nav-item" role="presentation">
                             <button class="nav-link" id="scheduler-tab" data-bs-toggle="tab" data-bs-target="#scheduler" type="button" role="tab">
-                                <i class="fas fa-clock me-2"></i>计划任务
+                                <i class="bi bi-clock me-2"></i>计划任务
                             </button>
                         </li>
                         <li class="nav-item" role="presentation">
                             <button class="nav-link" id="logs-tab" data-bs-toggle="tab" data-bs-target="#logs" type="button" role="tab">
-                                <i class="fas fa-file-alt me-2"></i>系统日志
+                                <i class="bi bi-file-text me-2"></i>系统日志
                             </button>
                         </li>
                         <li class="nav-item" role="presentation">
                             <button class="nav-link" id="about-tab" data-bs-toggle="tab" data-bs-target="#about" type="button" role="tab">
-                                <i class="fas fa-info-circle me-2"></i>关于系统
+                                <i class="bi bi-info-circle me-2"></i>关于系统
                             </button>
                         </li>
                     </ul>
@@ -237,10 +237,10 @@
 
                                             <div class="mb-3">
                                                 <button class="btn btn-outline-primary" id="testDbConnectionBtn">
-                                                    <i class="fas fa-plug me-2"></i>测试连接
+                                                    <i class="bi bi-plug me-2"></i>测试连接
                                                 </button>
                                                 <button class="btn btn-success" id="saveDbConfigBtn">
-                                                    <i class="fas fa-save me-2"></i>保存配置
+                                                    <i class="bi bi-save me-2"></i>保存配置
                                                 </button>
                                             </div>
                                         </div>
@@ -281,7 +281,7 @@
                                                 <label class="form-label">设备路径</label>
                                                 <div class="input-group">
                                                     <span class="input-group-text">
-                                                        <i class="fas fa-hdd"></i>
+                                                        <i class="bi bi-hdd"></i>
                                                     </span>
                                                     <input type="text" class="form-control" id="tapeDevicePath" placeholder="/dev/nst0">
                                                 </div>
@@ -292,7 +292,7 @@
                                                 <label class="form-label">驱动盘符 (Windows)</label>
                                                 <div class="input-group">
                                                     <span class="input-group-text">
-                                                        <i class="fas fa-drive"></i>
+                                                        <i class="bi bi-hdd-rack"></i>
                                                     </span>
                                                     <input type="text" class="form-control" id="tapeDriveLetter" placeholder="o" maxlength="1" style="max-width: 80px;">
                                                 </div>
@@ -348,13 +348,13 @@
 
                                             <div class="mb-3">
                                                 <button class="btn btn-outline-primary" id="testTapeConnectionBtn">
-                                                    <i class="fas fa-plug me-2"></i>测试连接
+                                                    <i class="bi bi-plug me-2"></i>测试连接
                                                 </button>
                                                 <button class="btn btn-success" id="saveTapeConfigBtn">
-                                                    <i class="fas fa-save me-2"></i>保存配置
+                                                    <i class="bi bi-save me-2"></i>保存配置
                                                 </button>
                                                 <button class="btn btn-info" id="scanTapeDevicesBtn">
-                                                    <i class="fas fa-search me-2"></i>扫描设备
+                                                    <i class="bi bi-search me-2"></i>扫描设备
                                                 </button>
                                             </div>
                                         </div>
@@ -386,7 +386,7 @@
                                             <h6 class="card-title">已检测设备</h6>
                                             <div id="detectedDevices">
                                                 <p class="text-muted text-center mb-0">
-                                                    <i class="fas fa-info-circle"></i>
+                                                    <i class="bi bi-info-circle"></i>
                                                     暂无设备
                                                 </p>
                                             </div>
@@ -417,17 +417,17 @@
                                             </div>
                                             <div class="mb-3">
                                                 <button class="btn btn-outline-primary" id="testNotificationBtn">
-                                                    <i class="fas fa-paper-plane me-2"></i>发送测试通知
+                                                    <i class="bi bi-send me-2"></i>发送测试通知
                                                 </button>
                                                 <button class="btn btn-success ms-2" id="saveNotificationConfigBtn">
-                                                    <i class="fas fa-save me-2"></i>保存配置
+                                                    <i class="bi bi-save me-2"></i>保存配置
                                                 </button>
                                             </div>
                                             <hr>
                                             <h6 class="card-title mt-3">通知人员</h6>
                                             <div class="mb-3">
                                                 <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addNotificationUserModal">
-                                                    <i class="fas fa-plus me-1"></i>添加人员
+                                                    <i class="bi bi-plus me-1"></i>添加人员
                                                 </button>
                                             </div>
                                             <div id="notificationUsers">
@@ -572,10 +572,10 @@
                                                             <td>2025-11-01 02:00</td>
                                                             <td>
                                                                 <button class="btn btn-sm btn-outline-primary">
-                                                                    <i class="fas fa-edit"></i>
+                                                                    <i class="bi bi-pencil"></i>
                                                                 </button>
                                                                 <button class="btn btn-sm btn-outline-secondary">
-                                                                    <i class="fas fa-play"></i>
+                                                                    <i class="bi bi-play"></i>
                                                                 </button>
                                                             </td>
                                                         </tr>
@@ -586,10 +586,10 @@
                                                             <td>今天 03:00</td>
                                                             <td>
                                                                 <button class="btn btn-sm btn-outline-primary">
-                                                                    <i class="fas fa-edit"></i>
+                                                                    <i class="bi bi-pencil"></i>
                                                                 </button>
                                                                 <button class="btn btn-sm btn-outline-secondary">
-                                                                    <i class="fas fa-play"></i>
+                                                                    <i class="bi bi-play"></i>
                                                                 </button>
                                                             </td>
                                                         </tr>
@@ -600,10 +600,10 @@
                                                             <td>30分钟后</td>
                                                             <td>
                                                                 <button class="btn btn-sm btn-outline-primary">
-                                                                    <i class="fas fa-edit"></i>
+                                                                    <i class="bi bi-pencil"></i>
                                                                 </button>
                                                                 <button class="btn btn-sm btn-outline-secondary">
-                                                                    <i class="fas fa-play"></i>
+                                                                    <i class="bi bi-play"></i>
                                                                 </button>
                                                             </td>
                                                         </tr>
@@ -633,7 +633,7 @@
                                                     <option value="CRITICAL">严重</option>
                                                 </select>
                                                 <button class="btn btn-outline-secondary btn-sm float-end" id="clearLogsBtn">
-                                                    <i class="fas fa-trash me-1"></i>清空
+                                                    <i class="bi bi-trash me-1"></i>清空
                                                 </button>
                                             </div>
                                             <div class="log-container" style="height: 400px; overflow-y: auto; background: #f8f9fa; padding: 10px; border-radius: 4px;">
@@ -746,7 +746,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const btn = this;
         const originalHtml = btn.innerHTML;
         btn.disabled = true;
-        btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>测试中...';
+        btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-2"></i>测试中...';
         
         try {
             const config = getDatabaseConfig();
@@ -776,7 +776,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const btn = this;
         const originalHtml = btn.innerHTML;
         btn.disabled = true;
-        btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>保存中...';
+        btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-2"></i>保存中...';
         
         try {
             const config = getDatabaseConfig();
@@ -923,7 +923,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const btn = this;
         const originalHtml = btn.innerHTML;
         btn.disabled = true;
-        btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>测试中...';
+        btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-2"></i>测试中...';
         
         try {
             const config = getTapeConfig();
@@ -955,7 +955,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const btn = this;
         const originalHtml = btn.innerHTML;
         btn.disabled = true;
-        btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>保存中...';
+        btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-2"></i>保存中...';
         
         try {
             const config = getTapeConfig();
@@ -986,7 +986,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const btn = this;
         const originalHtml = btn.innerHTML;
         btn.disabled = true;
-        btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>扫描中...';
+        btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-2"></i>扫描中...';
         
         try {
             const response = await fetch('/api/system/tape/scan');
@@ -1078,7 +1078,7 @@ function displayDetectedDevices(devices) {
     const container = document.getElementById('detectedDevices');
     
     if (!devices || devices.length === 0) {
-        container.innerHTML = '<p class="text-muted text-center mb-0"><i class="fas fa-info-circle"></i> 暂无设备</p>';
+        container.innerHTML = '<p class="text-muted text-center mb-0"><i class="bi bi-info-circle"></i> 暂无设备</p>';
         return;
     }
     
@@ -1088,7 +1088,7 @@ function displayDetectedDevices(devices) {
         let capacityDisplay = '';
         if (device.native_capacity) {
             const tb = (device.native_capacity / (1024 ** 4)).toFixed(1);
-            capacityDisplay = `<small class="text-muted d-block"><i class="fas fa-hdd"></i> 容量: ${tb} TB</small>`;
+            capacityDisplay = `<small class="text-muted d-block"><i class="bi bi-hdd"></i> 容量: ${tb} TB</small>`;
         }
         
         // LTO代数显示
@@ -1100,7 +1100,7 @@ function displayDetectedDevices(devices) {
         html += `
             <li class="mb-2 p-2 border rounded">
                 <div class="fw-bold">${device.vendor} ${device.model}${ltoDisplay}</div>
-                <small class="text-muted d-block"><i class="fas fa-map-marker-alt"></i> ${device.path}</small>
+                <small class="text-muted d-block"><i class="bi bi-geo-alt"></i> ${device.path}</small>
                 ${capacityDisplay}
                 ${device.status === 'online' ? 
                     '<span class="badge bg-success">在线</span>' : 
@@ -1124,7 +1124,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const btn = this;
             const originalHtml = btn.innerHTML;
             btn.disabled = true;
-            btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>发送中...';
+            btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-2"></i>发送中...';
             
             try {
                 const phone = document.getElementById('dingtalkDefaultPhone').value;
@@ -1154,7 +1154,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const btn = this;
             const originalHtml = btn.innerHTML;
             btn.disabled = true;
-            btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>保存中...';
+            btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-2"></i>保存中...';
             
             try {
                 const config = {
