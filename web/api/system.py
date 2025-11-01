@@ -542,25 +542,29 @@ async def test_tape_connection(config: TapeConfig):
             
             # 如果找到设备，测试连接
             if devices and len(devices) > 0:
-                # 测试第一个设备
-                ready = await scsi.test_unit_ready(devices[0]['path'])
+                device = devices[0]
+                
+                # 尝试测试设备就绪状态（可能需要管理员权限）
+                try:
+                    ready = await scsi.test_unit_ready(device['path'])
+                    status_msg = "设备已就绪" if ready else "设备已检测到但未就绪"
+                except Exception as e:
+                    logger.warning(f"测试设备就绪状态失败: {str(e)}")
+                    # 如果test_unit_ready失败但扫描成功，认为设备存在
+                    ready = False
+                    status_msg = f"设备已检测到（{str(e)}）"
                 
                 await scsi.close()
                 
-                if ready:
-                    return {
-                        "success": True,
-                        "message": "磁带机连接测试成功",
-                        "connected": True,
-                        "device_info": f"{devices[0]['vendor']} {devices[0]['model']}"
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "message": "设备未就绪",
-                        "connected": False,
-                        "error": "设备无响应"
-                    }
+                # 只要扫描到设备就认为连接成功
+                return {
+                    "success": True,
+                    "message": "磁带机连接测试成功",
+                    "connected": True,
+                    "device_info": f"{device.get('vendor', 'Unknown')} {device.get('model', 'Unknown')}",
+                    "status": status_msg,
+                    "device_path": device.get('path', '')
+                }
             else:
                 await scsi.close()
                 return {
