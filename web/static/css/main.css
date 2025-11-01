@@ -1,0 +1,134 @@
+/* 企业级磁带备份系统 - 主样式文件 */
+
+/* 通用样式 */
+body {
+    font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+    background-color: #f8f9fa;
+}
+
+/* 导航栏样式 */
+.navbar-brand {
+    font-weight: bold;
+    font-size: 1.3rem;
+}
+
+/* 卡片样式 */
+.card {
+    border: none;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    transition: box-shadow 0.3s;
+}
+
+.card:hover {
+    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+}
+
+/* 设置卡片样式 */
+.setting-card {
+    margin-bottom: 1.5rem;
+}
+
+/* 状态指示器 */
+.status-indicator {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 8px;
+}
+
+.status-online {
+    background-color: #28a745;
+    animation: pulse 2s infinite;
+}
+
+.status-offline {
+    background-color: #dc3545;
+}
+
+.status-warning {
+    background-color: #ffc107;
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.5;
+    }
+}
+
+/* 页脚样式 */
+footer {
+    margin-top: auto;
+}
+
+/* CHANGELOG模态框样式 */
+#changelog-content {
+    max-height: 500px;
+    overflow-y: auto;
+}
+
+#changelog-content h1,
+#changelog-content h2,
+#changelog-content h3 {
+    margin-top: 1.5rem;
+    margin-bottom: 1rem;
+    font-weight: bold;
+}
+
+#changelog-content h1 {
+    border-bottom: 2px solid #dee2e6;
+    padding-bottom: 0.5rem;
+}
+
+#changelog-content ul {
+    padding-left: 1.5rem;
+}
+
+#changelog-content code {
+    background-color: #f1f3f5;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: "Consolas", "Monaco", monospace;
+}
+
+#changelog-content pre {
+    background-color: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    padding: 1rem;
+    overflow-x: auto;
+}
+
+#changelog-content blockquote {
+    border-left: 4px solid #007bff;
+    padding-left: 1rem;
+    margin-left: 0;
+    color: #6c757d;
+}
+
+/* 版本链接样式 */
+#version-link {
+    cursor: pointer;
+    transition: color 0.2s;
+}
+
+#version-link:hover {
+    color: #007bff !important;
+}
+
+/* 响应式调整 */
+@media (max-width: 768px) {
+    .navbar-brand {
+        font-size: 1.1rem;
+    }
+    
+    #changelog-content {
+        max-height: 400px;
+    }
+}
+

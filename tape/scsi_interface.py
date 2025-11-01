@@ -1,0 +1,810 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+SCSI接口模块
+SCSI Interface Module
+"""
+
+import os
+import sys
+import platform
+import logging
+import re
+from typing import List, Dict, Any, Optional
+from ctypes import *
+from pathlib import Path
+
+from config.settings import get_settings
+
+logger = logging.getLogger(__name__)
+
+
+class SCSIInterface:
+    """SCSI接口类"""
+
+    def __init__(self):
+        self.system = platform.system()
+        self.settings = get_settings()
+        self.tape_devices = []
+        self._initialized = False
+
+    async def initialize(self):
+        """初始化SCSI接口"""
+        try:
+            if self.system == "Windows":
+                await self._init_windows_scsi()
+            elif self.system == "Linux":
+                await self._init_linux_scsi()
+            else:
+                raise OSError(f"不支持的操作系统: {self.system}")
+
+            self._initialized = True
+            logger.info(f"SCSI接口初始化完成 ({self.system})")
+
+        except Exception as e:
+            logger.error(f"SCSI接口初始化失败: {str(e)}")
+            raise
+
+    async def _init_windows_scsi(self):
+        """初始化Windows SCSI接口"""
+        try:
+            # Windows SPTI (SCSI Pass Through Interface)
+            import ctypes
+            from ctypes import wintypes
+
+            # 定义缺失的类型
+            if not hasattr(wintypes, 'UCHAR'):
+                wintypes.UCHAR = ctypes.c_ubyte
+            if not hasattr(wintypes, 'ULONG_PTR'):
+                wintypes.ULONG_PTR = ctypes.c_ulong
+            if not hasattr(wintypes, 'ULONG'):
+                wintypes.ULONG = ctypes.c_ulong
+
+            # 定义Windows API结构
+            class SCSI_PASS_THROUGH(Structure):
+                _fields_ = [
+                    ("Length", wintypes.USHORT),
+                    ("ScsiStatus", wintypes.UCHAR),
+                    ("PathId", wintypes.UCHAR),
+                    ("TargetId", wintypes.UCHAR),
+                    ("Lun", wintypes.UCHAR),
+                    ("CdbLength", wintypes.UCHAR),
+                    ("SenseInfoLength", wintypes.UCHAR),
+                    ("DataIn", wintypes.UCHAR),
+                    ("DataTransferLength", wintypes.ULONG),
+                    ("TimeOutValue", wintypes.ULONG),
+                    ("DataBufferOffset", wintypes.ULONG_PTR),
+                    ("SenseInfoOffset", wintypes.ULONG),
+                    ("Cdb", wintypes.UCHAR * 16)
+                ]
+
+            class SCSI_PASS_THROUGH_WITH_BUFFERS(Structure):
+                _fields_ = [
+                    ("Spt", SCSI_PASS_THROUGH),
+                    ("Sense", wintypes.UCHAR * 32),
+                    ("Data", wintypes.UCHAR * 4096)
+                ]
+
+            # 加载kernel32.dll
+            self.kernel32 = windll.kernel32
+            self.create_file = self.kernel32.CreateFileW
+            self.device_io_control = self.kernel32.DeviceIoControl
+
+        except Exception as e:
+            logger.error(f"Windows SCSI接口初始化失败: {str(e)}")
+            raise
+
+    async def _init_linux_scsi(self):
+        """初始化Linux SCSI接口"""
+        try:
+            # Linux sg_io接口
+            import fcntl
+            import struct
+
+            # SG_IO 命令定义
+            self.SG_IO = 0x2285
+
+            # 定义SG_IO结构
+            class sg_io_hdr(Structure):
+                _fields_ = [
+                    ("interface_id", c_int),
+                    ("dxfer_direction", c_int),
+                    ("cmd_len", c_ubyte),
+                    ("mx_sb_len", c_ubyte),
+                    ("iovec_count", c_ushort),
+                    ("dxfer_len", c_uint),
+                    ("dxferp", c_void_p),
+                    ("cmdp", c_void_p),
+                    ("sbp", c_void_p),
+                    ("timeout", c_uint),
+                    ("flags", c_uint),
+                    ("pack_id", c_uint),
+                    ("usr_ptr", c_void_p),
+                    ("status", c_ubyte),
+                    ("masked_status", c_ubyte),
+                    ("msg_status", c_ubyte),
+                    ("sb_len_wr", c_ubyte),
+                    ("host_status", c_ushort),
+                    ("driver_status", c_ushort),
+                    ("resid", c_uint),
+                    ("duration", c_uint),
+                    ("info", c_uint)
+                ]
+
+            self.sg_io_hdr = sg_io_hdr
+
+        except Exception as e:
+            logger.error(f"Linux SCSI接口初始化失败: {str(e)}")
+            raise
+
+    async def scan_tape_devices(self) -> List[Dict[str, Any]]:
+        """扫描磁带设备"""
+        devices = []
+
+        try:
+            if self.system == "Windows":
+                devices = await self._scan_windows_tape_devices()
+            elif self.system == "Linux":
+                devices = await self._scan_linux_tape_devices()
+
+            self.tape_devices = devices
+            logger.info(f"扫描到 {len(devices)} 个磁带设备")
+
+        except Exception as e:
+            logger.error(f"扫描磁带设备失败: {str(e)}")
+
+        return devices
+
+    async def _scan_windows_tape_devices(self) -> List[Dict[str, Any]]:
+        """扫描Windows磁带设备"""
+        devices = []
+
+        try:
+            # 首先通过WMI查询磁带设备
+            try:
+                import wmi
+                c = wmi.WMI()
+                for tape in c.Win32_TapeDrive():
+                    # 获取详细的设备信息
+                    device_info = {
+                        'path': tape.DeviceID,
+                        'type': 'SCSI',
+                        'vendor': getattr(tape, 'Manufacturer', 'Unknown'),
+                        'model': getattr(tape, 'Name', 'Unknown'),
+                        'serial': getattr(tape, 'SerialNumber', 'Unknown'),
+                        'status': 'online',
+                        'scsi_bus': getattr(tape, 'SCSIBus', 'Unknown'),
+                        'scsi_target_id': getattr(tape, 'SCSITargetId', 'Unknown'),
+                        'scsi_lun': getattr(tape, 'SCSILogicalUnit', 'Unknown')
+                    }
+
+                    # 检查是否为IBM LTO磁带机
+                    if 'IBM' in device_info['vendor'].upper() and 'ULT3580' in device_info['model'].upper():
+                        device_info.update({
+                            'is_ibm_lto': True,
+                            'lto_generation': self._extract_lto_generation(device_info['model']),
+                            'supports_worm': True,
+                            'supports_encryption': True,
+                            'native_capacity': self._get_lto_capacity(device_info['model'])
+                        })
+
+                    devices.append(device_info)
+                    logger.info(f"发现磁带设备: {device_info['vendor']} {device_info['model']}")
+
+            except ImportError:
+                logger.warning("WMI模块不可用，使用基本扫描方法")
+
+            # 如果WMI不可用，检查可用的磁带驱动器盘符
+            if not devices:
+                # 检查常见磁带设备路径
+                tape_paths = [
+                    "\\TAPE0",
+                    "\\TAPE1",
+                    "\\TAPE2",
+                    "\\\\.\\TAPE0",
+                    "\\\\.\\TAPE1",
+                    "\\\\.\\TAPE2"
+                ]
+
+                for tape_path in tape_paths:
+                    if await self._test_tape_device_access(tape_path):
+                        # 尝试获取设备信息
+                        tape_info = await self.get_tape_info(tape_path)
+                        device_info = {
+                            'path': tape_path,
+                            'type': 'SCSI',
+                            'vendor': tape_info.get('vendor', 'Unknown') if tape_info else 'Unknown',
+                            'model': tape_info.get('model', 'Unknown') if tape_info else 'Tape Drive',
+                            'serial': tape_info.get('serial', 'Unknown') if tape_info else 'Unknown',
+                            'status': 'online'
+                        }
+
+                        if tape_info:
+                            device_info.update(tape_info)
+
+                        devices.append(device_info)
+
+        except Exception as e:
+            logger.error(f"扫描Windows磁带设备失败: {str(e)}")
+
+        return devices
+
+    async def _scan_linux_tape_devices(self) -> List[Dict[str, Any]]:
+        """扫描Linux磁带设备"""
+        devices = []
+
+        try:
+            # 扫描 /dev/nst* 和 /dev/st* 设备
+            base_path = Path("/dev")
+            tape_pattern = ["nst*", "st*"]
+
+            for pattern in tape_pattern:
+                for device_path in base_path.glob(pattern):
+                    if device_path.is_char_device():
+                        # 获取设备信息
+                        vendor, model, serial = await self._get_linux_tape_info(str(device_path))
+
+                        device_info = {
+                            'path': str(device_path),
+                            'type': 'SCSI',
+                            'vendor': vendor,
+                            'model': model,
+                            'serial': serial,
+                            'status': 'online'
+                        }
+
+                        # 检查是否为IBM LTO磁带机
+                        if 'IBM' in vendor.upper() and 'ULT3580' in model.upper():
+                            device_info.update({
+                                'is_ibm_lto': True,
+                                'lto_generation': self._extract_lto_generation(model),
+                                'supports_worm': True,
+                                'supports_encryption': True,
+                                'native_capacity': self._get_lto_capacity(model)
+                            })
+
+                        devices.append(device_info)
+                        logger.info(f"发现磁带设备: {device_path} - {vendor} {model}")
+
+        except Exception as e:
+            logger.error(f"扫描Linux磁带设备失败: {str(e)}")
+
+        return devices
+
+    async def _get_linux_tape_info(self, device_path: str) -> tuple:
+        """获取Linux磁带设备信息"""
+        try:
+            # 通过 /sys/class/scsi_tape 获取信息
+            device_name = Path(device_path).name
+            sys_path = Path(f"/sys/class/scsi_tape/{device_name}/device")
+
+            vendor = "Unknown"
+            model = "Unknown"
+            serial = "Unknown"
+
+            if sys_path.exists():
+                try:
+                    with open(sys_path / "vendor", "r") as f:
+                        vendor = f.read().strip()
+                except:
+                    pass
+
+                try:
+                    with open(sys_path / "model", "r") as f:
+                        model = f.read().strip()
+                except:
+                    pass
+
+                try:
+                    with open(sys_path / "serial", "r") as f:
+                        serial = f.read().strip()
+                except:
+                    pass
+
+            return vendor, model, serial
+
+        except Exception as e:
+            logger.error(f"获取Linux磁带设备信息失败: {str(e)}")
+            return "Unknown", "Unknown", "Unknown"
+
+    async def execute_scsi_command(self, device_path: str, cdb: bytes,
+                                 data_direction: int = 0, data_length: int = 0,
+                                 timeout: int = 30) -> Dict[str, Any]:
+        """执行SCSI命令"""
+        try:
+            if self.system == "Windows":
+                return await self._execute_windows_scsi(device_path, cdb, data_direction, data_length, timeout)
+            elif self.system == "Linux":
+                return await self._execute_linux_scsi(device_path, cdb, data_direction, data_length, timeout)
+
+        except Exception as e:
+            logger.error(f"执行SCSI命令失败: {str(e)}")
+            return {'success': False, 'error': str(e)}
+
+    async def _execute_windows_scsi(self, device_path: str, cdb: bytes,
+                                  data_direction: int, data_length: int,
+                                  timeout: int) -> Dict[str, Any]:
+        """执行Windows SCSI命令"""
+        try:
+            # Windows SPTI实现
+            # 这里需要实现具体的SCSI Pass Through逻辑
+            # 由于复杂性，这里提供框架代码
+
+            handle = self.create_file(
+                device_path,
+                0x80000000,  # GENERIC_READ
+                0x80000000,  # GENERIC_WRITE
+                0,
+                3,           # OPEN_EXISTING
+                0x80,        # FILE_ATTRIBUTE_NORMAL
+                None
+            )
+
+            if handle == -1:  # INVALID_HANDLE_VALUE
+                return {'success': False, 'error': '无法打开设备'}
+
+            # 构造SCSI命令结构
+            # 实际实现需要填充SCSI_PASS_THROUGH结构
+            # 这里省略具体实现
+
+            # 关闭句柄
+            self.kernel32.CloseHandle(handle)
+
+            return {'success': True, 'data': b''}
+
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    async def _execute_linux_scsi(self, device_path: str, cdb: bytes,
+                                data_direction: int, data_length: int,
+                                timeout: int) -> Dict[str, Any]:
+        """执行Linux SCSI命令"""
+        try:
+            with open(device_path, 'rb+') as fd:
+                # 构造SG_IO请求
+                hdr = self.sg_io_hdr()
+                hdr.interface_id = ord('S')
+                hdr.dxfer_direction = data_direction
+                hdr.cmd_len = len(cdb)
+                hdr.mx_sb_len = 32
+                hdr.dxfer_len = data_length
+                hdr.timeout = timeout * 1000  # 毫秒
+
+                # 分配缓冲区
+                cdb_buffer = create_string_buffer(cdb)
+                sense_buffer = create_string_buffer(32)
+                data_buffer = create_string_buffer(data_length) if data_length > 0 else None
+
+                hdr.cmdp = cast(cdb_buffer, c_void_p)
+                hdr.sbp = cast(sense_buffer, c_void_p)
+                if data_buffer:
+                    hdr.dxferp = cast(data_buffer, c_void_p)
+
+                # 执行SG_IO命令
+                fcntl.ioctl(fd, self.SG_IO, byref(hdr))
+
+                # 检查结果
+                if hdr.status == 0:
+                    data = data_buffer.raw[:data_length] if data_buffer else b''
+                    return {'success': True, 'data': data}
+                else:
+                    return {
+                        'success': False,
+                        'error': f'SCSI错误: 状态={hdr.status}, 主机状态={hdr.host_status}',
+                        'sense_data': sense_buffer.raw[:hdr.sb_len_wr]
+                    }
+
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    async def get_tape_info(self, device_path: str = None) -> Optional[Dict[str, Any]]:
+        """获取磁带信息"""
+        try:
+            if not device_path and self.tape_devices:
+                device_path = self.tape_devices[0]['path']
+
+            if not device_path:
+                return None
+
+            # 发送INQUIRY命令获取设备信息
+            cdb = bytes([0x12, 0x00, 0x00, 0x00, 36, 0x00])  # INQUIRY命令
+            result = await self.execute_scsi_command(device_path, cdb, data_direction=1, data_length=36)
+
+            if result['success']:
+                data = result['data']
+                if len(data) >= 36:
+                    vendor = data[8:16].decode('ascii', errors='ignore').strip()
+                    model = data[16:32].decode('ascii', errors='ignore').strip()
+                    revision = data[32:36].decode('ascii', errors='ignore').strip()
+
+                    return {
+                        'vendor': vendor,
+                        'model': model,
+                        'revision': revision,
+                        'device_type': data[0] & 0x1F,
+                        'device_modifier': (data[0] >> 6) & 0x07
+                    }
+
+            return None
+
+        except Exception as e:
+            logger.error(f"获取磁带信息失败: {str(e)}")
+            return None
+
+    async def test_unit_ready(self, device_path: str = None) -> bool:
+        """测试设备就绪状态"""
+        try:
+            if not device_path and self.tape_devices:
+                device_path = self.tape_devices[0]['path']
+
+            if not device_path:
+                return False
+
+            # 发送TEST UNIT READY命令
+            cdb = bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+            result = await self.execute_scsi_command(device_path, cdb)
+
+            return result['success']
+
+        except Exception as e:
+            logger.error(f"测试设备就绪状态失败: {str(e)}")
+            return False
+
+    async def rewind_tape(self, device_path: str = None) -> bool:
+        """倒带"""
+        try:
+            if not device_path and self.tape_devices:
+                device_path = self.tape_devices[0]['path']
+
+            if not device_path:
+                return False
+
+            # 发送REWIND命令
+            cdb = bytes([0x01, 0x00, 0x00, 0x00, 0x00, 0x00])
+            result = await self.execute_scsi_command(device_path, cdb, timeout=300)
+
+            return result['success']
+
+        except Exception as e:
+            logger.error(f"磁带倒带失败: {str(e)}")
+            return False
+
+    async def health_check(self) -> bool:
+        """SCSI接口健康检查"""
+        try:
+            if not self.tape_devices:
+                return False
+
+            for device in self.tape_devices:
+                if not await self.test_unit_ready(device['path']):
+                    logger.warning(f"磁带设备 {device['path']} 未就绪")
+                    return False
+
+            return True
+
+        except Exception as e:
+            logger.error(f"SCSI接口健康检查失败: {str(e)}")
+            return False
+
+    async def close(self):
+        """关闭SCSI接口"""
+        try:
+            self._initialized = False
+            logger.info("SCSI接口已关闭")
+
+        except Exception as e:
+            logger.error(f"关闭SCSI接口时发生错误: {str(e)}")
+
+    def _extract_lto_generation(self, model: str) -> int:
+        """从型号中提取LTO代数"""
+        try:
+            model_upper = model.upper()
+            if 'HH9' in model_upper or 'LTO-9' in model_upper or 'ULTRIUM-HH9' in model_upper:
+                return 9
+            elif 'HH8' in model_upper or 'LTO-8' in model_upper or 'ULTRIUM-HH8' in model_upper:
+                return 8
+            elif 'HH7' in model_upper or 'LTO-7' in model_upper or 'ULTRIUM-HH7' in model_upper:
+                return 7
+            elif 'HH6' in model_upper or 'LTO-6' in model_upper or 'ULTRIUM-HH6' in model_upper:
+                return 6
+            elif 'HH5' in model_upper or 'LTO-5' in model_upper or 'ULTRIUM-HH5' in model_upper:
+                return 5
+            else:
+                # 尝试从型号字符串中提取数字
+                match = re.search(r'HH(\d+)', model_upper)
+                if match:
+                    return int(match.group(1))
+                return 0
+        except:
+            return 0
+
+    def _get_lto_capacity(self, model: str) -> int:
+        """获取LTO磁带机容量（字节）"""
+        lto_gen = self._extract_lto_generation(model)
+
+        # LTO标准容量（未压缩）
+        lto_capacities = {
+            9: 18 * 1024 * 1024 * 1024 * 1024,  # 18TB
+            8: 12 * 1024 * 1024 * 1024 * 1024,  # 12TB
+            7: 6 * 1024 * 1024 * 1024 * 1024,   # 6TB
+            6: 2.5 * 1024 * 1024 * 1024 * 1024, # 2.5TB
+            5: 1.5 * 1024 * 1024 * 1024 * 1024, # 1.5TB
+        }
+
+        return lto_capacities.get(lto_gen, 0)
+
+    async def _test_tape_device_access(self, device_path: str) -> bool:
+        """测试磁带设备访问"""
+        try:
+            if self.system == "Windows":
+                # Windows设备访问测试
+                handle = self.create_file(
+                    device_path,
+                    0x80000000,  # GENERIC_READ
+                    0x80000000,  # GENERIC_WRITE
+                    0,
+                    3,           # OPEN_EXISTING
+                    0x80,        # FILE_ATTRIBUTE_NORMAL
+                    None
+                )
+
+                if handle != -1:  # INVALID_HANDLE_VALUE
+                    self.kernel32.CloseHandle(handle)
+                    return True
+
+            elif self.system == "Linux":
+                # Linux设备访问测试
+                if os.path.exists(device_path):
+                    with open(device_path, 'rb') as f:
+                        # 尝试读取MTIO状态
+                        import fcntl
+                        try:
+                            # MTGETSTATUS ioctl
+                            fcntl.ioctl(f, 0x801c6d01, b'\x00' * 20)
+                            return True
+                        except:
+                            # 即使ioctl失败，设备存在就认为可访问
+                            return True
+
+        except Exception as e:
+            logger.debug(f"测试设备访问失败 {device_path}: {str(e)}")
+
+        return False
+
+    async def send_ibm_specific_command(self, device_path: str, command_type: str,
+                                      parameters: Dict[str, Any] = None) -> Dict[str, Any]:
+        """发送IBM特定的SCSI命令"""
+        try:
+            if command_type == "log_sense":
+                return await self._ibm_log_sense(device_path, parameters or {})
+            elif command_type == "mode_sense":
+                return await self._ibm_mode_sense(device_path, parameters or {})
+            elif command_type == "inquiry_vpd":
+                return await self._ibm_inquiry_vpd(device_path, parameters or {})
+            elif command_type == "receive_diagnostic":
+                return await self._ibm_receive_diagnostic(device_path, parameters or {})
+            else:
+                return {'success': False, 'error': f'不支持的IBM命令类型: {command_type}'}
+
+        except Exception as e:
+            logger.error(f"发送IBM特定命令失败: {str(e)}")
+            return {'success': False, 'error': str(e)}
+
+    async def _ibm_log_sense(self, device_path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """IBM LOG SENSE命令 - 获取详细日志信息"""
+        try:
+            page_code = params.get('page_code', 0x00)
+            subpage_code = params.get('subpage_code', 0x00)
+
+            # 构造LOG SENSE CDB
+            cdb = bytes([
+                0x4D,        # LOG SENSE
+                0x00,        # 保留
+                page_code,   # 页面代码
+                subpage_code, # 子页面代码
+                0x00,        # PC位
+                0x00,        # 保留
+                0x00,        # 参数指针长度
+                0x00,        # 参数指针
+                0x00,        # 分配长度高位
+                252          # 分配长度低位
+            ])
+
+            result = await self.execute_scsi_command(device_path, cdb, data_direction=1, data_length=252)
+
+            if result['success']:
+                log_data = result['data']
+                return {
+                    'success': True,
+                    'page_code': page_code,
+                    'log_data': log_data.hex(),
+                    'data_length': len(log_data)
+                }
+            else:
+                return result
+
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    async def _ibm_mode_sense(self, device_path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """IBM MODE SENSE命令 - 获取模式参数"""
+        try:
+            page_code = params.get('page_code', 0x3F)  # 所有页面
+            subpage_code = params.get('subpage_code', 0x00)
+
+            # 构造MODE SENSE(10) CDB
+            cdb = bytes([
+                0x5A,        # MODE SENSE(10)
+                0x00,        # 保留
+                page_code,   # 页面代码
+                subpage_code, # 子页面代码
+                0x00,        # 保留
+                0x00,        # 保留
+                0x00,        # 保留
+                0x00,        # 参数列表长度高位
+                252,         # 参数列表长度低位
+                0x00         # 控制
+            ])
+
+            result = await self.execute_scsi_command(device_path, cdb, data_direction=1, data_length=252)
+
+            if result['success']:
+                mode_data = result['data']
+                return {
+                    'success': True,
+                    'page_code': page_code,
+                    'mode_data': mode_data.hex(),
+                    'data_length': len(mode_data)
+                }
+            else:
+                return result
+
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    async def _ibm_inquiry_vpd(self, device_path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """IBM INQUIRY VPD命令 - 获取产品特定数据"""
+        try:
+            page_code = params.get('page_code', 0x00)
+
+            # 构造INQUIRY CDB with VPD
+            cdb = bytes([
+                0x12,        # INQUIRY
+                0x01,        # EVPD=1 (启用VPD)
+                page_code,   # 页面代码
+                0x00,        # 保留
+                0x00,        # 分配长度高位
+                252,         # 分配长度低位
+                0x00         # 控制
+            ])
+
+            result = await self.execute_scsi_command(device_path, cdb, data_direction=1, data_length=252)
+
+            if result['success']:
+                vpd_data = result['data']
+                return {
+                    'success': True,
+                    'page_code': page_code,
+                    'vpd_data': vpd_data.hex(),
+                    'data_length': len(vpd_data)
+                }
+            else:
+                return result
+
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    async def _ibm_receive_diagnostic(self, device_path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """IBM RECEIVE DIAGNOSTIC RESULTS命令"""
+        try:
+            page_code = params.get('page_code', 0x00)
+
+            # 构造RECEIVE DIAGNOSTIC RESULTS CDB
+            cdb = bytes([
+                0x1C,        # RECEIVE DIAGNOSTIC RESULTS
+                0x01,        # PCV=1 (页面代码有效)
+                page_code,   # 页面代码
+                0x00,        # 保留
+                0x00,        # 分配长度高位
+                252,         # 分配长度低位
+                0x00         # 控制
+            ])
+
+            result = await self.execute_scsi_command(device_path, cdb, data_direction=1, data_length=252)
+
+            if result['success']:
+                diagnostic_data = result['data']
+                return {
+                    'success': True,
+                    'page_code': page_code,
+                    'diagnostic_data': diagnostic_data.hex(),
+                    'data_length': len(diagnostic_data)
+                }
+            else:
+                return result
+
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    async def get_tape_position(self, device_path: str = None) -> Dict[str, Any]:
+        """获取磁带位置信息"""
+        try:
+            if not device_path and self.tape_devices:
+                device_path = self.tape_devices[0]['path']
+
+            if not device_path:
+                return {'success': False, 'error': '没有指定设备路径'}
+
+            # 使用READ POSITION命令
+            cdb = bytes([0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20])
+            result = await self.execute_scsi_command(device_path, cdb, data_direction=1, data_length=32)
+
+            if result['success']:
+                data = result['data']
+                if len(data) >= 20:
+                    flags = data[0]
+                    partition = (data[1] << 8) | data[2]
+                    file_number = (data[4] << 24) | (data[5] << 16) | (data[6] << 8) | data[7]
+                    set_number = (data[8] << 24) | (data[9] << 16) | (data[10] << 8) | data[11]
+                    end_of_data = (data[12] << 24) | (data[13] << 16) | (data[14] << 8) | data[15]
+                    block_in_buffer = (data[16] << 24) | (data[17] << 16) | (data[18] << 8) | data[19]
+
+                    return {
+                        'success': True,
+                        'flags': flags,
+                        'partition': partition,
+                        'file_number': file_number,
+                        'set_number': set_number,
+                        'end_of_data': end_of_data,
+                        'block_in_buffer': block_in_buffer,
+                        'is_bop': bool(flags & 0x04),  # Beginning of Partition
+                        'is_eop': bool(flags & 0x02),  # End of Partition
+                        'is_bom': bool(flags & 0x01),  # Beginning of Medium
+                    }
+                else:
+                    return {'success': False, 'error': '返回数据长度不足'}
+            else:
+                return result
+
+        except Exception as e:
+            logger.error(f"获取磁带位置失败: {str(e)}")
+            return {'success': False, 'error': str(e)}
+
+    async def request_sense(self, device_path: str = None) -> Dict[str, Any]:
+        """请求Sense数据 - 获取详细错误信息"""
+        try:
+            if not device_path and self.tape_devices:
+                device_path = self.tape_devices[0]['path']
+
+            if not device_path:
+                return {'success': False, 'error': '没有指定设备路径'}
+
+            # 构造REQUEST SENSE命令
+            cdb = bytes([0x03, 0x00, 0x00, 0x00, 252, 0x00])
+            result = await self.execute_scsi_command(device_path, cdb, data_direction=1, data_length=252)
+
+            if result['success']:
+                sense_data = result['data']
+                if len(sense_data) >= 18:
+                    response_code = sense_data[0] & 0x7F
+                    sense_key = sense_data[2] & 0x0F
+                    asc = sense_data[12]
+                    ascq = sense_data[13]
+
+                    return {
+                        'success': True,
+                        'response_code': response_code,
+                        'sense_key': sense_key,
+                        'asc': asc,
+                        'ascq': ascq,
+                        'sense_data': sense_data.hex(),
+                        'data_length': len(sense_data)
+                    }
+                else:
+                    return {'success': False, 'error': 'Sense数据长度不足'}
+            else:
+                return result
+
+        except Exception as e:
+            logger.error(f"请求Sense数据失败: {str(e)}")
+            return {'success': False, 'error': str(e)}

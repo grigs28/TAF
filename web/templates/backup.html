@@ -1,0 +1,343 @@
+{% extends "base.html" %}
+
+{% block title %}{{ app_name }} - 备份管理{% endblock %}
+
+{% block extra_css %}
+<style>
+.task-card {
+    transition: all 0.3s ease;
+    border-left: 4px solid transparent;
+}
+.task-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+.task-running { border-left-color: #007bff; }
+.task-completed { border-left-color: #28a745; }
+.task-failed { border-left-color: #dc3545; }
+.task-pending { border-left-color: #ffc107; }
+
+.progress-circle {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    font-size: 0.8rem;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <!-- 页面标题 -->
+    <div class="row mb-4">
+        <div class="col">
+            <h1 class="h3 mb-0">
+                <i class="fas fa-database me-2"></i>
+                备份管理
+            </h1>
+            <p class="text-muted">管理备份任务和监控备份进度</p>
+        </div>
+        <div class="col-auto">
+            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createBackupModal">
+                <i class="fas fa-plus me-2"></i>创建备份任务
+            </button>
+        </div>
+    </div>
+
+    <!-- 统计信息 -->
+    <div class="row mb-4">
+        <div class="col-md-3">
+            <div class="card bg-primary text-white">
+                <div class="card-body">
+                    <h5 class="card-title">总任务数</h5>
+                    <h2 class="mb-0">156</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card bg-success text-white">
+                <div class="card-body">
+                    <h5 class="card-title">成功</h5>
+                    <h2 class="mb-0">142</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card bg-warning text-white">
+                <div class="card-body">
+                    <h5 class="card-title">运行中</h5>
+                    <h2 class="mb-0">3</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card bg-danger text-white">
+                <div class="card-body">
+                    <h5 class="card-title">失败</h5>
+                    <h2 class="mb-0">11</h2>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 筛选和搜索 -->
+    <div class="row mb-4">
+        <div class="col">
+            <div class="card">
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-3">
+                            <select class="form-select">
+                                <option>所有状态</option>
+                                <option>运行中</option>
+                                <option>已完成</option>
+                                <option>失败</option>
+                                <option>等待中</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <select class="form-select">
+                                <option>所有类型</option>
+                                <option>完整备份</option>
+                                <option>增量备份</option>
+                                <option>差异备份</option>
+                                <option>月度备份</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <input type="text" class="form-control" placeholder="搜索备份任务...">
+                        </div>
+                        <div class="col-md-2">
+                            <button class="btn btn-outline-secondary w-100">
+                                <i class="fas fa-search me-1"></i>搜索
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 备份任务列表 -->
+    <div class="row">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">备份任务列表</h5>
+                </div>
+                <div class="card-body">
+                    <!-- 运行中的任务 -->
+                    <h6 class="text-primary mb-3">
+                        <i class="fas fa-spinner fa-spin me-2"></i>运行中的任务
+                    </h6>
+                    <div class="row mb-4">
+                        <div class="col-md-6 col-lg-4 mb-3">
+                            <div class="card task-card task-running">
+                                <div class="card-body">
+                                    <div class="d-flex justify-content-between align-items-start mb-2">
+                                        <h6 class="card-title mb-0">月度完整备份</h6>
+                                        <span class="badge bg-primary">运行中</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">源路径:</small><br>
+                                        <code>/data</code>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">目标:</small><br>
+                                        <code>磁带 #TAP001</code>
+                                    </div>
+                                    <div class="mb-2">
+                                        <div class="d-flex justify-content-between align-items-center">
+                                            <small class="text-muted">进度:</small>
+                                            <small class="text-muted">65%</small>
+                                        </div>
+                                        <div class="progress" style="height: 6px;">
+                                            <div class="progress-bar bg-primary" style="width: 65%"></div>
+                                        </div>
+                                    </div>
+                                    <div class="d-flex justify-content-between">
+                                        <small class="text-muted">开始时间: 02:00:45</small>
+                                        <small class="text-muted">剩余: ~15分钟</small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="col-md-6 col-lg-4 mb-3">
+                            <div class="card task-card task-running">
+                                <div class="card-body">
+                                    <div class="d-flex justify-content-between align-items-start mb-2">
+                                        <h6 class="card-title mb-0">增量备份</h6>
+                                        <span class="badge bg-primary">运行中</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">源路径:</small><br>
+                                        <code>/home</code>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">目标:</small><br>
+                                        <code>磁带 #TAP003</code>
+                                    </div>
+                                    <div class="mb-2">
+                                        <div class="d-flex justify-content-between align-items-center">
+                                            <small class="text-muted">进度:</small>
+                                            <small class="text-muted">32%</small>
+                                        </div>
+                                        <div class="progress" style="height: 6px;">
+                                            <div class="progress-bar bg-primary" style="width: 32%"></div>
+                                        </div>
+                                    </div>
+                                    <div class="d-flex justify-content-between">
+                                        <small class="text-muted">开始时间: 03:15:22</small>
+                                        <small class="text-muted">剩余: ~8分钟</small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 已完成的任务 -->
+                    <h6 class="text-success mb-3">
+                        <i class="fas fa-check-circle me-2"></i>最近完成的任务
+                    </h6>
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <thead>
+                                <tr>
+                                    <th>任务名称</th>
+                                    <th>类型</th>
+                                    <th>源路径</th>
+                                    <th>状态</th>
+                                    <th>开始时间</th>
+                                    <th>完成时间</th>
+                                    <th>数据大小</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td><strong>完整备份-20251030</strong></td>
+                                    <td><span class="badge bg-info">完整备份</span></td>
+                                    <td><code>/data</code></td>
+                                    <td><span class="badge bg-success">成功</span></td>
+                                    <td>2025-10-30 02:00:00</td>
+                                    <td>2025-10-30 03:45:23</td>
+                                    <td>1.8 GB</td>
+                                    <td>
+                                        <button class="btn btn-sm btn-outline-primary">
+                                            <i class="fas fa-eye"></i>
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-warning">
+                                            <i class="fas fa-download"></i>
+                                        </button>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td><strong>增量备份-20251029</strong></td>
+                                    <td><span class="badge bg-secondary">增量备份</span></td>
+                                    <td><code>/home</code></td>
+                                    <td><span class="badge bg-success">成功</span></td>
+                                    <td>2025-10-29 04:00:00</td>
+                                    <td>2025-10-29 04:12:45</td>
+                                    <td>245 MB</td>
+                                    <td>
+                                        <button class="btn btn-sm btn-outline-primary">
+                                            <i class="fas fa-eye"></i>
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-warning">
+                                            <i class="fas fa-download"></i>
+                                        </button>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td><strong>测试备份</strong></td>
+                                    <td><span class="badge bg-warning">差异备份</span></td>
+                                    <td><code>/var/log</code></td>
+                                    <td><span class="badge bg-danger">失败</span></td>
+                                    <td>2025-10-28 15:30:00</td>
+                                    <td>2025-10-28 15:35:12</td>
+                                    <td>-</td>
+                                    <td>
+                                        <button class="btn btn-sm btn-outline-primary">
+                                            <i class="fas fa-eye"></i>
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-danger">
+                                            <i class="fas fa-redo"></i>
+                                        </button>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 创建备份任务模态框 -->
+<div class="modal fade" id="createBackupModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">创建备份任务</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">任务名称</label>
+                            <input type="text" class="form-control" placeholder="输入任务名称">
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">备份类型</label>
+                            <select class="form-select">
+                                <option>完整备份</option>
+                                <option>增量备份</option>
+                                <option>差异备份</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">源路径</label>
+                        <input type="text" class="form-control" placeholder="/data,/home,/var">
+                        <small class="text-muted">多个路径用逗号分隔</small>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">压缩级别</label>
+                            <select class="form-select">
+                                <option value="9">最高 (9)</option>
+                                <option value="6">标准 (6)</option>
+                                <option value="3">快速 (3)</option>
+                                <option value="0">无压缩 (0)</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">优先级</label>
+                            <select class="form-select">
+                                <option>高</option>
+                                <option>中</option>
+                                <option>低</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">备注</label>
+                        <textarea class="form-control" rows="3" placeholder="可选的任务描述"></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary">创建任务</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

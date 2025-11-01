@@ -1,0 +1,736 @@
+{% extends "base.html" %}
+
+{% block title %}{{ app_name }} - 系统设置{% endblock %}
+
+{% block extra_css %}
+<style>
+.setting-card {
+    transition: all 0.3s ease;
+}
+.setting-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.nav-tabs .nav-link.active {
+    font-weight: 600;
+}
+
+.status-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 8px;
+}
+.status-online { background-color: #28a745; }
+.status-offline { background-color: #dc3545; }
+.status-warning { background-color: #ffc107; }
+
+.log-entry {
+    font-family: 'Courier New', monospace;
+    font-size: 0.85rem;
+    padding: 8px;
+    border-left: 3px solid transparent;
+    margin-bottom: 2px;
+}
+.log-entry:hover {
+    background-color: #f8f9fa;
+}
+.log-info { border-left-color: #17a2b8; }
+.log-warning { border-left-color: #ffc107; }
+.log-error { border-left-color: #dc3545; }
+.log-debug { border-left-color: #6c757d; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <!-- 页面标题 -->
+    <div class="row mb-4">
+        <div class="col">
+            <h1 class="h3 mb-0">
+                <i class="fas fa-cog me-2"></i>
+                系统设置
+            </h1>
+            <p class="text-muted">配置系统参数和管理系统服务</p>
+        </div>
+        <div class="col-auto">
+            <button class="btn btn-primary" id="saveSettingsBtn">
+                <i class="fas fa-save me-2"></i>保存设置
+            </button>
+            <button class="btn btn-secondary" id="restartSystemBtn">
+                <i class="fas fa-redo me-2"></i>重启系统
+            </button>
+        </div>
+    </div>
+
+    <!-- 设置选项卡 -->
+    <div class="row">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-body">
+                    <ul class="nav nav-tabs" id="settingsTabs" role="tablist">
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link active" id="general-tab" data-bs-toggle="tab" data-bs-target="#general" type="button" role="tab">
+                                <i class="fas fa-cogs me-2"></i>常规设置
+                            </button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="database-tab" data-bs-toggle="tab" data-bs-target="#database" type="button" role="tab">
+                                <i class="fas fa-database me-2"></i>数据库
+                            </button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="notification-tab" data-bs-toggle="tab" data-bs-target="#notification" type="button" role="tab">
+                                <i class="fas fa-bell me-2"></i>通知设置
+                            </button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="backup-tab" data-bs-toggle="tab" data-bs-target="#backup" type="button" role="tab">
+                                <i class="fas fa-tape me-2"></i>备份策略
+                            </button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="scheduler-tab" data-bs-toggle="tab" data-bs-target="#scheduler" type="button" role="tab">
+                                <i class="fas fa-clock me-2"></i>计划任务
+                            </button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="logs-tab" data-bs-toggle="tab" data-bs-target="#logs" type="button" role="tab">
+                                <i class="fas fa-file-alt me-2"></i>系统日志
+                            </button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="about-tab" data-bs-toggle="tab" data-bs-target="#about" type="button" role="tab">
+                                <i class="fas fa-info-circle me-2"></i>关于系统
+                            </button>
+                        </li>
+                    </ul>
+
+                    <!-- 选项卡内容 -->
+                    <div class="tab-content" id="settingsTabsContent">
+                        <!-- 常规设置 -->
+                        <div class="tab-pane fade show active" id="general" role="tabpanel">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="setting-card card mb-3">
+                                        <div class="card-body">
+                                            <h6 class="card-title">应用信息</h6>
+                                            <div class="mb-3">
+                                                <label class="form-label">应用名称</label>
+                                                <input type="text" class="form-control" value="{{ app_name }}">
+                                            </div>
+                                            <div class="mb-3">
+                                                <label class="form-label">版本号</label>
+                                                <input type="text" class="form-control" value="{{ version }}" readonly>
+                                            </div>
+                                            <div class="mb-3">
+                                                <label class="form-label">运行环境</label>
+                                                <select class="form-select">
+                                                    <option value="production" selected>生产环境</option>
+                                                    <option value="development">开发环境</option>
+                                                    <option value="testing">测试环境</option>
+                                                </select>
+                                            </div>
+                                            <div class="form-check form-switch">
+                                                <input class="form-check-input" type="checkbox" id="debugMode">
+                                                <label class="form-check-label" for="debugMode">调试模式</label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="setting-card card mb-3">
+                                        <div class="card-body">
+                                            <h6 class="card-title">Web服务</h6>
+                                            <div class="mb-3">
+                                                <label class="form-label">监听地址</label>
+                                                <input type="text" class="form-control" value="0.0.0.0">
+                                            </div>
+                                            <div class="mb-3">
+                                                <label class="form-label">监听端口</label>
+                                                <input type="number" class="form-control" value="8080">
+                                            </div>
+                                            <div class="mb-3">
+                                                <label class="form-label">工作进程数</label>
+                                                <input type="number" class="form-control" value="4" min="1" max="16">
+                                            </div>
+                                            <div class="form-check form-switch">
+                                                <input class="form-check-input" type="checkbox" id="enableCors" checked>
+                                                <label class="form-check-label" for="enableCors">启用CORS</label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 数据库设置 -->
+                        <div class="tab-pane fade" id="database" role="tabpanel">
+                            <div class="row">
+                                <div class="col-md-8">
+                                    <div class="setting-card card mb-3">
+                                        <div class="card-body">
+                                            <h6 class="card-title">数据库连接配置</h6>
+                                            <div class="mb-3">
+                                                <label class="form-label">数据库类型</label>
+                                                <select class="form-select" id="dbType">
+                                                    <option value="sqlite">SQLite</option>
+                                                    <option value="postgresql">PostgreSQL</option>
+                                                    <option value="opengauss">openGauss</option>
+                                                    <option value="mysql">MySQL</option>
+                                                </select>
+                                            </div>
+
+                                            <!-- SQLite配置 -->
+                                            <div id="sqliteConfig">
+                                                <div class="mb-3">
+                                                    <label class="form-label">数据库路径</label>
+                                                    <input type="text" class="form-control" id="dbPath" placeholder="./backup_system.db">
+                                                    <small class="text-muted">SQLite数据库文件路径</small>
+                                                </div>
+                                            </div>
+
+                                            <!-- PostgreSQL/openGauss/MySQL配置 -->
+                                            <div id="serverDbConfig" style="display: none;">
+                                                <div class="row">
+                                                    <div class="col-md-6 mb-3">
+                                                        <label class="form-label">数据库主机</label>
+                                                        <input type="text" class="form-control" id="dbHost" placeholder="192.168.0.20">
+                                                    </div>
+                                                    <div class="col-md-6 mb-3">
+                                                        <label class="form-label">数据库端口</label>
+                                                        <input type="number" class="form-control" id="dbPort" placeholder="5560">
+                                                    </div>
+                                                </div>
+                                                <div class="mb-3">
+                                                    <label class="form-label">数据库名称</label>
+                                                    <input type="text" class="form-control" id="dbDatabase" placeholder="taf_codex_1">
+                                                </div>
+                                                <div class="row">
+                                                    <div class="col-md-6 mb-3">
+                                                        <label class="form-label">用户名</label>
+                                                        <input type="text" class="form-control" id="dbUser" placeholder="grigs">
+                                                    </div>
+                                                    <div class="col-md-6 mb-3">
+                                                        <label class="form-label">密码</label>
+                                                        <input type="password" class="form-control" id="dbPassword" placeholder="••••••••">
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <hr>
+                                            <h6 class="card-title mt-3">连接池配置</h6>
+                                            <div class="row">
+                                                <div class="col-md-6 mb-3">
+                                                    <label class="form-label">连接池大小</label>
+                                                    <input type="number" class="form-control" id="poolSize" value="10" min="1" max="100">
+                                                    <small class="text-muted">并发连接数</small>
+                                                </div>
+                                                <div class="col-md-6 mb-3">
+                                                    <label class="form-label">最大溢出</label>
+                                                    <input type="number" class="form-control" id="maxOverflow" value="20" min="0" max="100">
+                                                    <small class="text-muted">超出连接池的连接数</small>
+                                                </div>
+                                            </div>
+
+                                            <div class="mb-3">
+                                                <button class="btn btn-outline-primary" id="testDbConnectionBtn">
+                                                    <i class="fas fa-plug me-2"></i>测试连接
+                                                </button>
+                                                <button class="btn btn-success" id="saveDbConfigBtn">
+                                                    <i class="fas fa-save me-2"></i>保存配置
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="setting-card card mb-3">
+                                        <div class="card-body">
+                                            <h6 class="card-title">连接状态</h6>
+                                            <div class="text-center" id="dbStatus">
+                                                <div class="status-indicator status-online mb-2"></div>
+                                                <p class="text-success" id="dbStatusText">已连接</p>
+                                                <small class="text-muted" id="dbTypeText">SQLite</small>
+                                            </div>
+                                            <hr>
+                                            <div class="d-flex justify-content-between">
+                                                <small class="text-muted">连接池大小:</small>
+                                                <small class="text-muted" id="currentPoolSize">10</small>
+                                            </div>
+                                            <div class="d-flex justify-content-between">
+                                                <small class="text-muted">最大溢出:</small>
+                                                <small class="text-muted" id="currentMaxOverflow">20</small>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 通知设置 -->
+                        <div class="tab-pane fade" id="notification" role="tabpanel">
+                            <div class="row">
+                                <div class="col-md-8">
+                                    <div class="setting-card card mb-3">
+                                        <div class="card-body">
+                                            <h6 class="card-title">钉钉通知配置</h6>
+                                            <div class="mb-3">
+                                                <label class="form-label">API地址</label>
+                                                <input type="url" class="form-control" value="http://192.168.0.20:5555">
+                                            </div>
+                                            <div class="mb-3">
+                                                <label class="form-label">API密钥</label>
+                                                <input type="password" class="form-control" value="sk-dingtalk-api-2024-001">
+                                            </div>
+                                            <div class="mb-3">
+                                                <label class="form-label">默认手机号</label>
+                                                <input type="tel" class="form-control" value="13293513336">
+                                            </div>
+                                            <div class="mb-3">
+                                                <button class="btn btn-outline-primary" id="testNotificationBtn">
+                                                    <i class="fas fa-paper-plane me-2"></i>发送测试通知
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="setting-card card mb-3">
+                                        <div class="card-body">
+                                            <h6 class="card-title">通知事件</h6>
+                                            <div class="form-check mb-2">
+                                                <input class="form-check-input" type="checkbox" id="notifyBackupSuccess" checked>
+                                                <label class="form-check-label" for="notifyBackupSuccess">备份成功</label>
+                                            </div>
+                                            <div class="form-check mb-2">
+                                                <input class="form-check-input" type="checkbox" id="notifyBackupFailed" checked>
+                                                <label class="form-check-label" for="notifyBackupFailed">备份失败</label>
+                                            </div>
+                                            <div class="form-check mb-2">
+                                                <input class="form-check-input" type="checkbox" id="notifyTapeChange" checked>
+                                                <label class="form-check-label" for="notifyTapeChange">磁带更换</label>
+                                            </div>
+                                            <div class="form-check mb-2">
+                                                <input class="form-check-input" type="checkbox" id="notifySystemError" checked>
+                                                <label class="form-check-label" for="notifySystemError">系统错误</label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 备份策略 -->
+                        <div class="tab-pane fade" id="backup" role="tabpanel">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="setting-card card mb-3">
+                                        <div class="card-body">
+                                            <h6 class="card-title">保留策略</h6>
+                                            <div class="mb-3">
+                                                <label class="form-label">默认保留月数</label>
+                                                <input type="number" class="form-control" value="6" min="1" max="36">
+                                                <small class="text-muted">磁带数据保留时间（月）</small>
+                                            </div>
+                                            <div class="form-check form-switch">
+                                                <input class="form-check-input" type="checkbox" id="autoEraseExpired" checked>
+                                                <label class="form-check-label" for="autoEraseExpired">自动擦除过期磁带</label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="setting-card card mb-3">
+                                        <div class="card-body">
+                                            <h6 class="card-title">压缩设置</h6>
+                                            <div class="mb-3">
+                                                <label class="form-label">压缩级别</label>
+                                                <select class="form-select">
+                                                    <option value="9" selected>最高 (9)</option>
+                                                    <option value="6">标准 (6)</option>
+                                                    <option value="3">快速 (3)</option>
+                                                    <option value="0">无压缩 (0)</option>
+                                                </select>
+                                            </div>
+                                            <div class="mb-3">
+                                                <label class="form-label">最大文件大小</label>
+                                                <input type="text" class="form-control" value="3GB">
+                                                <small class="text-muted">单个压缩包的最大大小</small>
+                                            </div>
+                                            <div class="form-check form-switch">
+                                                <input class="form-check-input" type="checkbox" id="enableVerification" checked>
+                                                <label class="form-check-label" for="enableVerification">备份验证</label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 计划任务 -->
+                        <div class="tab-pane fade" id="scheduler" role="tabpanel">
+                            <div class="row">
+                                <div class="col-12">
+                                    <div class="setting-card card mb-3">
+                                        <div class="card-body">
+                                            <h6 class="card-title">定时任务配置</h6>
+                                            <div class="table-responsive">
+                                                <table class="table">
+                                                    <thead>
+                                                        <tr>
+                                                            <th>任务名称</th>
+                                                            <th>Cron表达式</th>
+                                                            <th>状态</th>
+                                                            <th>下次执行</th>
+                                                            <th>操作</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        <tr>
+                                                            <td>月度完整备份</td>
+                                                            <td><code>0 2 1 * *</code></td>
+                                                            <td><span class="badge bg-success">启用</span></td>
+                                                            <td>2025-11-01 02:00</td>
+                                                            <td>
+                                                                <button class="btn btn-sm btn-outline-primary">
+                                                                    <i class="fas fa-edit"></i>
+                                                                </button>
+                                                                <button class="btn btn-sm btn-outline-secondary">
+                                                                    <i class="fas fa-play"></i>
+                                                                </button>
+                                                            </td>
+                                                        </tr>
+                                                        <tr>
+                                                            <td>保留期检查</td>
+                                                            <td><code>0 3 * * *</code></td>
+                                                            <td><span class="badge bg-success">启用</span></td>
+                                                            <td>今天 03:00</td>
+                                                            <td>
+                                                                <button class="btn btn-sm btn-outline-primary">
+                                                                    <i class="fas fa-edit"></i>
+                                                                </button>
+                                                                <button class="btn btn-sm btn-outline-secondary">
+                                                                    <i class="fas fa-play"></i>
+                                                                </button>
+                                                            </td>
+                                                        </tr>
+                                                        <tr>
+                                                            <td>系统健康检查</td>
+                                                            <td><code>*/30 * * * *</code></td>
+                                                            <td><span class="badge bg-success">启用</span></td>
+                                                            <td>30分钟后</td>
+                                                            <td>
+                                                                <button class="btn btn-sm btn-outline-primary">
+                                                                    <i class="fas fa-edit"></i>
+                                                                </button>
+                                                                <button class="btn btn-sm btn-outline-secondary">
+                                                                    <i class="fas fa-play"></i>
+                                                                </button>
+                                                            </td>
+                                                        </tr>
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 系统日志 -->
+                        <div class="tab-pane fade" id="logs" role="tabpanel">
+                            <div class="row">
+                                <div class="col-12">
+                                    <div class="setting-card card mb-3">
+                                        <div class="card-body">
+                                            <h6 class="card-title">实时日志</h6>
+                                            <div class="mb-3">
+                                                <select class="form-select" id="logLevel">
+                                                    <option value="">所有级别</option>
+                                                    <option value="DEBUG">调试</option>
+                                                    <option value="INFO">信息</option>
+                                                    <option value="WARNING">警告</option>
+                                                    <option value="ERROR">错误</option>
+                                                    <option value="CRITICAL">严重</option>
+                                                </select>
+                                                <button class="btn btn-outline-secondary btn-sm float-end" id="clearLogsBtn">
+                                                    <i class="fas fa-trash me-1"></i>清空
+                                                </button>
+                                            </div>
+                                            <div class="log-container" style="height: 400px; overflow-y: auto; background: #f8f9fa; padding: 10px; border-radius: 4px;">
+                                                <div class="log-entry log-info">
+                                                    <span class="text-muted">[2025-11-01 09:32:56]</span>
+                                                    <span>系统初始化完成</span>
+                                                </div>
+                                                <div class="log-entry log-info">
+                                                    <span class="text-muted">[2025-11-01 09:32:56]</span>
+                                                    <span>Web服务启动在端口 8080</span>
+                                                </div>
+                                                <div class="log-entry log-warning">
+                                                    <span class="text-muted">[2025-11-01 09:32:56]</span>
+                                                    <span>磁带设备扫描: 未检测到磁带设备</span>
+                                                </div>
+                                                <div class="log-entry log-info">
+                                                    <span class="text-muted">[2025-11-01 09:32:56]</span>
+                                                    <span>钉钉消息发送成功: 系统启动 -> 13293513336</span>
+                                                </div>
+                                                <div class="log-entry log-info">
+                                                    <span class="text-muted">[2025-11-01 09:32:56]</span>
+                                                    <span>计划任务调度器已启动</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 关于系统 -->
+                        <div class="tab-pane fade" id="about" role="tabpanel">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="setting-card card mb-3">
+                                        <div class="card-body text-center">
+                                            <h5 class="card-title">{{ app_name }}</h5>
+                                            <p class="text-muted">企业级磁带备份系统</p>
+                                            <hr>
+                                            <div class="text-start">
+                                                <p><strong>版本:</strong> <a href="#" id="about-version-link" style="text-decoration: underline; cursor: pointer;">{{ version }}</a></p>
+                                                <p><strong>构建日期:</strong> 2024-11-01</p>
+                                                <p><strong>Python版本:</strong> 3.10.19</p>
+                                                <p><strong>运行时间:</strong> <span id="uptime">计算中...</span></p>
+                                                <p><strong>许可证:</strong> 企业版</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="setting-card card mb-3">
+                                        <div class="card-body">
+                                            <h6 class="card-title">系统组件</h6>
+                                            <div class="list-group list-group-flush">
+                                                <div class="list-group-item d-flex justify-content-between">
+                                                    <span>FastAPI</span>
+                                                    <span class="badge bg-success">0.104.1</span>
+                                                </div>
+                                                <div class="list-group-item d-flex justify-content-between">
+                                                    <span>SQLAlchemy</span>
+                                                    <span class="badge bg-success">2.0.23</span>
+                                                </div>
+                                                <div class="list-group-item d-flex justify-content-between">
+                                                    <span>Pydantic</span>
+                                                    <span class="badge bg-success">2.5.0</span>
+                                                </div>
+                                                <div class="list-group-item d-flex justify-content-between">
+                                                    <span>Hypercorn</span>
+                                                    <span class="badge bg-success">0.17.3</span>
+                                                </div>
+                                                <div class="list-group-item d-flex justify-content-between">
+                                                    <span>py7zr</span>
+                                                    <span class="badge bg-success">0.20.8</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// 数据库配置JavaScript
+document.addEventListener('DOMContentLoaded', function() {
+    loadDatabaseConfig();
+    
+    // 数据库类型切换
+    document.getElementById('dbType').addEventListener('change', function() {
+        const dbType = this.value;
+        const sqliteConfig = document.getElementById('sqliteConfig');
+        const serverDbConfig = document.getElementById('serverDbConfig');
+        
+        if (dbType === 'sqlite') {
+            sqliteConfig.style.display = 'block';
+            serverDbConfig.style.display = 'none';
+        } else {
+            sqliteConfig.style.display = 'none';
+            serverDbConfig.style.display = 'block';
+        }
+    });
+    
+    // 测试数据库连接
+    document.getElementById('testDbConnectionBtn').addEventListener('click', async function() {
+        const btn = this;
+        const originalHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>测试中...';
+        
+        try {
+            const config = getDatabaseConfig();
+            const response = await fetch('/api/system/database/test', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(config)
+            });
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                alert('✅ 数据库连接测试成功！');
+            } else {
+                alert('❌ 数据库连接测试失败：' + result.message);
+            }
+        } catch (error) {
+            alert('❌ 测试失败：' + error.message);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = originalHtml;
+        }
+    });
+    
+    // 保存数据库配置
+    document.getElementById('saveDbConfigBtn').addEventListener('click', async function() {
+        const btn = this;
+        const originalHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>保存中...';
+        
+        try {
+            const config = getDatabaseConfig();
+            const response = await fetch('/api/system/database/config', {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(config)
+            });
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                alert('✅ ' + result.message);
+                loadDatabaseConfig();
+            } else {
+                alert('❌ 保存失败：' + result.message);
+            }
+        } catch (error) {
+            alert('❌ 保存失败：' + error.message);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = originalHtml;
+        }
+    });
+});
+
+// 获取数据库配置
+function getDatabaseConfig() {
+    const dbType = document.getElementById('dbType').value;
+    const config = {
+        db_type: dbType,
+        pool_size: parseInt(document.getElementById('poolSize').value),
+        max_overflow: parseInt(document.getElementById('maxOverflow').value)
+    };
+    
+    if (dbType === 'sqlite') {
+        config.db_path = document.getElementById('dbPath').value;
+    } else {
+        config.db_host = document.getElementById('dbHost').value;
+        config.db_port = parseInt(document.getElementById('dbPort').value);
+        config.db_user = document.getElementById('dbUser').value;
+        config.db_password = document.getElementById('dbPassword').value;
+        config.db_database = document.getElementById('dbDatabase').value;
+    }
+    
+    return config;
+}
+
+// 加载数据库配置
+async function loadDatabaseConfig() {
+    try {
+        const response = await fetch('/api/system/database/config');
+        const config = await response.json();
+        
+        if (config) {
+            document.getElementById('dbType').value = config.db_type || 'sqlite';
+            
+            if (config.db_type === 'sqlite') {
+                if (config.db_path) document.getElementById('dbPath').value = config.db_path;
+                document.getElementById('sqliteConfig').style.display = 'block';
+                document.getElementById('serverDbConfig').style.display = 'none';
+            } else {
+                if (config.db_host) document.getElementById('dbHost').value = config.db_host;
+                if (config.db_port) document.getElementById('dbPort').value = config.db_port;
+                if (config.db_user) document.getElementById('dbUser').value = config.db_user;
+                if (config.db_database) document.getElementById('dbDatabase').value = config.db_database;
+                document.getElementById('sqliteConfig').style.display = 'none';
+                document.getElementById('serverDbConfig').style.display = 'block';
+            }
+            
+            if (config.pool_size) document.getElementById('poolSize').value = config.pool_size;
+            if (config.max_overflow) document.getElementById('maxOverflow').value = config.max_overflow;
+            
+            document.getElementById('currentPoolSize').textContent = config.pool_size || '10';
+            document.getElementById('currentMaxOverflow').textContent = config.max_overflow || '20';
+        }
+        
+        // 加载数据库状态
+        loadDatabaseStatus();
+    } catch (error) {
+        console.error('加载数据库配置失败:', error);
+    }
+}
+
+// 加载数据库状态
+async function loadDatabaseStatus() {
+    try {
+        const response = await fetch('/api/system/database/status');
+        const status = await response.json();
+        
+        if (status) {
+            const statusIndicator = document.querySelector('#dbStatus .status-indicator');
+            const statusText = document.getElementById('dbStatusText');
+            const dbTypeText = document.getElementById('dbTypeText');
+            
+            statusIndicator.className = 'status-indicator';
+            
+            if (status.status === 'online') {
+                statusIndicator.classList.add('status-online');
+                statusText.textContent = '已连接';
+                statusText.className = 'text-success';
+            } else if (status.status === 'offline') {
+                statusIndicator.classList.add('status-offline');
+                statusText.textContent = '未连接';
+                statusText.className = 'text-danger';
+            } else {
+                statusIndicator.classList.add('status-warning');
+                statusText.textContent = status.message || '未知';
+                statusText.className = 'text-warning';
+            }
+            
+            dbTypeText.textContent = status.db_type || 'Unknown';
+        }
+    } catch (error) {
+        console.error('加载数据库状态失败:', error);
+    }
+}
+
+// 定期刷新数据库状态
+setInterval(loadDatabaseStatus, 30000); // 每30秒刷新一次
+
+// 系统信息标签页的版本链接
+document.addEventListener('DOMContentLoaded', function() {
+    const aboutVersionLink = document.getElementById('about-version-link');
+    if (aboutVersionLink) {
+        aboutVersionLink.addEventListener('click', function(e) {
+            e.preventDefault();
+            loadChangelog();
+        });
+    }
+});
+</script>
+{% endblock %}

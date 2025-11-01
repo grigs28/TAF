@@ -1,0 +1,504 @@
+{% extends "base.html" %}
+
+{% block title %}{{ app_name }} - 磁带管理{% endblock %}
+
+{% block extra_css %}
+<style>
+.tape-card {
+    transition: all 0.3s ease;
+    border-left: 4px solid transparent;
+}
+.tape-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+.tape-available { border-left-color: #28a745; }
+.tape-in-use { border-left-color: #007bff; }
+.tape-full { border-left-color: #dc3545; }
+.tape-expired { border-left-color: #6c757d; }
+.tape-maintenance { border-left-color: #ffc107; }
+
+.health-indicator {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 8px;
+}
+.health-excellent { background-color: #28a745; }
+.health-good { background-color: #17a2b8; }
+.health-warning { background-color: #ffc107; }
+.health-critical { background-color: #dc3545; }
+.health-unknown { background-color: #6c757d; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <!-- 页面标题 -->
+    <div class="row mb-4">
+        <div class="col">
+            <h1 class="h3 mb-0">
+                <i class="fas fa-database me-2"></i>
+                磁带管理
+            </h1>
+            <p class="text-muted">监控磁带状态和管理磁带生命周期</p>
+        </div>
+        <div class="col-auto">
+            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#scanTapeModal">
+                <i class="fas fa-search me-2"></i>扫描磁带
+            </button>
+            <button class="btn btn-success" data-bs-toggle="modal" data-bs-target="#addTapeModal">
+                <i class="fas fa-plus me-2"></i>添加磁带
+            </button>
+        </div>
+    </div>
+
+    <!-- 统计信息 -->
+    <div class="row mb-4">
+        <div class="col-md-2">
+            <div class="card bg-primary text-white">
+                <div class="card-body text-center">
+                    <h2 class="mb-0">12</h2>
+                    <small>总磁带数</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="card bg-success text-white">
+                <div class="card-body text-center">
+                    <h2 class="mb-0">8</h2>
+                    <small>可用</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="card bg-info text-white">
+                <div class="card-body text-center">
+                    <h2 class="mb-0">2</h2>
+                    <small>使用中</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="card bg-warning text-white">
+                <div class="card-body text-center">
+                    <h2 class="mb-0">1</h2>
+                    <small>已满</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="card bg-secondary text-white">
+                <div class="card-body text-center">
+                    <h2 class="mb-0">1</h2>
+                    <small>已过期</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="card bg-danger text-white">
+                <div class="card-body text-center">
+                    <h2 class="mb-0">0</h2>
+                    <small>故障</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 筛选和搜索 -->
+    <div class="row mb-4">
+        <div class="col">
+            <div class="card">
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-2">
+                            <select class="form-select" id="statusFilter">
+                                <option value="">所有状态</option>
+                                <option value="available">可用</option>
+                                <option value="in_use">使用中</option>
+                                <option value="full">已满</option>
+                                <option value="expired">已过期</option>
+                                <option value="maintenance">维护中</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <select class="form-select" id="locationFilter">
+                                <option value="">所有位置</option>
+                                <option value="drive-1">驱动器 1</option>
+                                <option value="drive-2">驱动器 2</option>
+                                <option value="storage">存储柜</option>
+                                <option value="offsite">外部存储</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <select class="form-select" id="healthFilter">
+                                <option value="">所有健康状态</option>
+                                <option value="excellent">优秀</option>
+                                <option value="good">良好</option>
+                                <option value="warning">警告</option>
+                                <option value="critical">严重</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <input type="text" class="form-control" placeholder="搜索磁带标签、序列号或备注...">
+                        </div>
+                        <div class="col-md-2">
+                            <button class="btn btn-outline-secondary w-100">
+                                <i class="fas fa-search me-1"></i>搜索
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 磁带列表 -->
+    <div class="row">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">磁带库存</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <!-- 磁带卡片 1 -->
+                        <div class="col-lg-3 col-md-4 col-sm-6 mb-3">
+                            <div class="card tape-card tape-available">
+                                <div class="card-body">
+                                    <div class="d-flex justify-content-between align-items-start mb-2">
+                                        <div>
+                                            <h6 class="card-title mb-0">TAP001</h6>
+                                            <small class="text-muted">序列号: STK123456789</small>
+                                        </div>
+                                        <span class="badge bg-success">可用</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <div class="health-indicator health-excellent"></div>
+                                        <small>健康状态: 优秀</small>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">类型: </small>
+                                        <span>LTO-8</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">容量: </small>
+                                        <span>0 GB / 12 TB</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <div class="progress" style="height: 6px;">
+                                            <div class="progress-bar bg-success" style="width: 0%"></div>
+                                        </div>
+                                        <small class="text-muted">0% 使用</small>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">位置: </small>
+                                        <span>存储柜 A-1</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">最后使用: </small>
+                                        <span>2025-09-15</span>
+                                    </div>
+                                    <div class="d-flex justify-content-between">
+                                        <button class="btn btn-sm btn-outline-primary">
+                                            <i class="fas fa-info-circle"></i> 详情
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-warning">
+                                            <i class="fas fa-edit"></i> 编辑
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 磁带卡片 2 -->
+                        <div class="col-lg-3 col-md-4 col-sm-6 mb-3">
+                            <div class="card tape-card tape-in-use">
+                                <div class="card-body">
+                                    <div class="d-flex justify-content-between align-items-start mb-2">
+                                        <div>
+                                            <h6 class="card-title mb-0">TAP002</h6>
+                                            <small class="text-muted">序列号: STK987654321</small>
+                                        </div>
+                                        <span class="badge bg-primary">使用中</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <div class="health-indicator health-good"></div>
+                                        <small>健康状态: 良好</small>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">类型: </small>
+                                        <span>LTO-8</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">容量: </small>
+                                        <span>8.5 GB / 12 TB</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <div class="progress" style="height: 6px;">
+                                            <div class="progress-bar bg-info" style="width: 70%"></div>
+                                        </div>
+                                        <small class="text-muted">70% 使用</small>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">位置: </small>
+                                        <span>驱动器 1</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">当前任务: </small>
+                                        <span>月度备份</span>
+                                    </div>
+                                    <div class="d-flex justify-content-between">
+                                        <button class="btn btn-sm btn-outline-primary">
+                                            <i class="fas fa-info-circle"></i> 详情
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-danger">
+                                            <i class="fas fa-stop"></i> 停止
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 磁带卡片 3 -->
+                        <div class="col-lg-3 col-md-4 col-sm-6 mb-3">
+                            <div class="card tape-card tape-full">
+                                <div class="card-body">
+                                    <div class="d-flex justify-content-between align-items-start mb-2">
+                                        <div>
+                                            <h6 class="card-title mb-0">TAP003</h6>
+                                            <small class="text-muted">序列号: STK555666777</small>
+                                        </div>
+                                        <span class="badge bg-danger">已满</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <div class="health-indicator health-warning"></div>
+                                        <small>健康状态: 警告</small>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">类型: </small>
+                                        <span>LTO-8</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">容量: </small>
+                                        <span>12 TB / 12 TB</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <div class="progress" style="height: 6px;">
+                                            <div class="progress-bar bg-danger" style="width: 100%"></div>
+                                        </div>
+                                        <small class="text-muted">100% 使用</small>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">位置: </small>
+                                        <span>存储柜 B-2</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">最后写入: </small>
+                                        <span>2025-10-15</span>
+                                    </div>
+                                    <div class="d-flex justify-content-between">
+                                        <button class="btn btn-sm btn-outline-primary">
+                                            <i class="fas fa-info-circle"></i> 详情
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-warning">
+                                            <i class="fas fa-eraser"></i> 擦除
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 磁带卡片 4 -->
+                        <div class="col-lg-3 col-md-4 col-sm-6 mb-3">
+                            <div class="card tape-card tape-expired">
+                                <div class="card-body">
+                                    <div class="d-flex justify-content-between align-items-start mb-2">
+                                        <div>
+                                            <h6 class="card-title mb-0">TAP004</h6>
+                                            <small class="text-muted">序列号: STK111222333</small>
+                                        </div>
+                                        <span class="badge bg-secondary">已过期</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <div class="health-indicator health-unknown"></div>
+                                        <small>健康状态: 未知</small>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">类型: </small>
+                                        <span>LTO-7</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">容量: </small>
+                                        <span>9.2 GB / 6 TB</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <div class="progress" style="height: 6px;">
+                                            <div class="progress-bar bg-secondary" style="width: 100%"></div>
+                                        </div>
+                                        <small class="text-muted">已过期</small>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">位置: </small>
+                                        <span>存储柜 C-3</span>
+                                    </div>
+                                    <div class="mb-2">
+                                        <small class="text-muted">过期时间: </small>
+                                        <span>2025-09-30</span>
+                                    </div>
+                                    <div class="d-flex justify-content-between">
+                                        <button class="btn btn-sm btn-outline-primary">
+                                            <i class="fas fa-info-circle"></i> 详情
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-success">
+                                            <i class="fas fa-recycle"></i> 回收
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 磁带操作历史 -->
+    <div class="row mt-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">
+                        <i class="fas fa-history me-2"></i>
+                        磁带操作历史
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-sm">
+                            <thead>
+                                <tr>
+                                    <th>时间</th>
+                                    <th>磁带</th>
+                                    <th>操作</th>
+                                    <th>用户</th>
+                                    <th>状态</th>
+                                    <th>备注</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>2025-10-30 10:30:15</td>
+                                    <td><span class="badge bg-secondary">TAP002</span></td>
+                                    <td>开始备份</td>
+                                    <td>system</td>
+                                    <td><span class="badge bg-success">成功</span></td>
+                                    <td>月度完整备份任务</td>
+                                </tr>
+                                <tr>
+                                    <td>2025-10-29 15:45:22</td>
+                                    <td><span class="badge bg-secondary">TAP003</span></td>
+                                    <td>完成备份</td>
+                                    <td>system</td>
+                                    <td><span class="badge bg-success">成功</span></td>
+                                    <td>磁带已满，自动卸载</td>
+                                </tr>
+                                <tr>
+                                    <td>2025-10-28 09:20:11</td>
+                                    <td><span class="badge bg-secondary">TAP001</span></td>
+                                    <td>加载磁带</td>
+                                    <td>admin</td>
+                                    <td><span class="badge bg-warning">警告</span></td>
+                                    <td>手动操作</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 扫描磁带模态框 -->
+<div class="modal fade" id="scanTapeModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">扫描磁带设备</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>正在扫描磁带设备...</p>
+                <div class="progress">
+                    <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 添加磁带模态框 -->
+<div class="modal fade" id="addTapeModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">添加新磁带</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">磁带标签</label>
+                            <input type="text" class="form-control" placeholder="TAP001" required>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">序列号</label>
+                            <input type="text" class="form-control" placeholder="STK123456789" required>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">磁带类型</label>
+                            <select class="form-select" required>
+                                <option value="">选择类型</option>
+                                <option value="LTO-9">LTO-9</option>
+                                <option value="LTO-8">LTO-8</option>
+                                <option value="LTO-7">LTO-7</option>
+                                <option value="LTO-6">LTO-6</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">容量</label>
+                            <select class="form-select" required>
+                                <option value="">选择容量</option>
+                                <option value="18TB">18 TB (LTO-9)</option>
+                                <option value="12TB">12 TB (LTO-8)</option>
+                                <option value="6TB">6 TB (LTO-7)</option>
+                                <option value="2.5TB">2.5 TB (LTO-6)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">位置</label>
+                        <input type="text" class="form-control" placeholder="存储柜 A-1">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">备注</label>
+                        <textarea class="form-control" rows="3" placeholder="可选的备注信息"></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary">添加磁带</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

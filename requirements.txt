@@ -1,0 +1,81 @@
+# 企业级磁带备份系统依赖包
+# Enterprise Tape Backup System Dependencies
+
+# Web框架
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+hypercorn==0.15.0
+jinja2==3.1.2
+python-multipart==0.0.6
+
+# 数据库
+sqlalchemy==2.0.23
+asyncpg==0.29.0
+psycopg2-binary==2.9.9
+alembic==1.12.1
+
+# 异步支持
+aiohttp==3.9.1
+aiofiles==23.2.1
+
+# 压缩
+py7zr==0.20.8
+# lzma 已内置在Python标准库中，无需单独安装
+
+# 加密
+cryptography==41.0.7
+passlib[bcrypt]==1.7.4
+python-jose[cryptography]==3.3.0
+
+# 配置管理
+pydantic==2.5.0
+pydantic-settings==2.1.0
+python-dotenv==1.0.0
+
+# 任务调度
+celery==5.3.4
+redis==5.0.1
+croniter==2.0.1
+
+# 系统监控
+psutil==5.9.6
+prometheus-client==0.19.0
+
+# 日志
+structlog==23.2.0
+colorlog==6.8.0
+
+# HTTP客户端
+httpx==0.25.2
+requests==2.31.0
+
+# 数据处理
+pandas==2.1.4
+numpy==1.26.2
+
+# 日期时间
+python-dateutil==2.8.2
+pytz==2023.3
+
+# 系统工具
+pathlib2==2.3.7
+click==8.1.7
+rich==13.7.0
+typer==0.9.0
+
+# 测试
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+httpx==0.25.2
+
+# 开发工具
+black==23.11.0
+flake8==6.1.0
+mypy==1.7.1
+pre-commit==3.6.0
+
+# 系统特定
+pywin32==306; sys_platform == "win32"
+wmi==1.5.1; sys_platform == "win32"
+pyudev==0.24.1; sys_platform == "linux"

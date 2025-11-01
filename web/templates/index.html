@@ -1,0 +1,304 @@
+{% extends "base.html" %}
+
+{% block title %}{{ app_name }} - 首页{% endblock %}
+
+{% block extra_css %}
+<style>
+.dashboard-card {
+    transition: transform 0.2s;
+}
+.dashboard-card:hover {
+    transform: translateY(-5px);
+}
+.status-indicator {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 8px;
+}
+.status-online { background-color: #28a745; }
+.status-offline { background-color: #dc3545; }
+.status-warning { background-color: #ffc107; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <!-- 页面标题 -->
+    <div class="row mb-4">
+        <div class="col">
+            <h1 class="h3 mb-0">
+                <i class="fas fa-tachometer-alt me-2"></i>
+                系统概览
+            </h1>
+            <p class="text-muted">企业级磁带备份系统状态监控</p>
+        </div>
+    </div>
+
+    <!-- 系统状态卡片 -->
+    <div class="row mb-4">
+        <div class="col-lg-3 col-md-6 mb-3">
+            <div class="card dashboard-card">
+                <div class="card-body">
+                    <div class="d-flex align-items-center">
+                        <div class="flex-shrink-0">
+                            <div class="status-indicator status-online"></div>
+                        </div>
+                        <div class="flex-grow-1 ms-3">
+                            <h5 class="card-title mb-1">系统状态</h5>
+                            <p class="card-text text-success">运行正常</p>
+                        </div>
+                        <div class="flex-shrink-0">
+                            <i class="fas fa-server fa-2x text-success"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-3 col-md-6 mb-3">
+            <div class="card dashboard-card">
+                <div class="card-body">
+                    <div class="d-flex align-items-center">
+                        <div class="flex-shrink-0">
+                            <div class="status-indicator status-online"></div>
+                        </div>
+                        <div class="flex-grow-1 ms-3">
+                            <h5 class="card-title mb-1">数据库连接</h5>
+                            <p class="card-text text-success">已连接</p>
+                        </div>
+                        <div class="flex-shrink-0">
+                            <i class="fas fa-database fa-2x text-success"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-3 col-md-6 mb-3">
+            <div class="card dashboard-card">
+                <div class="card-body">
+                    <div class="d-flex align-items-center">
+                        <div class="flex-shrink-0">
+                            <div class="status-indicator status-warning"></div>
+                        </div>
+                        <div class="flex-grow-1 ms-3">
+                            <h5 class="card-title mb-1">磁带设备</h5>
+                            <p class="card-text text-warning">未检测到</p>
+                        </div>
+                        <div class="flex-shrink-0">
+                            <i class="fas fa-tape fa-2x text-warning"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-3 col-md-6 mb-3">
+            <div class="card dashboard-card">
+                <div class="card-body">
+                    <div class="d-flex align-items-center">
+                        <div class="flex-shrink-0">
+                            <div class="status-indicator status-online"></div>
+                        </div>
+                        <div class="flex-grow-1 ms-3">
+                            <h5 class="card-title mb-1">备份任务</h5>
+                            <p class="card-text">3 个活跃</p>
+                        </div>
+                        <div class="flex-shrink-0">
+                            <i class="fas fa-tasks fa-2x text-info"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 功能区域 -->
+    <div class="row">
+        <!-- 快速操作 -->
+        <div class="col-lg-4 mb-4">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">
+                        <i class="fas fa-bolt me-2"></i>
+                        快速操作
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <div class="d-grid gap-2">
+                        <a href="/backup" class="btn btn-primary">
+                            <i class="fas fa-plus me-2"></i>创建备份任务
+                        </a>
+                        <a href="/recovery" class="btn btn-success">
+                            <i class="fas fa-undo me-2"></i>数据恢复
+                        </a>
+                        <a href="/tape" class="btn btn-warning">
+                            <i class="fas fa-database me-2"></i>磁带管理
+                        </a>
+                        <a href="/system" class="btn btn-secondary">
+                            <i class="fas fa-cog me-2"></i>系统设置
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 最近备份 -->
+        <div class="col-lg-4 mb-4">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">
+                        <i class="fas fa-history me-2"></i>
+                        最近备份
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <div class="list-group list-group-flush">
+                        <div class="list-group-item d-flex justify-content-between align-items-center">
+                            <div>
+                                <h6 class="mb-1">月度完整备份</h6>
+                                <small class="text-muted">2025-10-01 02:00</small>
+                            </div>
+                            <span class="badge bg-success">完成</span>
+                        </div>
+                        <div class="list-group-item d-flex justify-content-between align-items-center">
+                            <div>
+                                <h6 class="mb-1">增量备份</h6>
+                                <small class="text-muted">2025-10-15 04:00</small>
+                            </div>
+                            <span class="badge bg-success">完成</span>
+                        </div>
+                        <div class="list-group-item d-flex justify-content-between align-items-center">
+                            <div>
+                                <h6 class="mb-1">测试备份</h6>
+                                <small class="text-muted">2025-10-30 10:30</small>
+                            </div>
+                            <span class="badge bg-warning">运行中</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 系统信息 -->
+        <div class="col-lg-4 mb-4">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">
+                        <i class="fas fa-info-circle me-2"></i>
+                        系统信息
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <table class="table table-sm">
+                        <tr>
+                            <td>版本</td>
+                            <td class="text-end">{{ version }}</td>
+                        </tr>
+                        <tr>
+                            <td>运行时间</td>
+                            <td class="text-end">2天 14小时</td>
+                        </tr>
+                        <tr>
+                            <td>磁带池</td>
+                            <td class="text-end">12个磁带</td>
+                        </tr>
+                        <tr>
+                            <td>存储容量</td>
+                            <td class="text-end">3.2TB / 3.6TB</td>
+                        </tr>
+                        <tr>
+                            <td>最后备份</td>
+                            <td class="text-end">2天前</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 活动日志 -->
+    <div class="row">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="card-title mb-0">
+                        <i class="fas fa-stream me-2"></i>
+                        活动日志
+                    </h5>
+                    <small class="text-muted">最近24小时</small>
+                </div>
+                <div class="card-body">
+                    <div class="timeline">
+                        <div class="timeline-item">
+                            <div class="timeline-marker bg-success"></div>
+                            <div class="timeline-content">
+                                <h6 class="mb-1">系统启动成功</h6>
+                                <p class="text-muted mb-1">所有模块初始化完成</p>
+                                <small class="text-muted">刚刚</small>
+                            </div>
+                        </div>
+                        <div class="timeline-item">
+                            <div class="timeline-marker bg-info"></div>
+                            <div class="timeline-content">
+                                <h6 class="mb-1">计划任务注册</h6>
+                                <p class="text-muted mb-1">月度备份、保留检查、健康检查任务已注册</p>
+                                <small class="text-muted">2分钟前</small>
+                            </div>
+                        </div>
+                        <div class="timeline-item">
+                            <div class="timeline-marker bg-warning"></div>
+                            <div class="timeline-content">
+                                <h6 class="mb-1">磁带设备扫描</h6>
+                                <p class="text-muted mb-1">未检测到磁带设备，请检查连接</p>
+                                <small class="text-muted">5分钟前</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.timeline {
+    position: relative;
+    padding-left: 30px;
+}
+
+.timeline::before {
+    content: '';
+    position: absolute;
+    left: 8px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: #dee2e6;
+}
+
+.timeline-item {
+    position: relative;
+    margin-bottom: 20px;
+}
+
+.timeline-marker {
+    position: absolute;
+    left: -22px;
+    top: 5px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid #fff;
+}
+
+.timeline-content {
+    background: #f8f9fa;
+    padding: 10px 15px;
+    border-radius: 5px;
+    border-left: 3px solid #007bff;
+}
+</style>
+{% endblock %}

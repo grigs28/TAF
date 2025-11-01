@@ -1,0 +1,378 @@
+{% extends "base.html" %}
+
+{% block title %}{{ app_name }} - 数据恢复{% endblock %}
+
+{% block extra_css %}
+<style>
+.backup-set-card {
+    transition: all 0.3s ease;
+    border-left: 4px solid transparent;
+}
+.backup-set-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+.backup-set-full { border-left-color: #28a745; }
+.backup-set-incremental { border-left-color: #007bff; }
+.backup-set-differential { border-left-color: #ffc107; }
+
+.file-tree {
+    max-height: 400px;
+    overflow-y: auto;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+}
+
+.tree-node {
+    padding: 4px 8px;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+.tree-node:hover {
+    background-color: #f8f9fa;
+}
+.tree-node.selected {
+    background-color: #e3f2fd;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <!-- 页面标题 -->
+    <div class="row mb-4">
+        <div class="col">
+            <h1 class="h3 mb-0">
+                <i class="fas fa-undo me-2"></i>
+                数据恢复
+            </h1>
+            <p class="text-muted">浏览备份集并恢复数据</p>
+        </div>
+        <div class="col-auto">
+            <button class="btn btn-success" id="startRecoveryBtn" disabled>
+                <i class="fas fa-play me-2"></i>开始恢复
+            </button>
+        </div>
+    </div>
+
+    <div class="row">
+        <!-- 备份集时间轴 -->
+        <div class="col-lg-4">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">
+                        <i class="fas fa-calendar-alt me-2"></i>
+                        备份集时间轴
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <!-- 月份选择 -->
+                    <div class="mb-3">
+                        <select class="form-select" id="monthSelect">
+                            <option value="2025-10">2025年10月</option>
+                            <option value="2025-09">2025年9月</option>
+                            <option value="2025-08">2025年8月</option>
+                        </select>
+                    </div>
+
+                    <!-- 备份集列表 -->
+                    <div class="backup-timeline">
+                        <div class="backup-set-card backup-set-full mb-3 p-3" data-backup-id="bs-20251001">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div>
+                                    <h6 class="mb-1">完整备份</h6>
+                                    <small class="text-muted">2025-10-01 02:00</small>
+                                    <div class="mt-2">
+                                        <small class="text-muted">磁带: </small>
+                                        <span class="badge bg-secondary">TAP001</span>
+                                    </div>
+                                    <div class="mt-1">
+                                        <small class="text-muted">大小: </small>
+                                        <span>1.8 GB</span>
+                                    </div>
+                                </div>
+                                <div class="text-end">
+                                    <span class="badge bg-success">完整</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="backup-set-card backup-set-incremental mb-3 p-3" data-backup-id="bs-20251015">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div>
+                                    <h6 class="mb-1">增量备份</h6>
+                                    <small class="text-muted">2025-10-15 04:00</small>
+                                    <div class="mt-2">
+                                        <small class="text-muted">磁带: </small>
+                                        <span class="badge bg-secondary">TAP003</span>
+                                    </div>
+                                    <div class="mt-1">
+                                        <small class="text-muted">大小: </small>
+                                        <span>245 MB</span>
+                                    </div>
+                                </div>
+                                <div class="text-end">
+                                    <span class="badge bg-primary">增量</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="backup-set-card backup-set-differential mb-3 p-3" data-backup-id="bs-20251022">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div>
+                                    <h6 class="mb-1">差异备份</h6>
+                                    <small class="text-muted">2025-10-22 03:30</small>
+                                    <div class="mt-2">
+                                        <small class="text-muted">磁带: </small>
+                                        <span class="badge bg-secondary">TAP005</span>
+                                    </div>
+                                    <div class="mt-1">
+                                        <small class="text-muted">大小: </small>
+                                        <span>567 MB</span>
+                                    </div>
+                                </div>
+                                <div class="text-end">
+                                    <span class="badge bg-warning">差异</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="backup-set-card backup-set-incremental mb-3 p-3" data-backup-id="bs-20251030">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div>
+                                    <h6 class="mb-1">增量备份</h6>
+                                    <small class="text-muted">2025-10-30 10:30</small>
+                                    <div class="mt-2">
+                                        <small class="text-muted">磁带: </small>
+                                        <span class="badge bg-secondary">TAP007</span>
+                                    </div>
+                                    <div class="mt-1">
+                                        <small class="text-muted">大小: </small>
+                                        <span>189 MB</span>
+                                    </div>
+                                </div>
+                                <div class="text-end">
+                                    <span class="badge bg-primary">增量</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 文件浏览器 -->
+        <div class="col-lg-8">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">
+                        <i class="fas fa-folder-open me-2"></i>
+                        文件浏览器
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <!-- 当前备份集信息 -->
+                    <div class="alert alert-info mb-3">
+                        <strong>当前备份集:</strong>
+                        <span id="currentBackupName">完整备份 (2025-10-01 02:00)</span>
+                        <button class="btn btn-sm btn-outline-secondary float-end" id="changeBackupBtn">
+                            <i class="fas fa-exchange-alt me-1"></i>切换
+                        </button>
+                    </div>
+
+                    <!-- 搜索和筛选 -->
+                    <div class="row mb-3">
+                        <div class="col-md-8">
+                            <div class="input-group">
+                                <input type="text" class="form-control" placeholder="搜索文件或文件夹..." id="fileSearch">
+                                <button class="btn btn-outline-secondary" type="button">
+                                    <i class="fas fa-search"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <select class="form-select" id="fileTypeFilter">
+                                <option>所有文件</option>
+                                <option>仅显示文件</option>
+                                <option>仅显示文件夹</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- 文件树 -->
+                    <div class="file-tree" id="fileTree">
+                        <div class="tree-node">
+                            <i class="fas fa-folder me-2"></i>
+                            <span>data</span>
+                        </div>
+                        <div class="ms-4">
+                            <div class="tree-node">
+                                <i class="fas fa-folder me-2"></i>
+                                <span>documents</span>
+                            </div>
+                            <div class="ms-4">
+                                <div class="tree-node">
+                                    <i class="fas fa-file-alt me-2"></i>
+                                    <span>report.docx</span>
+                                    <small class="text-muted ms-2">2.3 MB</small>
+                                </div>
+                                <div class="tree-node">
+                                    <i class="fas fa-file-excel me-2"></i>
+                                    <span>budget.xlsx</span>
+                                    <small class="text-muted ms-2">1.1 MB</small>
+                                </div>
+                            </div>
+                            <div class="tree-node">
+                                <i class="fas fa-folder me-2"></i>
+                                <span>images</span>
+                            </div>
+                            <div class="ms-4">
+                                <div class="tree-node">
+                                    <i class="fas fa-file-image me-2"></i>
+                                    <span>logo.png</span>
+                                    <small class="text-muted ms-2">156 KB</small>
+                                </div>
+                                <div class="tree-node">
+                                    <i class="fas fa-file-image me-2"></i>
+                                    <span>banner.jpg</span>
+                                    <small class="text-muted ms-2">892 KB</small>
+                                </div>
+                            </div>
+                            <div class="tree-node">
+                                <i class="fas fa-file-pdf me-2"></i>
+                                <span>manual.pdf</span>
+                                <small class="text-muted ms-2">5.6 MB</small>
+                            </div>
+                        </div>
+                        <div class="tree-node">
+                            <i class="fas fa-folder me-2"></i>
+                            <span>home</span>
+                        </div>
+                        <div class="ms-4">
+                            <div class="tree-node">
+                                <i class="fas fa-folder me-2"></i>
+                                <span>user</span>
+                            </div>
+                            <div class="ms-4">
+                                <div class="tree-node">
+                                    <i class="fas fa-file-alt me-2"></i>
+                                    <span>config.txt</span>
+                                    <small class="text-muted ms-2">12 KB</small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 选中文件统计 -->
+                    <div class="mt-3 p-3 bg-light rounded">
+                        <div class="row">
+                            <div class="col-md-3">
+                                <strong>选中文件:</strong>
+                                <span class="text-primary" id="selectedCount">0</span>
+                            </div>
+                            <div class="col-md-3">
+                                <strong>总大小:</strong>
+                                <span id="selectedSize">0 KB</span>
+                            </div>
+                            <div class="col-md-3">
+                                <strong>包含文件夹:</strong>
+                                <span id="folderCount">0</span>
+                            </div>
+                            <div class="col-md-3">
+                                <button class="btn btn-sm btn-outline-primary" id="selectAllBtn">
+                                    <i class="fas fa-check-square me-1"></i>全选
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary" id="clearSelectionBtn">
+                                    <i class="fas fa-times me-1"></i>清除
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 恢复选项 -->
+            <div class="card mt-3">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">
+                        <i class="fas fa-cog me-2"></i>
+                        恢复选项
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <label class="form-label">恢复目标路径</label>
+                            <input type="text" class="form-control" value="/tmp/recovery" id="recoveryPath">
+                            <small class="text-muted">文件将恢复到此目录</small>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">覆盖选项</label>
+                            <select class="form-select" id="overwriteOption">
+                                <option value="ask">询问是否覆盖</option>
+                                <option value="skip">跳过已存在的文件</option>
+                                <option value="overwrite">覆盖所有文件</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="row mt-3">
+                        <div class="col-md-6">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="preservePerms" checked>
+                                <label class="form-check-label" for="preservePerms">
+                                    保留文件权限
+                                </label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="verifyIntegrity" checked>
+                                <label class="form-check-label" for="verifyIntegrity">
+                                    验证文件完整性
+                                </label>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="sendNotification" checked>
+                                <label class="form-check-label" for="sendNotification">
+                                    发送完成通知
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.backup-timeline {
+    max-height: 500px;
+    overflow-y: auto;
+}
+
+.backup-set-card {
+    cursor: pointer;
+}
+.backup-set-card.selected {
+    background-color: #e3f2fd;
+    border-color: #2196f3 !important;
+}
+
+.tree-node {
+    display: flex;
+    align-items: center;
+    padding: 4px 8px;
+    border-radius: 4px;
+    margin: 1px 0;
+}
+
+.tree-node:hover {
+    background-color: #f8f9fa;
+}
+
+.tree-node.selected {
+    background-color: #e3f2fd;
+}
+</style>
+{% endblock %}
