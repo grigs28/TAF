@@ -364,6 +364,7 @@ async def update_database_config(config: DatabaseConfig):
         
         # 获取当前配置，用于填充缺失的密码
         current_settings = get_settings()
+        logger.info(f"更新数据库配置: type={config.db_type}, host={config.db_host}, user={config.db_user}")
         
         # 验证配置
         if config.db_type == "sqlite":
@@ -377,7 +378,7 @@ async def update_database_config(config: DatabaseConfig):
             if not config.db_password:
                 # 从当前URL提取密码
                 current_url = current_settings.DATABASE_URL
-                if "@" in current_url:
+                if "@" in current_url and (current_url.startswith("postgresql://") or current_url.startswith("opengauss://")):
                     try:
                         # 解析当前URL获取密码
                         parts = current_url.split("@")
@@ -392,9 +393,14 @@ async def update_database_config(config: DatabaseConfig):
                 if not config.db_password:
                     config.db_password = current_settings.DB_PASSWORD
             
-            # 验证必需参数
-            if not all([config.db_host, config.db_port, config.db_user, config.db_password, config.db_database]):
-                raise ValueError("PostgreSQL/openGauss数据库需要完整的连接参数")
+            # 验证必需参数（允许空字符串，将使用当前配置）
+            if not all([config.db_host, config.db_port, config.db_user, config.db_database]):
+                raise ValueError("PostgreSQL/openGauss数据库需要主机、端口、用户名和数据库名")
+            
+            # 确保有密码
+            if not config.db_password:
+                raise ValueError("PostgreSQL/openGauss数据库密码不能为空")
+            
             db_url = f"{config.db_type}://{config.db_user}:{config.db_password}@{config.db_host}:{config.db_port}/{config.db_database}"
         else:
             raise ValueError(f"不支持的数据库类型: {config.db_type}")

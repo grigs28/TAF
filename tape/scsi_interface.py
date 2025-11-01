@@ -532,6 +532,147 @@ class SCSIInterface:
             logger.error(f"磁带倒带失败: {str(e)}")
             return False
 
+    async def format_tape(self, device_path: str = None, format_type: int = 0) -> bool:
+        """格式化磁带 - FORMAT MEDIUM命令"""
+        try:
+            if not device_path and self.tape_devices:
+                device_path = self.tape_devices[0]['path']
+
+            if not device_path:
+                return False
+
+            # FORMAT MEDIUM命令 (0x04)
+            # Byte 1: Format Code (0=default, 1=LTO format)
+            cdb = bytes([0x04, format_type & 0xFF, 0x00, 0x00, 0x00, 0x00])
+            result = await self.execute_scsi_command(device_path, cdb, timeout=600)  # 格式化可能需要更长时间
+
+            return result['success']
+
+        except Exception as e:
+            logger.error(f"磁带格式化失败: {str(e)}")
+            return False
+
+    async def erase_tape(self, device_path: str = None, erase_type: int = 0) -> bool:
+        """擦除磁带 - ERASE命令"""
+        try:
+            if not device_path and self.tape_devices:
+                device_path = self.tape_devices[0]['path']
+
+            if not device_path:
+                return False
+
+            # ERASE命令 (0x19)
+            # Byte 1: Erase Type (0=long, 1=short)
+            cdb = bytes([0x19, erase_type & 0xFF, 0x00, 0x00, 0x00, 0x00])
+            result = await self.execute_scsi_command(device_path, cdb, timeout=600)
+
+            return result['success']
+
+        except Exception as e:
+            logger.error(f"磁带擦除失败: {str(e)}")
+            return False
+
+    async def load_unload(self, device_path: str = None, load: bool = True) -> bool:
+        """加载/卸载磁带 - LOAD UNLOAD命令"""
+        try:
+            if not device_path and self.tape_devices:
+                device_path = self.tape_devices[0]['path']
+
+            if not device_path:
+                return False
+
+            # LOAD UNLOAD命令 (0x1B)
+            # Byte 4: Bit 0 = LOAD (1), UNLOAD (0)
+            cdb = bytes([0x1B, 0x00, 0x00, 0x00, 0x01 if load else 0x00, 0x00])
+            result = await self.execute_scsi_command(device_path, cdb, timeout=300)
+
+            return result['success']
+
+        except Exception as e:
+            logger.error(f"磁带加载/卸载失败: {str(e)}")
+            return False
+
+    async def space_blocks(self, device_path: str = None, blocks: int = 1, direction: str = "forward") -> bool:
+        """按块定位 - SPACE命令"""
+        try:
+            if not device_path and self.tape_devices:
+                device_path = self.tape_devices[0]['path']
+
+            if not device_path:
+                return False
+
+            # SPACE命令 (0x11)
+            # Byte 1: Code (1=blocks, 2=filemarks, 3=end of data)
+            # Byte 4-6: Count
+            direction_code = 0x01  # forward
+            if direction == "reverse":
+                blocks = -blocks
+                direction_code = 0x02  # reverse
+
+            cdb = bytes([
+                0x11,  # SPACE
+                direction_code,
+                0x00,
+                ((blocks >> 16) & 0xFF),
+                ((blocks >> 8) & 0xFF),
+                (blocks & 0xFF)
+            ])
+            result = await self.execute_scsi_command(device_path, cdb, timeout=300)
+
+            return result['success']
+
+        except Exception as e:
+            logger.error(f"磁带定位失败: {str(e)}")
+            return False
+
+    async def write_filemarks(self, device_path: str = None, count: int = 1) -> bool:
+        """写入文件标记 - WRITE FILEMARKS命令"""
+        try:
+            if not device_path and self.tape_devices:
+                device_path = self.tape_devices[0]['path']
+
+            if not device_path:
+                return False
+
+            # WRITE FILEMARKS命令 (0x10)
+            # Byte 1: Immediate bit
+            # Byte 4-6: Filemark count
+            cdb = bytes([
+                0x10,  # WRITE FILEMARKS
+                0x00,
+                0x00,
+                ((count >> 16) & 0xFF),
+                ((count >> 8) & 0xFF),
+                (count & 0xFF)
+            ])
+            result = await self.execute_scsi_command(device_path, cdb, timeout=300)
+
+            return result['success']
+
+        except Exception as e:
+            logger.error(f"写入文件标记失败: {str(e)}")
+            return False
+
+    async def set_mark(self, device_path: str = None, mark_type: int = 0) -> bool:
+        """设置磁带标记 - SET MARK命令"""
+        try:
+            if not device_path and self.tape_devices:
+                device_path = self.tape_devices[0]['path']
+
+            if not device_path:
+                return False
+
+            # SET MARK命令 (0x3B)
+            # Byte 1: Mark Type (0=BOM, 1=EOM)
+            cdb = bytes([0x3B, mark_type & 0xFF, 0x00, 0x00, 0x00, 0x00])
+            result = await self.execute_scsi_command(device_path, cdb, timeout=30)
+
+            return result['success']
+
+        except Exception as e:
+            logger.error(f"设置磁带标记失败: {str(e)}")
+            return False
+
     async def health_check(self) -> bool:
         """SCSI接口健康检查"""
         try:
