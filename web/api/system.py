@@ -804,7 +804,7 @@ async def update_notification_config(config: DingTalkConfig):
         
         return {
             "success": True,
-            "message": "通知配置更新成功，需要重启系统生效"
+            "message": "通知配置更新成功"
         }
         
     except Exception as e:
@@ -816,38 +816,57 @@ async def update_notification_config(config: DingTalkConfig):
 async def test_notification(phone: str = ""):
     """测试钉钉通知"""
     try:
-        from config.settings import get_settings
-        settings = get_settings()
+        from config.settings import Settings
+        
+        # 创建新的配置实例，读取最新的.env文件
+        temp_settings = Settings()
         
         # 使用提供的手机号或默认手机号
-        target_phone = phone or settings.DINGTALK_DEFAULT_PHONE
+        target_phone = phone or temp_settings.DINGTALK_DEFAULT_PHONE
         
         if not target_phone:
             return {"success": False, "message": "未指定手机号"}
         
-        # 调用钉钉通知器
+        # 手动创建通知器，使用最新的配置
         from utils.dingtalk_notifier import DingTalkNotifier
-        notifier = DingTalkNotifier()
-        await notifier.initialize()
+        import aiohttp
         
-        result = await notifier.send_message(
-            phone=target_phone,
-            title="测试通知",
-            content="这是一条测试通知，用于验证钉钉通知配置是否正常工作。"
-        )
+        # 创建临时会话
+        connector = aiohttp.TCPConnector(limit=10, limit_per_host=5)
+        timeout = aiohttp.ClientTimeout(total=30)
+        session = aiohttp.ClientSession(connector=connector, timeout=timeout)
         
-        await notifier.close()
-        
-        if result.get('success'):
-            return {
-                "success": True,
-                "message": f"测试通知发送成功 -> {target_phone}"
+        try:
+            url = f"{temp_settings.DINGTALK_API_URL}/api/v1/messages/send"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {temp_settings.DINGTALK_API_KEY}"
             }
-        else:
-            return {
-                "success": False,
-                "message": f"发送失败: {result.get('message', '未知错误')}"
+            
+            payload = {
+                "phone": target_phone,
+                "title": "测试通知",
+                "content": "这是一条测试通知，用于验证钉钉通知配置是否正常工作。",
+                "message_type": "markdown"
             }
+            
+            async with session.post(url, headers=headers, json=payload) as response:
+                result = await response.json()
+                
+                if result.get('success'):
+                    logger.info(f"钉钉消息发送成功: 测试通知 -> {target_phone}")
+                    return {
+                        "success": True,
+                        "message": f"测试通知发送成功 -> {target_phone}"
+                    }
+                else:
+                    logger.error(f"钉钉消息发送失败: {result.get('message', '未知错误')}")
+                    return {
+                        "success": False,
+                        "message": f"发送失败: {result.get('message', '未知错误')}"
+                    }
+        finally:
+            await session.close()
             
     except Exception as e:
         logger.error(f"测试通知失败: {str(e)}")
