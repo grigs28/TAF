@@ -514,7 +514,25 @@ async def get_tape_config():
             "auto_tape_cleanup": settings.AUTO_TAPE_CLEANUP
         }
         
-        return {"success": True, "config": config}
+        # 检查设备状态
+        status = {"connected": False, "device_info": "未检测"}
+        try:
+            from tape.scsi_interface import SCSIInterface
+            scsi = SCSIInterface()
+            await scsi.initialize()
+            devices = await scsi.scan_tape_devices()
+            await scsi.close()
+            
+            if devices and len(devices) > 0:
+                status = {
+                    "connected": True,
+                    "device_info": f"{devices[0].get('vendor', 'Unknown')} {devices[0].get('model', 'Unknown')}",
+                    "device_path": devices[0].get('path', '')
+                }
+        except Exception as e:
+            logger.debug(f"检查设备状态失败: {str(e)}")
+        
+        return {"success": True, "config": config, "status": status}
         
     except Exception as e:
         logger.error(f"获取磁带机配置失败: {str(e)}")
