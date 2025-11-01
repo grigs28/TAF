@@ -350,7 +350,9 @@ async def test_database_connection(config: DatabaseConfig):
         elif config.db_type in ["postgresql", "opengauss"]:
             if not all([config.db_host, config.db_port, config.db_user, config.db_database]):
                 raise ValueError("PostgreSQL/openGauss数据库需要完整的连接参数")
-            db_url = f"{config.db_type}://{config.db_user}:{config.db_password}@{config.db_host}:{config.db_port}/{config.db_database}"
+            # 将opengauss转换为postgresql协议（兼容）
+            db_protocol = "postgresql://" if config.db_type == "opengauss" else f"{config.db_type}://"
+            db_url = f"{db_protocol}{config.db_user}:{config.db_password}@{config.db_host}:{config.db_port}/{config.db_database}"
         else:
             raise ValueError(f"不支持的数据库类型: {config.db_type}")
         
@@ -437,7 +439,9 @@ async def update_database_config(config: DatabaseConfig):
             if not config.db_password:
                 raise ValueError("PostgreSQL/openGauss数据库密码不能为空")
             
-            db_url = f"{config.db_type}://{config.db_user}:{config.db_password}@{config.db_host}:{config.db_port}/{config.db_database}"
+            # 将opengauss转换为postgresql协议（兼容）
+            db_protocol = "postgresql://" if config.db_type == "opengauss" else f"{config.db_type}://"
+            db_url = f"{db_protocol}{config.db_user}:{config.db_password}@{config.db_host}:{config.db_port}/{config.db_database}"
         else:
             raise ValueError(f"不支持的数据库类型: {config.db_type}")
         

@@ -113,7 +113,11 @@ class DatabaseManager:
 
     def _build_database_url(self) -> str:
         """构建同步数据库URL"""
-        return self.settings.DATABASE_URL
+        url = self.settings.DATABASE_URL
+        # 将opengauss URL转换为postgresql URL（兼容）
+        if url.startswith("opengauss://"):
+            return url.replace("opengauss://", "postgresql://")
+        return url
 
     def _build_async_database_url(self) -> str:
         """构建异步数据库URL"""
