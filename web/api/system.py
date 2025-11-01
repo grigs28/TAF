@@ -467,7 +467,7 @@ async def update_database_config(config: DatabaseConfig):
         
         return {
             "success": True,
-            "message": "数据库配置更新成功，需要重启系统生效",
+            "message": "数据库配置更新成功",
             "db_url": db_url.split("@")[0] + "@***" if "@" in db_url else db_url  # 隐藏密码
         }
         
@@ -685,7 +685,7 @@ async def update_tape_config(config: TapeConfig):
         
         return {
             "success": True,
-            "message": "磁带机配置更新成功，需要重启系统生效"
+            "message": "磁带机配置更新成功"
         }
         
     except Exception as e:
