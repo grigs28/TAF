@@ -238,24 +238,12 @@ class TapeOperations:
     async def _write_block(self, data: bytes, block_number: int) -> bool:
         """写入单个数据块"""
         try:
-            # 构造WRITE(6) SCSI命令
-            # WRITE(6): 0A 00 XX XX XX XX
-            # XX XX XX: 传输长度
-            cdb = bytes([
-                0x0A,  # WRITE(6)操作码
-                0x00,  # 固定
-                (len(data) >> 16) & 0xFF,
-                (len(data) >> 8) & 0xFF,
-                len(data) & 0xFF,
-                0x00   # 控制字节
-            ])
-
-            result = await self.scsi_interface.execute_scsi_command(
-                device_path=None,  # 使用当前设备
-                cdb=cdb,
-                data_direction=0,  # 出方向
-                data_length=len(data),
-                timeout=60
+            # 使用SCSI接口的write_tape_data方法
+            result = await self.scsi_interface.write_tape_data(
+                device_path=None,
+                data=data,
+                block_number=block_number,
+                block_size=self.settings.DEFAULT_BLOCK_SIZE
             )
 
             if result['success']:
@@ -271,28 +259,16 @@ class TapeOperations:
     async def _read_block(self, block_number: int, block_size: int) -> Optional[bytes]:
         """读取单个数据块"""
         try:
-            # 构造READ(6) SCSI命令
-            # READ(6): 08 00 XX XX XX XX
-            # XX XX XX: 传输长度
-            cdb = bytes([
-                0x08,  # READ(6)操作码
-                0x00,  # 固定
-                (block_size >> 16) & 0xFF,
-                (block_size >> 8) & 0xFF,
-                block_size & 0xFF,
-                0x00   # 控制字节
-            ])
-
-            result = await self.scsi_interface.execute_scsi_command(
-                device_path=None,  # 使用当前设备
-                cdb=cdb,
-                data_direction=1,  # 入方向
-                data_length=block_size,
-                timeout=60
+            # 使用SCSI接口的read_tape_data方法
+            result = await self.scsi_interface.read_tape_data(
+                device_path=None,
+                block_number=block_number,
+                block_count=1,
+                block_size=block_size
             )
 
             if result['success']:
-                return result['data']
+                return result.get('data', b'')
             else:
                 logger.debug(f"读取数据块失败: {result.get('error', '未知错误')}")
                 return None

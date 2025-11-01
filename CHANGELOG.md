@@ -69,11 +69,19 @@
 - ✅ 系统日志模型（`models/system_log.py`）
 - ✅ 系统配置模型（`models/system_config.py`）
 
+#### 静态资源
+- ✅ CSS样式（`web/static/css/main.css`）
+- ✅ JavaScript（`web/static/js/main.js`）
+- ✅ Markdown渲染支持
+
 #### 测试
 - ✅ 测试框架配置（`tests/conftest.py`）
 - ✅ 备份功能测试（`tests/test_backup.py`）
 - ✅ 磁带功能测试（`tests/test_tape.py`）
 - ✅ 配置功能测试（`tests/test_config.py`）
+
+#### 文档
+- ✅ `SCSI接口实现分析报告.md` - SCSI接口分析
 
 ### 修改
 
@@ -115,7 +123,9 @@
 
 ### 待办事项
 
-- 🔲 完善磁带设备SCSI接口实现
+- 🔲 标准LOG SENSE解析优化
+- 🔲 MODE SENSE/SELECT完善
+- 🔲 UI SCSI状态显示
 - 🔲 实现Celery分布式任务（可选）
 - 🔲 添加配置加密功能
 - 🔲 完善Web界面交互
@@ -130,10 +140,39 @@
 - ✅ 优化数据库文件路径管理（data/taf_backup.db）
 - ✅ 配置参数脱敏和标准化
 
+#### SCSI接口重构
+
+- ✅ 完善Windows SCSI Pass Through完整实现
+  - 完整实现SCSI_PASS_THROUGH结构填充
+  - 正确执行DeviceIoControl调用
+  - 支持数据双向传输
+- ✅ 修复Linux SG_IO导入问题
+  - 优化平台特定导入逻辑
+  - 确保fcntl正确可用
+- ✅ 实现READ/WRITE SCSI命令
+  - READ(16) 和 WRITE(16)完整实现
+  - 支持64位LBA寻址
+  - 替换旧式READ/WRITE(6)
+- ✅ 添加SCSI命令重试机制
+  - 指数退避重试策略
+  - 智能错误类型判断
+  - 自动处理临时性错误
+- ✅ 实现设备热插拔监控
+  - 设备连接/断开自动检测
+  - 状态变化事件通知
+  - 监控任务管理
+- ✅ 优化SCSI接口架构
+  - 代码结构优化
+  - 错误处理增强
+  - 日志记录完善
+
 ## [未发布]
 
 ### 计划
 
+- 标准LOG SENSE解析（需要IBM文档参考）
+- MODE SENSE/SELECT完整实现
+- UI SCSI状态显示增强
 - 配置加密功能
 - 配置导入/导出
 - 配置变更历史

@@ -10,9 +10,15 @@ import sys
 import platform
 import logging
 import re
+import asyncio
 from typing import List, Dict, Any, Optional
 from ctypes import *
 from pathlib import Path
+
+# Platform-specific imports
+if platform.system() == "Linux":
+    import fcntl
+    import struct
 
 from config.settings import get_settings
 
@@ -27,6 +33,8 @@ class SCSIInterface:
         self.settings = get_settings()
         self.tape_devices = []
         self._initialized = False
+        self._monitoring_task = None
+        self._device_change_callback = None
 
     async def initialize(self):
         """初始化SCSI接口"""
@@ -85,10 +93,16 @@ class SCSIInterface:
                     ("Data", wintypes.UCHAR * 4096)
                 ]
 
+            # 保存结构体类型供后续使用
+            self.SCSI_PASS_THROUGH_WITH_BUFFERS = SCSI_PASS_THROUGH_WITH_BUFFERS
+            
             # 加载kernel32.dll
             self.kernel32 = windll.kernel32
             self.create_file = self.kernel32.CreateFileW
             self.device_io_control = self.kernel32.DeviceIoControl
+            
+            # IOCTL控制码
+            self.IOCTL_SCSI_PASS_THROUGH_DIRECT = 0x4D014
 
         except Exception as e:
             logger.error(f"Windows SCSI接口初始化失败: {str(e)}")
@@ -97,9 +111,7 @@ class SCSIInterface:
     async def _init_linux_scsi(self):
         """初始化Linux SCSI接口"""
         try:
-            # Linux sg_io接口
-            import fcntl
-            import struct
+            # Linux sg_io接口已在文件顶部导入
 
             # SG_IO 命令定义
             self.SG_IO = 0x2285
@@ -327,14 +339,11 @@ class SCSIInterface:
         """执行Windows SCSI命令"""
         try:
             # Windows SPTI实现
-            # 这里需要实现具体的SCSI Pass Through逻辑
-            # 由于复杂性，这里提供框架代码
-
             handle = self.create_file(
                 device_path,
-                0x80000000,  # GENERIC_READ
-                0x80000000,  # GENERIC_WRITE
+                0x80000000 | 0x40000000,  # GENERIC_READ | GENERIC_WRITE
                 0,
+                None,
                 3,           # OPEN_EXISTING
                 0x80,        # FILE_ATTRIBUTE_NORMAL
                 None
@@ -343,16 +352,70 @@ class SCSIInterface:
             if handle == -1:  # INVALID_HANDLE_VALUE
                 return {'success': False, 'error': '无法打开设备'}
 
-            # 构造SCSI命令结构
-            # 实际实现需要填充SCSI_PASS_THROUGH结构
-            # 这里省略具体实现
-
-            # 关闭句柄
-            self.kernel32.CloseHandle(handle)
-
-            return {'success': True, 'data': b''}
+            try:
+                # 构造完整的SCSI_PASS_THROUGH_WITH_BUFFERS结构
+                sptwb = self.SCSI_PASS_THROUGH_WITH_BUFFERS()
+                
+                # 计算偏移量
+                sense_offset = sizeof(sptwb.Spt)
+                data_offset = sense_offset + sizeof(sptwb.Sense)
+                
+                # 填充SCSI_PASS_THROUGH字段
+                sptwb.Spt.Length = sizeof(sptwb.Spt)
+                sptwb.Spt.ScsiStatus = 0
+                sptwb.Spt.PathId = 0
+                sptwb.Spt.TargetId = 0
+                sptwb.Spt.Lun = 0
+                sptwb.Spt.CdbLength = len(cdb)
+                sptwb.Spt.SenseInfoLength = 32
+                sptwb.Spt.DataIn = data_direction  # 1=IN, 0=OUT
+                sptwb.Spt.DataTransferLength = data_length
+                sptwb.Spt.TimeOutValue = timeout
+                sptwb.Spt.DataBufferOffset = data_offset
+                sptwb.Spt.SenseInfoOffset = sense_offset
+                
+                # 复制CDB命令
+                for i, byte in enumerate(cdb):
+                    if i < 16:
+                        sptwb.Spt.Cdb[i] = byte
+                
+                # 调用DeviceIoControl
+                result = self.device_io_control(
+                    handle,
+                    self.IOCTL_SCSI_PASS_THROUGH_DIRECT,
+                    byref(sptwb),
+                    sizeof(sptwb),
+                    byref(sptwb),
+                    sizeof(sptwb),
+                    None,
+                    None
+                )
+                
+                if result:
+                    if sptwb.Spt.ScsiStatus == 0:
+                        # 成功，返回数据
+                        if data_direction == 1 and data_length > 0:
+                            data = bytes(sptwb.Data[:data_length])
+                            return {'success': True, 'data': data}
+                        else:
+                            return {'success': True, 'data': b''}
+                    else:
+                        # SCSI错误
+                        sense = bytes(sptwb.Sense[:sptwb.Spt.SenseInfoLength])
+                        return {
+                            'success': False,
+                            'error': f'SCSI错误: 状态={sptwb.Spt.ScsiStatus}',
+                            'sense_data': sense.hex()
+                        }
+                else:
+                    error_code = self.kernel32.GetLastError()
+                    return {'success': False, 'error': f'DeviceIoControl失败: 错误代码={error_code}'}
+                    
+            finally:
+                self.kernel32.CloseHandle(handle)
 
         except Exception as e:
+            logger.error(f"Windows SCSI命令执行异常: {str(e)}")
             return {'success': False, 'error': str(e)}
 
     async def _execute_linux_scsi(self, device_path: str, cdb: bytes,
@@ -486,10 +549,65 @@ class SCSIInterface:
             logger.error(f"SCSI接口健康检查失败: {str(e)}")
             return False
 
+    async def start_device_monitoring(self, interval: int = 60, callback=None):
+        """启动设备状态监控"""
+        try:
+            self._device_change_callback = callback
+            self._monitoring_task = asyncio.create_task(
+                self._monitoring_loop(interval)
+            )
+            logger.info(f"启动设备监控任务，间隔: {interval}秒")
+        except Exception as e:
+            logger.error(f"启动设备监控失败: {str(e)}")
+
+    async def _monitoring_loop(self, interval: int):
+        """设备监控循环"""
+        while self._initialized:
+            try:
+                devices = await self.scan_tape_devices()
+                
+                # 检测设备状态变化
+                current_paths = {d['path'] for d in devices}
+                previous_paths = {d['path'] for d in self.tape_devices}
+                
+                # 新设备连接
+                new_devices = current_paths - previous_paths
+                if new_devices:
+                    for path in new_devices:
+                        logger.info(f"检测到新设备: {path}")
+                        if self._device_change_callback:
+                            await self._device_change_callback('connected', path)
+                
+                # 设备断开
+                removed_devices = previous_paths - current_paths
+                if removed_devices:
+                    for path in removed_devices:
+                        logger.warning(f"设备断开连接: {path}")
+                        if self._device_change_callback:
+                            await self._device_change_callback('disconnected', path)
+                
+                self.tape_devices = devices
+                await asyncio.sleep(interval)
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"设备监控异常: {str(e)}")
+                await asyncio.sleep(interval)
+
     async def close(self):
         """关闭SCSI接口"""
         try:
             self._initialized = False
+
+            # 停止监控任务
+            if self._monitoring_task:
+                self._monitoring_task.cancel()
+                try:
+                    await self._monitoring_task
+                except asyncio.CancelledError:
+                    pass
+
             logger.info("SCSI接口已关闭")
 
         except Exception as e:
@@ -557,7 +675,6 @@ class SCSIInterface:
                 if os.path.exists(device_path):
                     with open(device_path, 'rb') as f:
                         # 尝试读取MTIO状态
-                        import fcntl
                         try:
                             # MTGETSTATUS ioctl
                             fcntl.ioctl(f, 0x801c6d01, b'\x00' * 20)
@@ -808,3 +925,127 @@ class SCSIInterface:
         except Exception as e:
             logger.error(f"请求Sense数据失败: {str(e)}")
             return {'success': False, 'error': str(e)}
+
+    async def read_tape_data(self, device_path: str = None, block_number: int = 0,
+                            block_count: int = 1, block_size: int = 512) -> Dict[str, Any]:
+        """读取磁带数据 - READ(16)命令"""
+        try:
+            if not device_path and self.tape_devices:
+                device_path = self.tape_devices[0]['path']
+
+            if not device_path:
+                return {'success': False, 'error': '没有指定设备路径'}
+
+            # READ(16)命令 - 支持64位LBA
+            cdb = bytes([
+                0x88,  # READ(16)
+                0x00,  # RDPROTECT, DPO, FUA
+                ((block_number >> 56) & 0xFF),
+                ((block_number >> 48) & 0xFF),
+                ((block_number >> 40) & 0xFF),
+                ((block_number >> 32) & 0xFF),
+                ((block_number >> 24) & 0xFF),
+                ((block_number >> 16) & 0xFF),
+                ((block_number >> 8) & 0xFF),
+                (block_number & 0xFF),
+                ((block_count >> 32) & 0xFF),
+                ((block_count >> 24) & 0xFF),
+                ((block_count >> 16) & 0xFF),
+                ((block_count >> 8) & 0xFF),
+                (block_count & 0xFF),
+                0x00   # 控制
+            ])
+
+            data_length = block_count * block_size
+            return await self.execute_scsi_command(
+                device_path, cdb,
+                data_direction=1,  # IN
+                data_length=data_length,
+                timeout=300
+            )
+
+        except Exception as e:
+            logger.error(f"读取磁带数据失败: {str(e)}")
+            return {'success': False, 'error': str(e)}
+
+    async def write_tape_data(self, device_path: str = None, data: bytes = b'',
+                            block_number: int = 0, block_size: int = 512) -> Dict[str, Any]:
+        """写入磁带数据 - WRITE(16)命令"""
+        try:
+            if not device_path and self.tape_devices:
+                device_path = self.tape_devices[0]['path']
+
+            if not device_path:
+                return {'success': False, 'error': '没有指定设备路径'}
+
+            # 计算块数
+            block_count = (len(data) + block_size - 1) // block_size
+
+            # WRITE(16)命令 - 支持64位LBA
+            cdb = bytes([
+                0x8A,  # WRITE(16)
+                0x00,  # RDPROTECT, DPO, FUA
+                ((block_number >> 56) & 0xFF),
+                ((block_number >> 48) & 0xFF),
+                ((block_number >> 40) & 0xFF),
+                ((block_number >> 32) & 0xFF),
+                ((block_number >> 24) & 0xFF),
+                ((block_number >> 16) & 0xFF),
+                ((block_number >> 8) & 0xFF),
+                (block_number & 0xFF),
+                ((block_count >> 32) & 0xFF),
+                ((block_count >> 24) & 0xFF),
+                ((block_count >> 16) & 0xFF),
+                ((block_count >> 8) & 0xFF),
+                (block_count & 0xFF),
+                0x00   # 控制
+            ])
+
+            return await self.execute_scsi_command(
+                device_path, cdb,
+                data_direction=0,  # OUT
+                data_length=len(data),
+                timeout=300
+            )
+
+        except Exception as e:
+            logger.error(f"写入磁带数据失败: {str(e)}")
+            return {'success': False, 'error': str(e)}
+
+    async def execute_scsi_command_with_retry(self, device_path: str, cdb: bytes,
+                                            data_direction: int = 0, data_length: int = 0,
+                                            timeout: int = 30, max_retries: int = 3) -> Dict[str, Any]:
+        """执行SCSI命令（带重试机制）"""
+        last_error = None
+
+        for attempt in range(max_retries):
+            result = await self.execute_scsi_command(
+                device_path, cdb, data_direction, data_length, timeout
+            )
+
+            if result['success']:
+                return result
+
+            # 检查错误类型
+            error = result.get('error', '')
+            if self._is_retryable_error(error):
+                last_error = result
+                logger.warning(f"SCSI命令失败 (尝试 {attempt+1}/{max_retries}): {error}")
+                await asyncio.sleep(2 ** attempt)  # 指数退避
+            else:
+                # 不可重试的错误
+                return result
+
+        return last_error or {'success': False, 'error': '所有重试均失败'}
+
+    def _is_retryable_error(self, error: str) -> bool:
+        """判断错误是否可重试"""
+        retryable_keywords = [
+            'busy',
+            'timeout',
+            'temporary',
+            'not ready',
+            'unit attention',
+            '设备忙碌'
+        ]
+        return any(keyword in error.lower() for keyword in retryable_keywords)
