@@ -885,6 +885,10 @@ body {
 }
 
 /* 模态框调整 */
+.modal {
+    z-index: 1050;
+}
+
 .modal-content {
     background: var(--card-bg);
     border: 1px solid var(--card-border);
