@@ -51,14 +51,12 @@
     <div class="row">
         <!-- 备份集时间轴 -->
         <div class="col-lg-4">
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="card-title mb-0">
-                        <i class="fas fa-calendar-alt me-2"></i>
-                        备份集时间轴
-                    </h5>
-                </div>
+            <div class="service-card">
                 <div class="card-body">
+                    <h6 class="mb-3">
+                        <i class="bi bi-calendar-event me-2"></i>
+                        备份集时间轴
+                    </h6>
                     <!-- 月份选择 -->
                     <div class="mb-3">
                         <select class="form-select" id="monthSelect">
@@ -156,20 +154,18 @@
 
         <!-- 文件浏览器 -->
         <div class="col-lg-8">
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="card-title mb-0">
-                        <i class="fas fa-folder-open me-2"></i>
-                        文件浏览器
-                    </h5>
-                </div>
+            <div class="service-card">
                 <div class="card-body">
+                    <h6 class="mb-3">
+                        <i class="bi bi-folder-open me-2"></i>
+                        文件浏览器
+                    </h6>
                     <!-- 当前备份集信息 -->
                     <div class="alert alert-info mb-3">
                         <strong>当前备份集:</strong>
                         <span id="currentBackupName">完整备份 (2025-10-01 02:00)</span>
                         <button class="btn btn-sm btn-outline-secondary float-end" id="changeBackupBtn">
-                            <i class="fas fa-exchange-alt me-1"></i>切换
+                            <i class="bi bi-arrow-left-right me-1"></i>切换
                         </button>
                     </div>
 
@@ -179,7 +175,7 @@
                             <div class="input-group">
                                 <input type="text" class="form-control" placeholder="搜索文件或文件夹..." id="fileSearch">
                                 <button class="btn btn-outline-secondary" type="button">
-                                    <i class="fas fa-search"></i>
+                                    <i class="bi bi-search"></i>
                                 </button>
                             </div>
                         </div>
@@ -195,60 +191,60 @@
                     <!-- 文件树 -->
                     <div class="file-tree" id="fileTree">
                         <div class="tree-node">
-                            <i class="fas fa-folder me-2"></i>
+                            <i class="bi bi-folder me-2"></i>
                             <span>data</span>
                         </div>
                         <div class="ms-4">
                             <div class="tree-node">
-                                <i class="fas fa-folder me-2"></i>
+                                <i class="bi bi-folder me-2"></i>
                                 <span>documents</span>
                             </div>
                             <div class="ms-4">
                                 <div class="tree-node">
-                                    <i class="fas fa-file-alt me-2"></i>
+                                    <i class="bi bi-file-text me-2"></i>
                                     <span>report.docx</span>
                                     <small class="text-muted ms-2">2.3 MB</small>
                                 </div>
                                 <div class="tree-node">
-                                    <i class="fas fa-file-excel me-2"></i>
+                                    <i class="bi bi-file-earmark-spreadsheet me-2"></i>
                                     <span>budget.xlsx</span>
                                     <small class="text-muted ms-2">1.1 MB</small>
                                 </div>
                             </div>
                             <div class="tree-node">
-                                <i class="fas fa-folder me-2"></i>
+                                <i class="bi bi-folder me-2"></i>
                                 <span>images</span>
                             </div>
                             <div class="ms-4">
                                 <div class="tree-node">
-                                    <i class="fas fa-file-image me-2"></i>
+                                    <i class="bi bi-file-image me-2"></i>
                                     <span>logo.png</span>
                                     <small class="text-muted ms-2">156 KB</small>
                                 </div>
                                 <div class="tree-node">
-                                    <i class="fas fa-file-image me-2"></i>
+                                    <i class="bi bi-file-image me-2"></i>
                                     <span>banner.jpg</span>
                                     <small class="text-muted ms-2">892 KB</small>
                                 </div>
                             </div>
                             <div class="tree-node">
-                                <i class="fas fa-file-pdf me-2"></i>
+                                <i class="bi bi-file-pdf me-2"></i>
                                 <span>manual.pdf</span>
                                 <small class="text-muted ms-2">5.6 MB</small>
                             </div>
                         </div>
                         <div class="tree-node">
-                            <i class="fas fa-folder me-2"></i>
+                            <i class="bi bi-folder me-2"></i>
                             <span>home</span>
                         </div>
                         <div class="ms-4">
                             <div class="tree-node">
-                                <i class="fas fa-folder me-2"></i>
+                                <i class="bi bi-folder me-2"></i>
                                 <span>user</span>
                             </div>
                             <div class="ms-4">
                                 <div class="tree-node">
-                                    <i class="fas fa-file-alt me-2"></i>
+                                    <i class="bi bi-file-text me-2"></i>
                                     <span>config.txt</span>
                                     <small class="text-muted ms-2">12 KB</small>
                                 </div>
@@ -273,10 +269,10 @@
                             </div>
                             <div class="col-md-3">
                                 <button class="btn btn-sm btn-outline-primary" id="selectAllBtn">
-                                    <i class="fas fa-check-square me-1"></i>全选
+                                    <i class="bi bi-check-square me-1"></i>全选
                                 </button>
                                 <button class="btn btn-sm btn-outline-secondary" id="clearSelectionBtn">
-                                    <i class="fas fa-times me-1"></i>清除
+                                    <i class="bi bi-x-circle me-1"></i>清除
                                 </button>
                             </div>
                         </div>
@@ -285,14 +281,12 @@
             </div>
 
             <!-- 恢复选项 -->
-            <div class="card mt-3">
-                <div class="card-header">
-                    <h5 class="card-title mb-0">
-                        <i class="fas fa-cog me-2"></i>
-                        恢复选项
-                    </h5>
-                </div>
+            <div class="service-card mt-3">
                 <div class="card-body">
+                    <h6 class="mb-3">
+                        <i class="bi bi-gear me-2"></i>
+                        恢复选项
+                    </h6>
                     <div class="row">
                         <div class="col-md-6">
                             <label class="form-label">恢复目标路径</label>
