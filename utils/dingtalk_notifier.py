@@ -10,6 +10,7 @@ import asyncio
 import logging
 from typing import Optional, Dict, Any
 from datetime import datetime
+from pathlib import Path
 import aiohttp
 
 from config.settings import get_settings
@@ -26,6 +27,7 @@ class DingTalkNotifier:
         self.api_key = self.settings.DINGTALK_API_KEY
         self.default_phone = self.settings.DINGTALK_DEFAULT_PHONE
         self._session = None
+        self._notification_events = None
 
     async def initialize(self):
         """初始化通知器"""
@@ -43,6 +45,43 @@ class DingTalkNotifier:
         if self._session:
             await self._session.close()
             logger.info("钉钉通知器已关闭")
+
+    def _load_notification_events(self) -> Dict[str, bool]:
+        """加载通知事件配置"""
+        if self._notification_events is not None:
+            return self._notification_events
+        
+        # 从.env文件读取
+        env_file = Path(".env")
+        if env_file.exists():
+            with open(env_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("NOTIFICATION_EVENTS="):
+                        events_json = line.split("=", 1)[1]
+                        self._notification_events = json.loads(events_json)
+                        return self._notification_events
+        
+        # 如果.env中没有，返回默认配置（全部启用）
+        self._notification_events = {
+            "notify_backup_success": True,
+            "notify_backup_started": True,
+            "notify_backup_failed": True,
+            "notify_recovery_success": True,
+            "notify_recovery_failed": True,
+            "notify_tape_change": True,
+            "notify_tape_expired": True,
+            "notify_tape_error": True,
+            "notify_capacity_warning": True,
+            "notify_system_error": True,
+            "notify_system_started": True
+        }
+        return self._notification_events
+
+    def _should_send_notification(self, event_name: str) -> bool:
+        """检查是否应该发送某个通知事件"""
+        events = self._load_notification_events()
+        return events.get(event_name, True)
 
     async def send_message(self, phone: str, title: str, content: str,
                           message_type: str = "markdown") -> Dict[str, Any]:
@@ -115,6 +154,17 @@ class DingTalkNotifier:
     async def send_backup_notification(self, backup_name: str, status: str,
                                      details: Optional[Dict] = None):
         """发送备份通知"""
+        # 根据状态检查是否应该发送
+        if status == "success" and not self._should_send_notification("notify_backup_success"):
+            logger.debug("备份成功通知已禁用")
+            return
+        elif status == "failed" and not self._should_send_notification("notify_backup_failed"):
+            logger.debug("备份失败通知已禁用")
+            return
+        elif status == "started" and not self._should_send_notification("notify_backup_started"):
+            logger.debug("备份开始通知已禁用")
+            return
+        
         if status == "success":
             title = "✅ 备份任务完成"
             content = f"""## 备份任务完成通知
@@ -157,6 +207,14 @@ class DingTalkNotifier:
     async def send_recovery_notification(self, recovery_name: str, status: str,
                                        details: Optional[Dict] = None):
         """发送恢复通知"""
+        # 根据状态检查是否应该发送
+        if status == "success" and not self._should_send_notification("notify_recovery_success"):
+            logger.debug("恢复成功通知已禁用")
+            return
+        elif status == "failed" and not self._should_send_notification("notify_recovery_failed"):
+            logger.debug("恢复失败通知已禁用")
+            return
+        
         if status == "success":
             title = "✅ 恢复任务完成"
             content = f"""## 恢复任务完成通知
@@ -188,6 +246,17 @@ class DingTalkNotifier:
     async def send_tape_notification(self, tape_id: str, action: str,
                                    details: Optional[Dict] = None):
         """发送磁带操作通知"""
+        # 根据动作检查是否应该发送
+        if action == "expired" and not self._should_send_notification("notify_tape_expired"):
+            logger.debug("磁带过期通知已禁用")
+            return
+        elif action == "error" and not self._should_send_notification("notify_tape_error"):
+            logger.debug("磁带错误通知已禁用")
+            return
+        elif action == "change_required" and not self._should_send_notification("notify_tape_change"):
+            logger.debug("磁带更换通知已禁用")
+            return
+        
         if action == "change_required":
             title = "📼 需要更换磁带"
             content = f"""## 磁带更换提醒
@@ -228,6 +297,11 @@ class DingTalkNotifier:
 
     async def send_system_notification(self, title: str, content: str):
         """发送系统通知"""
+        # 检查是否应该发送系统通知
+        if not self._should_send_notification("notify_system_started"):
+            logger.debug("系统启动通知已禁用")
+            return
+        
         formatted_content = f"""## 系统通知
 
 {content}
@@ -238,6 +312,11 @@ class DingTalkNotifier:
 
     async def send_capacity_warning(self, used_percent: float, details: Optional[Dict] = None):
         """发送容量预警通知"""
+        # 检查是否应该发送容量预警
+        if not self._should_send_notification("notify_capacity_warning"):
+            logger.debug("容量预警通知已禁用")
+            return
+        
         title = "⚠️ 存储容量预警"
         content = f"""## 存储容量预警
 
