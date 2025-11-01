@@ -38,6 +38,17 @@ class SystemConfigRequest(BaseModel):
     database_config: Optional[DatabaseConfig] = None
 
 
+class TapeConfig(BaseModel):
+    """磁带机配置模型"""
+    tape_device_path: str = Field("/dev/nst0", description="磁带设备路径")
+    tape_drive_letter: str = Field("o", description="Windows驱动盘符")
+    default_block_size: int = Field(262144, description="默认块大小(字节)")
+    max_volume_size: int = Field(322122547200, description="最大卷大小(字节)")
+    tape_pool_size: int = Field(12, description="磁带池大小")
+    tape_check_interval: int = Field(3600, description="状态检查间隔(秒)")
+    auto_tape_cleanup: bool = Field(True, description="自动清理过期磁带")
+
+
 @router.get("/info")
 async def get_system_info():
     """获取系统信息"""
@@ -450,5 +461,203 @@ async def get_database_status(request: Request):
         logger.error(f"获取数据库状态失败: {str(e)}")
         return {
             "status": "error",
+            "message": str(e)
+        }
+
+
+# ===== 磁带机配置API =====
+
+@router.get("/tape/config")
+async def get_tape_config():
+    """获取磁带机配置"""
+    try:
+        from config.settings import get_settings
+        settings = get_settings()
+        
+        # 返回当前磁带机配置
+        config = {
+            "tape_device_path": settings.TAPE_DEVICE_PATH,
+            "tape_drive_letter": settings.TAPE_DRIVE_LETTER,
+            "default_block_size": settings.DEFAULT_BLOCK_SIZE,
+            "max_volume_size": settings.MAX_VOLUME_SIZE,
+            "tape_pool_size": settings.TAPE_POOL_SIZE,
+            "tape_check_interval": settings.TAPE_CHECK_INTERVAL,
+            "auto_tape_cleanup": settings.AUTO_TAPE_CLEANUP
+        }
+        
+        return {"success": True, "config": config}
+        
+    except Exception as e:
+        logger.error(f"获取磁带机配置失败: {str(e)}")
+        return {"success": False, "message": str(e)}
+
+
+@router.post("/tape/test")
+async def test_tape_connection(config: TapeConfig):
+    """测试磁带机连接"""
+    try:
+        from config.settings import get_settings
+        settings = get_settings()
+        
+        # 使用配置的SCSI接口测试设备连接
+        try:
+            from tape.scsi_interface import SCSIInterface
+            scsi = SCSIInterface()
+            await scsi.initialize()
+            
+            # 使用配置的设备路径或默认路径
+            device_path = config.tape_device_path if config.tape_device_path else settings.TAPE_DEVICE_PATH
+            
+            # 尝试扫描设备
+            devices = await scsi.scan_tape_devices()
+            
+            # 如果找到设备，测试连接
+            if devices and len(devices) > 0:
+                # 测试第一个设备
+                ready = await scsi.test_unit_ready(devices[0]['path'])
+                
+                await scsi.close()
+                
+                if ready:
+                    return {
+                        "success": True,
+                        "message": "磁带机连接测试成功",
+                        "connected": True,
+                        "device_info": f"{devices[0]['vendor']} {devices[0]['model']}"
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "message": "设备未就绪",
+                        "connected": False,
+                        "error": "设备无响应"
+                    }
+            else:
+                await scsi.close()
+                return {
+                    "success": False,
+                    "message": "未检测到磁带设备",
+                    "connected": False,
+                    "error": "请检查设备是否连接"
+                }
+                
+        except Exception as scsi_error:
+            logger.error(f"SCSI接口测试失败: {str(scsi_error)}")
+            return {
+                "success": False,
+                "message": f"连接测试失败: {str(scsi_error)}",
+                "connected": False,
+                "error": str(scsi_error)
+            }
+        
+    except Exception as e:
+        logger.error(f"测试磁带机连接失败: {str(e)}")
+        return {
+            "success": False,
+            "message": f"测试失败: {str(e)}",
+            "connected": False,
+            "error": str(e)
+        }
+
+
+@router.put("/tape/config")
+async def update_tape_config(config: TapeConfig):
+    """更新磁带机配置"""
+    try:
+        import os
+        from pathlib import Path
+        
+        # 保存配置到.env文件
+        env_file = Path(".env")
+        env_lines = []
+        
+        if env_file.exists():
+            with open(env_file, "r", encoding="utf-8") as f:
+                env_lines = f.readlines()
+        
+        # 更新或添加磁带机配置
+        config_keys = {
+            "TAPE_DEVICE_PATH": config.tape_device_path,
+            "TAPE_DRIVE_LETTER": config.tape_drive_letter,
+            "DEFAULT_BLOCK_SIZE": str(config.default_block_size),
+            "MAX_VOLUME_SIZE": str(config.max_volume_size),
+            "TAPE_POOL_SIZE": str(config.tape_pool_size),
+            "TAPE_CHECK_INTERVAL": str(config.tape_check_interval),
+            "AUTO_TAPE_CLEANUP": "true" if config.auto_tape_cleanup else "false"
+        }
+        
+        # 更新现有配置或添加新配置
+        updated_keys = set()
+        for i, line in enumerate(env_lines):
+            line_stripped = line.strip()
+            for key, value in config_keys.items():
+                if line_stripped.startswith(key + "="):
+                    env_lines[i] = f"{key}={value}\n"
+                    updated_keys.add(key)
+        
+        # 添加未更新的配置
+        for key, value in config_keys.items():
+            if key not in updated_keys:
+                env_lines.append(f"{key}={value}\n")
+        
+        # 写入文件
+        with open(env_file, "w", encoding="utf-8") as f:
+            f.writelines(env_lines)
+        
+        logger.info("磁带机配置已更新")
+        
+        return {
+            "success": True,
+            "message": "磁带机配置更新成功，需要重启系统生效"
+        }
+        
+    except Exception as e:
+        logger.error(f"更新磁带机配置失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/tape/scan")
+async def scan_tape_devices(request: Request):
+    """扫描磁带设备"""
+    try:
+        try:
+            from tape.scsi_interface import SCSIInterface
+            scsi = SCSIInterface()
+            await scsi.initialize()
+            
+            # 扫描设备
+            devices = await scsi.scan_tape_devices()
+            
+            await scsi.close()
+            
+            if devices and len(devices) > 0:
+                return {
+                    "success": True,
+                    "devices": devices,
+                    "count": len(devices)
+                }
+            else:
+                return {
+                    "success": True,
+                    "devices": [],
+                    "count": 0,
+                    "message": "未检测到磁带设备"
+                }
+                
+        except Exception as scsi_error:
+            logger.error(f"扫描磁带设备失败: {str(scsi_error)}")
+            return {
+                "success": False,
+                "devices": [],
+                "count": 0,
+                "message": f"扫描失败: {str(scsi_error)}"
+            }
+        
+    except Exception as e:
+        logger.error(f"扫描磁带设备失败: {str(e)}")
+        return {
+            "success": False,
+            "devices": [],
+            "count": 0,
             "message": str(e)
         }

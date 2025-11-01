@@ -82,6 +82,11 @@
                             </button>
                         </li>
                         <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="tapedrive-tab" data-bs-toggle="tab" data-bs-target="#tapedrive" type="button" role="tab">
+                                <i class="fas fa-server me-2"></i>磁带机配置
+                            </button>
+                        </li>
+                        <li class="nav-item" role="presentation">
                             <button class="nav-link" id="notification-tab" data-bs-toggle="tab" data-bs-target="#notification" type="button" role="tab">
                                 <i class="fas fa-bell me-2"></i>通知设置
                             </button>
@@ -263,6 +268,132 @@
                                             <div class="d-flex justify-content-between">
                                                 <small class="text-muted">最大溢出:</small>
                                                 <small class="text-muted" id="currentMaxOverflow">20</small>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 磁带机配置 -->
+                        <div class="tab-pane fade" id="tapedrive" role="tabpanel">
+                            <div class="row">
+                                <div class="col-md-8">
+                                    <div class="setting-card card mb-3">
+                                        <div class="card-body">
+                                            <h6 class="card-title">磁带机设备配置</h6>
+                                            <div class="mb-3">
+                                                <label class="form-label">设备路径</label>
+                                                <div class="input-group">
+                                                    <span class="input-group-text">
+                                                        <i class="fas fa-hdd"></i>
+                                                    </span>
+                                                    <input type="text" class="form-control" id="tapeDevicePath" placeholder="/dev/nst0">
+                                                </div>
+                                                <small class="text-muted">Linux: /dev/nst0, Windows: \\.\TAPE0</small>
+                                            </div>
+
+                                            <div class="mb-3">
+                                                <label class="form-label">驱动盘符 (Windows)</label>
+                                                <div class="input-group">
+                                                    <span class="input-group-text">
+                                                        <i class="fas fa-drive"></i>
+                                                    </span>
+                                                    <input type="text" class="form-control" id="tapeDriveLetter" placeholder="o" maxlength="1" style="max-width: 80px;">
+                                                </div>
+                                                <small class="text-muted">Windows系统磁带驱动器的盘符</small>
+                                            </div>
+
+                                            <hr>
+                                            <h6 class="card-title mt-3">数据块配置</h6>
+                                            <div class="row">
+                                                <div class="col-md-6 mb-3">
+                                                    <label class="form-label">默认块大小</label>
+                                                    <select class="form-select" id="blockSize">
+                                                        <option value="65536">64KB</option>
+                                                        <option value="131072">128KB</option>
+                                                        <option value="262144" selected>256KB (推荐)</option>
+                                                        <option value="524288">512KB</option>
+                                                        <option value="1048576">1MB</option>
+                                                    </select>
+                                                    <small class="text-muted">磁带数据块大小</small>
+                                                </div>
+                                                <div class="col-md-6 mb-3">
+                                                    <label class="form-label">最大卷大小</label>
+                                                    <div class="input-group">
+                                                        <input type="number" class="form-control" id="maxVolumeSize" value="322122547200" step="1024">
+                                                        <span class="input-group-text">Bytes</span>
+                                                    </div>
+                                                    <small class="text-muted">单个备份卷的最大大小</small>
+                                                </div>
+                                            </div>
+
+                                            <hr>
+                                            <h6 class="card-title mt-3">磁带管理</h6>
+                                            <div class="row">
+                                                <div class="col-md-6 mb-3">
+                                                    <label class="form-label">磁带池大小</label>
+                                                    <input type="number" class="form-control" id="tapePoolSize" value="12" min="1" max="100">
+                                                    <small class="text-muted">管理的磁带数量</small>
+                                                </div>
+                                                <div class="col-md-6 mb-3">
+                                                    <label class="form-label">状态检查间隔</label>
+                                                    <div class="input-group">
+                                                        <input type="number" class="form-control" id="tapeCheckInterval" value="3600" min="60">
+                                                        <span class="input-group-text">秒</span>
+                                                    </div>
+                                                    <small class="text-muted">磁带状态自动检查间隔</small>
+                                                </div>
+                                            </div>
+
+                                            <div class="form-check form-switch mb-3">
+                                                <input class="form-check-input" type="checkbox" id="autoTapeCleanup" checked>
+                                                <label class="form-check-label" for="autoTapeCleanup">自动清理过期磁带</label>
+                                            </div>
+
+                                            <div class="mb-3">
+                                                <button class="btn btn-outline-primary" id="testTapeConnectionBtn">
+                                                    <i class="fas fa-plug me-2"></i>测试连接
+                                                </button>
+                                                <button class="btn btn-success" id="saveTapeConfigBtn">
+                                                    <i class="fas fa-save me-2"></i>保存配置
+                                                </button>
+                                                <button class="btn btn-info" id="scanTapeDevicesBtn">
+                                                    <i class="fas fa-search me-2"></i>扫描设备
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="setting-card card mb-3">
+                                        <div class="card-body">
+                                            <h6 class="card-title">连接状态</h6>
+                                            <div class="text-center" id="tapeStatus">
+                                                <div class="status-indicator status-offline mb-2"></div>
+                                                <p class="text-danger" id="tapeStatusText">未连接</p>
+                                                <small class="text-muted" id="tapeDeviceInfo">未检测到设备</small>
+                                            </div>
+                                            <hr>
+                                            <div class="d-flex justify-content-between">
+                                                <small class="text-muted">块大小:</small>
+                                                <small class="text-muted" id="currentBlockSize">256KB</small>
+                                            </div>
+                                            <div class="d-flex justify-content-between">
+                                                <small class="text-muted">池大小:</small>
+                                                <small class="text-muted" id="currentTapePoolSize">12</small>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div class="setting-card card mb-3">
+                                        <div class="card-body">
+                                            <h6 class="card-title">已检测设备</h6>
+                                            <div id="detectedDevices">
+                                                <p class="text-muted text-center mb-0">
+                                                    <i class="fas fa-info-circle"></i>
+                                                    暂无设备
+                                                </p>
                                             </div>
                                         </div>
                                     </div>
@@ -721,6 +852,188 @@ async function loadDatabaseStatus() {
 
 // 定期刷新数据库状态
 setInterval(loadDatabaseStatus, 30000); // 每30秒刷新一次
+
+// ===== 磁带机配置JavaScript =====
+document.addEventListener('DOMContentLoaded', function() {
+    loadTapeConfig();
+    
+    // 测试磁带连接
+    document.getElementById('testTapeConnectionBtn').addEventListener('click', async function() {
+        const btn = this;
+        const originalHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>测试中...';
+        
+        try {
+            const config = getTapeConfig();
+            const response = await fetch('/api/system/tape/test', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(config)
+            });
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                alert('✅ 磁带机连接测试成功！');
+                updateTapeStatus(result);
+            } else {
+                alert('❌ 磁带机连接测试失败：' + result.message);
+                updateTapeStatus({ connected: false });
+            }
+        } catch (error) {
+            alert('❌ 测试失败：' + error.message);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = originalHtml;
+        }
+    });
+    
+    // 保存磁带配置
+    document.getElementById('saveTapeConfigBtn').addEventListener('click', async function() {
+        const btn = this;
+        const originalHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>保存中...';
+        
+        try {
+            const config = getTapeConfig();
+            const response = await fetch('/api/system/tape/config', {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(config)
+            });
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                alert('✅ ' + result.message);
+                loadTapeConfig();
+            } else {
+                alert('❌ 保存失败：' + result.message);
+            }
+        } catch (error) {
+            alert('❌ 保存失败：' + error.message);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = originalHtml;
+        }
+    });
+    
+    // 扫描磁带设备
+    document.getElementById('scanTapeDevicesBtn').addEventListener('click', async function() {
+        const btn = this;
+        const originalHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>扫描中...';
+        
+        try {
+            const response = await fetch('/api/system/tape/scan');
+            const result = await response.json();
+            
+            if (result.success && result.devices && result.devices.length > 0) {
+                displayDetectedDevices(result.devices);
+                alert(`✅ 检测到 ${result.devices.length} 个磁带设备！`);
+            } else {
+                displayDetectedDevices([]);
+                alert('⚠️ 未检测到磁带设备');
+            }
+        } catch (error) {
+            alert('❌ 扫描失败：' + error.message);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = originalHtml;
+        }
+    });
+});
+
+function loadTapeConfig() {
+    fetch('/api/system/tape/config')
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                const config = data.config;
+                if (config.tape_device_path) {
+                    document.getElementById('tapeDevicePath').value = config.tape_device_path;
+                }
+                if (config.tape_drive_letter) {
+                    document.getElementById('tapeDriveLetter').value = config.tape_drive_letter;
+                }
+                if (config.default_block_size) {
+                    document.getElementById('blockSize').value = config.default_block_size;
+                }
+                if (config.max_volume_size) {
+                    document.getElementById('maxVolumeSize').value = config.max_volume_size;
+                }
+                if (config.tape_pool_size) {
+                    document.getElementById('tapePoolSize').value = config.tape_pool_size;
+                }
+                if (config.tape_check_interval) {
+                    document.getElementById('tapeCheckInterval').value = config.tape_check_interval;
+                }
+                if (config.auto_tape_cleanup !== undefined) {
+                    document.getElementById('autoTapeCleanup').checked = config.auto_tape_cleanup;
+                }
+                updateTapeStatus(data.status || {});
+            }
+        })
+        .catch(error => console.error('加载磁带配置失败:', error));
+}
+
+function getTapeConfig() {
+    return {
+        tape_device_path: document.getElementById('tapeDevicePath').value,
+        tape_drive_letter: document.getElementById('tapeDriveLetter').value,
+        default_block_size: parseInt(document.getElementById('blockSize').value),
+        max_volume_size: parseInt(document.getElementById('maxVolumeSize').value),
+        tape_pool_size: parseInt(document.getElementById('tapePoolSize').value),
+        tape_check_interval: parseInt(document.getElementById('tapeCheckInterval').value),
+        auto_tape_cleanup: document.getElementById('autoTapeCleanup').checked
+    };
+}
+
+function updateTapeStatus(status) {
+    const statusDiv = document.getElementById('tapeStatus');
+    const statusText = document.getElementById('tapeStatusText');
+    const deviceInfo = document.getElementById('tapeDeviceInfo');
+    const indicator = statusDiv.querySelector('.status-indicator');
+    
+    if (status.connected) {
+        indicator.className = 'status-indicator status-online mb-2';
+        statusText.className = 'text-success';
+        statusText.textContent = '已连接';
+        deviceInfo.textContent = status.device_info || '设备正常';
+    } else {
+        indicator.className = 'status-indicator status-offline mb-2';
+        statusText.className = 'text-danger';
+        statusText.textContent = '未连接';
+        deviceInfo.textContent = status.error || '未检测到设备';
+    }
+}
+
+function displayDetectedDevices(devices) {
+    const container = document.getElementById('detectedDevices');
+    
+    if (!devices || devices.length === 0) {
+        container.innerHTML = '<p class="text-muted text-center mb-0"><i class="fas fa-info-circle"></i> 暂无设备</p>';
+        return;
+    }
+    
+    let html = '<ul class="list-unstyled mb-0">';
+    devices.forEach(device => {
+        html += `
+            <li class="mb-2 p-2 border rounded">
+                <div class="fw-bold">${device.vendor} ${device.model}</div>
+                <small class="text-muted d-block">${device.path}</small>
+                ${device.status === 'online' ? 
+                    '<span class="badge bg-success">在线</span>' : 
+                    '<span class="badge bg-danger">离线</span>'}
+            </li>
+        `;
+    });
+    html += '</ul>';
+    container.innerHTML = html;
+}
 
 // 系统信息标签页的版本链接
 document.addEventListener('DOMContentLoaded', function() {
