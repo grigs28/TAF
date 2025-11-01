@@ -410,20 +410,35 @@
                                             <h6 class="card-title">钉钉通知配置</h6>
                                             <div class="mb-3">
                                                 <label class="form-label">API地址</label>
-                                                <input type="url" class="form-control" value="http://192.168.0.20:5555">
+                                                <input type="url" class="form-control" id="dingtalkApiUrl" value="http://192.168.0.20:5555">
                                             </div>
                                             <div class="mb-3">
                                                 <label class="form-label">API密钥</label>
-                                                <input type="password" class="form-control" value="sk-dingtalk-api-2024-001">
+                                                <input type="password" class="form-control" id="dingtalkApiKey" value="sk-dingtalk-api-2024-001">
                                             </div>
                                             <div class="mb-3">
                                                 <label class="form-label">默认手机号</label>
-                                                <input type="tel" class="form-control" value="13293513336">
+                                                <input type="tel" class="form-control" id="dingtalkDefaultPhone" value="13293513336">
                                             </div>
                                             <div class="mb-3">
                                                 <button class="btn btn-outline-primary" id="testNotificationBtn">
                                                     <i class="fas fa-paper-plane me-2"></i>发送测试通知
                                                 </button>
+                                                <button class="btn btn-success ms-2" id="saveNotificationConfigBtn">
+                                                    <i class="fas fa-save me-2"></i>保存配置
+                                                </button>
+                                            </div>
+                                            <hr>
+                                            <h6 class="card-title mt-3">通知人员</h6>
+                                            <div class="mb-3">
+                                                <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addNotificationUserModal">
+                                                    <i class="fas fa-plus me-1"></i>添加人员
+                                                </button>
+                                            </div>
+                                            <div id="notificationUsers">
+                                                <div class="alert alert-info mb-0">
+                                                    <small>默认手机号: <strong id="defaultPhoneDisplay">13293513336</strong></small>
+                                                </div>
                                             </div>
                                         </div>
                                     </div>
@@ -479,21 +494,9 @@
                                                 <input class="form-check-input" type="checkbox" id="notifySystemError" checked>
                                                 <label class="form-check-label" for="notifySystemError">系统错误</label>
                                             </div>
-                                        </div>
-                                    </div>
-                                    
-                                    <div class="setting-card card mb-3">
-                                        <div class="card-body">
-                                            <div class="d-flex justify-content-between align-items-center mb-2">
-                                                <h6 class="card-title mb-0">通知人员</h6>
-                                                <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addNotificationUserModal">
-                                                    <i class="fas fa-plus"></i>
-                                                </button>
-                                            </div>
-                                            <div id="notificationUsers">
-                                                <div class="alert alert-info mb-0">
-                                                    <small>默认手机号: <strong>13293513336</strong></small>
-                                                </div>
+                                            <div class="form-check mb-2">
+                                                <input class="form-check-input" type="checkbox" id="notifySystemStarted" checked>
+                                                <label class="form-check-label" for="notifySystemStarted">系统启动</label>
                                             </div>
                                         </div>
                                     </div>
@@ -1098,6 +1101,102 @@ function displayDetectedDevices(devices) {
     container.innerHTML = html;
 }
 
+// ===== 通知配置JavaScript =====
+document.addEventListener('DOMContentLoaded', function() {
+    // 加载通知配置
+    loadNotificationConfig();
+    
+    // 测试通知
+    const testNotificationBtn = document.getElementById('testNotificationBtn');
+    if (testNotificationBtn) {
+        testNotificationBtn.addEventListener('click', async function() {
+            const btn = this;
+            const originalHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>发送中...';
+            
+            try {
+                const phone = document.getElementById('dingtalkDefaultPhone').value;
+                const response = await fetch(`/api/system/notification/test?phone=${phone}`, {
+                    method: 'POST'
+                });
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert('✅ ' + result.message);
+                } else {
+                    alert('❌ ' + result.message);
+                }
+            } catch (error) {
+                alert('❌ 测试失败：' + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = originalHtml;
+            }
+        });
+    }
+    
+    // 保存通知配置
+    const saveNotificationConfigBtn = document.getElementById('saveNotificationConfigBtn');
+    if (saveNotificationConfigBtn) {
+        saveNotificationConfigBtn.addEventListener('click', async function() {
+            const btn = this;
+            const originalHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>保存中...';
+            
+            try {
+                const config = {
+                    dingtalk_api_url: document.getElementById('dingtalkApiUrl').value,
+                    dingtalk_api_key: document.getElementById('dingtalkApiKey').value,
+                    dingtalk_default_phone: document.getElementById('dingtalkDefaultPhone').value
+                };
+                
+                const response = await fetch('/api/system/notification/config', {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(config)
+                });
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert('✅ ' + result.message);
+                    loadNotificationConfig();
+                } else {
+                    alert('❌ 保存失败：' + result.message);
+                }
+            } catch (error) {
+                alert('❌ 保存失败：' + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = originalHtml;
+            }
+        });
+    }
+});
+
+// 加载通知配置
+function loadNotificationConfig() {
+    fetch('/api/system/notification/config')
+        .then(response => response.json())
+        .then(data => {
+            if (data.success && data.config) {
+                const config = data.config;
+                if (config.dingtalk_api_url) {
+                    document.getElementById('dingtalkApiUrl').value = config.dingtalk_api_url;
+                }
+                if (config.dingtalk_api_key) {
+                    document.getElementById('dingtalkApiKey').value = config.dingtalk_api_key;
+                }
+                if (config.dingtalk_default_phone) {
+                    document.getElementById('dingtalkDefaultPhone').value = config.dingtalk_default_phone;
+                    document.getElementById('defaultPhoneDisplay').textContent = config.dingtalk_default_phone;
+                }
+            }
+        })
+        .catch(error => console.error('加载通知配置失败:', error));
+}
+
 // 系统信息标签页的版本链接
 document.addEventListener('DOMContentLoaded', function() {
     const aboutVersionLink = document.getElementById('about-version-link');
@@ -1125,8 +1224,14 @@ document.addEventListener('DOMContentLoaded', function() {
                     <small class="text-muted">11位手机号码</small>
                 </div>
                 <div class="mb-3">
-                    <label class="form-label">姓名/备注</label>
-                    <input type="text" class="form-control" id="notificationName" placeholder="管理员">
+                    <label class="form-label">姓名</label>
+                    <input type="text" class="form-control" id="notificationName" placeholder="张管理员">
+                    <small class="text-muted">通知人员姓名</small>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">备注</label>
+                    <input type="text" class="form-control" id="notificationRemark" placeholder="系统管理员">
+                    <small class="text-muted">可选的备注信息</small>
                 </div>
             </div>
             <div class="modal-footer">
@@ -1142,18 +1247,42 @@ document.addEventListener('DOMContentLoaded', function() {
 function addNotificationUser() {
     const phone = document.getElementById('notificationPhone').value;
     const name = document.getElementById('notificationName').value;
+    const remark = document.getElementById('notificationRemark').value;
     
     if (!phone || phone.length !== 11) {
         alert('请输入正确的11位手机号');
         return;
     }
     
-    // TODO: 调用API添加通知人员
-    alert('功能开发中：将添加通知人员到数据库');
+    // TODO: 调用API添加通知人员到数据库
+    // 临时添加到列表显示
+    addNotificationUserToList(phone, name, remark);
+    
+    // 清空表单
+    document.getElementById('notificationPhone').value = '';
+    document.getElementById('notificationName').value = '';
+    document.getElementById('notificationRemark').value = '';
     
     // 关闭模态框
     const modal = bootstrap.Modal.getInstance(document.getElementById('addNotificationUserModal'));
     modal.hide();
+}
+
+// 添加通知人员到列表显示
+function addNotificationUserToList(phone, name, remark) {
+    const container = document.getElementById('notificationUsers');
+    const userDiv = document.createElement('div');
+    userDiv.className = 'alert alert-light mb-2 border';
+    userDiv.innerHTML = `
+        <div class="form-check">
+            <input class="form-check-input" type="checkbox" checked>
+            <label class="form-check-label">
+                <strong>${name || '未命名'}</strong> <small class="text-muted">${phone}</small>
+                ${remark ? `<br><small class="text-muted">${remark}</small>` : ''}
+            </label>
+        </div>
+    `;
+    container.appendChild(userDiv);
 }
 </script>
 

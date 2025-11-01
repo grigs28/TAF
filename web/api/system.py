@@ -49,6 +49,21 @@ class TapeConfig(BaseModel):
     auto_tape_cleanup: bool = Field(True, description="自动清理过期磁带")
 
 
+class DingTalkConfig(BaseModel):
+    """钉钉通知配置模型"""
+    dingtalk_api_url: str = Field(..., description="钉钉API地址")
+    dingtalk_api_key: str = Field(..., description="钉钉API密钥")
+    dingtalk_default_phone: str = Field(..., description="默认手机号")
+
+
+class NotificationUser(BaseModel):
+    """通知人员模型"""
+    phone: str = Field(..., description="手机号")
+    name: str = Field(..., description="姓名")
+    remark: Optional[str] = Field(None, description="备注")
+    enabled: bool = Field(True, description="是否启用")
+
+
 @router.get("/info")
 async def get_system_info():
     """获取系统信息"""
@@ -718,3 +733,117 @@ async def scan_tape_devices(request: Request):
             "count": 0,
             "message": str(e)
         }
+
+
+@router.get("/notification/config")
+async def get_notification_config():
+    """获取钉钉通知配置"""
+    try:
+        from config.settings import get_settings
+        settings = get_settings()
+        
+        return {
+            "success": True,
+            "config": {
+                "dingtalk_api_url": settings.DINGTALK_API_URL,
+                "dingtalk_api_key": settings.DINGTALK_API_KEY,
+                "dingtalk_default_phone": settings.DINGTALK_DEFAULT_PHONE
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"获取通知配置失败: {str(e)}")
+        return {"success": False, "message": str(e)}
+
+
+@router.put("/notification/config")
+async def update_notification_config(config: DingTalkConfig):
+    """更新钉钉通知配置"""
+    try:
+        from pathlib import Path
+        
+        # 保存配置到.env文件
+        env_file = Path(".env")
+        env_lines = []
+        
+        if env_file.exists():
+            with open(env_file, "r", encoding="utf-8") as f:
+                env_lines = f.readlines()
+        
+        # 更新或添加钉钉配置
+        config_keys = {
+            "DINGTALK_API_URL": config.dingtalk_api_url,
+            "DINGTALK_API_KEY": config.dingtalk_api_key,
+            "DINGTALK_DEFAULT_PHONE": config.dingtalk_default_phone
+        }
+        
+        # 更新现有行或添加新行
+        updated = set()
+        for i, line in enumerate(env_lines):
+            for key, value in config_keys.items():
+                if line.startswith(f"{key}="):
+                    env_lines[i] = f"{key}={value}\n"
+                    updated.add(key)
+                    break
+        
+        # 添加缺失的配置
+        for key, value in config_keys.items():
+            if key not in updated:
+                env_lines.append(f"{key}={value}\n")
+        
+        # 写入.env文件
+        with open(env_file, "w", encoding="utf-8") as f:
+            f.writelines(env_lines)
+        
+        logger.info("钉钉通知配置已更新")
+        
+        return {
+            "success": True,
+            "message": "通知配置更新成功，需要重启系统生效"
+        }
+        
+    except Exception as e:
+        logger.error(f"更新通知配置失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/notification/test")
+async def test_notification(phone: str = ""):
+    """测试钉钉通知"""
+    try:
+        from config.settings import get_settings
+        settings = get_settings()
+        
+        # 使用提供的手机号或默认手机号
+        target_phone = phone or settings.DINGTALK_DEFAULT_PHONE
+        
+        if not target_phone:
+            return {"success": False, "message": "未指定手机号"}
+        
+        # 调用钉钉通知器
+        from utils.dingtalk_notifier import DingTalkNotifier
+        notifier = DingTalkNotifier()
+        await notifier.initialize()
+        
+        result = await notifier.send_message(
+            phone=target_phone,
+            title="测试通知",
+            content="这是一条测试通知，用于验证钉钉通知配置是否正常工作。"
+        )
+        
+        await notifier.close()
+        
+        if result.get('success'):
+            return {
+                "success": True,
+                "message": f"测试通知发送成功 -> {target_phone}"
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"发送失败: {result.get('message', '未知错误')}"
+            }
+            
+    except Exception as e:
+        logger.error(f"测试通知失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
