@@ -432,21 +432,68 @@
                                     <div class="setting-card card mb-3">
                                         <div class="card-body">
                                             <h6 class="card-title">通知事件</h6>
+                                            <small class="text-muted d-block mb-2">备份相关</small>
                                             <div class="form-check mb-2">
                                                 <input class="form-check-input" type="checkbox" id="notifyBackupSuccess" checked>
                                                 <label class="form-check-label" for="notifyBackupSuccess">备份成功</label>
                                             </div>
                                             <div class="form-check mb-2">
+                                                <input class="form-check-input" type="checkbox" id="notifyBackupStarted" checked>
+                                                <label class="form-check-label" for="notifyBackupStarted">备份开始</label>
+                                            </div>
+                                            <div class="form-check mb-2">
                                                 <input class="form-check-input" type="checkbox" id="notifyBackupFailed" checked>
                                                 <label class="form-check-label" for="notifyBackupFailed">备份失败</label>
                                             </div>
+                                            
+                                            <small class="text-muted d-block mb-2 mt-2">恢复相关</small>
+                                            <div class="form-check mb-2">
+                                                <input class="form-check-input" type="checkbox" id="notifyRecoverySuccess" checked>
+                                                <label class="form-check-label" for="notifyRecoverySuccess">恢复成功</label>
+                                            </div>
+                                            <div class="form-check mb-2">
+                                                <input class="form-check-input" type="checkbox" id="notifyRecoveryFailed" checked>
+                                                <label class="form-check-label" for="notifyRecoveryFailed">恢复失败</label>
+                                            </div>
+                                            
+                                            <small class="text-muted d-block mb-2 mt-2">磁带相关</small>
                                             <div class="form-check mb-2">
                                                 <input class="form-check-input" type="checkbox" id="notifyTapeChange" checked>
                                                 <label class="form-check-label" for="notifyTapeChange">磁带更换</label>
                                             </div>
                                             <div class="form-check mb-2">
+                                                <input class="form-check-input" type="checkbox" id="notifyTapeExpired" checked>
+                                                <label class="form-check-label" for="notifyTapeExpired">磁带过期</label>
+                                            </div>
+                                            <div class="form-check mb-2">
+                                                <input class="form-check-input" type="checkbox" id="notifyTapeError" checked>
+                                                <label class="form-check-label" for="notifyTapeError">磁带错误</label>
+                                            </div>
+                                            
+                                            <small class="text-muted d-block mb-2 mt-2">系统相关</small>
+                                            <div class="form-check mb-2">
+                                                <input class="form-check-input" type="checkbox" id="notifyCapacityWarning" checked>
+                                                <label class="form-check-label" for="notifyCapacityWarning">容量预警</label>
+                                            </div>
+                                            <div class="form-check mb-2">
                                                 <input class="form-check-input" type="checkbox" id="notifySystemError" checked>
                                                 <label class="form-check-label" for="notifySystemError">系统错误</label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="setting-card card mb-3">
+                                        <div class="card-body">
+                                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                                <h6 class="card-title mb-0">通知人员</h6>
+                                                <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addNotificationUserModal">
+                                                    <i class="fas fa-plus"></i>
+                                                </button>
+                                            </div>
+                                            <div id="notificationUsers">
+                                                <div class="alert alert-info mb-0">
+                                                    <small>默认手机号: <strong>13293513336</strong></small>
+                                                </div>
                                             </div>
                                         </div>
                                     </div>
@@ -1062,4 +1109,52 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 </script>
+
+<!-- 添加通知人员模态框 -->
+<div class="modal fade" id="addNotificationUserModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">添加通知人员</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">手机号</label>
+                    <input type="tel" class="form-control" id="notificationPhone" placeholder="13293513336" required>
+                    <small class="text-muted">11位手机号码</small>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">姓名/备注</label>
+                    <input type="text" class="form-control" id="notificationName" placeholder="管理员">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="addNotificationUser()">添加</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// 添加通知人员
+function addNotificationUser() {
+    const phone = document.getElementById('notificationPhone').value;
+    const name = document.getElementById('notificationName').value;
+    
+    if (!phone || phone.length !== 11) {
+        alert('请输入正确的11位手机号');
+        return;
+    }
+    
+    // TODO: 调用API添加通知人员
+    alert('功能开发中：将添加通知人员到数据库');
+    
+    // 关闭模态框
+    const modal = bootstrap.Modal.getInstance(document.getElementById('addNotificationUserModal'));
+    modal.hide();
+}
+</script>
+
 {% endblock %}
