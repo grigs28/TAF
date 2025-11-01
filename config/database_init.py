@@ -7,8 +7,7 @@ Database Initialization Module
 
 import logging
 from typing import Optional
-from sqlalchemy import create_engine, text
-from sqlalchemy.exc import OperationalError, ProgrammingError
+import psycopg2
 
 from .settings import get_settings
 
@@ -31,88 +30,107 @@ class DatabaseInitializer:
                 logger.debug(f"SQLite数据库无需创建: {database_url}")
                 return True
             
-            # 解析URL获取数据库名
-            database_name = self._extract_database_name(database_url)
-            if not database_name:
-                logger.warning("无法从DATABASE_URL中提取数据库名")
+            # 解析URL获取数据库连接信息
+            db_info = self._parse_database_url(database_url)
+            if not db_info:
+                logger.warning("无法从DATABASE_URL中解析数据库信息")
                 return False
             
-            # 连接到默认的postgres数据库
-            admin_url = self._get_admin_url(database_url, database_name)
+            database_name = db_info['database']
             
             logger.info(f"检查数据库 {database_name} 是否存在...")
             
-            # 使用同步引擎创建数据库
-            engine = create_engine(
-                admin_url,
-                isolation_level="AUTOCOMMIT",
-                connect_args={"application_name": "tape_backup_init"}
+            # 先连接到默认的postgres数据库
+            conn = psycopg2.connect(
+                host=db_info['host'],
+                port=db_info['port'],
+                user=db_info['user'],
+                password=db_info['password'],
+                database='postgres'
             )
+            conn.autocommit = True
+            cur = conn.cursor()
             
-            try:
-                with engine.connect() as conn:
-                    # 检查数据库是否存在
-                    result = conn.execute(
-                        text(
-                            "SELECT 1 FROM pg_database WHERE datname = :db_name"
-                        ),
-                        {"db_name": database_name}
-                    )
-                    exists = result.fetchone() is not None
-                    
-                    if exists:
-                        logger.info(f"数据库 {database_name} 已存在")
-                        return True
-                    
-                    # 创建数据库
-                    logger.info(f"创建数据库 {database_name}...")
-                    conn.execute(
-                        text(f'CREATE DATABASE "{database_name}"')
-                    )
-                    logger.info(f"数据库 {database_name} 创建成功")
-                    return True
-                    
-            except ProgrammingError as e:
-                # 可能是权限问题
-                logger.error(f"无法创建数据库，可能是权限不足: {str(e)}")
-                logger.info(f"请手动创建数据库: CREATE DATABASE {database_name};")
-                return False
-            except Exception as e:
-                logger.error(f"检查或创建数据库时发生错误: {str(e)}")
-                return False
-            finally:
-                engine.dispose()
+            # 检查数据库是否存在
+            cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (database_name,))
+            if not cur.fetchone():
+                # 创建数据库
+                logger.info(f"创建数据库 {database_name}...")
+                cur.execute(f'CREATE DATABASE "{database_name}"')
+                logger.info(f"数据库 {database_name} 创建成功")
+            else:
+                logger.info(f"数据库 {database_name} 已存在")
+            
+            cur.close()
+            conn.close()
+            return True
                 
+        except psycopg2.errors.InsufficientPrivilege as e:
+            # 可能是权限问题
+            logger.error(f"无法创建数据库，可能是权限不足: {str(e)}")
+            logger.info(f"请手动创建数据库: CREATE DATABASE {database_name};")
+            return False
         except Exception as e:
             logger.error(f"数据库初始化失败: {str(e)}")
             return False
     
-    def _extract_database_name(self, database_url: str) -> Optional[str]:
-        """从数据库URL中提取数据库名"""
+    def _parse_database_url(self, database_url: str) -> Optional[dict]:
+        """从数据库URL中解析连接信息"""
         try:
             # 格式: postgresql://user:password@host:port/database
             # 或:    opengauss://user:password@host:port/database
-            if "@" in database_url and "/" in database_url:
-                # 获取@之后的部分
-                after_at = database_url.split("@")[1]
-                # 获取最后一个/之后的部分
-                parts = after_at.split("/")
-                if len(parts) > 1:
-                    database_name = parts[-1]
-                    # 移除可能的查询参数
-                    if "?" in database_name:
-                        database_name = database_name.split("?")[0]
-                    return database_name
+            
+            # 移除协议前缀
+            url = database_url
+            if url.startswith("opengauss://"):
+                url = url.replace("opengauss://", "", 1)
+            elif url.startswith("postgresql://"):
+                url = url.replace("postgresql://", "", 1)
+            else:
+                logger.error(f"不支持的数据库URL协议: {database_url}")
+                return None
+            
+            # 解析认证信息
+            if "@" not in url:
+                logger.error(f"无效的数据库URL格式: {database_url}")
+                return None
+            
+            auth_part, server_part = url.split("@", 1)
+            
+            # 解析用户名和密码
+            if ":" not in auth_part:
+                logger.error(f"无法解析用户名和密码: {database_url}")
+                return None
+            
+            user, password = auth_part.split(":", 1)
+            
+            # 解析服务器信息和数据库名
+            if "/" not in server_part:
+                logger.error(f"无法解析数据库名: {database_url}")
+                return None
+            
+            server_part, database = server_part.split("/", 1)
+            
+            # 移除可能的查询参数
+            if "?" in database:
+                database = database.split("?")[0]
+            
+            # 解析主机和端口
+            if ":" in server_part:
+                host, port = server_part.split(":", 1)
+                port = int(port)
+            else:
+                host = server_part
+                port = 5432  # 默认端口
+            
+            return {
+                'host': host,
+                'port': port,
+                'user': user,
+                'password': password,
+                'database': database
+            }
         except Exception as e:
-            logger.error(f"解析数据库名失败: {str(e)}")
-        return None
-    
-    def _get_admin_url(self, database_url: str, current_db: str) -> str:
-        """获取管理员的URL（连接到postgres数据库）"""
-        # 将URL中的数据库名替换为postgres
-        admin_url = database_url.replace(f"/{current_db}", "/postgres")
-        # 确保使用postgresql协议
-        if admin_url.startswith("opengauss://"):
-            admin_url = admin_url.replace("opengauss://", "postgresql://")
-        return admin_url
+            logger.error(f"解析数据库URL失败: {str(e)}")
+            return None
 
