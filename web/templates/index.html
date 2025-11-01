@@ -53,7 +53,7 @@
                         </div>
                         <div>
                             <h6 class="mb-1">磁带设备</h6>
-                            <span class="status-indicator stopped">未检测到</span>
+                            <span class="status-indicator" id="tapeDeviceStatus">未检测到</span>
                         </div>
                     </div>
                 </div>
@@ -369,4 +369,35 @@
         </div>
     </div>
 </div>
+
+<script>
+// 加载磁带设备状态
+async function loadTapeDeviceStatus() {
+    try {
+        const response = await fetch('/api/system/tape/config');
+        const data = await response.json();
+        
+        const statusElement = document.getElementById('tapeDeviceStatus');
+        if (statusElement && data.success && data.status) {
+            const status = data.status;
+            if (status.connected) {
+                statusElement.className = 'status-indicator';
+                statusElement.textContent = status.device_info || '已连接';
+            } else {
+                statusElement.className = 'status-indicator stopped';
+                statusElement.textContent = '未检测到';
+            }
+        }
+    } catch (error) {
+        console.error('加载磁带设备状态失败:', error);
+    }
+}
+
+// 页面加载时获取状态
+document.addEventListener('DOMContentLoaded', function() {
+    loadTapeDeviceStatus();
+    // 每30秒刷新一次
+    setInterval(loadTapeDeviceStatus, 30000);
+});
+</script>
 {% endblock %}
