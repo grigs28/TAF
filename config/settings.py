@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     # 应用配置
     APP_NAME: str = "企业级磁带备份系统"
-    APP_VERSION: str = "0.0.1"
+    APP_VERSION: str = "0.0.2"
     DEBUG: bool = False
     WEB_PORT: int = 8080
 

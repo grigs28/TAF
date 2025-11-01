@@ -84,22 +84,38 @@ def create_app(system_instance=None) -> FastAPI:
     @app.get("/backup", response_class=HTMLResponse)
     async def backup_page(request: Request):
         """备份管理页面"""
-        return templates.TemplateResponse("backup.html", {"request": request})
+        return templates.TemplateResponse("backup.html", {
+            "request": request,
+            "app_name": settings.APP_NAME,
+            "version": settings.APP_VERSION
+        })
 
     @app.get("/recovery", response_class=HTMLResponse)
     async def recovery_page(request: Request):
         """恢复管理页面"""
-        return templates.TemplateResponse("recovery.html", {"request": request})
+        return templates.TemplateResponse("recovery.html", {
+            "request": request,
+            "app_name": settings.APP_NAME,
+            "version": settings.APP_VERSION
+        })
 
     @app.get("/tape", response_class=HTMLResponse)
     async def tape_page(request: Request):
         """磁带管理页面"""
-        return templates.TemplateResponse("tape.html", {"request": request})
+        return templates.TemplateResponse("tape.html", {
+            "request": request,
+            "app_name": settings.APP_NAME,
+            "version": settings.APP_VERSION
+        })
 
     @app.get("/system", response_class=HTMLResponse)
     async def system_page(request: Request):
         """系统设置页面"""
-        return templates.TemplateResponse("system.html", {"request": request})
+        return templates.TemplateResponse("system.html", {
+            "request": request,
+            "app_name": settings.APP_NAME,
+            "version": settings.APP_VERSION
+        })
 
     @app.get("/health")
     async def health_check():
