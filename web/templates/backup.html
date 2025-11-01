@@ -44,34 +44,62 @@
     <!-- 统计信息 -->
     <div class="row mb-4">
         <div class="col-md-3">
-            <div class="card bg-primary text-white">
+            <div class="service-card">
                 <div class="card-body">
-                    <h5 class="card-title">总任务数</h5>
-                    <h2 class="mb-0">156</h2>
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <h6 class="mb-2">总任务数</h6>
+                            <h3 class="mb-0">156</h3>
+                        </div>
+                        <div class="ai-icon">
+                            <i class="bi bi-stack"></i>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
         <div class="col-md-3">
-            <div class="card bg-success text-white">
+            <div class="service-card">
                 <div class="card-body">
-                    <h5 class="card-title">成功</h5>
-                    <h2 class="mb-0">142</h2>
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <h6 class="mb-2">成功</h6>
+                            <h3 class="mb-0">142</h3>
+                        </div>
+                        <div class="ai-icon">
+                            <i class="bi bi-check-circle"></i>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
         <div class="col-md-3">
-            <div class="card bg-warning text-white">
+            <div class="service-card">
                 <div class="card-body">
-                    <h5 class="card-title">运行中</h5>
-                    <h2 class="mb-0">3</h2>
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <h6 class="mb-2">运行中</h6>
+                            <h3 class="mb-0">3</h3>
+                        </div>
+                        <div class="ai-icon">
+                            <i class="bi bi-hourglass-split"></i>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
         <div class="col-md-3">
-            <div class="card bg-danger text-white">
+            <div class="service-card">
                 <div class="card-body">
-                    <h5 class="card-title">失败</h5>
-                    <h2 class="mb-0">11</h2>
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <h6 class="mb-2">失败</h6>
+                            <h3 class="mb-0">11</h3>
+                        </div>
+                        <div class="ai-icon">
+                            <i class="bi bi-x-circle"></i>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -80,7 +108,7 @@
     <!-- 筛选和搜索 -->
     <div class="row mb-4">
         <div class="col">
-            <div class="card">
+            <div class="service-card">
                 <div class="card-body">
                     <div class="row">
                         <div class="col-md-3">
@@ -106,7 +134,7 @@
                         </div>
                         <div class="col-md-2">
                             <button class="btn btn-outline-secondary w-100">
-                                <i class="fas fa-search me-1"></i>搜索
+                                <i class="bi bi-search me-1"></i>搜索
                             </button>
                         </div>
                     </div>
@@ -118,18 +146,15 @@
     <!-- 备份任务列表 -->
     <div class="row">
         <div class="col-12">
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="card-title mb-0">备份任务列表</h5>
-                </div>
+            <div class="service-card">
                 <div class="card-body">
                     <!-- 运行中的任务 -->
-                    <h6 class="text-primary mb-3">
-                        <i class="fas fa-spinner fa-spin me-2"></i>运行中的任务
+                    <h6 class="mb-3">
+                        <i class="bi bi-hourglass-split me-2"></i>运行中的任务
                     </h6>
                     <div class="row mb-4">
                         <div class="col-md-6 col-lg-4 mb-3">
-                            <div class="card task-card task-running">
+                            <div class="service-card">
                                 <div class="card-body">
                                     <div class="d-flex justify-content-between align-items-start mb-2">
                                         <h6 class="card-title mb-0">月度完整备份</h6>
@@ -161,7 +186,7 @@
                         </div>
 
                         <div class="col-md-6 col-lg-4 mb-3">
-                            <div class="card task-card task-running">
+                            <div class="service-card">
                                 <div class="card-body">
                                     <div class="d-flex justify-content-between align-items-start mb-2">
                                         <h6 class="card-title mb-0">增量备份</h6>
@@ -195,7 +220,7 @@
 
                     <!-- 已完成的任务 -->
                     <h6 class="text-success mb-3">
-                        <i class="fas fa-check-circle me-2"></i>最近完成的任务
+                        <i class="bi bi-check-circle-fill me-2"></i>最近完成的任务
                     </h6>
                     <div class="table-responsive">
                         <table class="table table-hover">
@@ -222,10 +247,10 @@
                                     <td>1.8 GB</td>
                                     <td>
                                         <button class="btn btn-sm btn-outline-primary">
-                                            <i class="fas fa-eye"></i>
+                                            <i class="bi bi-eye"></i>
                                         </button>
                                         <button class="btn btn-sm btn-outline-warning">
-                                            <i class="fas fa-download"></i>
+                                            <i class="bi bi-download"></i>
                                         </button>
                                     </td>
                                 </tr>
@@ -239,10 +264,10 @@
                                     <td>245 MB</td>
                                     <td>
                                         <button class="btn btn-sm btn-outline-primary">
-                                            <i class="fas fa-eye"></i>
+                                            <i class="bi bi-eye"></i>
                                         </button>
                                         <button class="btn btn-sm btn-outline-warning">
-                                            <i class="fas fa-download"></i>
+                                            <i class="bi bi-download"></i>
                                         </button>
                                     </td>
                                 </tr>
@@ -256,10 +281,10 @@
                                     <td>-</td>
                                     <td>
                                         <button class="btn btn-sm btn-outline-primary">
-                                            <i class="fas fa-eye"></i>
+                                            <i class="bi bi-eye"></i>
                                         </button>
                                         <button class="btn btn-sm btn-outline-danger">
-                                            <i class="fas fa-redo"></i>
+                                            <i class="bi bi-arrow-repeat"></i>
                                         </button>
                                     </td>
                                 </tr>
@@ -304,7 +329,7 @@
                         <div class="input-group mb-2">
                             <input type="text" class="form-control" id="sourcePathInput" placeholder="/data,/home,/var">
                             <button class="btn btn-outline-secondary" type="button" onclick="showSourcePathDialog()">
-                                <i class="fas fa-folder-open me-1"></i>浏览
+                                <i class="bi bi-folder-open me-1"></i>浏览
                             </button>
                         </div>
                         <div id="sourcePathsList" class="mb-2"></div>
@@ -315,13 +340,13 @@
                         <div class="form-check mb-2">
                             <input class="form-check-input" type="radio" name="backupTarget" id="targetDisk" value="disk" checked>
                             <label class="form-check-label" for="targetDisk">
-                                <i class="fas fa-hdd me-1"></i>磁盘存储
+                                <i class="bi bi-hdd me-1"></i>磁盘存储
                             </label>
                         </div>
                         <div class="form-check mb-2">
                             <input class="form-check-input" type="radio" name="backupTarget" id="targetTape" value="tape">
                             <label class="form-check-label" for="targetTape">
-                                <i class="fas fa-database me-1"></i>磁带机
+                                <i class="bi bi-database me-1"></i>磁带机
                             </label>
                         </div>
                         <div id="targetTapeOptions" class="ms-4 mt-2" style="display:none;">
