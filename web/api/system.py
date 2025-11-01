@@ -69,6 +69,9 @@ async def get_system_info():
     """获取系统信息"""
     try:
         from config.settings import get_settings
+        from pathlib import Path
+        import re
+        
         settings = get_settings()
 
         return {
@@ -91,12 +94,14 @@ async def get_version():
     try:
         from config.settings import get_settings
         from pathlib import Path
+        import re
         
         settings = get_settings()
         
         # 读取CHANGELOG.md
         changelog_path = Path("CHANGELOG.md")
         changelog_content = ""
+        
         if changelog_path.exists():
             with open(changelog_path, "r", encoding="utf-8") as f:
                 changelog_content = f.read()

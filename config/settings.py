@@ -6,8 +6,10 @@ System Configuration Management Module
 """
 
 import os
+import re
+from pathlib import Path
 from typing import Optional
-from pydantic import Field
+from pydantic import Field, field_validator
 
 try:
     from pydantic_settings import BaseSettings
@@ -19,12 +21,29 @@ except ImportError:
     )
 
 
+def _read_version_from_changelog() -> str:
+    """从CHANGELOG.md读取最新版本号"""
+    try:
+        changelog_path = Path("CHANGELOG.md")
+        if changelog_path.exists():
+            with open(changelog_path, "r", encoding="utf-8") as f:
+                content = f.read()
+                # 匹配 ## [版本号] 格式
+                match = re.search(r'^##\s+\[([\d.]+)\]', content, re.MULTILINE)
+                if match:
+                    return match.group(1)
+    except Exception:
+        pass
+    # 默认版本
+    return "0.0.2"
+
+
 class Settings(BaseSettings):
     """系统配置类"""
 
     # 应用配置
     APP_NAME: str = "企业级磁带备份系统"
-    APP_VERSION: str = "0.0.2"
+    APP_VERSION: str = Field(default_factory=_read_version_from_changelog, description="版本号从CHANGELOG.md自动读取")
     DEBUG: bool = False
     WEB_PORT: int = 8080
 

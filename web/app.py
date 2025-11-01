@@ -35,9 +35,24 @@ async def lifespan(app: FastAPI):
 
 def create_app(system_instance=None) -> FastAPI:
     """创建FastAPI应用"""
+    # 从CHANGELOG.md解析版本号
+    app_version = "0.0.1"  # 默认版本
+    try:
+        from pathlib import Path
+        import re
+        changelog_path = Path("CHANGELOG.md")
+        if changelog_path.exists():
+            with open(changelog_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            version_match = re.search(r'## \[(\d+\.\d+\.\d+)\]', content)
+            if version_match:
+                app_version = version_match.group(1)
+    except Exception:
+        pass
+    
     app = FastAPI(
         title=settings.APP_NAME,
-        version=settings.APP_VERSION,
+        version=app_version,
         description="企业级磁带备份系统管理界面",
         lifespan=lifespan
     )
@@ -78,7 +93,7 @@ def create_app(system_instance=None) -> FastAPI:
         return templates.TemplateResponse("index.html", {
             "request": request,
             "app_name": settings.APP_NAME,
-            "version": settings.APP_VERSION
+            "version": app_version
         })
 
     @app.get("/backup", response_class=HTMLResponse)
@@ -87,7 +102,7 @@ def create_app(system_instance=None) -> FastAPI:
         return templates.TemplateResponse("backup.html", {
             "request": request,
             "app_name": settings.APP_NAME,
-            "version": settings.APP_VERSION
+            "version": app_version
         })
 
     @app.get("/recovery", response_class=HTMLResponse)
@@ -96,7 +111,7 @@ def create_app(system_instance=None) -> FastAPI:
         return templates.TemplateResponse("recovery.html", {
             "request": request,
             "app_name": settings.APP_NAME,
-            "version": settings.APP_VERSION
+            "version": app_version
         })
 
     @app.get("/tape", response_class=HTMLResponse)
@@ -105,7 +120,7 @@ def create_app(system_instance=None) -> FastAPI:
         return templates.TemplateResponse("tape.html", {
             "request": request,
             "app_name": settings.APP_NAME,
-            "version": settings.APP_VERSION
+            "version": app_version
         })
 
     @app.get("/system", response_class=HTMLResponse)
@@ -114,7 +129,7 @@ def create_app(system_instance=None) -> FastAPI:
         return templates.TemplateResponse("system.html", {
             "request": request,
             "app_name": settings.APP_NAME,
-            "version": settings.APP_VERSION
+            "version": app_version
         })
 
     @app.get("/health")
@@ -123,7 +138,7 @@ def create_app(system_instance=None) -> FastAPI:
         return {
             "status": "healthy",
             "timestamp": "2024-10-30T04:20:00Z",
-            "version": settings.APP_VERSION
+            "version": app_version
         }
 
     return app

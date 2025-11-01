@@ -69,15 +69,26 @@ htmlcov/
 .claude/
 .sample/
 
+# Static files - UI resources
+web/static/img/LOGO.png
+web/static/LOGO.png
+
 # Documentation
 docs/_build/
 site/
 
-# Static files
+# Static files - CSS
 web/static/css/*
-web/static/js/*
 !web/static/css/main.css
+!web/static/css/ai.css
+!web/static/css/bootstrap.min.css
+!web/static/css/bootstrap-icons.css
+!web/static/css/AlimamaDaoLiTi-Regular.woff2
+
+# Static files - JS
+web/static/js/*
 !web/static/js/main.js
+!web/static/js/**/*.js
 
 # Backup files
 *.bak
