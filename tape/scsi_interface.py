@@ -95,7 +95,7 @@ class SCSIInterface:
 
             # 保存结构体类型供后续使用
             self.SCSI_PASS_THROUGH_WITH_BUFFERS = SCSI_PASS_THROUGH_WITH_BUFFERS
-            
+
             # 加载kernel32.dll
             self.kernel32 = windll.kernel32
             self.create_file = self.kernel32.CreateFileW
