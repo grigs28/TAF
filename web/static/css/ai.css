@@ -268,8 +268,8 @@ body {
 }
 
 .nav-link.active {
-    background: linear-gradient(90deg, #0070a0, #005080);
-    color: #fff;
+    background: linear-gradient(90deg, #1a1a1a, #000000) !important;
+    color: #fff !important;
     box-shadow: 0 0 15px rgba(0, 80, 160, 0.18);
 }
 
@@ -979,6 +979,13 @@ body {
 .form-control:focus::placeholder {
     color: var(--primary-light);
     opacity: 0.9;
+}
+
+.form-control[readonly] {
+    background: rgba(30, 40, 55, 0.4) !important;
+    border-color: rgba(0, 170, 255, 0.15) !important;
+    color: var(--text-secondary) !important;
+    cursor: not-allowed;
 }
 
 .alert {
