@@ -268,7 +268,7 @@ body {
 }
 
 .nav-link.active {
-    background: linear-gradient(90deg, #005080, #003050);
+    background: linear-gradient(90deg, #0070a0, #005080);
     color: #fff;
     box-shadow: 0 0 15px rgba(0, 80, 160, 0.18);
 }
