@@ -466,6 +466,12 @@
                         <button type="button" class="btn btn-sm btn-outline-info" id="scanForAddTapeBtn">
                             <i class="bi bi-search me-1"></i>从磁带机扫描信息
                         </button>
+                        <button type="button" class="btn btn-sm btn-outline-primary ms-2" id="readTapeLabelBtn">
+                            <i class="bi bi-tag me-1"></i>读取磁带标签
+                        </button>
+                    </div>
+                    <div id="tapeLabelInfo" class="alert alert-light d-none mb-3">
+                        <small><i class="bi bi-info-circle me-1"></i><span id="tapeLabelInfoText"></span></small>
                     </div>
                     <div class="row">
                         <div class="col-md-6 mb-3">
@@ -664,6 +670,78 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             } catch (error) {
                 alert('❌ 扫描失败：' + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = originalHtml;
+            }
+        });
+    }
+    
+    // 读取磁带标签
+    const readTapeLabelBtn = document.getElementById('readTapeLabelBtn');
+    if (readTapeLabelBtn) {
+        readTapeLabelBtn.addEventListener('click', async function() {
+            const btn = this;
+            const originalHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-1"></i>读取中...';
+            
+            try {
+                const response = await fetch('/api/tape/read-label');
+                const result = await response.json();
+                
+                const infoDiv = document.getElementById('tapeLabelInfo');
+                const infoText = document.getElementById('tapeLabelInfoText');
+                
+                if (result.success && result.metadata) {
+                    const metadata = result.metadata;
+                    
+                    // 填充表单
+                    if (metadata.tape_id) {
+                        document.getElementById('tapeLabel').value = metadata.tape_id;
+                    }
+                    if (metadata.serial_number) {
+                        document.getElementById('tapeSerial').value = metadata.serial_number;
+                    }
+                    if (metadata.created_date) {
+                        const createdDate = new Date(metadata.created_date);
+                        const expiryDate = new Date(metadata.expiry_date);
+                        const daysUntilExpiry = Math.floor((expiryDate - new Date()) / (1000 * 60 * 60 * 24));
+                        
+                        let statusText = '从磁带读取到的信息: ';
+                        if (daysUntilExpiry > 0) {
+                            statusText += `创建日期: ${createdDate.toLocaleDateString()}, 距离过期还有 ${daysUntilExpiry} 天`;
+                            infoDiv.className = 'alert alert-success mb-3';
+                        } else {
+                            statusText += `创建日期: ${createdDate.toLocaleDateString()}, 磁带已过期，需要擦除`;
+                            infoDiv.className = 'alert alert-danger mb-3';
+                        }
+                        infoText.textContent = statusText;
+                        infoDiv.classList.remove('d-none');
+                    } else {
+                        infoText.textContent = '读取到磁带标签，但无过期信息';
+                        infoDiv.className = 'alert alert-warning mb-3';
+                        infoDiv.classList.remove('d-none');
+                    }
+                    
+                    // 检查是否在数据库中存在
+                    if (metadata.tape_id) {
+                        const checkResponse = await fetch(`/api/tape/check/${metadata.tape_id}`);
+                        const checkResult = await checkResponse.json();
+                        
+                        if (checkResult.exists) {
+                            infoText.textContent += ' (数据库中已存在此磁带记录)';
+                        }
+                    }
+                } else {
+                    infoText.textContent = '未检测到磁带标签或磁带为空';
+                    infoDiv.className = 'alert alert-warning mb-3';
+                    infoDiv.classList.remove('d-none');
+                }
+            } catch (error) {
+                document.getElementById('tapeLabelInfoText').textContent = '读取标签失败: ' + error.message;
+                document.getElementById('tapeLabelInfo').className = 'alert alert-danger mb-3';
+                document.getElementById('tapeLabelInfo').classList.remove('d-none');
             } finally {
                 btn.disabled = false;
                 btn.innerHTML = originalHtml;

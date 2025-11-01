@@ -102,6 +102,69 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/read-label")
+async def read_tape_label(request: Request):
+    """读取磁带标签"""
+    try:
+        system = request.app.state.system
+        if not system:
+            raise HTTPException(status_code=500, detail="系统未初始化")
+        
+        # 通过磁带操作读取标签
+        metadata = await system.tape_manager.tape_operations._read_tape_label()
+        
+        if metadata:
+            return {
+                "success": True,
+                "metadata": metadata
+            }
+        else:
+            return {
+                "success": False,
+                "message": "无法读取磁带标签或磁带为空"
+            }
+        
+    except Exception as e:
+        logger.error(f"读取磁带标签失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/check/{tape_id}")
+async def check_tape_exists(tape_id: str, request: Request):
+    """检查磁带是否存在"""
+    try:
+        from models.tape import TapeCartridge
+        from config.database import get_db
+        from sqlalchemy import select
+        
+        async for db in get_db():
+            stmt = select(TapeCartridge).where(TapeCartridge.tape_id == tape_id)
+            result = await db.execute(stmt)
+            existing = result.scalar_one_or_none()
+            
+            if existing:
+                # 检查是否过期
+                from datetime import datetime
+                is_expired = existing.expiry_date and datetime.now() > existing.expiry_date
+                
+                return {
+                    "exists": True,
+                    "tape_id": existing.tape_id,
+                    "label": existing.label,
+                    "status": existing.status.value,
+                    "is_expired": is_expired,
+                    "expiry_date": existing.expiry_date.isoformat() if existing.expiry_date else None
+                }
+            else:
+                return {
+                    "exists": False
+                }
+        
+    except Exception as e:
+        logger.error(f"检查磁带存在性失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/inventory")
 async def get_tape_inventory(request: Request):
     """获取磁带库存"""

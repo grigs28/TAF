@@ -397,21 +397,107 @@ class TapeOperations:
             logger.error(f"获取磁带容量异常: {str(e)}")
             return None
 
-    async def _read_tape_label(self) -> Optional[str]:
-        """读取磁带标签"""
+    async def _read_tape_label(self) -> Optional[Dict[str, Any]]:
+        """读取磁带标签（从磁带头读取元数据）"""
         try:
-            # 这里可以实现读取磁带标签的逻辑
-            # 例如读取开头的特定数据块来识别磁带
+            if not self.scsi_interface:
+                logger.error("SCSI接口未初始化")
+                return None
+            
+            import json
+            
+            # 倒带到开头
+            await self.scsi_interface.rewind_tape()
+            
+            # 读取第一个数据块（256字节）
+            block_size = 256
+            result = await self.scsi_interface.read_tape_data(block_number=0, block_count=1, block_size=block_size)
+            
+            if not result or 'data' not in result:
+                logger.warning("无法读取磁带标签")
+                return None
+            
+            data = result['data']
+            if len(data) < 16:
+                logger.warning("磁带标签数据太短")
+                return None
+            
+            # 解析头部信息
+            header_length = int.from_bytes(data[0:4], 'big')
+            version = data[4:8].decode('ascii', errors='ignore')
+            
+            if version != 'TAF1':
+                logger.warning(f"不支持的磁带标签格式: {version}")
+                return None
+            
+            # 提取元数据
+            if header_length > 0 and header_length < len(data) - 16:
+                metadata_bytes = data[8:8+header_length]
+                metadata_json = metadata_bytes.decode('utf-8', errors='ignore')
+                metadata = json.loads(metadata_json)
+                logger.info(f"读取磁带标签成功: {metadata.get('tape_id')}")
+                return metadata
+            
+            logger.warning("磁带标签元数据为空")
             return None
+            
         except Exception as e:
             logger.error(f"读取磁带标签异常: {str(e)}")
             return None
 
-    async def _write_tape_label(self, label: str) -> bool:
-        """写入磁带标签"""
+    async def _write_tape_label(self, tape_info: Dict[str, Any]) -> bool:
+        """写入磁带标签（磁带元数据到磁带头）"""
         try:
-            # 这里可以实现写入磁带标签的逻辑
-            return True
+            import json
+            if not self.scsi_interface:
+                logger.error("SCSI接口未初始化")
+                return False
+            
+            # 准备磁带元数据
+            metadata = {
+                "tape_id": tape_info.get("tape_id"),
+                "label": tape_info.get("label"),
+                "serial_number": tape_info.get("serial_number"),
+                "created_date": tape_info.get("created_date"),
+                "expiry_date": tape_info.get("expiry_date"),
+                "system_version": "TAF_0.0.4"
+            }
+            
+            # 将元数据序列化为JSON
+            metadata_json = json.dumps(metadata, default=str)
+            metadata_bytes = metadata_json.encode('utf-8')
+            
+            # 磁带标签应该写入磁带头部（第一个数据块）
+            # 这里使用最小的块大小确保写入成功
+            block_size = 256  # 256字节
+            
+            # 确保元数据不超过块大小
+            if len(metadata_bytes) > block_size - 16:  # 保留16字节用于头部
+                metadata_bytes = metadata_bytes[:block_size-16]
+            
+            # 添加头部信息（4字节长度 + 4字节版本 + 8字节预留）
+            header = len(metadata_bytes).to_bytes(4, 'big')
+            version = b'TAF1'  # TAF格式版本1
+            
+            # 填充到块大小
+            label_data = header + version + metadata_bytes
+            padding = block_size - len(label_data)
+            if padding > 0:
+                label_data += b'\x00' * padding
+            
+            # 倒带到开头
+            await self.scsi_interface.rewind_tape()
+            
+            # 写入标签数据
+            result = await self.scsi_interface.write_tape_data(data=label_data, block_number=0, block_size=block_size)
+            
+            if result:
+                logger.info(f"磁带标签写入成功: {tape_info.get('tape_id')}")
+                return True
+            else:
+                logger.error("磁带标签写入失败")
+                return False
+                
         except Exception as e:
             logger.error(f"写入磁带标签异常: {str(e)}")
             return False
