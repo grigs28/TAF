@@ -106,7 +106,7 @@
                     <!-- 选项卡内容 -->
                     <div class="tab-content" id="settingsTabsContent">
                         <!-- 常规设置 -->
-                        <div class="tab-pane fade" id="general" role="tabpanel">
+                        <div class="tab-pane fade show active" id="general" role="tabpanel">
                             <div class="row">
                                 <div class="col-md-6">
                                     <div class="setting-card service-card mb-3">
@@ -649,6 +649,48 @@ document.addEventListener('DOMContentLoaded', function() {
         
         try {
             const config = getDatabaseConfig();
+            
+            // 验证必填字段
+            if (config.db_type === 'sqlite') {
+                if (!config.db_path || config.db_path.trim() === '') {
+                    alert('❌ 请填写SQLite数据库路径');
+                    btn.disabled = false;
+                    btn.innerHTML = originalHtml;
+                    return;
+                }
+            } else {
+                if (!config.db_host || config.db_host.trim() === '') {
+                    alert('❌ 请填写数据库主机');
+                    btn.disabled = false;
+                    btn.innerHTML = originalHtml;
+                    return;
+                }
+                if (!config.db_port) {
+                    alert('❌ 请填写数据库端口');
+                    btn.disabled = false;
+                    btn.innerHTML = originalHtml;
+                    return;
+                }
+                if (!config.db_user || config.db_user.trim() === '') {
+                    alert('❌ 请填写用户名');
+                    btn.disabled = false;
+                    btn.innerHTML = originalHtml;
+                    return;
+                }
+                if (!config.db_password || config.db_password.trim() === '') {
+                    alert('❌ 请填写密码');
+                    btn.disabled = false;
+                    btn.innerHTML = originalHtml;
+                    return;
+                }
+                if (!config.db_database || config.db_database.trim() === '') {
+                    alert('❌ 请填写数据库名称');
+                    btn.disabled = false;
+                    btn.innerHTML = originalHtml;
+                    return;
+                }
+            }
+            
             const response = await fetch('/api/system/database/config', {
                 method: 'PUT',
                 headers: {'Content-Type': 'application/json'},

@@ -203,6 +203,15 @@ document.addEventListener('DOMContentLoaded', function() {
         
         try {
             const config = getTapeConfig();
+            
+            // 验证必填字段
+            if (!config.tape_device_path || config.tape_device_path.trim() === '') {
+                alert('❌ 请填写设备路径');
+                btn.disabled = false;
+                btn.innerHTML = originalHtml;
+                return;
+            }
+            
             const response = await fetch('/api/system/tape/config', {
                 method: 'PUT',
                 headers: {'Content-Type': 'application/json'},

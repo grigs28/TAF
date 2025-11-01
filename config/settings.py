@@ -59,6 +59,14 @@ class Settings(BaseSettings):
     DB_PASSWORD: Optional[str] = "password"
     DB_DATABASE: Optional[str] = "backup_db"
 
+    @field_validator('DB_PORT', mode='before')
+    @classmethod
+    def validate_db_port(cls, v):
+        """验证DB_PORT，将空字符串转换为None"""
+        if v == '':
+            return None
+        return v
+
     # 安全配置
     SECRET_KEY: str = "your-jwt-secret-key-change-in-production"
     ALGORITHM: str = "HS256"
