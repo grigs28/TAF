@@ -7,8 +7,9 @@ Tape Management API
 
 import logging
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel
+from config.database import get_db
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -34,7 +35,7 @@ class CreateTapeRequest(BaseModel):
 
 
 @router.post("/create")
-async def create_tape(request: CreateTapeRequest, http_request: Request):
+async def create_tape(request: CreateTapeRequest, http_request: Request, db = Depends(get_db)):
     """创建新磁带记录"""
     try:
         system = http_request.app.state.system
@@ -43,59 +44,55 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
 
         # 检查磁带ID是否已存在
         from models.tape import TapeCartridge, TapeStatus
-        from config.database import DatabaseManager
         from datetime import datetime, timedelta
         from sqlalchemy import select
         
-        db_manager = DatabaseManager()
-        await db_manager.initialize()
+        session = db
+        # 检查是否已存在
+        stmt = select(TapeCartridge).where(TapeCartridge.tape_id == request.tape_id)
+        result = await session.execute(stmt)
+        existing = result.scalar_one_or_none()
         
-        async with db_manager.AsyncSessionLocal() as session:
-            # 检查是否已存在
-            stmt = select(TapeCartridge).where(TapeCartridge.tape_id == request.tape_id)
-            result = await session.execute(stmt)
-            existing = result.scalar_one_or_none()
-            
-            if existing:
-                return {
-                    "success": False,
-                    "message": f"磁带 {request.tape_id} 已存在"
-                }
-            
-            # 计算容量
-            capacity_bytes = request.capacity_gb * (1024 ** 3) if request.capacity_gb else 18000000000000  # 默认18TB
-            
-            # 计算过期日期
-            expiry_date = datetime.now() + timedelta(days=request.retention_months * 30)
-            
-            # 创建新磁带
-            new_tape = TapeCartridge(
-                tape_id=request.tape_id,
-                label=request.label,
-                serial_number=request.serial_number,
-                media_type=request.media_type,
-                generation=request.generation,
-                capacity_bytes=capacity_bytes,
-                used_bytes=0,
-                location=request.location,
-                notes=request.notes,
-                retention_months=request.retention_months,
-                status=TapeStatus.NEW,
-                manufactured_date=datetime.now(),
-                expiry_date=expiry_date,
-                auto_erase=True
-            )
-            
-            session.add(new_tape)
-            await session.commit()
-            
-            logger.info(f"创建磁带记录: {request.tape_id}")
-            
+        if existing:
             return {
-                "success": True,
-                "message": f"磁带 {request.tape_id} 创建成功",
-                "tape_id": request.tape_id
+                "success": False,
+                "message": f"磁带 {request.tape_id} 已存在"
             }
+        
+        # 计算容量
+        capacity_bytes = request.capacity_gb * (1024 ** 3) if request.capacity_gb else 18000000000000  # 默认18TB
+        
+        # 计算过期日期
+        expiry_date = datetime.now() + timedelta(days=request.retention_months * 30)
+        
+        # 创建新磁带
+        new_tape = TapeCartridge(
+            tape_id=request.tape_id,
+            label=request.label,
+            serial_number=request.serial_number,
+            media_type=request.media_type,
+            generation=request.generation,
+            capacity_bytes=capacity_bytes,
+            used_bytes=0,
+            location=request.location,
+            notes=request.notes,
+            retention_months=request.retention_months,
+            status=TapeStatus.NEW,
+            manufactured_date=datetime.now(),
+            expiry_date=expiry_date,
+            auto_erase=True
+        )
+        
+        session.add(new_tape)
+        await session.commit()
+        
+        logger.info(f"创建磁带记录: {request.tape_id}")
+        
+        return {
+            "success": True,
+            "message": f"磁带 {request.tape_id} 创建成功",
+            "tape_id": request.tape_id
+        }
         
     except Exception as e:
         logger.error(f"创建磁带记录失败: {str(e)}")
