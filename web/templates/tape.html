@@ -511,4 +511,54 @@
         </div>
     </div>
 </div>
+
+<script>
+// 扫描磁带功能
+document.addEventListener('DOMContentLoaded', function() {
+    // 监听模态框显示事件，执行扫描
+    const scanModal = document.getElementById('scanTapeModal');
+    if (scanModal) {
+        scanModal.addEventListener('show.bs.modal', async function() {
+            const modalBody = this.querySelector('.modal-body');
+            modalBody.innerHTML = '<p>正在扫描磁带设备...</p><div class="progress"><div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%"></div></div>';
+            
+            try {
+                const response = await fetch('/api/system/tape/scan');
+                const result = await response.json();
+                
+                if (result.success && result.devices && result.devices.length > 0) {
+                    let html = '<div class="alert alert-success"><i class="bi bi-check-circle me-2"></i>检测到 ' + result.devices.length + ' 个磁带设备</div>';
+                    html += '<div class="list-group mt-3">';
+                    result.devices.forEach(device => {
+                        html += '<div class="list-group-item">';
+                        html += '<div class="d-flex w-100 justify-content-between"><h6 class="mb-1">' + (device.vendor || 'Unknown') + ' ' + (device.model || 'Unknown') + '</h6>';
+                        if (device.is_ibm_lto && device.lto_generation) {
+                            html += '<span class="badge bg-info">LTO-' + device.lto_generation + '</span>';
+                        }
+                        html += '</div>';
+                        html += '<p class="mb-1 text-muted"><i class="bi bi-geo-alt me-1"></i>' + (device.path || '') + '</p>';
+                        if (device.native_capacity) {
+                            const tb = (device.native_capacity / (1024 ** 4)).toFixed(1);
+                            html += '<small><i class="bi bi-hdd me-1"></i>容量: ' + tb + ' TB</small>';
+                        }
+                        html += '<br>';
+                        if (device.status === 'online') {
+                            html += '<span class="badge bg-success">在线</span>';
+                        } else {
+                            html += '<span class="badge bg-danger">离线</span>';
+                        }
+                        html += '</div>';
+                    });
+                    html += '</div>';
+                    modalBody.innerHTML = html;
+                } else {
+                    modalBody.innerHTML = '<div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i>未检测到磁带设备</div>';
+                }
+            } catch (error) {
+                modalBody.innerHTML = '<div class="alert alert-danger"><i class="bi bi-x-circle me-2"></i>扫描失败: ' + error.message + '</div>';
+            }
+        });
+    }
+});
+</script>
 {% endblock %}
