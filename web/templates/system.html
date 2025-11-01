@@ -72,18 +72,18 @@
                 <div class="card-body">
                     <ul class="nav nav-tabs" id="settingsTabs" role="tablist">
                         <li class="nav-item" role="presentation">
-                            <button class="nav-link active" id="general-tab" data-bs-toggle="tab" data-bs-target="#general" type="button" role="tab">
+                            <button class="nav-link active" id="tapedrive-tab" data-bs-toggle="tab" data-bs-target="#tapedrive" type="button" role="tab">
+                                <i class="fas fa-server me-2"></i>磁带机配置
+                            </button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="general-tab" data-bs-toggle="tab" data-bs-target="#general" type="button" role="tab">
                                 <i class="fas fa-cogs me-2"></i>常规设置
                             </button>
                         </li>
                         <li class="nav-item" role="presentation">
                             <button class="nav-link" id="database-tab" data-bs-toggle="tab" data-bs-target="#database" type="button" role="tab">
                                 <i class="fas fa-database me-2"></i>数据库
-                            </button>
-                        </li>
-                        <li class="nav-item" role="presentation">
-                            <button class="nav-link" id="tapedrive-tab" data-bs-toggle="tab" data-bs-target="#tapedrive" type="button" role="tab">
-                                <i class="fas fa-server me-2"></i>磁带机配置
                             </button>
                         </li>
                         <li class="nav-item" role="presentation">
@@ -116,7 +116,7 @@
                     <!-- 选项卡内容 -->
                     <div class="tab-content" id="settingsTabsContent">
                         <!-- 常规设置 -->
-                        <div class="tab-pane fade show active" id="general" role="tabpanel">
+                        <div class="tab-pane fade" id="general" role="tabpanel">
                             <div class="row">
                                 <div class="col-md-6">
                                     <div class="setting-card card mb-3">
@@ -276,12 +276,12 @@
                         </div>
 
                         <!-- 磁带机配置 -->
-                        <div class="tab-pane fade" id="tapedrive" role="tabpanel">
+                        <div class="tab-pane fade show active" id="tapedrive" role="tabpanel">
                             <div class="row">
                                 <div class="col-md-8">
                                     <div class="setting-card card mb-3">
                                         <div class="card-body">
-                                            <h6 class="card-title">磁带机设备配置</h6>
+                                            <h6 class="card-title">磁带机配置</h6>
                                             <div class="mb-3">
                                                 <label class="form-label">设备路径</label>
                                                 <div class="input-group">
