@@ -322,6 +322,7 @@ async def get_database_config():
             db_info["db_port"] = settings.DB_PORT
             db_info["db_user"] = settings.DB_USER
             db_info["db_database"] = settings.DB_DATABASE
+            db_info["db_password"] = settings.DB_PASSWORD or ""  # 添加密码字段，如果为空则返回空字符串
         
         return db_info
         

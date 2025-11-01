@@ -752,6 +752,7 @@ async function loadDatabaseConfig() {
                 if (config.db_host) document.getElementById('dbHost').value = config.db_host;
                 if (config.db_port) document.getElementById('dbPort').value = config.db_port;
                 if (config.db_user) document.getElementById('dbUser').value = config.db_user;
+                if (config.db_password !== undefined) document.getElementById('dbPassword').value = config.db_password;
                 if (config.db_database) document.getElementById('dbDatabase').value = config.db_database;
                 document.getElementById('sqliteConfig').style.display = 'none';
                 document.getElementById('serverDbConfig').style.display = 'block';
