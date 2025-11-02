@@ -11,6 +11,7 @@ from sqlalchemy import Column, Integer, String, DateTime, Text, BigInteger, Enum
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID
 import enum
+import uuid
 
 from .base import BaseModel
 
@@ -97,6 +98,7 @@ class BackupSet(BaseModel):
     __tablename__ = "backup_sets"
 
     # 基本信息
+    set_uuid = Column(UUID(as_uuid=True), default=uuid.uuid4, unique=True, nullable=False, comment="备份集UUID")
     set_id = Column(String(50), unique=True, nullable=False, comment="备份集ID")
     set_name = Column(String(200), nullable=False, comment="备份集名称")
     backup_group = Column(String(20), nullable=False, comment="备份组(YYYY-MM)")

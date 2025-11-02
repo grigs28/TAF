@@ -8,7 +8,9 @@ Tape Data Models
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, DateTime, Text, BigInteger, Enum, Float, JSON, Boolean, ForeignKey
 from sqlalchemy.orm import relationship
+from sqlalchemy.dialects.postgresql import UUID
 import enum
+import uuid
 
 from .base import BaseModel
 
@@ -31,6 +33,7 @@ class TapeCartridge(BaseModel):
     __tablename__ = "tape_cartridges"
 
     # 基本信息
+    tape_uuid = Column(UUID(as_uuid=True), default=uuid.uuid4, unique=True, nullable=False, comment="磁带UUID")
     tape_id = Column(String(50), unique=True, nullable=False, comment="磁带ID")
     label = Column(String(200), nullable=False, comment="磁带标签")
     status = Column(Enum(TapeStatus), default=TapeStatus.NEW, comment="状态")

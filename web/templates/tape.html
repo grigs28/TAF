@@ -562,6 +562,7 @@ function renderTapeList(tapes) {
                                 <div>
                                     <h6 class="card-title mb-0">${tape.label || tape.tape_id}</h6>
                                     <small class="text-muted">磁带ID: ${tape.tape_id} | 序列号: ${tape.serial_number || 'N/A'}</small>
+                                    ${tape.tape_uuid ? `<small class="text-muted d-block mt-1"><i class="bi bi-fingerprint"></i> UUID: ${tape.tape_uuid}</small>` : ''}
                                 </div>
                                 <span class="badge bg-${status.class}">${status.text}</span>
                             </div>

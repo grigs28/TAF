@@ -6,6 +6,7 @@ Tape Management API
 """
 
 import logging
+import uuid
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel
@@ -106,13 +107,17 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
                 # 计算过期日期
                 expiry_date = datetime.now() + timedelta(days=request.retention_months * 30)
                 
+                # 生成UUID
+                tape_uuid = uuid.uuid4()
+                
                 # 插入新磁带
                 cur.execute("""
                     INSERT INTO tape_cartridges 
-                    (tape_id, label, status, media_type, generation, serial_number, location,
+                    (tape_uuid, tape_id, label, status, media_type, generation, serial_number, location,
                      capacity_bytes, used_bytes, retention_months, notes, manufactured_date, expiry_date, auto_erase, health_score)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
+                    tape_uuid,
                     request.tape_id,
                     request.label,
                     'AVAILABLE',  # 使用'AVAILABLE'状态（全大写）
@@ -388,7 +393,7 @@ async def list_tapes(request: Request):
                 # 查询所有磁带
                 cur.execute("""
                     SELECT 
-                        tape_id, label, status, media_type, generation,
+                        tape_uuid, tape_id, label, status, media_type, generation,
                         serial_number, location, capacity_bytes, used_bytes,
                         write_count, read_count, load_count, health_score,
                         first_use_date, last_erase_date, expiry_date,
@@ -401,26 +406,27 @@ async def list_tapes(request: Request):
                 
                 for row in rows:
                     tapes.append({
-                        "tape_id": row[0],
-                        "label": row[1],
-                        "status": row[2] if isinstance(row[2], str) else row[2].value,
-                        "media_type": row[3],
-                        "generation": row[4],
-                        "serial_number": row[5],
-                        "location": row[6],
-                        "capacity_bytes": row[7],
-                        "used_bytes": row[8],
-                        "usage_percent": (row[8] / row[7] * 100) if row[7] > 0 else 0,
-                        "write_count": row[9],
-                        "read_count": row[10],
-                        "load_count": row[11],
-                        "health_score": row[12],
-                        "first_use_date": row[13].isoformat() if row[13] else None,
-                        "last_erase_date": row[14].isoformat() if row[14] else None,
-                        "expiry_date": row[15].isoformat() if row[15] else None,
-                        "retention_months": row[16],
-                        "backup_set_count": row[17],
-                        "notes": row[18]
+                        "tape_uuid": str(row[0]) if row[0] else None,
+                        "tape_id": row[1],
+                        "label": row[2],
+                        "status": row[3] if isinstance(row[3], str) else row[3].value,
+                        "media_type": row[4],
+                        "generation": row[5],
+                        "serial_number": row[6],
+                        "location": row[7],
+                        "capacity_bytes": row[8],
+                        "used_bytes": row[9],
+                        "usage_percent": (row[9] / row[8] * 100) if row[8] > 0 else 0,
+                        "write_count": row[10],
+                        "read_count": row[11],
+                        "load_count": row[12],
+                        "health_score": row[13],
+                        "first_use_date": row[14].isoformat() if row[14] else None,
+                        "last_erase_date": row[15].isoformat() if row[15] else None,
+                        "expiry_date": row[16].isoformat() if row[16] else None,
+                        "retention_months": row[17],
+                        "backup_set_count": row[18],
+                        "notes": row[19]
                     })
         finally:
             conn.close()
