@@ -166,7 +166,6 @@ class DatabaseManager:
         try:
             # 使用SQLAlchemy的Base.metadata.create_all，但通过psycopg2连接
             # 这样可以避免版本检查，同时保留SQLAlchemy的所有特性
-            from sqlalchemy.dialects.postgresql import CreateType, DropType
             from sqlalchemy.schema import CreateTable
             
             with conn.cursor() as cur:
@@ -183,7 +182,8 @@ class DatabaseManager:
                             """, (enum_name,))
                             if not cur.fetchone():
                                 # 创建枚举类型
-                                enum_sql = f"CREATE TYPE {enum_name} AS ENUM ({', '.join([f\"'{v}'\" for v in enum_values])})"
+                                quoted_values = ', '.join([f"'{v}'" for v in enum_values])
+                                enum_sql = f"CREATE TYPE {enum_name} AS ENUM ({quoted_values})"
                                 cur.execute(enum_sql)
                                 logger.info(f"创建枚举类型: {enum_name}")
                 
