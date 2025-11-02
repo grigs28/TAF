@@ -85,16 +85,12 @@ async function loadChangelog() {
  * 初始化所有模态框的拖拽功能
  */
 function initModalDraggable() {
-    console.log('initModalDraggable called');
     // 为所有模态框添加拖拽功能
     document.querySelectorAll('.modal').forEach(modal => {
-        console.log('Found modal:', modal.id);
         // 为每个模态框添加显示事件监听
         modal.addEventListener('show.bs.modal', function() {
-            console.log('Modal show event:', this.id);
             const modalDialog = this.querySelector('.modal-dialog');
             const modalHeader = this.querySelector('.modal-header');
-            console.log('modalDialog:', modalDialog, 'modalHeader:', modalHeader);
             if (!modalDialog || !modalHeader) return;
             
             // 设置模态框为可拖拽
@@ -118,7 +114,6 @@ function initModalDraggable() {
  * @param {HTMLElement} handle - 拖拽手柄（通常是header）
  */
 function makeDraggable(element, handle) {
-    console.log('makeDraggable called for:', element, handle);
     let isDragging = false;
     let currentX;
     let currentY;
