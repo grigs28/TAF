@@ -154,10 +154,10 @@
                             </select>
                         </div>
                         <div class="col-md-4">
-                            <input type="text" class="form-control" placeholder="搜索磁带标签、序列号或备注...">
+                            <input type="text" class="form-control" id="searchInput" placeholder="搜索磁带标签、序列号或备注...">
                         </div>
                         <div class="col-md-2">
-                            <button class="btn btn-outline-secondary w-100">
+                            <button class="btn btn-outline-secondary w-100" id="searchBtn">
                                 <i class="bi bi-search me-1"></i>搜索
                             </button>
                         </div>
@@ -366,106 +366,168 @@ async function loadTapeStatistics() {
     }
 }
 
+// 存储所有磁带数据用于筛选
+let allTapesData = [];
+
+// 筛选和搜索磁带列表
+function filterTapeList() {
+    const container = document.getElementById('tapeListContainer');
+    const statusFilter = document.getElementById('statusFilter').value;
+    const locationFilter = document.getElementById('locationFilter').value;
+    const healthFilter = document.getElementById('healthFilter').value;
+    const searchInput = document.getElementById('searchInput').value.toLowerCase();
+    
+    let filteredTapes = allTapesData;
+    
+    // 状态筛选
+    if (statusFilter) {
+        filteredTapes = filteredTapes.filter(t => t.status === statusFilter);
+    }
+    
+    // 位置筛选
+    if (locationFilter) {
+        filteredTapes = filteredTapes.filter(t => 
+            t.location && t.location.toLowerCase().includes(locationFilter.toLowerCase())
+        );
+    }
+    
+    // 健康状态筛选
+    if (healthFilter) {
+        const healthMap = {
+            'excellent': (score) => score >= 80,
+            'good': (score) => score >= 60 && score < 80,
+            'warning': (score) => score >= 40 && score < 60,
+            'critical': (score) => score < 40
+        };
+        if (healthMap[healthFilter]) {
+            filteredTapes = filteredTapes.filter(t => healthMap[healthFilter](t.health_score));
+        }
+    }
+    
+    // 搜索筛选
+    if (searchInput) {
+        filteredTapes = filteredTapes.filter(t => 
+            t.tape_id.toLowerCase().includes(searchInput) ||
+            (t.serial_number && t.serial_number.toLowerCase().includes(searchInput)) ||
+            (t.location && t.location.toLowerCase().includes(searchInput)) ||
+            (t.notes && t.notes.toLowerCase().includes(searchInput))
+        );
+    }
+    
+    // 渲染筛选后的列表
+    renderTapeList(filteredTapes);
+}
+
+// 渲染磁带列表
+function renderTapeList(tapes) {
+    const container = document.getElementById('tapeListContainer');
+    
+    if (tapes.length > 0) {
+        container.innerHTML = '';
+        
+        tapes.forEach(tape => {
+            // 状态样式
+            const statusConfig = {
+                'available': {class: 'success', text: '可用'},
+                'in_use': {class: 'primary', text: '使用中'},
+                'full': {class: 'danger', text: '已满'},
+                'expired': {class: 'secondary', text: '已过期'},
+                'error': {class: 'danger', text: '故障'},
+                'maintenance': {class: 'warning', text: '维护中'},
+                'new': {class: 'info', text: '新建'}
+            };
+            const status = statusConfig[tape.status] || {class: 'secondary', text: tape.status};
+            
+            // 健康状态
+            const getHealthIndicator = (score) => {
+                if (score >= 80) return '<span class="health-indicator health-excellent"></span>优秀';
+                if (score >= 60) return '<span class="health-indicator health-good"></span>良好';
+                if (score >= 40) return '<span class="health-indicator health-warning"></span>警告';
+                return '<span class="health-indicator health-critical"></span>严重';
+            };
+            
+            // 容量格式化
+            const formatBytes = (bytes) => {
+                if (bytes >= 1024 ** 4) return (bytes / (1024 ** 4)).toFixed(1) + ' TB';
+                if (bytes >= 1024 ** 3) return (bytes / (1024 ** 3)).toFixed(1) + ' GB';
+                if (bytes >= 1024 ** 2) return (bytes / (1024 ** 2)).toFixed(1) + ' MB';
+                return bytes + ' B';
+            };
+            
+            // 进度条颜色
+            const getProgressColor = (percent) => {
+                if (percent >= 90) return 'danger';
+                if (percent >= 70) return 'warning';
+                return 'success';
+            };
+            
+            const cardHtml = `
+                <div class="col-lg-3 col-md-4 col-sm-6 mb-3">
+                    <div class="service-card tape-${tape.status}">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-start mb-2">
+                                <div>
+                                    <h6 class="card-title mb-0">${tape.tape_id}</h6>
+                                    <small class="text-muted">序列号: ${tape.serial_number || 'N/A'}</small>
+                                </div>
+                                <span class="badge bg-${status.class}">${status.text}</span>
+                            </div>
+                            <div class="mb-2">
+                                ${getHealthIndicator(tape.health_score)}
+                            </div>
+                            <div class="mb-2">
+                                <small class="text-muted">类型: </small>
+                                <span>LTO-${tape.generation}</span>
+                            </div>
+                            <div class="mb-2">
+                                <small class="text-muted">容量: </small>
+                                <span>${formatBytes(tape.used_bytes)} / ${formatBytes(tape.capacity_bytes)}</span>
+                            </div>
+                            <div class="mb-2">
+                                <div class="progress" style="height: 6px;">
+                                    <div class="progress-bar bg-${getProgressColor(tape.usage_percent)}" style="width: ${tape.usage_percent}%"></div>
+                                </div>
+                                <small class="text-muted">${tape.usage_percent.toFixed(1)}% 使用</small>
+                            </div>
+                            ${tape.location ? `<div class="mb-2">
+                                <small class="text-muted">位置: </small>
+                                <span>${tape.location}</span>
+                            </div>` : ''}
+                            ${tape.first_use_date ? `<div class="mb-2">
+                                <small class="text-muted">首次使用: </small>
+                                <span>${new Date(tape.first_use_date).toLocaleDateString()}</span>
+                            </div>` : ''}
+                            <div class="d-flex justify-content-between">
+                                <button class="btn btn-sm btn-outline-primary" data-tape-id="${tape.tape_id}" onclick="showTapeDetails('${tape.tape_id}')">
+                                    <i class="bi bi-info-circle"></i> 详情
+                                </button>
+                                <button class="btn btn-sm btn-outline-warning" data-tape-id="${tape.tape_id}" onclick="editTape('${tape.tape_id}')">
+                                    <i class="bi bi-pencil"></i> 编辑
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            container.insertAdjacentHTML('beforeend', cardHtml);
+        });
+    } else {
+        container.innerHTML = '<div class="col-12 text-center text-muted py-4">暂无磁带</div>';
+    }
+}
+
 // 加载磁带列表
 async function loadTapeList() {
     try {
         const response = await fetch('/api/tape/list');
         const result = await response.json();
         
-        const container = document.getElementById('tapeListContainer');
-        
-        if (result.success && result.tapes && result.tapes.length > 0) {
-            container.innerHTML = '';
-            
-            result.tapes.forEach(tape => {
-                // 状态样式
-                const statusConfig = {
-                    'available': {class: 'success', text: '可用'},
-                    'in_use': {class: 'primary', text: '使用中'},
-                    'full': {class: 'danger', text: '已满'},
-                    'expired': {class: 'secondary', text: '已过期'},
-                    'error': {class: 'danger', text: '故障'},
-                    'maintenance': {class: 'warning', text: '维护中'},
-                    'new': {class: 'info', text: '新建'}
-                };
-                const status = statusConfig[tape.status] || {class: 'secondary', text: tape.status};
-                
-                // 健康状态
-                const getHealthIndicator = (score) => {
-                    if (score >= 80) return '<span class="health-indicator health-excellent"></span>优秀';
-                    if (score >= 60) return '<span class="health-indicator health-good"></span>良好';
-                    if (score >= 40) return '<span class="health-indicator health-warning"></span>警告';
-                    return '<span class="health-indicator health-critical"></span>严重';
-                };
-                
-                // 容量格式化
-                const formatBytes = (bytes) => {
-                    if (bytes >= 1024 ** 4) return (bytes / (1024 ** 4)).toFixed(1) + ' TB';
-                    if (bytes >= 1024 ** 3) return (bytes / (1024 ** 3)).toFixed(1) + ' GB';
-                    if (bytes >= 1024 ** 2) return (bytes / (1024 ** 2)).toFixed(1) + ' MB';
-                    return bytes + ' B';
-                };
-                
-                // 进度条颜色
-                const getProgressColor = (percent) => {
-                    if (percent >= 90) return 'danger';
-                    if (percent >= 70) return 'warning';
-                    return 'success';
-                };
-                
-                const cardHtml = `
-                    <div class="col-lg-3 col-md-4 col-sm-6 mb-3">
-                        <div class="service-card tape-${tape.status}">
-                            <div class="card-body">
-                                <div class="d-flex justify-content-between align-items-start mb-2">
-                                    <div>
-                                        <h6 class="card-title mb-0">${tape.tape_id}</h6>
-                                        <small class="text-muted">序列号: ${tape.serial_number || 'N/A'}</small>
-                                    </div>
-                                    <span class="badge bg-${status.class}">${status.text}</span>
-                                </div>
-                                <div class="mb-2">
-                                    ${getHealthIndicator(tape.health_score)}
-                                </div>
-                                <div class="mb-2">
-                                    <small class="text-muted">类型: </small>
-                                    <span>LTO-${tape.generation}</span>
-                                </div>
-                                <div class="mb-2">
-                                    <small class="text-muted">容量: </small>
-                                    <span>${formatBytes(tape.used_bytes)} / ${formatBytes(tape.capacity_bytes)}</span>
-                                </div>
-                                <div class="mb-2">
-                                    <div class="progress" style="height: 6px;">
-                                        <div class="progress-bar bg-${getProgressColor(tape.usage_percent)}" style="width: ${tape.usage_percent}%"></div>
-                                    </div>
-                                    <small class="text-muted">${tape.usage_percent.toFixed(1)}% 使用</small>
-                                </div>
-                                ${tape.location ? `<div class="mb-2">
-                                    <small class="text-muted">位置: </small>
-                                    <span>${tape.location}</span>
-                                </div>` : ''}
-                                ${tape.first_use_date ? `<div class="mb-2">
-                                    <small class="text-muted">首次使用: </small>
-                                    <span>${new Date(tape.first_use_date).toLocaleDateString()}</span>
-                                </div>` : ''}
-                                <div class="d-flex justify-content-between">
-                                    <button class="btn btn-sm btn-outline-primary">
-                                        <i class="bi bi-info-circle"></i> 详情
-                                    </button>
-                                    <button class="btn btn-sm btn-outline-warning">
-                                        <i class="bi bi-pencil"></i> 编辑
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                `;
-                
-                container.insertAdjacentHTML('beforeend', cardHtml);
-            });
+        if (result.success && result.tapes) {
+            allTapesData = result.tapes;
+            filterTapeList();
         } else {
-            container.innerHTML = '<div class="col-12 text-center text-muted py-4">暂无磁带</div>';
+            document.getElementById('tapeListContainer').innerHTML = '<div class="col-12 text-center text-muted py-4">暂无磁带</div>';
         }
     } catch (error) {
         console.error('加载磁带列表失败:', error);
@@ -478,6 +540,13 @@ document.addEventListener('DOMContentLoaded', function() {
     // 页面加载时加载数据
     loadTapeStatistics();
     loadTapeList();
+    
+    // 筛选器事件监听
+    document.getElementById('statusFilter').addEventListener('change', filterTapeList);
+    document.getElementById('locationFilter').addEventListener('change', filterTapeList);
+    document.getElementById('healthFilter').addEventListener('change', filterTapeList);
+    document.getElementById('searchInput').addEventListener('input', filterTapeList);
+    document.getElementById('searchBtn').addEventListener('click', filterTapeList);
     
     // 监听模态框显示事件，执行扫描
     const scanModal = document.getElementById('scanTapeModal');
@@ -778,5 +847,103 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 });
+
+// 显示磁带详情
+async function showTapeDetails(tapeId) {
+    const tape = allTapesData.find(t => t.tape_id === tapeId);
+    if (!tape) {
+        alert('找不到磁带信息');
+        return;
+    }
+    
+    // 容量格式化
+    const formatBytes = (bytes) => {
+        if (bytes >= 1024 ** 4) return (bytes / (1024 ** 4)).toFixed(2) + ' TB';
+        if (bytes >= 1024 ** 3) return (bytes / (1024 ** 3)).toFixed(2) + ' GB';
+        if (bytes >= 1024 ** 2) return (bytes / (1024 ** 2)).toFixed(2) + ' MB';
+        return bytes + ' B';
+    };
+    
+    let html = `
+        <div class="row">
+            <div class="col-md-6">
+                <h6 class="fw-bold">基本信息</h6>
+                <table class="table table-sm table-borderless">
+                    <tr><td class="text-muted" style="width: 40%;">磁带ID:</td><td>${tape.tape_id}</td></tr>
+                    <tr><td class="text-muted">标签:</td><td>${tape.label}</td></tr>
+                    <tr><td class="text-muted">序列号:</td><td>${tape.serial_number || 'N/A'}</td></tr>
+                    <tr><td class="text-muted">类型:</td><td>LTO-${tape.generation}</td></tr>
+                    <tr><td class="text-muted">状态:</td><td><span class="badge bg-${tape.status === 'available' ? 'success' : tape.status === 'in_use' ? 'primary' : 'danger'}">${tape.status}</span></td></tr>
+                    <tr><td class="text-muted">位置:</td><td>${tape.location || 'N/A'}</td></tr>
+                </table>
+            </div>
+            <div class="col-md-6">
+                <h6 class="fw-bold">容量信息</h6>
+                <table class="table table-sm table-borderless">
+                    <tr><td class="text-muted" style="width: 40%;">总容量:</td><td>${formatBytes(tape.capacity_bytes)}</td></tr>
+                    <tr><td class="text-muted">已使用:</td><td>${formatBytes(tape.used_bytes)}</td></tr>
+                    <tr><td class="text-muted">可用:</td><td>${formatBytes(tape.capacity_bytes - tape.used_bytes)}</td></tr>
+                    <tr><td class="text-muted">使用率:</td><td>${tape.usage_percent.toFixed(2)}%</td></tr>
+                    <tr><td class="text-muted">保留月数:</td><td>${tape.retention_months}</td></tr>
+                    <tr><td class="text-muted">健康分数:</td><td>${tape.health_score}/100</td></tr>
+                </table>
+            </div>
+        </div>
+        <div class="row mt-3">
+            <div class="col-md-6">
+                <h6 class="fw-bold">使用统计</h6>
+                <table class="table table-sm table-borderless">
+                    <tr><td class="text-muted" style="width: 40%;">写入次数:</td><td>${tape.write_count}</td></tr>
+                    <tr><td class="text-muted">读取次数:</td><td>${tape.read_count}</td></tr>
+                    <tr><td class="text-muted">加载次数:</td><td>${tape.load_count}</td></tr>
+                    <tr><td class="text-muted">备份集:</td><td>${tape.backup_set_count}</td></tr>
+                </table>
+            </div>
+            <div class="col-md-6">
+                <h6 class="fw-bold">时间信息</h6>
+                <table class="table table-sm table-borderless">
+                    <tr><td class="text-muted" style="width: 40%;">首次使用:</td><td>${tape.first_use_date ? new Date(tape.first_use_date).toLocaleString() : 'N/A'}</td></tr>
+                    <tr><td class="text-muted">最后擦除:</td><td>${tape.last_erase_date ? new Date(tape.last_erase_date).toLocaleString() : 'N/A'}</td></tr>
+                    <tr><td class="text-muted">过期时间:</td><td>${tape.expiry_date ? new Date(tape.expiry_date).toLocaleString() : 'N/A'}</td></tr>
+                </table>
+            </div>
+        </div>
+        ${tape.notes ? `<div class="row mt-3"><div class="col-12"><h6 class="fw-bold">备注</h6><p class="text-muted">${tape.notes}</p></div></div>` : ''}
+    `;
+    
+    // 显示详情模态框
+    const modal = new bootstrap.Modal(document.getElementById('tapeDetailsModal'));
+    document.getElementById('tapeDetailsModalBody').innerHTML = html;
+    modal.show();
+}
+
+// 编辑磁带
+function editTape(tapeId) {
+    const tape = allTapesData.find(t => t.tape_id === tapeId);
+    if (!tape) {
+        alert('找不到磁带信息');
+        return;
+    }
+    
+    alert(`编辑磁带功能开发中: ${tapeId}`);
+}
 </script>
+
+<!-- 磁带详情模态框 -->
+<div class="modal fade" id="tapeDetailsModal" tabindex="-1" data-bs-backdrop="false">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">磁带详情</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="tapeDetailsModalBody">
+                <!-- 详情内容将动态加载 -->
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}
