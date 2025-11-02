@@ -256,9 +256,40 @@ class DatabaseManager:
     async def health_check(self) -> bool:
         """数据库健康检查"""
         try:
-            from sqlalchemy import text
-            async with self.async_engine.begin() as conn:
-                await conn.execute(text("SELECT 1"))
+            # 对于openGauss，使用psycopg2直接连接避免版本解析问题
+            database_url = self.settings.DATABASE_URL
+            if "opengauss" in database_url.lower():
+                import psycopg2
+                import re
+                
+                # 解析数据库URL
+                if database_url.startswith("opengauss://"):
+                    database_url = database_url.replace("opengauss://", "postgresql://", 1)
+                
+                pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
+                match = re.match(pattern, database_url)
+                if not match:
+                    return False
+                
+                username, password, host, port, database = match.groups()
+                
+                # 使用psycopg2直接连接测试
+                conn = psycopg2.connect(
+                    host=host,
+                    port=port,
+                    user=username,
+                    password=password,
+                    database=database,
+                    connect_timeout=5
+                )
+                cur = conn.cursor()
+                cur.execute("SELECT 1")
+                cur.close()
+                conn.close()
+            else:
+                from sqlalchemy import text
+                async with self.async_engine.begin() as conn:
+                    await conn.execute(text("SELECT 1"))
             return True
         except Exception as e:
             logger.error(f"数据库健康检查失败: {str(e)}")

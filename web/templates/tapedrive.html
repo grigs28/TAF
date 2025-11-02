@@ -168,6 +168,9 @@
 document.addEventListener('DOMContentLoaded', function() {
     loadTapeConfig();
     
+    // 页面加载时自动扫描设备
+    scanDevicesOnLoad();
+    
     // 测试磁带连接
     document.getElementById('testTapeConnectionBtn').addEventListener('click', async function() {
         const btn = this;
@@ -368,6 +371,23 @@ function displayDetectedDevices(devices) {
     });
     html += '</ul>';
     container.innerHTML = html;
+}
+
+function scanDevicesOnLoad() {
+    // 页面加载时自动扫描设备
+    fetch('/api/system/tape/scan')
+        .then(response => response.json())
+        .then(result => {
+            if (result.success && result.devices && result.devices.length > 0) {
+                displayDetectedDevices(result.devices);
+            } else {
+                displayDetectedDevices([]);
+            }
+        })
+        .catch(error => {
+            console.error('自动扫描设备失败:', error);
+            displayDetectedDevices([]);
+        });
 }
 </script>
 {% endblock %}
