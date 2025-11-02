@@ -398,13 +398,50 @@ class TapeOperations:
             return None
 
     async def _read_tape_label(self) -> Optional[Dict[str, Any]]:
-        """读取磁带标签（从磁带头读取元数据）"""
+        """读取磁带标签（优先从LTFS文件系统，失败则从磁带头读取元数据）"""
         try:
+            import json
+            import platform
+            
+            # Windows系统且配置了LTFS盘符，尝试从文件系统读取
+            if platform.system() == "Windows" and self.settings.TAPE_DRIVE_LETTER:
+                drive_letter = self.settings.TAPE_DRIVE_LETTER.upper()
+                ltfs_label_file = f"{drive_letter}:\\TAPE_LABEL.txt"
+                
+                try:
+                    if os.path.exists(ltfs_label_file):
+                        logger.info(f"从LTFS文件系统读取标签: {ltfs_label_file}")
+                        with open(ltfs_label_file, 'r', encoding='utf-8') as f:
+                            content = f.read().strip()
+                            lines = content.split('\n')
+                            
+                            if lines and lines[0].startswith('TAPE_'):
+                                # 解析LTFS格式的标签文件
+                                tape_id = lines[0]
+                                metadata = {'tape_id': tape_id, 'label': tape_id}
+                                
+                                # 解析其他字段
+                                for line in lines[1:]:
+                                    if line.startswith('Created:'):
+                                        try:
+                                            metadata['created_date'] = line.split(':', 1)[1].strip()
+                                        except:
+                                            pass
+                                    elif line.startswith('Capacity:'):
+                                        try:
+                                            metadata['capacity'] = line.split(':', 1)[1].strip()
+                                        except:
+                                            pass
+                                
+                                logger.info(f"从LTFS读取磁带标签成功: {tape_id}")
+                                return metadata
+                except Exception as e:
+                    logger.debug(f"从LTFS读取标签失败: {str(e)}")
+            
+            # 回退到SCSI方式读取磁带头
             if not self.scsi_interface:
                 logger.error("SCSI接口未初始化")
                 return None
-            
-            import json
             
             # 倒带到开头
             await self.scsi_interface.rewind_tape()
@@ -440,7 +477,7 @@ class TapeOperations:
                 metadata_bytes = data[8:8+header_length]
                 metadata_json = metadata_bytes.decode('utf-8', errors='ignore')
                 metadata = json.loads(metadata_json)
-                logger.info(f"读取磁带标签成功: {metadata.get('tape_id')}")
+                logger.info(f"从磁带头读取磁带标签成功: {metadata.get('tape_id')}")
                 return metadata
             
             logger.warning("磁带标签元数据为空")
@@ -451,9 +488,41 @@ class TapeOperations:
             return None
 
     async def _write_tape_label(self, tape_info: Dict[str, Any]) -> bool:
-        """写入磁带标签（磁带元数据到磁带头）"""
+        """写入磁带标签（优先写入LTFS文件系统，失败则写入磁带头）"""
         try:
             import json
+            import platform
+            
+            # Windows系统且配置了LTFS盘符，尝试写入文件系统
+            if platform.system() == "Windows" and self.settings.TAPE_DRIVE_LETTER:
+                drive_letter = self.settings.TAPE_DRIVE_LETTER.upper()
+                ltfs_label_file = f"{drive_letter}:\\TAPE_LABEL.txt"
+                
+                try:
+                    if os.path.exists(f"{drive_letter}:\\"):
+                        logger.info(f"写入LTFS文件系统标签: {ltfs_label_file}")
+                        
+                        # 准备LTFS格式的标签内容
+                        tape_id = tape_info.get("tape_id", "")
+                        created_date = tape_info.get("created_date", "")
+                        
+                        label_content = f"{tape_id}\n"
+                        if created_date:
+                            # 格式化日期时间
+                            if isinstance(created_date, datetime):
+                                label_content += f"Created: {created_date.isoformat()}\n"
+                            else:
+                                label_content += f"Created: {created_date}\n"
+                        
+                        with open(ltfs_label_file, 'w', encoding='utf-8') as f:
+                            f.write(label_content)
+                        
+                        logger.info(f"LTFS标签写入成功: {tape_id}")
+                        return True
+                except Exception as e:
+                    logger.debug(f"从LTFS写入标签失败: {str(e)}")
+            
+            # 回退到SCSI方式写入磁带头
             if not self.scsi_interface:
                 logger.error("SCSI接口未初始化")
                 return False

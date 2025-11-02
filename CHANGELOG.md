@@ -4,6 +4,18 @@
 
 本文档遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式。
 
+## [0.0.8] - 2024-11-02
+
+### 修复
+
+#### LTFS文件系统标签支持
+- ✅ 修复Windows下LTFS环境中无法读取磁带标签的问题
+  - 实现双模式标签读取/写入：优先使用LTFS文件系统（`O:\TAPE_LABEL.txt`），失败回退到SCSI磁带头
+  - Windows系统且配置了LTFS盘符时，自动从文件系统读取标签
+  - 兼容IBM LTFS环境中磁带设备被独占的情况
+  - 解析LTFS格式的标签文件（TAPE_xxx, Created, Capacity字段）
+  - 写入标签时同样优先写入LTFS文件系统
+
 ## [0.0.7] - 2024-11-02
 
 ### 移除
