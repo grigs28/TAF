@@ -64,8 +64,8 @@ class DatabaseInitializer:
             exists = cursor.fetchone()
             
             if not exists:
-                # 创建数据库，指定所有者
-                cursor.execute(f'CREATE DATABASE "{database}" OWNER "{username}"')
+                # 创建数据库，指定所有者和模板
+                cursor.execute(f'CREATE DATABASE "{database}" OWNER "{username}" TEMPLATE template0')
                 logger.info(f"数据库 {database} 创建成功，所有者为 {username}")
             else:
                 logger.info(f"数据库 {database} 已存在")
