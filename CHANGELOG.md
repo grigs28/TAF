@@ -37,6 +37,8 @@
   - 修复读写操作错误处理以检查success字段
   - **严格UUID读取策略**：不允许自动生成UUID
   - **UUID读取失败处理**：显示友好的错误对话框并提供重试按钮
+  - **Windows Storage API支持**：优先使用IOCTL_STORAGE_GET_MEDIA_SERIAL_NUMBER读取磁带序列号
+  - **WMI到DOS路径映射**：自动将WMI DeviceID转换为Windows DOS设备路径
 
 ### 修复
 
