@@ -890,7 +890,7 @@ body {
 }
 
 .modal-content {
-    background: var(--card-bg);
+    background: #0d1626 !important;
     border: 1px solid var(--card-border);
     color: var(--text-primary);
 }
@@ -1445,10 +1445,8 @@ select.form-select:focus {
   display: none !important;
 }
 /* === 所有模态框内容区域改为不透明深色 === */
-#configModal .modal-content,
-#readmeModal .modal-content,
-#loginModal .modal-content {
-  background: #0d1626; /* 深色不透明背景 */
+.modal-content {
+  background: #0d1626 !important; /* 深色不透明背景 */
   border: 1px solid var(--card-border);
   color: var(--text-primary);
 }
@@ -1459,7 +1457,7 @@ body.modal-open {
 
 /* README Modal Styles */
 #readmeModal .modal-content {
-    background: var(--bg-dark);
+    background: #0d1626 !important;
     border: 1px solid var(--border-color);
     box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
 }
@@ -1647,7 +1645,7 @@ body.modal-open {
 
 #readmeModal .modal-content {
     pointer-events: auto !important;
-    background: #0d1626;
+    background: #0d1626 !important;
 }
 
 #readmeModal,

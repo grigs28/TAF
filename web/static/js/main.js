@@ -7,6 +7,9 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // 修复模态框z-index问题
     fixModalZIndex();
+    
+    // 初始化所有模态框拖拽功能
+    initModalDraggable();
 });
 
 // 修复模态框z-index，确保所有模态框显示在最上层
@@ -72,6 +75,122 @@ async function loadChangelog() {
         console.error('加载更新日志失败:', error);
         document.getElementById('changelog-content').innerHTML = 
             '<div class="alert alert-danger">加载更新日志失败，请稍后重试</div>';
+    }
+}
+
+/**
+ * 初始化所有模态框的拖拽功能
+ */
+function initModalDraggable() {
+    // 为所有模态框添加拖拽功能
+    document.querySelectorAll('.modal').forEach(modal => {
+        const modalHeader = modal.querySelector('.modal-header');
+        if (!modalHeader) return;
+        
+        // 设置模态框为可拖拽
+        makeDraggable(modal, modalHeader);
+    });
+}
+
+/**
+ * 使元素可拖拽
+ * @param {HTMLElement} element - 要拖拽的元素
+ * @param {HTMLElement} handle - 拖拽手柄（通常是header）
+ */
+function makeDraggable(element, handle) {
+    let isDragging = false;
+    let currentX;
+    let currentY;
+    let initialX;
+    let initialY;
+    let xOffset = 0;
+    let yOffset = 0;
+    
+    // 设置初始位置
+    element.style.position = 'fixed';
+    element.style.margin = '0';
+    
+    // 给拖拽手柄添加样式
+    handle.style.cursor = 'move';
+    
+    // 鼠标按下事件
+    handle.addEventListener('mousedown', dragStart);
+    
+    // 触摸开始事件（移动端支持）
+    handle.addEventListener('touchstart', touchStart);
+    
+    function dragStart(e) {
+        // 获取鼠标初始位置
+        initialX = e.clientX - xOffset;
+        initialY = e.clientY - yOffset;
+        
+        // 如果点击在模态框内部，开始拖拽
+        if (e.target === handle || handle.contains(e.target)) {
+            isDragging = true;
+            
+            // 添加移动和释放事件监听
+            document.addEventListener('mousemove', drag);
+            document.addEventListener('mouseup', dragEnd);
+        }
+    }
+    
+    function touchStart(e) {
+        const touch = e.touches[0];
+        initialX = touch.clientX - xOffset;
+        initialY = touch.clientY - yOffset;
+        
+        if (e.target === handle || handle.contains(e.target)) {
+            isDragging = true;
+            document.addEventListener('touchmove', touchDrag);
+            document.addEventListener('touchend', touchEnd);
+        }
+    }
+    
+    function drag(e) {
+        if (isDragging) {
+            e.preventDefault();
+            currentX = e.clientX - initialX;
+            currentY = e.clientY - initialY;
+            xOffset = currentX;
+            yOffset = currentY;
+            
+            setTranslate(currentX, currentY, element);
+        }
+    }
+    
+    function touchDrag(e) {
+        if (isDragging) {
+            const touch = e.touches[0];
+            currentX = touch.clientX - initialX;
+            currentY = touch.clientY - initialY;
+            xOffset = currentX;
+            yOffset = currentY;
+            
+            setTranslate(currentX, currentY, element);
+        }
+    }
+    
+    function dragEnd() {
+        initialX = currentX;
+        initialY = currentY;
+        isDragging = false;
+        
+        // 移除事件监听
+        document.removeEventListener('mousemove', drag);
+        document.removeEventListener('mouseup', dragEnd);
+    }
+    
+    function touchEnd() {
+        initialX = currentX;
+        initialY = currentY;
+        isDragging = false;
+        
+        document.removeEventListener('touchmove', touchDrag);
+        document.removeEventListener('touchend', touchEnd);
+    }
+    
+    function setTranslate(xPos, yPos, el) {
+        el.style.transform = `translate(${xPos}px, ${yPos}px)`;
     }
 }
 
