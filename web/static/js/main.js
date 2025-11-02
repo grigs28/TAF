@@ -86,18 +86,20 @@ function initModalDraggable() {
     document.querySelectorAll('.modal').forEach(modal => {
         // 为每个模态框添加显示事件监听
         modal.addEventListener('show.bs.modal', function() {
+            const modalDialog = this.querySelector('.modal-dialog');
             const modalHeader = this.querySelector('.modal-header');
-            if (!modalHeader) return;
+            if (!modalDialog || !modalHeader) return;
             
             // 设置模态框为可拖拽
-            makeDraggable(this, modalHeader);
+            makeDraggable(modalDialog, modalHeader);
         });
         
         // 如果模态框已经显示，也要初始化拖拽
         if (modal.classList.contains('show')) {
+            const modalDialog = modal.querySelector('.modal-dialog');
             const modalHeader = modal.querySelector('.modal-header');
-            if (modalHeader) {
-                makeDraggable(modal, modalHeader);
+            if (modalDialog && modalHeader) {
+                makeDraggable(modalDialog, modalHeader);
             }
         }
     });
@@ -117,10 +119,6 @@ function makeDraggable(element, handle) {
     let xOffset = 0;
     let yOffset = 0;
     
-    // 设置初始位置
-    element.style.position = 'fixed';
-    element.style.margin = '0';
-    
     // 给拖拽手柄添加样式
     handle.style.cursor = 'move';
     
@@ -131,70 +129,96 @@ function makeDraggable(element, handle) {
     handle.addEventListener('touchstart', touchStart);
     
     function dragStart(e) {
-        // 获取鼠标初始位置
-        initialX = e.clientX - xOffset;
-        initialY = e.clientY - yOffset;
-        
-        // 如果点击在模态框内部，开始拖拽
-        if (e.target === handle || handle.contains(e.target)) {
-            isDragging = true;
-            
-            // 添加移动和释放事件监听
-            document.addEventListener('mousemove', drag);
-            document.addEventListener('mouseup', dragEnd);
+        // 防止拖拽按钮等元素
+        if (e.target.tagName === 'BUTTON' || e.target.tagName === 'A') {
+            return;
         }
+        
+        e.preventDefault();
+        e.stopPropagation();
+        
+        // 获取鼠标初始位置和元素当前位置
+        initialX = e.clientX;
+        initialY = e.clientY;
+        
+        // 获取元素的当前transform值
+        const transform = element.style.transform;
+        if (transform) {
+            const matches = transform.match(/translate\((-?\d+)px,\s*(-?\d+)px\)/);
+            if (matches) {
+                xOffset = parseInt(matches[1], 10);
+                yOffset = parseInt(matches[2], 10);
+            }
+        }
+        
+        isDragging = true;
+        
+        // 添加移动和释放事件监听
+        document.addEventListener('mousemove', drag);
+        document.addEventListener('mouseup', dragEnd);
     }
     
     function touchStart(e) {
-        const touch = e.touches[0];
-        initialX = touch.clientX - xOffset;
-        initialY = touch.clientY - yOffset;
-        
-        if (e.target === handle || handle.contains(e.target)) {
-            isDragging = true;
-            document.addEventListener('touchmove', touchDrag);
-            document.addEventListener('touchend', touchEnd);
+        // 防止拖拽按钮等元素
+        if (e.target.tagName === 'BUTTON' || e.target.tagName === 'A') {
+            return;
         }
+        
+        e.preventDefault();
+        e.stopPropagation();
+        
+        const touch = e.touches[0];
+        initialX = touch.clientX;
+        initialY = touch.clientY;
+        
+        isDragging = true;
+        document.addEventListener('touchmove', touchDrag);
+        document.addEventListener('touchend', touchEnd);
     }
     
     function drag(e) {
-        if (isDragging) {
-            e.preventDefault();
-            currentX = e.clientX - initialX;
-            currentY = e.clientY - initialY;
-            xOffset = currentX;
-            yOffset = currentY;
-            
-            setTranslate(currentX, currentY, element);
-        }
+        if (!isDragging) return;
+        
+        e.preventDefault();
+        e.stopPropagation();
+        
+        currentX = xOffset + (e.clientX - initialX);
+        currentY = yOffset + (e.clientY - initialY);
+        
+        setTranslate(currentX, currentY, element);
     }
     
     function touchDrag(e) {
-        if (isDragging) {
-            const touch = e.touches[0];
-            currentX = touch.clientX - initialX;
-            currentY = touch.clientY - initialY;
-            xOffset = currentX;
-            yOffset = currentY;
-            
-            setTranslate(currentX, currentY, element);
-        }
+        if (!isDragging) return;
+        
+        e.preventDefault();
+        e.stopPropagation();
+        
+        const touch = e.touches[0];
+        currentX = xOffset + (touch.clientX - initialX);
+        currentY = yOffset + (touch.clientY - initialY);
+        
+        setTranslate(currentX, currentY, element);
     }
     
-    function dragEnd() {
-        initialX = currentX;
-        initialY = currentY;
+    function dragEnd(e) {
+        if (!isDragging) return;
+        
         isDragging = false;
+        xOffset = currentX;
+        yOffset = currentY;
         
         // 移除事件监听
         document.removeEventListener('mousemove', drag);
         document.removeEventListener('mouseup', dragEnd);
     }
     
-    function touchEnd() {
-        initialX = currentX;
-        initialY = currentY;
+    function touchEnd(e) {
+        if (!isDragging) return;
+        
         isDragging = false;
+        xOffset = currentX;
+        yOffset = currentY;
         
         document.removeEventListener('touchmove', touchDrag);
         document.removeEventListener('touchend', touchEnd);
