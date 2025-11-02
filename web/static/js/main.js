@@ -84,11 +84,22 @@ async function loadChangelog() {
 function initModalDraggable() {
     // 为所有模态框添加拖拽功能
     document.querySelectorAll('.modal').forEach(modal => {
-        const modalHeader = modal.querySelector('.modal-header');
-        if (!modalHeader) return;
+        // 为每个模态框添加显示事件监听
+        modal.addEventListener('show.bs.modal', function() {
+            const modalHeader = this.querySelector('.modal-header');
+            if (!modalHeader) return;
+            
+            // 设置模态框为可拖拽
+            makeDraggable(this, modalHeader);
+        });
         
-        // 设置模态框为可拖拽
-        makeDraggable(modal, modalHeader);
+        // 如果模态框已经显示，也要初始化拖拽
+        if (modal.classList.contains('show')) {
+            const modalHeader = modal.querySelector('.modal-header');
+            if (modalHeader) {
+                makeDraggable(modal, modalHeader);
+            }
+        }
     });
 }
 
