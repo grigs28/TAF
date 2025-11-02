@@ -163,40 +163,43 @@ async def check_tape_exists(tape_id: str, request: Request):
 
 
 @router.get("/list")
-async def list_tapes(request: Request, db = Depends(get_db)):
+async def list_tapes(request: Request):
     """获取所有磁带列表"""
     try:
         from models.tape import TapeCartridge as ORMTapeCartridge, TapeStatus
-        from sqlalchemy import select
+        from config.database import db_manager
         
         tapes = []
-        stmt = select(ORMTapeCartridge).order_by(ORMTapeCartridge.tape_id)
-        result = await db.execute(stmt)
-        orm_tapes = result.scalars().all()
-        
-        for tape in orm_tapes:
-            tapes.append({
-                "tape_id": tape.tape_id,
-                "label": tape.label,
-                "status": tape.status.value,
-                "media_type": tape.media_type,
-                "generation": tape.generation,
-                "serial_number": tape.serial_number,
-                "location": tape.location,
-                "capacity_bytes": tape.capacity_bytes,
-                "used_bytes": tape.used_bytes,
-                "usage_percent": (tape.used_bytes / tape.capacity_bytes * 100) if tape.capacity_bytes > 0 else 0,
-                "write_count": tape.write_count,
-                "read_count": tape.read_count,
-                "load_count": tape.load_count,
-                "health_score": tape.health_score,
-                "first_use_date": tape.first_use_date.isoformat() if tape.first_use_date else None,
-                "last_erase_date": tape.last_erase_date.isoformat() if tape.last_erase_date else None,
-                "expiry_date": tape.expiry_date.isoformat() if tape.expiry_date else None,
-                "retention_months": tape.retention_months,
-                "backup_set_count": tape.backup_set_count,
-                "notes": tape.notes
-            })
+        # 使用同步会话避免asyncpg的版本解析问题
+        session = db_manager.get_sync_session()
+        try:
+            orm_tapes = session.query(ORMTapeCartridge).order_by(ORMTapeCartridge.tape_id).all()
+            
+            for tape in orm_tapes:
+                tapes.append({
+                    "tape_id": tape.tape_id,
+                    "label": tape.label,
+                    "status": tape.status.value,
+                    "media_type": tape.media_type,
+                    "generation": tape.generation,
+                    "serial_number": tape.serial_number,
+                    "location": tape.location,
+                    "capacity_bytes": tape.capacity_bytes,
+                    "used_bytes": tape.used_bytes,
+                    "usage_percent": (tape.used_bytes / tape.capacity_bytes * 100) if tape.capacity_bytes > 0 else 0,
+                    "write_count": tape.write_count,
+                    "read_count": tape.read_count,
+                    "load_count": tape.load_count,
+                    "health_score": tape.health_score,
+                    "first_use_date": tape.first_use_date.isoformat() if tape.first_use_date else None,
+                    "last_erase_date": tape.last_erase_date.isoformat() if tape.last_erase_date else None,
+                    "expiry_date": tape.expiry_date.isoformat() if tape.expiry_date else None,
+                    "retention_months": tape.retention_months,
+                    "backup_set_count": tape.backup_set_count,
+                    "notes": tape.notes
+                })
+        finally:
+            session.close()
             
         return {
             "success": True,
