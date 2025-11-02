@@ -55,6 +55,7 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
 
         # 使用psycopg2直接连接，避免openGauss版本解析问题
         import psycopg2
+        import psycopg2.extras
         from config.settings import get_settings
         from datetime import datetime, timedelta
         
@@ -82,6 +83,9 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
             password=password,
             database=database
         )
+        
+        # 注册UUID适配器
+        psycopg2.extras.register_uuid()
         
         try:
             with conn.cursor() as cur:
@@ -162,6 +166,7 @@ async def update_tape(tape_id: str, request: UpdateTapeRequest, http_request: Re
 
         # 使用psycopg2直接连接，避免openGauss版本解析问题
         import psycopg2
+        import psycopg2.extras
         from config.settings import get_settings
         
         settings = get_settings()
@@ -188,6 +193,9 @@ async def update_tape(tape_id: str, request: UpdateTapeRequest, http_request: Re
             password=password,
             database=database
         )
+        
+        # 注册UUID适配器
+        psycopg2.extras.register_uuid()
         
         try:
             with conn.cursor() as cur:
@@ -291,6 +299,7 @@ async def check_tape_exists(tape_id: str, request: Request):
     try:
         # 使用psycopg2直接连接，避免openGauss版本解析问题
         import psycopg2
+        import psycopg2.extras
         from config.settings import get_settings
         from datetime import datetime
         
@@ -318,6 +327,9 @@ async def check_tape_exists(tape_id: str, request: Request):
             password=password,
             database=database
         )
+        
+        # 注册UUID适配器
+        psycopg2.extras.register_uuid()
         
         try:
             with conn.cursor() as cur:
@@ -386,6 +398,10 @@ async def list_tapes(request: Request):
             password=password,
             database=database
         )
+        
+        # 注册UUID适配器
+        import psycopg2.extras
+        psycopg2.extras.register_uuid()
         
         tapes = []
         try:
