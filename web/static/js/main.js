@@ -10,6 +10,9 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // 初始化所有模态框拖拽功能
     initModalDraggable();
+    
+    // 使用原生拖拽API实现模态框拖动
+    initNativeModalDraggable();
 });
 
 // 修复模态框z-index，确保所有模态框显示在最上层
@@ -232,5 +235,72 @@ function makeDraggable(element, handle) {
     function setTranslate(xPos, yPos, el) {
         el.style.transform = `translate(${xPos}px, ${yPos}px)`;
     }
+}
+
+/**
+ * 使用HTML5原生拖拽API实现模态框拖动
+ * 这个实现更简单可靠
+ */
+function initNativeModalDraggable() {
+    // 监听所有模态框的显示事件
+    document.addEventListener('show.bs.modal', function(event) {
+        const modal = event.target;
+        const dialog = modal.querySelector('.modal-dialog');
+        const header = modal.querySelector('.modal-header');
+        
+        if (!dialog || !header) return;
+        
+        // 添加拖拽样式
+        dialog.style.position = 'absolute';
+        dialog.style.left = '50%';
+        dialog.style.top = '50%';
+        dialog.style.transform = 'translate(-50%, -50%)';
+        dialog.style.margin = '0';
+        
+        let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
+        let isDragging = false;
+        
+        // 让header可拖拽
+        header.style.cursor = 'move';
+        
+        const dragMouseDown = function(e) {
+            // 如果点击的是按钮或链接，不拖拽
+            if (e.target.tagName === 'BUTTON' || e.target.tagName === 'A' || e.target.closest('button') || e.target.closest('a')) {
+                return;
+            }
+            
+            e.preventDefault();
+            pos3 = e.clientX;
+            pos4 = e.clientY;
+            isDragging = true;
+            
+            document.addEventListener('mousemove', elementDrag);
+            document.addEventListener('mouseup', closeDragElement);
+        };
+        
+        const elementDrag = function(e) {
+            if (!isDragging) return;
+            e.preventDefault();
+            
+            pos1 = pos3 - e.clientX;
+            pos2 = pos4 - e.clientY;
+            pos3 = e.clientX;
+            pos4 = e.clientY;
+            
+            // 更新位置
+            dialog.style.top = (dialog.offsetTop - pos2) + 'px';
+            dialog.style.left = (dialog.offsetLeft - pos1) + 'px';
+            dialog.style.transform = 'none';
+        };
+        
+        const closeDragElement = function() {
+            isDragging = false;
+            document.removeEventListener('mousemove', elementDrag);
+            document.removeEventListener('mouseup', closeDragElement);
+        };
+        
+        // 移除旧的事件监听器（如果存在）
+        header.onmousedown = dragMouseDown;
+    });
 }
 
