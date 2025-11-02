@@ -45,13 +45,6 @@
   - 主键(tape_id)和标签不允许修改
   - 添加PUT `/api/tape/{tape_id}` 更新API
 
-#### UUID唯一标识支持
-- ✅ 添加磁带和备份集的UUID字段
-  - `TapeCartridge`模型添加`tape_uuid`字段
-  - `BackupSet`模型添加`set_uuid`字段
-  - UUID用于跨系统唯一识别和匹配
-  - 磁带列表卡片显示UUID（带指纹图标）
-
 #### 物理磁带标签读写
 - ✅ 实现磁带物理标签自动读写功能
   - 创建磁带时自动写入标签到物理磁带
@@ -59,15 +52,9 @@
   - **独立的写入标签API**：POST `/api/tape/write-label`允许用户修改现有磁带的卷标
   - 智能格式化：仅未格式化磁带才格式化
   - 使用SCSI READ(16)/WRITE(16)命令直接操作磁带头部
-  - 从VPD Page 0x83读取磁带物理UUID用于唯一标识
   - 修复读写操作错误处理以检查success字段
-  - **严格UUID读取策略**：不允许自动生成UUID
-  - **UUID读取失败处理**：显示友好的错误对话框并提供重试按钮
-  - **Windows Storage API支持**：使用IOCTL_STORAGE_GET_MEDIA_SERIAL_NUMBER读取磁带序列号并生成UUID
   - **WMI到DOS路径映射**：自动将WMI DeviceID转换为Windows DOS设备路径
   - **磁带设备路径验证**：优先使用\\.\TAPEn路径，通过INQUIRY命令验证设备类型确保准确性
-  - **磁带标签UUID存储**：将UUID写入磁带标签，实现真正的物理关联
-  - **MODE SENSE条码读取**：从MODE SENSE Page 0x03读取磁带条码生成UUID
 
 ### 修复
 
@@ -117,12 +104,6 @@
 - ✅ 添加数据库枚举类型创建和检查调试日志
   - 显示枚举类型值信息
   - 便于排查数据库兼容性问题
-
-#### psycopg2 UUID适配
-- ✅ 修复psycopg2无法处理UUID类型错误
-  - 添加`psycopg2.extras.register_uuid()`注册UUID适配器
-  - 修复磁带创建、更新、列表查询中的UUID兼容性
-  - 确保UUID字段正确写入数据库
 
 ## [0.0.5] - 2024-11-02
 
