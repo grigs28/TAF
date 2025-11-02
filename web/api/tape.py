@@ -145,11 +145,40 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
         finally:
             conn.close()
         
-        return {
-            "success": True,
-            "message": f"磁带 {request.tape_id} 创建成功",
-            "tape_id": request.tape_id
-        }
+        # 尝试写入物理磁带标签（如果磁带机中有磁带）
+        try:
+            # 准备标签数据
+            tape_info = {
+                "tape_id": request.tape_id,
+                "label": request.label,
+                "serial_number": request.serial_number,
+                "created_date": datetime.now(),
+                "expiry_date": expiry_date
+            }
+            
+            # 写入物理磁带标签
+            write_result = await system.tape_manager.tape_operations._write_tape_label(tape_info)
+            if write_result:
+                logger.info(f"磁带标签已写入物理磁带: {request.tape_id}")
+                return {
+                    "success": True,
+                    "message": f"磁带 {request.tape_id} 创建成功，标签已写入",
+                    "tape_id": request.tape_id
+                }
+            else:
+                logger.warning(f"磁带记录创建成功，但物理标签写入失败（可能磁带机中无磁带）")
+                return {
+                    "success": True,
+                    "message": f"磁带 {request.tape_id} 创建成功（但未写入物理磁带，请确保磁带机中已装入磁带）",
+                    "tape_id": request.tape_id
+                }
+        except Exception as e:
+            logger.warning(f"写入物理磁带标签时出错: {str(e)}")
+            return {
+                "success": True,
+                "message": f"磁带 {request.tape_id} 创建成功（但未写入物理磁带，请确保磁带机中已装入磁带）",
+                "tape_id": request.tape_id
+            }
         
     except Exception as e:
         logger.error(f"创建磁带记录失败: {str(e)}")
