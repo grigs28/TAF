@@ -1101,6 +1101,16 @@ class SCSIInterface:
                 logger.info(f"从磁带标签读取到UUID: {tape_uuid}")
                 return tape_uuid
             
+            # 尝试从MODE SENSE读取条码
+            logger.info("尝试从MODE SENSE读取磁带条码...")
+            barcode = await self._read_barcode_from_mode_sense(device_path)
+            if barcode:
+                logger.info(f"从MODE SENSE读取到条码: {barcode}")
+                uuid_str = self._serial_to_uuid(barcode)
+                if uuid_str:
+                    logger.info(f"从条码生成UUID: {uuid_str}")
+                    return uuid_str
+            
             # Windows平台使用Storage API读取序列号生成UUID
             if self.system == "Windows":
                 uuid = await self._get_windows_storage_uuid(device_path)
@@ -1225,6 +1235,62 @@ class SCSIInterface:
             
         except Exception as e:
             logger.debug(f"从磁带标签读取UUID失败: {str(e)}")
+            return None
+
+    async def _read_barcode_from_mode_sense(self, device_path: str) -> Optional[str]:
+        """从MODE SENSE读取磁带条码"""
+        try:
+            # 获取MODE SENSE Page 0x03 (Medium Type Page)
+            result = await self.send_ibm_specific_command(
+                device_path,
+                "mode_sense",
+                {'page_code': 0x03}
+            )
+
+            if not result.get('success'):
+                logger.debug(f"无法读取MODE SENSE Page 0x03: {result.get('error', '未知错误')}")
+                return None
+
+            # 解析MODE SENSE数据
+            mode_hex = result.get('mode_data', '')
+            if not mode_hex:
+                logger.debug("MODE SENSE数据为空")
+                return None
+
+            mode_data = bytes.fromhex(mode_hex)
+            
+            # MODE SENSE返回格式: [Mode Parameter Header] [Page(s)]
+            # 需要跳过Mode Parameter Header找到Page 0x03
+            if len(mode_data) < 8:
+                logger.debug("MODE SENSE数据太短")
+                return None
+            
+            # 查找Page 0x03
+            offset = 8  # 跳过Mode Parameter Header
+            while offset + 2 <= len(mode_data):
+                page_code = mode_data[offset]
+                page_length = mode_data[offset + 1] + 2  # 包含page_code和page_length
+                
+                if page_code == 0x03 and offset + page_length <= len(mode_data):
+                    # 找到Page 0x03 (Medium Type Page)
+                    page_data = mode_data[offset:offset + page_length]
+                    # 条码通常在Page 0x03的扩展字段中
+                    # 简化处理：尝试从page_data中提取ASCII字符串
+                    if len(page_data) > 16:
+                        # 条码通常在偏移16后
+                        barcode_bytes = page_data[16:]
+                        barcode = barcode_bytes.split(b'\x00')[0].decode('ascii', errors='ignore').strip()
+                        if barcode and len(barcode) > 3:
+                            logger.info(f"从MODE SENSE Page 0x03读取到条码: {barcode}")
+                            return barcode
+                
+                offset += page_length
+                
+            logger.debug("MODE SENSE Page 0x03中未找到条码")
+            return None
+
+        except Exception as e:
+            logger.debug(f"从MODE SENSE读取条码失败: {str(e)}")
             return None
 
     async def _get_windows_storage_uuid(self, device_path: str) -> Optional[str]:
