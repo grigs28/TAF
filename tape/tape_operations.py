@@ -413,8 +413,13 @@ class TapeOperations:
             block_size = 256
             result = await self.scsi_interface.read_tape_data(block_number=0, block_count=1, block_size=block_size)
             
-            if not result or 'data' not in result:
-                logger.warning("无法读取磁带标签")
+            if not result or not result.get('success'):
+                error_msg = result.get('error', '未知错误') if result else '未返回结果'
+                logger.warning(f"无法读取磁带标签: {error_msg}")
+                return None
+            
+            if 'data' not in result:
+                logger.warning("磁带标签读取结果中缺少data字段")
                 return None
             
             data = result['data']
@@ -503,11 +508,12 @@ class TapeOperations:
             # 写入标签数据
             result = await self.scsi_interface.write_tape_data(data=label_data, block_number=0, block_size=block_size)
             
-            if result:
+            if result.get('success'):
                 logger.info(f"磁带标签写入成功: {tape_info.get('tape_id')}")
                 return True
             else:
-                logger.error("磁带标签写入失败")
+                error_msg = result.get('error', '未知错误')
+                logger.error(f"磁带标签写入失败: {error_msg}")
                 return False
                 
         except Exception as e:
