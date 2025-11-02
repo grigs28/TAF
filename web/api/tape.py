@@ -95,7 +95,13 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
                     }
                 
                 # 计算容量
-                capacity_bytes = request.capacity_gb * (1024 ** 3) if request.capacity_gb else 18000000000000  # 默认18TB
+                # 前端发送的是 capacity_gb，单位是GB（二进制：1TB=1024GB）
+                # 例如：18TB = 18 * 1024 = 18432 GB
+                # capacity_bytes = capacity_gb * (1024 ** 3)
+                if request.capacity_gb:
+                    capacity_bytes = request.capacity_gb * (1024 ** 3)
+                else:
+                    capacity_bytes = 18 * 1024 * (1024 ** 3)  # 默认18TB = 18432GB
                 
                 # 计算过期日期
                 expiry_date = datetime.now() + timedelta(days=request.retention_months * 30)
