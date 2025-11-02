@@ -119,15 +119,92 @@ class DatabaseManager:
         try:
             # 导入所有模型以确保它们被注册
             from models import backup, tape, user, system_log, system_config
-
-            # 直接使用SQLAlchemy引擎来创建表，因为它会自动处理枚举类型和所有PostgreSQL特性
-            with self.engine.begin() as conn:
-                Base.metadata.create_all(conn)
-            logger.info("数据库表创建完成")
+            import psycopg2
+            import re
+            
+            # 对于openGauss，使用psycopg2直接创建表，避免版本检查问题
+            database_url = self.settings.DATABASE_URL
+            if "opengauss" in database_url.lower():
+                logger.info("检测到openGauss数据库，使用psycopg2创建表...")
+                await self._create_tables_with_psycopg2()
+            else:
+                # PostgreSQL/SQLite使用SQLAlchemy引擎来创建表
+                with self.engine.begin() as conn:
+                    Base.metadata.create_all(conn)
+                logger.info("数据库表创建完成")
 
         except Exception as e:
             logger.error(f"创建数据库表失败: {str(e)}")
             raise
+    
+    async def _create_tables_with_psycopg2(self):
+        """使用psycopg2直接连接创建表（解决openGauss版本解析问题）"""
+        import psycopg2
+        import re
+        
+        # 解析数据库URL获取连接信息
+        database_url = self.settings.DATABASE_URL
+        if database_url.startswith("opengauss://"):
+            database_url = database_url.replace("opengauss://", "postgresql://", 1)
+        
+        pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
+        match = re.match(pattern, database_url)
+        if not match:
+            raise ValueError("无法解析数据库连接URL")
+        
+        username, password, host, port, database = match.groups()
+        
+        # 使用psycopg2直接连接
+        conn = psycopg2.connect(
+            host=host,
+            port=port,
+            user=username,
+            password=password,
+            database=database
+        )
+        
+        try:
+            # 使用SQLAlchemy的Base.metadata.create_all，但通过psycopg2连接
+            # 这样可以避免版本检查，同时保留SQLAlchemy的所有特性
+            from sqlalchemy.dialects.postgresql import CreateType, DropType
+            from sqlalchemy.schema import CreateTable
+            
+            with conn.cursor() as cur:
+                # 先创建枚举类型
+                for table in Base.metadata.tables.values():
+                    for column in table.columns:
+                        if hasattr(column.type, 'enums'):
+                            # 这是一个枚举类型
+                            enum_name = column.type.name
+                            enum_values = [e.value for e in column.type.enums]
+                            # 检查枚举类型是否已存在
+                            cur.execute("""
+                                SELECT 1 FROM pg_type WHERE typname = %s
+                            """, (enum_name,))
+                            if not cur.fetchone():
+                                # 创建枚举类型
+                                enum_sql = f"CREATE TYPE {enum_name} AS ENUM ({', '.join([f\"'{v}'\" for v in enum_values])})"
+                                cur.execute(enum_sql)
+                                logger.info(f"创建枚举类型: {enum_name}")
+                
+                # 创建表
+                for table in Base.metadata.sorted_tables:
+                    # 检查表是否已存在
+                    cur.execute("""
+                        SELECT 1 FROM information_schema.tables WHERE table_name = %s
+                    """, (table.name,))
+                    if not cur.fetchone():
+                        create_sql = str(CreateTable(table).compile(compile_kwargs={"literal_binds": True}))
+                        cur.execute(create_sql)
+                        logger.info(f"创建表: {table.name}")
+            
+            conn.commit()
+            logger.info("使用psycopg2成功创建数据库表")
+        except Exception as e:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def get_sync_session(self) -> Session:
         """获取同步数据库会话"""
