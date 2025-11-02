@@ -43,6 +43,13 @@
   - 使用psycopg2直接连接避免SQLAlchemy版本解析
   - 修复tape status枚举值大小写问题
   - `/api/tape/list`、`/api/tape/create`、`/api/tape/check`全面优化
+  - 明确指定health_score默认值为100，确保新磁带显示健康而非严重
+
+#### 磁带显示问题
+- ✅ 修复磁带卡片显示异常
+  - health_score为空时默认100分
+  - 状态映射支持大小写（AVAILABLE/available等）
+  - 添加过期时间显示
 
 ### 改进
 
