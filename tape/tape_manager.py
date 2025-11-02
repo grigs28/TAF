@@ -216,13 +216,22 @@ class TapeManager:
                 if not await self.load_tape(tape_id):
                     return False
 
+            # 先保存磁带信息用于擦除后重新写入标签
+            tape_info = {
+                "tape_id": tape.tape_id,
+                "label": tape.label,
+                "serial_number": tape.serial_number,
+                "created_date": tape.created_date,
+                "expiry_date": tape.expiry_date
+            }
+            
             # 执行擦除操作
             success = await self.tape_operations.erase_tape()
             if success:
-                # 重置磁带信息（内存）
+                # 重置磁带信息（内存）- 保留磁带标签和创建日期，只更新时间字段
                 tape.used_bytes = 0
-                tape.created_date = datetime.now()
-                tape.expiry_date = datetime.now() + timedelta(days=self.settings.DEFAULT_RETENTION_MONTHS * 30)
+                # tape.created_date 不变，保留原始创建日期
+                # tape.expiry_date 不变，保留原始过期日期
                 tape.status = TapeStatus.AVAILABLE
                 tape.last_erase_date = datetime.now()
                 
@@ -231,6 +240,16 @@ class TapeManager:
                     await self._update_tape_in_database(tape)
                 except Exception as db_error:
                     logger.warning(f"更新数据库磁带信息失败: {db_error}")
+                
+                # 擦除后重新写入磁带标签以保持标签不变
+                try:
+                    write_success = await self.tape_operations._write_tape_label(tape_info)
+                    if write_success:
+                        logger.info(f"擦除后重新写入磁带标签: {tape.tape_id}")
+                    else:
+                        logger.warning(f"擦除成功，但重新写入标签失败: {tape.tape_id}")
+                except Exception as e:
+                    logger.warning(f"重新写入标签时出错: {str(e)}")
 
                 logger.info(f"磁带 {tape_id} 擦除成功")
 

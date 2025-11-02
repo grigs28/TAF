@@ -96,10 +96,19 @@ class TapeCartridge:
 
     @property
     def is_expired(self) -> bool:
-        """是否已过期"""
+        """是否已过期（仅比较年月）"""
         if self.expiry_date is None:
             return False
-        return datetime.now() > self.expiry_date
+        
+        # 仅比较年月，忽略日
+        now = datetime.now()
+        expiry_year = self.expiry_date.year
+        expiry_month = self.expiry_date.month
+        current_year = now.year
+        current_month = now.month
+        
+        # 判断是否过期：当前年月 >= 过期年月
+        return (current_year > expiry_year) or (current_year == expiry_year and current_month >= expiry_month)
 
     @property
     def days_until_expiry(self) -> int:

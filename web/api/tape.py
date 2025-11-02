@@ -32,6 +32,8 @@ class CreateTapeRequest(BaseModel):
     location: Optional[str] = None
     notes: Optional[str] = None
     retention_months: int = 6
+    create_year: Optional[int] = None  # 创建年份
+    create_month: Optional[int] = None  # 创建月份
 
 
 class UpdateTapeRequest(BaseModel):
@@ -111,8 +113,26 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
                 else:
                     capacity_bytes = 18 * 1024 * (1024 ** 3)  # 默认18TB = 18432GB
                 
-                # 计算过期日期
-                expiry_date = datetime.now() + timedelta(days=request.retention_months * 30)
+                # 计算创建日期和过期日期（仅年月）
+                from datetime import date
+                if request.create_year and request.create_month:
+                    # 使用指定的年月，日期设为1号
+                    created_date = datetime(request.create_year, request.create_month, 1)
+                else:
+                    # 默认使用当前年月
+                    now = datetime.now()
+                    created_date = datetime(now.year, now.month, 1)
+                
+                # 计算过期日期：创建日期 + retention_months个月
+                expiry_year = created_date.year
+                expiry_month = created_date.month + request.retention_months
+                
+                # 处理跨年
+                while expiry_month > 12:
+                    expiry_year += 1
+                    expiry_month -= 12
+                
+                expiry_date = datetime(expiry_year, expiry_month, 1)
                 
                 # 插入新磁带
                 cur.execute("""
@@ -132,7 +152,7 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
                     0,
                     request.retention_months,
                     request.notes,
-                    datetime.now(),
+                    created_date,  # 使用计算出的创建日期（仅年月）
                     expiry_date,
                     True,
                     100  # 默认健康分数100
@@ -151,7 +171,7 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
                 "tape_id": request.tape_id,
                 "label": request.label,
                 "serial_number": request.serial_number,
-                "created_date": datetime.now(),
+                "created_date": created_date,
                 "expiry_date": expiry_date
             }
             
@@ -181,6 +201,91 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
         
     except Exception as e:
         logger.error(f"创建磁带记录失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{tape_id}")
+async def get_tape(tape_id: str, request: Request):
+    """获取磁带详情"""
+    try:
+        # 使用psycopg2直接连接
+        import psycopg2
+        import psycopg2.extras
+        from config.settings import get_settings
+        
+        settings = get_settings()
+        database_url = settings.DATABASE_URL
+        
+        # 解析URL
+        if database_url.startswith("opengauss://"):
+            database_url = database_url.replace("opengauss://", "postgresql://", 1)
+        
+        import re
+        pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
+        match = re.match(pattern, database_url)
+        
+        if not match:
+            raise ValueError("无法解析数据库连接URL")
+        
+        username, password, host, port, database = match.groups()
+        
+        # 连接数据库
+        conn = psycopg2.connect(
+            host=host,
+            port=port,
+            user=username,
+            password=password,
+            database=database
+        )
+        
+        try:
+            with conn.cursor() as cur:
+                # 查询磁带信息
+                cur.execute("""
+                    SELECT tape_id, label, status, media_type, generation, serial_number, location,
+                           capacity_bytes, used_bytes, retention_months, notes, manufactured_date, 
+                           expiry_date, auto_erase, health_score
+                    FROM tape_cartridges 
+                    WHERE tape_id = %s
+                """, (tape_id,))
+                
+                row = cur.fetchone()
+                
+                if not row:
+                    return {
+                        "success": False,
+                        "message": f"磁带 {tape_id} 不存在"
+                    }
+                
+                # 构建返回数据
+                tape = {
+                    "tape_id": row[0],
+                    "label": row[1],
+                    "status": row[2],
+                    "media_type": row[3],
+                    "generation": row[4],
+                    "serial_number": row[5],
+                    "location": row[6],
+                    "capacity_bytes": row[7],
+                    "used_bytes": row[8],
+                    "retention_months": row[9],
+                    "notes": row[10],
+                    "manufactured_date": row[11].isoformat() if row[11] else None,
+                    "expiry_date": row[12].isoformat() if row[12] else None,
+                    "auto_erase": row[13],
+                    "health_score": row[14]
+                }
+                
+                return {
+                    "success": True,
+                    "tape": tape
+                }
+                
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        logger.error(f"获取磁带详情失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -453,8 +558,14 @@ async def check_tape_exists(tape_id: str, request: Request):
                 row = cur.fetchone()
                 
                 if row:
-                    # 检查是否过期
-                    is_expired = row[3] and datetime.now() > row[3]
+                    # 检查是否过期（仅比较年月）
+                    is_expired = False
+                    if row[3]:  # expiry_date
+                        now = datetime.now()
+                        expiry_date = row[3]
+                        # 比较年月
+                        if (now.year > expiry_date.year) or (now.year == expiry_date.year and now.month >= expiry_date.month):
+                            is_expired = True
                     
                     return {
                         "exists": True,
@@ -728,21 +839,38 @@ async def format_tape(request: Request, format_request: FormatRequest = FormatRe
                 "message": "未检测到磁带设备"
             }
         
-        # 如果不强制，先检查是否已格式化
-        if not format_request.force:
-            try:
-                metadata = await system.tape_manager.tape_operations._read_tape_label()
-                if metadata:
-                    return {
-                        "success": False,
-                        "message": "磁带已格式化，如需强制格式化请使用force=true参数"
-                    }
-            except Exception as e:
-                logger.debug(f"读取磁带标签失败（继续格式化）: {str(e)}")
+        # 先读取现有标签（如果有），格式化后重新写入以保持标签不变
+        existing_label = None
+        
+        # 检查是否已格式化
+        try:
+            existing_label = await system.tape_manager.tape_operations._read_tape_label()
+            if existing_label and not format_request.force:
+                # 已格式化且不强制，拒绝
+                return {
+                    "success": False,
+                    "message": "磁带已格式化，如需强制格式化请使用force=true参数"
+                }
+        except Exception as e:
+            logger.debug(f"读取磁带标签失败（继续格式化）: {str(e)}")
         
         # 使用SCSI接口格式化
         success = await system.tape_manager.scsi_interface.format_tape(format_type=0)
         if success:
+            # 如果格式化前有标签，重新写入以保持标签不变
+            if existing_label:
+                try:
+                    write_success = await system.tape_manager.tape_operations._write_tape_label(existing_label)
+                    if write_success:
+                        logger.info(f"格式化后重新写入磁带标签: {existing_label.get('tape_id')}")
+                        return {"success": True, "message": "磁带格式化成功，标签已保留"}
+                    else:
+                        logger.warning("格式化成功，但重新写入标签失败")
+                        return {"success": True, "message": "磁带格式化成功（但标签未重写）"}
+                except Exception as e:
+                    logger.warning(f"重新写入标签时出错: {str(e)}")
+                    return {"success": True, "message": "磁带格式化成功（但标签未重写）"}
+            
             return {"success": True, "message": "磁带格式化成功"}
         else:
             return {

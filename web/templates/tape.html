@@ -284,9 +284,8 @@
                     </div>
                     <div class="row">
                         <div class="col-md-6 mb-3">
-                            <label class="form-label">月份</label>
+                            <label class="form-label">创建年月</label>
                             <select class="form-select" id="tapeMonth">
-                                <option value="">选择月份</option>
                                 <option value="01">1月</option>
                                 <option value="02">2月</option>
                                 <option value="03">3月</option>
@@ -300,6 +299,7 @@
                                 <option value="11">11月</option>
                                 <option value="12">12月</option>
                             </select>
+                            <small class="text-muted">默认为当前月</small>
                         </div>
                         <div class="col-md-6 mb-3">
                             <label class="form-label">磁带标签</label>
@@ -391,7 +391,11 @@ function resetTapeForm() {
     document.getElementById('tapeCapacity').value = '';
     document.getElementById('tapeLocation').value = '';
     document.getElementById('tapeRemark').value = '';
-    document.getElementById('tapeMonth').value = '';
+    
+    // 重置月份为当前月
+    const now = new Date();
+    const currentMonth = String(now.getMonth() + 1).padStart(2, '0');
+    document.getElementById('tapeMonth').value = currentMonth;
     
     // 恢复表单状态
     document.getElementById('tapeLabel').readOnly = false;
@@ -710,9 +714,14 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
     
-    // 月份选择改变时自动刷新标签和序列号
+    // 初始化月份下拉框为当前月并添加change监听
     const tapeMonthSelect = document.getElementById('tapeMonth');
     if (tapeMonthSelect) {
+        const now = new Date();
+        const currentMonth = String(now.getMonth() + 1).padStart(2, '0');
+        tapeMonthSelect.value = currentMonth;
+        
+        // 月份选择改变时自动刷新标签和序列号
         tapeMonthSelect.addEventListener('change', function() {
             // 如果标签和序列号都有值或者是扫描后的，自动刷新
             const tapeLabel = document.getElementById('tapeLabel').value;
@@ -880,14 +889,29 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (metadata.created_date) {
                         const createdDate = new Date(metadata.created_date);
                         const expiryDate = new Date(metadata.expiry_date);
-                        const daysUntilExpiry = Math.floor((expiryDate - new Date()) / (1000 * 60 * 60 * 24));
+                        const now = new Date();
+                        
+                        // 仅比较年月，忽略日
+                        const expiryYear = expiryDate.getFullYear();
+                        const expiryMonth = expiryDate.getMonth();
+                        const currentYear = now.getFullYear();
+                        const currentMonth = now.getMonth();
+                        
+                        // 判断是否过期：当前年月 >= 过期年月
+                        const isExpired = (currentYear > expiryYear) || (currentYear === expiryYear && currentMonth >= expiryMonth);
                         
                         let statusText = '从磁带读取到的信息: ';
-                        if (daysUntilExpiry > 0) {
-                            statusText += `创建日期: ${createdDate.toLocaleDateString()}, 距离过期还有 ${daysUntilExpiry} 天`;
+                        if (!isExpired) {
+                            const yearDiff = expiryYear - currentYear;
+                            const monthDiff = expiryMonth - currentMonth;
+                            if (yearDiff > 0) {
+                                statusText += `创建日期: ${createdDate.getFullYear()}年${createdDate.getMonth() + 1}月, 距离过期还有 ${yearDiff}年${monthDiff}个月`;
+                            } else {
+                                statusText += `创建日期: ${createdDate.getFullYear()}年${createdDate.getMonth() + 1}月, 距离过期还有 ${monthDiff}个月`;
+                            }
                             infoDiv.className = 'alert alert-success mb-3';
                         } else {
-                            statusText += `创建日期: ${createdDate.toLocaleDateString()}, 磁带已过期，需要擦除`;
+                            statusText += `创建日期: ${createdDate.getFullYear()}年${createdDate.getMonth() + 1}月, 磁带已过期，需要擦除`;
                             infoDiv.className = 'alert alert-danger mb-3';
                         }
                         infoText.textContent = statusText;
@@ -904,7 +928,36 @@ document.addEventListener('DOMContentLoaded', function() {
                         const checkResult = await checkResponse.json();
                         
                         if (checkResult.exists) {
-                            infoText.textContent += ' (数据库中已存在此磁带记录)';
+                            // 如果数据库已存在，禁用标签输入框，并自动填充数据库中的其他信息
+                            document.getElementById('tapeLabel').readOnly = true;
+                            infoText.textContent += ' (数据库中已存在此磁带记录，标签不可修改)';
+                            infoDiv.className = 'alert alert-info mb-3';
+                            
+                            // 从数据库获取完整信息并填充表单
+                            try {
+                                const detailResponse = await fetch(`/api/tape/${metadata.tape_id}`);
+                                const detailResult = await detailResponse.json();
+                                
+                                if (detailResult.tape) {
+                                    const tape = detailResult.tape;
+                                    // 填充其他字段
+                                    if (tape.media_type && tape.generation) {
+                                        document.getElementById('tapeType').value = `${tape.media_type}-${tape.generation}`;
+                                    }
+                                    if (tape.capacity_bytes) {
+                                        const tb = Math.round((tape.capacity_bytes / (1024 ** 4)) * 10) / 10;
+                                        document.getElementById('tapeCapacity').value = `${tb}TB`;
+                                    }
+                                    if (tape.location) {
+                                        document.getElementById('tapeLocation').value = tape.location;
+                                    }
+                                    if (tape.notes) {
+                                        document.getElementById('tapeRemark').value = tape.notes;
+                                    }
+                                }
+                            } catch (e) {
+                                console.error('获取磁带详情失败:', e);
+                            }
                         }
                     }
                 } else {
@@ -1008,6 +1061,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     const capacityValue = parseInt(tapeCapacity.replace('TB', ''));
                     const capacityGB = capacityValue * 1024;  // TB转GB
                     
+                    // 获取选中的月份和年份
+                    const selectedMonth = document.getElementById('tapeMonth').value;
+                    const now = new Date();
+                    const year = now.getFullYear();  // 当前年份
+                    
                     // 构建请求数据
                     const requestData = {
                         tape_id: tapeLabel,  // 使用label作为tape_id
@@ -1018,7 +1076,9 @@ document.addEventListener('DOMContentLoaded', function() {
                         capacity_gb: capacityGB,
                         location: tapeLocation,
                         notes: tapeRemark,
-                        retention_months: 6
+                        retention_months: 6,
+                        create_year: year,   // 创建年份
+                        create_month: parseInt(selectedMonth)  // 创建月份
                     };
                     
                     // 发送创建请求
