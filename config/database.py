@@ -166,7 +166,11 @@ class DatabaseManager:
         try:
             # 使用SQLAlchemy的Base.metadata.create_all，但通过psycopg2连接
             # 这样可以避免版本检查，同时保留SQLAlchemy的所有特性
+            from sqlalchemy import create_engine
             from sqlalchemy.schema import CreateTable
+            
+            # 创建一个临时的PostgreSQL引擎用于生成SQL（指定PostgreSQL dialect）
+            temp_engine = create_engine("postgresql://", pool_pre_ping=False)
             
             with conn.cursor() as cur:
                 # 先创建枚举类型
@@ -175,7 +179,13 @@ class DatabaseManager:
                         if hasattr(column.type, 'enums'):
                             # 这是一个枚举类型
                             enum_name = column.type.name
-                            enum_values = [e.value for e in column.type.enums]
+                            # 获取枚举值：可能是Enum对象列表，也可能是字符串列表
+                            try:
+                                enum_values = [e.value for e in column.type.enums]
+                            except AttributeError:
+                                # 如果已经是字符串列表
+                                enum_values = list(column.type.enums)
+                            
                             # 检查枚举类型是否已存在
                             cur.execute("""
                                 SELECT 1 FROM pg_type WHERE typname = %s
@@ -194,7 +204,7 @@ class DatabaseManager:
                         SELECT 1 FROM information_schema.tables WHERE table_name = %s
                     """, (table.name,))
                     if not cur.fetchone():
-                        create_sql = str(CreateTable(table).compile(compile_kwargs={"literal_binds": True}))
+                        create_sql = str(CreateTable(table).compile(compile_kwargs={"literal_binds": True}, dialect=temp_engine.dialect))
                         cur.execute(create_sql)
                         logger.info(f"创建表: {table.name}")
             
