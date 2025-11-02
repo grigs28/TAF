@@ -362,6 +362,25 @@
     </div>
 </div>
 
+<!-- 扫描结果模态框 -->
+<div class="modal fade" id="scanResultModal" tabindex="-1" data-bs-backdrop="false">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">磁带设备扫描结果</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="scanResultBody">
+                <p>正在扫描...</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                <button type="button" class="btn btn-primary" id="applyScanResultBtn" data-bs-dismiss="modal">应用信息</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
 // 加载磁带数据
 async function loadTapeStatistics() {
@@ -688,66 +707,96 @@ document.addEventListener('DOMContentLoaded', function() {
     const scanForAddTapeBtn = document.getElementById('scanForAddTapeBtn');
     if (scanForAddTapeBtn) {
         scanForAddTapeBtn.addEventListener('click', async function() {
-            const btn = this;
-            const originalHtml = btn.innerHTML;
-            btn.disabled = true;
-            btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-1"></i>扫描中...';
+            const scanResultModal = new bootstrap.Modal(document.getElementById('scanResultModal'));
+            const scanResultBody = document.getElementById('scanResultBody');
+            
+            // 显示扫描中状态
+            scanResultBody.innerHTML = `
+                <div class="text-center">
+                    <div class="spinner-border text-primary mb-3" role="status">
+                        <span class="visually-hidden">扫描中...</span>
+                    </div>
+                    <p>正在扫描磁带设备...</p>
+                </div>
+            `;
+            scanResultModal.show();
             
             try {
                 const response = await fetch('/api/system/tape/scan');
                 const result = await response.json();
                 
                 if (result.success && result.devices && result.devices.length > 0) {
-                    // 使用第一个设备的信息填充表单
-                    const device = result.devices[0];
-                    console.log('扫描到的设备信息:', device);
+                    // 存储扫描结果供"应用信息"按钮使用
+                    window.lastScanResult = result.devices[0];
                     
-                    // 如果有LTO信息，自动选择类型和容量
+                    const device = result.devices[0];
+                    
+                    // 生成详细的扫描结果HTML
+                    let html = '<div class="alert alert-success"><i class="bi bi-check-circle me-2"></i>扫描成功！检测到以下设备信息：</div>';
+                    html += '<div class="table-responsive"><table class="table table-sm">';
+                    
+                    // 基本信息
+                    if (device.vendor) html += `<tr><th class="w-30">厂商:</th><td>${device.vendor}</td></tr>`;
+                    if (device.model) html += `<tr><th>型号:</th><td>${device.model}</td></tr>`;
+                    if (device.product) html += `<tr><th>产品:</th><td>${device.product}</td></tr>`;
+                    if (device.serial) html += `<tr><th>序列号:</th><td>${device.serial}</td></tr>`;
+                    
+                    // LTO信息
                     if (device.is_ibm_lto && device.lto_generation) {
-                        console.log('检测到IBM LTO设备，代数:', device.lto_generation);
-                        const ltoGen = device.lto_generation;
-                        const tapeTypeValue = `LTO-${ltoGen}`;
-                        console.log('设置磁带类型为:', tapeTypeValue);
-                        const tapeTypeSelect = document.getElementById('tapeType');
-                        if (tapeTypeSelect) {
-                            tapeTypeSelect.value = tapeTypeValue;
-                            console.log('磁带类型已设置');
+                        html += `<tr><th>设备类型:</th><td><span class="badge bg-info">IBM LTO-${device.lto_generation}</span></td></tr>`;
+                        const capacityMap = {9: '18TB', 8: '12TB', 7: '6TB', 6: '2.5TB', 5: '1.5TB'};
+                        if (capacityMap[device.lto_generation]) {
+                            html += `<tr><th>建议容量:</th><td>${capacityMap[device.lto_generation]}</td></tr>`;
                         }
-                        
-                        // 根据LTO代数设置容量
-                        const capacityMap = {
-                            9: '18TB',
-                            8: '12TB',
-                            7: '6TB',
-                            6: '2.5TB',
-                            5: '1.5TB'
-                        };
-                        if (capacityMap[ltoGen]) {
-                            const capacityValue = capacityMap[ltoGen];
-                            console.log('设置容量为:', capacityValue);
-                            const tapeCapacitySelect = document.getElementById('tapeCapacity');
-                            if (tapeCapacitySelect) {
-                                tapeCapacitySelect.value = capacityValue;
-                                console.log('容量已设置');
-                            }
-                        }
-                    } else {
-                        console.log('未检测到IBM LTO信息 - is_ibm_lto:', device.is_ibm_lto, 'generation:', device.lto_generation);
                     }
                     
-                    // 生成磁带标签和序列号
-                    document.getElementById('tapeLabel').value = generateTapeLabel();
-                    document.getElementById('tapeSerial').value = generateTapeSerial();
+                    // 其他信息
+                    if (device.path) html += `<tr><th>设备路径:</th><td><code>${device.path}</code></td></tr>`;
+                    if (device.capacity) html += `<tr><th>设备容量:</th><td>${device.capacity}</td></tr>`;
                     
-                    alert('✅ 扫描成功，已自动填充信息');
+                    html += '</table></div>';
+                    scanResultBody.innerHTML = html;
                 } else {
-                    alert('⚠️ 未检测到磁带设备');
+                    scanResultBody.innerHTML = '<div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i>未检测到磁带设备</div>';
                 }
             } catch (error) {
-                alert('❌ 扫描失败：' + error.message);
-            } finally {
-                btn.disabled = false;
-                btn.innerHTML = originalHtml;
+                scanResultBody.innerHTML = `<div class="alert alert-danger"><i class="bi bi-x-circle me-2"></i>扫描失败: ${error.message}</div>`;
+            }
+        });
+    }
+    
+    // 应用扫描结果到表单
+    const applyScanResultBtn = document.getElementById('applyScanResultBtn');
+    if (applyScanResultBtn) {
+        applyScanResultBtn.addEventListener('click', function() {
+            if (window.lastScanResult) {
+                const device = window.lastScanResult;
+                
+                // 如果有LTO信息，自动选择类型和容量
+                if (device.is_ibm_lto && device.lto_generation) {
+                    const ltoGen = device.lto_generation;
+                    const tapeTypeValue = `LTO-${ltoGen}`;
+                    const tapeTypeSelect = document.getElementById('tapeType');
+                    if (tapeTypeSelect) {
+                        tapeTypeSelect.value = tapeTypeValue;
+                    }
+                    
+                    // 根据LTO代数设置容量
+                    const capacityMap = {9: '18TB', 8: '12TB', 7: '6TB', 6: '2.5TB', 5: '1.5TB'};
+                    if (capacityMap[ltoGen]) {
+                        const tapeCapacitySelect = document.getElementById('tapeCapacity');
+                        if (tapeCapacitySelect) {
+                            tapeCapacitySelect.value = capacityMap[ltoGen];
+                        }
+                    }
+                }
+                
+                // 生成磁带标签和序列号
+                document.getElementById('tapeLabel').value = generateTapeLabel();
+                document.getElementById('tapeSerial').value = generateTapeSerial();
+                
+                // 清空扫描结果缓存
+                delete window.lastScanResult;
             }
         });
     }
