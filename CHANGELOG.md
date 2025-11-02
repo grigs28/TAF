@@ -20,6 +20,13 @@
   - 主键(tape_id)和标签不允许修改
   - 添加PUT `/api/tape/{tape_id}` 更新API
 
+#### UUID唯一标识支持
+- ✅ 添加磁带和备份集的UUID字段
+  - `TapeCartridge`模型添加`tape_uuid`字段
+  - `BackupSet`模型添加`set_uuid`字段
+  - UUID用于跨系统唯一识别和匹配
+  - 磁带列表卡片显示UUID（带指纹图标）
+
 ### 修复
 
 #### IBM LTO检测修复
@@ -68,6 +75,12 @@
 - ✅ 添加数据库枚举类型创建和检查调试日志
   - 显示枚举类型值信息
   - 便于排查数据库兼容性问题
+
+#### psycopg2 UUID适配
+- ✅ 修复psycopg2无法处理UUID类型错误
+  - 添加`psycopg2.extras.register_uuid()`注册UUID适配器
+  - 修复磁带创建、更新、列表查询中的UUID兼容性
+  - 确保UUID字段正确写入数据库
 
 ## [0.0.5] - 2024-11-02
 
