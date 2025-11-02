@@ -915,8 +915,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 // 从类型中提取代数 (LTO-9 -> 9)
                 const generation = parseInt(tapeType.replace('LTO-', ''));
                 
-                // 从容量中提取GB (18TB -> 18)
-                const capacityGB = parseInt(tapeCapacity.replace('TB', ''));
+                // 从容量中提取并转换为GB (18TB -> 18432GB)
+                const capacityValue = parseInt(tapeCapacity.replace('TB', ''));
+                const capacityGB = capacityValue * 1024;  // TB转GB
                 
                 // 构建请求数据
                 const requestData = {
