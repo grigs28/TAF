@@ -525,10 +525,12 @@ async def get_database_status(request: Request):
         if db_url.startswith("sqlite"):
             db_info["db_type"] = "SQLite"
             db_info["db_path"] = db_url.replace("sqlite:///", "")
-        elif db_url.startswith("postgresql://"):
-            db_info["db_type"] = "PostgreSQL"
         elif db_url.startswith("opengauss://"):
             db_info["db_type"] = "openGauss"
+        elif db_url.startswith("postgresql://"):
+            # 需要检查是否是从opengauss转换来的
+            # 通过检查DB_HOST等参数是否匹配来判断
+            db_info["db_type"] = "PostgreSQL"
         
         return db_info
         
