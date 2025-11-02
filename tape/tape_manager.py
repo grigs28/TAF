@@ -156,7 +156,7 @@ class TapeManager:
                 
                 # 更新数据库
                 try:
-                    await self._update_tape_status_in_database(tape_id, 'in_use')
+                    await self._update_tape_status_in_database(tape_id, 'IN_USE')
                 except Exception as db_error:
                     logger.warning(f"更新数据库磁带状态失败: {db_error}")
                 
@@ -187,7 +187,7 @@ class TapeManager:
                 
                 # 更新数据库
                 try:
-                    await self._update_tape_status_in_database(tape_id, 'available')
+                    await self._update_tape_status_in_database(tape_id, 'AVAILABLE')
                 except Exception as db_error:
                     logger.warning(f"更新数据库磁带状态失败: {db_error}")
                 
@@ -429,10 +429,10 @@ class TapeManager:
                             cur.execute("SELECT COUNT(*) FROM tape_cartridges")
                             total_tapes = cur.fetchone()[0] or 0
                             
-                            cur.execute("SELECT COUNT(*) FROM tape_cartridges WHERE status = 'available'")
+                            cur.execute("SELECT COUNT(*) FROM tape_cartridges WHERE status = 'AVAILABLE'")
                             available_tapes = cur.fetchone()[0] or 0
                             
-                            cur.execute("SELECT COUNT(*) FROM tape_cartridges WHERE status = 'in_use'")
+                            cur.execute("SELECT COUNT(*) FROM tape_cartridges WHERE status = 'IN_USE'")
                             in_use_tapes = cur.fetchone()[0] or 0
                             
                             # 统计过期磁带

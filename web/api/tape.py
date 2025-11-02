@@ -99,7 +99,7 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
                 """, (
                     request.tape_id,
                     request.label,
-                    'available',  # 使用'available'状态，因为数据库中可能没有'new'
+                    'AVAILABLE',  # 使用'AVAILABLE'状态（全大写）
                     request.media_type,
                     request.generation,
                     request.serial_number,
