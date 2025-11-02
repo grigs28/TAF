@@ -111,7 +111,7 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
                 # 计算过期日期
                 expiry_date = datetime.now() + timedelta(days=request.retention_months * 30)
                 
-                # 尝试从物理磁带获取UUID，失败则生成新的
+                # 必须从物理磁带获取UUID，否则返回错误
                 tape_uuid_str = None
                 try:
                     system = http_request.app.state.system
@@ -120,14 +120,18 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
                         if tape_uuid_str:
                             logger.info(f"从物理磁带读取UUID: {tape_uuid_str}")
                 except Exception as e:
-                    logger.warning(f"读取物理磁带UUID失败: {str(e)}")
+                    logger.error(f"读取物理磁带UUID失败: {str(e)}")
                 
-                # 如果没有读取到物理UUID，则生成新的
-                if tape_uuid_str:
-                    tape_uuid = uuid.UUID(tape_uuid_str)
-                else:
-                    tape_uuid = uuid.uuid4()
-                    logger.info(f"生成新UUID: {tape_uuid}")
+                # 如果没有读取到物理UUID，返回错误
+                if not tape_uuid_str:
+                    logger.error("无法读取磁带物理UUID，请确保磁带已在磁带机中")
+                    conn.close()
+                    raise HTTPException(
+                        status_code=400,
+                        detail="无法读取磁带物理UUID。请确保：1) 磁带已正确装入磁带机 2) 磁带机电源已开启 3) 点击重试按钮重新读取"
+                    )
+                
+                tape_uuid = uuid.UUID(tape_uuid_str)
                 
                 # 插入新磁带
                 cur.execute("""

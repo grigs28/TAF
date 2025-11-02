@@ -1047,7 +1047,14 @@ document.addEventListener('DOMContentLoaded', function() {
                     }
                 }
             } catch (error) {
-                alert('❌ 添加失败：' + error.message);
+                // 检查是否是UUID读取失败
+                let errorMsg = error.message;
+                if (errorMsg && errorMsg.includes('物理UUID')) {
+                    // 显示重试对话框
+                    showUuidErrorDialog();
+                } else {
+                    alert('❌ 添加失败：' + errorMsg);
+                }
             } finally {
                 btn.disabled = false;
                 btn.innerHTML = originalHtml;
@@ -1055,6 +1062,69 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 });
+
+// 显示UUID读取错误对话框
+function showUuidErrorDialog() {
+    // 创建模态框HTML
+    const modalHtml = `
+        <div class="modal fade" id="uuidErrorModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header bg-danger text-white">
+                        <h5 class="modal-title">
+                            <i class="bi bi-exclamation-triangle-fill me-2"></i>无法读取磁带UUID
+                        </h5>
+                    </div>
+                    <div class="modal-body">
+                        <p class="mb-3">⚠️ 无法从磁带读取物理UUID，请检查：</p>
+                        <ol class="mb-3">
+                            <li>磁带已正确装入磁带机</li>
+                            <li>磁带机电源已开启</li>
+                            <li>磁带驱动器状态正常</li>
+                            <li>磁带已插入磁带机插槽</li>
+                        </ol>
+                        <p class="mb-0 text-danger">
+                            <i class="bi bi-info-circle-fill me-1"></i>
+                            系统不支持自动生成UUID，必须从物理磁带读取。
+                        </p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                        <button type="button" class="btn btn-primary" id="retryReadUuidBtn">
+                            <i class="bi bi-arrow-clockwise me-1"></i>重试
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    // 如果模态框不存在，添加到body
+    if (!document.getElementById('uuidErrorModal')) {
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+    }
+    
+    // 显示模态框
+    const modal = new bootstrap.Modal(document.getElementById('uuidErrorModal'));
+    modal.show();
+    
+    // 绑定重试按钮事件
+    const retryBtn = document.getElementById('retryReadUuidBtn');
+    if (retryBtn) {
+        retryBtn.onclick = function() {
+            modal.hide();
+            // 触发添加磁带按钮的点击事件
+            setTimeout(() => {
+                document.getElementById('confirmAddTapeBtn').click();
+            }, 300);
+        };
+    }
+    
+    // 模态框关闭后清理
+    document.getElementById('uuidErrorModal').addEventListener('hidden.bs.modal', function() {
+        this.remove();
+    });
+}
 
 // 显示磁带详情
 async function showTapeDetails(tapeId) {
