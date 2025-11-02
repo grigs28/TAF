@@ -511,20 +511,28 @@ function renderTapeList(tapes) {
         container.innerHTML = '';
         
         tapes.forEach(tape => {
-            // 状态样式
+            // 状态样式（支持大小写）
             const statusConfig = {
+                'AVAILABLE': {class: 'success', text: '可用'},
                 'available': {class: 'success', text: '可用'},
+                'IN_USE': {class: 'primary', text: '使用中'},
                 'in_use': {class: 'primary', text: '使用中'},
+                'FULL': {class: 'danger', text: '已满'},
                 'full': {class: 'danger', text: '已满'},
+                'EXPIRED': {class: 'secondary', text: '已过期'},
                 'expired': {class: 'secondary', text: '已过期'},
+                'ERROR': {class: 'danger', text: '故障'},
                 'error': {class: 'danger', text: '故障'},
+                'MAINTENANCE': {class: 'warning', text: '维护中'},
                 'maintenance': {class: 'warning', text: '维护中'},
+                'NEW': {class: 'info', text: '新建'},
                 'new': {class: 'info', text: '新建'}
             };
             const status = statusConfig[tape.status] || {class: 'secondary', text: tape.status};
             
             // 健康状态
             const getHealthIndicator = (score) => {
+                if (!score && score !== 0) score = 100;  // 默认100分
                 if (score >= 80) return '<span class="health-indicator health-excellent"></span>优秀';
                 if (score >= 60) return '<span class="health-indicator health-good"></span>良好';
                 if (score >= 40) return '<span class="health-indicator health-warning"></span>警告';
@@ -581,6 +589,10 @@ function renderTapeList(tapes) {
                             ${tape.first_use_date ? `<div class="mb-2">
                                 <small class="text-muted">首次使用: </small>
                                 <span>${new Date(tape.first_use_date).toLocaleDateString()}</span>
+                            </div>` : ''}
+                            ${tape.expiry_date ? `<div class="mb-2">
+                                <small class="text-muted">过期时间: </small>
+                                <span>${new Date(tape.expiry_date).toLocaleDateString()}</span>
                             </div>` : ''}
                             <div class="d-flex justify-content-between">
                                 <button class="btn btn-sm btn-outline-primary" data-tape-id="${tape.tape_id}" onclick="showTapeDetails('${tape.tape_id}')">

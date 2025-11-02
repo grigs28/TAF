@@ -104,8 +104,8 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
                 cur.execute("""
                     INSERT INTO tape_cartridges 
                     (tape_id, label, status, media_type, generation, serial_number, location,
-                     capacity_bytes, used_bytes, retention_months, notes, manufactured_date, expiry_date, auto_erase)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     capacity_bytes, used_bytes, retention_months, notes, manufactured_date, expiry_date, auto_erase, health_score)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     request.tape_id,
                     request.label,
@@ -120,7 +120,8 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
                     request.notes,
                     datetime.now(),
                     expiry_date,
-                    True
+                    True,
+                    100  # 默认健康分数100
                 ))
                 
                 conn.commit()
