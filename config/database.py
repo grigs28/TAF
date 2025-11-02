@@ -195,7 +195,16 @@ class DatabaseManager:
                                 quoted_values = ', '.join([f"'{v}'" for v in enum_values])
                                 enum_sql = f"CREATE TYPE {enum_name} AS ENUM ({quoted_values})"
                                 cur.execute(enum_sql)
-                                logger.info(f"创建枚举类型: {enum_name}")
+                                logger.info(f"创建枚举类型: {enum_name} with values: {enum_values}")
+                            else:
+                                # 如果已存在，检查其值
+                                cur.execute("""
+                                    SELECT enumlabel FROM pg_enum WHERE enumtypid = 
+                                    (SELECT oid FROM pg_type WHERE typname = %s)
+                                    ORDER BY enumsortorder
+                                """, (enum_name,))
+                                existing_values = [row[0] for row in cur.fetchall()]
+                                logger.info(f"枚举类型 {enum_name} 已存在，包含值: {existing_values}")
                 
                 # 创建表
                 for table in Base.metadata.sorted_tables:
