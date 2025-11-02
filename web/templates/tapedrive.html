@@ -122,34 +122,40 @@
             </div>
         </div>
         <div class="col-md-4">
-            <div class="setting-card service-card mb-3">
-                <div class="card-body">
-                    <h6 class="card-title">已检测设备</h6>
-                    <div id="detectedDevices" style="max-height: 300px; overflow-y: auto;">
-                        <p class="text-muted text-center mb-0">
-                            <i class="bi bi-info-circle"></i>
-                            暂无设备
-                        </p>
+            <div class="row">
+                <div class="col-12 mb-3">
+                    <div class="setting-card service-card">
+                        <div class="card-body">
+                            <h6 class="card-title">连接状态</h6>
+                            <div class="text-center" id="tapeStatus">
+                                <div class="status-indicator status-offline mb-2"></div>
+                                <p class="text-danger" id="tapeStatusText">未连接</p>
+                                <small class="text-muted" id="tapeDeviceInfo">未检测到设备</small>
+                            </div>
+                            <hr>
+                            <div class="d-flex justify-content-between">
+                                <small class="text-muted">块大小:</small>
+                                <small class="text-muted" id="currentBlockSize">256KB</small>
+                            </div>
+                            <div class="d-flex justify-content-between">
+                                <small class="text-muted">池大小:</small>
+                                <small class="text-muted" id="currentTapePoolSize">12</small>
+                            </div>
+                        </div>
                     </div>
                 </div>
-            </div>
 
-            <div class="setting-card service-card mb-3">
-                <div class="card-body">
-                    <h6 class="card-title">连接状态</h6>
-                    <div class="text-center" id="tapeStatus">
-                        <div class="status-indicator status-offline mb-2"></div>
-                        <p class="text-danger" id="tapeStatusText">未连接</p>
-                        <small class="text-muted" id="tapeDeviceInfo">未检测到设备</small>
-                    </div>
-                    <hr>
-                    <div class="d-flex justify-content-between">
-                        <small class="text-muted">块大小:</small>
-                        <small class="text-muted" id="currentBlockSize">256KB</small>
-                    </div>
-                    <div class="d-flex justify-content-between">
-                        <small class="text-muted">池大小:</small>
-                        <small class="text-muted" id="currentTapePoolSize">12</small>
+                <div class="col-12">
+                    <div class="setting-card service-card">
+                        <div class="card-body">
+                            <h6 class="card-title">已检测设备</h6>
+                            <div id="detectedDevices" style="max-height: 300px; overflow-y: auto;">
+                                <p class="text-muted text-center mb-0">
+                                    <i class="bi bi-info-circle"></i>
+                                    暂无设备
+                                </p>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
