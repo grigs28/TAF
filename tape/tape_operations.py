@@ -399,6 +399,7 @@ class TapeOperations:
 
     async def _read_tape_label(self) -> Optional[Dict[str, Any]]:
         """读取磁带标签（优先从LTFS文件系统，失败则从磁带头读取元数据）"""
+        logger.info("开始读取磁带标签")
         try:
             import json
             import platform
@@ -407,6 +408,7 @@ class TapeOperations:
             if platform.system() == "Windows" and self.settings.TAPE_DRIVE_LETTER:
                 drive_letter = self.settings.TAPE_DRIVE_LETTER.upper()
                 ltfs_label_file = f"{drive_letter}:\\TAPE_LABEL.txt"
+                logger.info(f"检查LTFS标签文件: {ltfs_label_file}")
                 
                 try:
                     if os.path.exists(ltfs_label_file):
