@@ -555,7 +555,7 @@ function renderTapeList(tapes) {
             };
             
             const cardHtml = `
-                <div class="col-lg-3 col-md-4 col-sm-6 mb-3">
+                <div class="col-lg-3 col-md-3 col-sm-6 mb-3">
                     <div class="service-card tape-${tape.status}">
                         <div class="card-body">
                             <div class="d-flex justify-content-between align-items-start mb-2">
@@ -575,13 +575,12 @@ function renderTapeList(tapes) {
                             </div>
                             <div class="mb-2">
                                 <small class="text-muted">容量: </small>
-                                <span>${formatBytes(tape.used_bytes)} / ${formatBytes(tape.capacity_bytes)}</span>
+                                <span>${formatBytes(tape.used_bytes)} / ${formatBytes(tape.capacity_bytes)} ${tape.usage_percent.toFixed(1)}%</span>
                             </div>
                             <div class="mb-2">
                                 <div class="progress" style="height: 6px;">
                                     <div class="progress-bar bg-${getProgressColor(tape.usage_percent)}" style="width: ${tape.usage_percent}%"></div>
                                 </div>
-                                <small class="text-muted">${tape.usage_percent.toFixed(1)}% 使用</small>
                             </div>
                             ${tape.location ? `<div class="mb-2">
                                 <small class="text-muted">位置: </small>
