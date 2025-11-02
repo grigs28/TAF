@@ -348,24 +348,45 @@ async def check_tape_format(request: Request):
     try:
         system = request.app.state.system
         if not system:
-            raise HTTPException(status_code=500, detail="系统未初始化")
+            return {
+                "success": False,
+                "formatted": False,
+                "message": "系统未初始化"
+            }
+        
+        # 检查是否有磁带设备
+        if not system.tape_manager.scsi_interface.tape_devices or len(system.tape_manager.scsi_interface.tape_devices) == 0:
+            return {
+                "success": False,
+                "formatted": False,
+                "message": "未检测到磁带设备"
+            }
         
         # 尝试读取磁带标签，如果成功则认为已格式化
-        metadata = await system.tape_manager.tape_operations._read_tape_label()
-        
-        return {
-            "success": True,
-            "formatted": metadata is not None,
-            "metadata": metadata if metadata else None
-        }
+        try:
+            metadata = await system.tape_manager.tape_operations._read_tape_label()
+            
+            return {
+                "success": True,
+                "formatted": metadata is not None,
+                "metadata": metadata if metadata else None
+            }
+        except Exception as e:
+            # 读取失败通常意味着未格式化或磁带为空
+            logger.debug(f"读取磁带标签失败（可能未格式化）: {str(e)}")
+            return {
+                "success": True,
+                "formatted": False,
+                "metadata": None
+            }
     
     except Exception as e:
-        # 读取失败通常意味着未格式化
-        logger.warning(f"检查磁带格式失败: {str(e)}")
+        # 其他错误
+        logger.error(f"检查磁带格式异常: {str(e)}")
         return {
-            "success": True,
+            "success": False,
             "formatted": False,
-            "metadata": None
+            "message": str(e)
         }
 
 
@@ -380,27 +401,46 @@ async def format_tape(request: Request, format_request: FormatRequest = FormatRe
     try:
         system = request.app.state.system
         if not system:
-            raise HTTPException(status_code=500, detail="系统未初始化")
+            return {
+                "success": False,
+                "message": "系统未初始化"
+            }
+        
+        # 检查是否有磁带设备
+        if not system.tape_manager.scsi_interface.tape_devices or len(system.tape_manager.scsi_interface.tape_devices) == 0:
+            return {
+                "success": False,
+                "message": "未检测到磁带设备"
+            }
         
         # 如果不强制，先检查是否已格式化
         if not format_request.force:
-            metadata = await system.tape_manager.tape_operations._read_tape_label()
-            if metadata:
-                return {
-                    "success": False,
-                    "message": "磁带已格式化，如需强制格式化请使用force=true参数"
-                }
-
+            try:
+                metadata = await system.tape_manager.tape_operations._read_tape_label()
+                if metadata:
+                    return {
+                        "success": False,
+                        "message": "磁带已格式化，如需强制格式化请使用force=true参数"
+                    }
+            except Exception as e:
+                logger.debug(f"读取磁带标签失败（继续格式化）: {str(e)}")
+        
         # 使用SCSI接口格式化
         success = await system.tape_manager.scsi_interface.format_tape(format_type=0)
         if success:
             return {"success": True, "message": "磁带格式化成功"}
         else:
-            raise HTTPException(status_code=500, detail="磁带格式化失败")
+            return {
+                "success": False,
+                "message": "磁带格式化失败，请检查设备状态和磁带是否正确加载"
+            }
 
     except Exception as e:
-        logger.error(f"格式化磁带失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"格式化磁带异常: {str(e)}")
+        return {
+            "success": False,
+            "message": f"格式化失败: {str(e)}"
+        }
 
 
 @router.post("/rewind")
