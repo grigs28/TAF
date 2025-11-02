@@ -45,6 +45,14 @@ class UpdateTapeRequest(BaseModel):
     notes: Optional[str] = None
 
 
+class WriteTapeLabelRequest(BaseModel):
+    """写入磁带标签请求模型"""
+    tape_id: str
+    label: str
+    serial_number: Optional[str] = None
+    tape_uuid: Optional[str] = None
+
+
 @router.post("/create")
 async def create_tape(request: CreateTapeRequest, http_request: Request):
     """创建新磁带记录"""
@@ -339,6 +347,100 @@ async def read_tape_label(request: Request):
         
     except Exception as e:
         logger.error(f"读取磁带标签失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/write-label")
+async def write_tape_label(request: WriteTapeLabelRequest, http_request: Request):
+    """写入磁带标签"""
+    try:
+        from datetime import datetime
+        system = http_request.app.state.system
+        if not system:
+            raise HTTPException(status_code=500, detail="系统未初始化")
+        
+        # 从数据库中获取磁带的过期时间等信息
+        import psycopg2
+        import psycopg2.extras
+        from config.settings import get_settings
+        
+        settings = get_settings()
+        database_url = settings.DATABASE_URL
+        
+        # 解析URL
+        if database_url.startswith("opengauss://"):
+            database_url = database_url.replace("opengauss://", "postgresql://", 1)
+        
+        import re
+        pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
+        match = re.match(pattern, database_url)
+        
+        if not match:
+            raise ValueError("无法解析数据库连接URL")
+        
+        username, password, host, port, database = match.groups()
+        conn = psycopg2.connect(
+            host=host,
+            port=port,
+            database=database,
+            user=username,
+            password=password
+        )
+        psycopg2.extras.register_uuid()
+        
+        try:
+            cur = conn.cursor()
+            
+            # 查询磁带信息
+            cur.execute(
+                "SELECT expiry_date, created_date FROM tape_cartridges WHERE tape_id = %s",
+                (request.tape_id,)
+            )
+            result = cur.fetchone()
+            
+            if not result:
+                conn.close()
+                raise HTTPException(status_code=404, detail=f"未找到磁带: {request.tape_id}")
+            
+            expiry_date, created_date = result
+            
+            # 准备磁带信息
+            tape_info = {
+                "tape_id": request.tape_id,
+                "label": request.label,
+                "serial_number": request.serial_number,
+                "created_date": created_date or datetime.now(),
+                "expiry_date": expiry_date or datetime.now(),
+            }
+            
+            # 如果提供了UUID，也包含在标签中
+            if request.tape_uuid:
+                tape_info["tape_uuid"] = request.tape_uuid
+            
+            # 写入物理磁带标签
+            write_result = await system.tape_manager.tape_operations._write_tape_label(tape_info)
+            
+            conn.close()
+            
+            if write_result:
+                return {
+                    "success": True,
+                    "message": f"磁带标签写入成功: {request.label}"
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": "磁带标签写入失败"
+                }
+        
+        except Exception as e:
+            conn.close()
+            raise
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"写入磁带标签失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
