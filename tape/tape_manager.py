@@ -153,6 +153,13 @@ class TapeManager:
                 self.current_tape = tape
                 tape.status = TapeStatus.IN_USE
                 tape.last_used_date = datetime.now()
+                
+                # 更新数据库
+                try:
+                    await self._update_tape_status_in_database(tape_id, 'in_use')
+                except Exception as db_error:
+                    logger.warning(f"更新数据库磁带状态失败: {db_error}")
+                
                 logger.info(f"磁带 {tape_id} 加载成功")
                 return True
             else:
@@ -175,7 +182,15 @@ class TapeManager:
 
             if success:
                 self.current_tape.status = TapeStatus.AVAILABLE
+                tape_to_unload = self.current_tape
                 self.current_tape = None
+                
+                # 更新数据库
+                try:
+                    await self._update_tape_status_in_database(tape_id, 'available')
+                except Exception as db_error:
+                    logger.warning(f"更新数据库磁带状态失败: {db_error}")
+                
                 logger.info(f"磁带 {tape_id} 卸载成功")
                 return True
             else:
@@ -204,12 +219,18 @@ class TapeManager:
             # 执行擦除操作
             success = await self.tape_operations.erase_tape()
             if success:
-                # 重置磁带信息
+                # 重置磁带信息（内存）
                 tape.used_bytes = 0
                 tape.created_date = datetime.now()
                 tape.expiry_date = datetime.now() + timedelta(days=self.settings.DEFAULT_RETENTION_MONTHS * 30)
                 tape.status = TapeStatus.AVAILABLE
                 tape.last_erase_date = datetime.now()
+                
+                # 更新数据库
+                try:
+                    await self._update_tape_in_database(tape)
+                except Exception as db_error:
+                    logger.warning(f"更新数据库磁带信息失败: {db_error}")
 
                 logger.info(f"磁带 {tape_id} 擦除成功")
 
@@ -232,9 +253,15 @@ class TapeManager:
 
             success = await self.tape_operations.write_data(data, block_number)
             if success:
-                # 更新磁带使用信息
+                # 更新磁带使用信息（内存）
                 self.current_tape.used_bytes += len(data)
                 self.current_tape.last_write_date = datetime.now()
+
+                # 更新数据库中的磁带使用信息
+                try:
+                    await self._update_tape_in_database(self.current_tape)
+                except Exception as db_error:
+                    logger.warning(f"更新数据库磁带使用信息失败: {db_error}")
 
                 # 检查容量
                 if self.current_tape.used_bytes >= self.current_tape.capacity_bytes:
@@ -448,6 +475,104 @@ class TapeManager:
         except Exception as e:
             logger.error(f"获取库存状态失败: {str(e)}")
             return {}
+
+    async def _update_tape_in_database(self, tape: TapeCartridge):
+        """更新数据库中的磁带信息"""
+        try:
+            import psycopg2
+            from config.settings import get_settings
+            
+            settings = get_settings()
+            database_url = settings.DATABASE_URL
+            
+            # 解析URL
+            if database_url.startswith("opengauss://"):
+                database_url = database_url.replace("opengauss://", "postgresql://", 1)
+            
+            import re
+            pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
+            match = re.match(pattern, database_url)
+            
+            if not match:
+                return
+            
+            username, password, host, port, database = match.groups()
+            
+            # 连接数据库
+            conn = psycopg2.connect(
+                host=host,
+                port=port,
+                user=username,
+                password=password,
+                database=database
+            )
+            
+            try:
+                with conn.cursor() as cur:
+                    # 更新磁带使用信息
+                    cur.execute("""
+                        UPDATE tape_cartridges
+                        SET 
+                            used_bytes = %s,
+                            write_count = write_count + 1
+                        WHERE tape_id = %s
+                    """, (tape.used_bytes, tape.tape_id))
+                    
+                    conn.commit()
+            finally:
+                conn.close()
+                
+        except Exception as e:
+            logger.error(f"更新数据库磁带信息失败: {str(e)}")
+            raise
+
+    async def _update_tape_status_in_database(self, tape_id: str, status: str):
+        """更新数据库中的磁带状态"""
+        try:
+            import psycopg2
+            from config.settings import get_settings
+            
+            settings = get_settings()
+            database_url = settings.DATABASE_URL
+            
+            # 解析URL
+            if database_url.startswith("opengauss://"):
+                database_url = database_url.replace("opengauss://", "postgresql://", 1)
+            
+            import re
+            pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
+            match = re.match(pattern, database_url)
+            
+            if not match:
+                return
+            
+            username, password, host, port, database = match.groups()
+            
+            # 连接数据库
+            conn = psycopg2.connect(
+                host=host,
+                port=port,
+                user=username,
+                password=password,
+                database=database
+            )
+            
+            try:
+                with conn.cursor() as cur:
+                    # 更新磁带状态
+                    cur.execute("""
+                        UPDATE tape_cartridges
+                        SET status = %s
+                        WHERE tape_id = %s
+                    """, (status, tape_id))
+                    
+                    conn.commit()
+            finally:
+                conn.close()
+                
+        except Exception as e:
+            logger.error(f"更新数据库磁带状态失败: {str(e)}")
+            raise
 
     async def shutdown(self):
         """关闭磁带管理器"""

@@ -166,40 +166,76 @@ async def check_tape_exists(tape_id: str, request: Request):
 async def list_tapes(request: Request):
     """获取所有磁带列表"""
     try:
-        from models.tape import TapeCartridge as ORMTapeCartridge, TapeStatus
-        from config.database import db_manager
+        import psycopg2
+        from config.settings import get_settings
+        
+        settings = get_settings()
+        database_url = settings.DATABASE_URL
+        
+        # 解析URL
+        if database_url.startswith("opengauss://"):
+            database_url = database_url.replace("opengauss://", "postgresql://", 1)
+        
+        import re
+        pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
+        match = re.match(pattern, database_url)
+        
+        if not match:
+            raise ValueError("无法解析数据库连接URL")
+        
+        username, password, host, port, database = match.groups()
+        
+        # 直接用psycopg2查询
+        conn = psycopg2.connect(
+            host=host,
+            port=port,
+            user=username,
+            password=password,
+            database=database
+        )
         
         tapes = []
-        # 使用同步会话避免asyncpg的版本解析问题
-        session = db_manager.get_sync_session()
         try:
-            orm_tapes = session.query(ORMTapeCartridge).order_by(ORMTapeCartridge.tape_id).all()
-            
-            for tape in orm_tapes:
-                tapes.append({
-                    "tape_id": tape.tape_id,
-                    "label": tape.label,
-                    "status": tape.status.value,
-                    "media_type": tape.media_type,
-                    "generation": tape.generation,
-                    "serial_number": tape.serial_number,
-                    "location": tape.location,
-                    "capacity_bytes": tape.capacity_bytes,
-                    "used_bytes": tape.used_bytes,
-                    "usage_percent": (tape.used_bytes / tape.capacity_bytes * 100) if tape.capacity_bytes > 0 else 0,
-                    "write_count": tape.write_count,
-                    "read_count": tape.read_count,
-                    "load_count": tape.load_count,
-                    "health_score": tape.health_score,
-                    "first_use_date": tape.first_use_date.isoformat() if tape.first_use_date else None,
-                    "last_erase_date": tape.last_erase_date.isoformat() if tape.last_erase_date else None,
-                    "expiry_date": tape.expiry_date.isoformat() if tape.expiry_date else None,
-                    "retention_months": tape.retention_months,
-                    "backup_set_count": tape.backup_set_count,
-                    "notes": tape.notes
-                })
+            with conn.cursor() as cur:
+                # 查询所有磁带
+                cur.execute("""
+                    SELECT 
+                        tape_id, label, status, media_type, generation,
+                        serial_number, location, capacity_bytes, used_bytes,
+                        write_count, read_count, load_count, health_score,
+                        first_use_date, last_erase_date, expiry_date,
+                        retention_months, backup_set_count, notes
+                    FROM tape_cartridges
+                    ORDER BY tape_id
+                """)
+                
+                rows = cur.fetchall()
+                
+                for row in rows:
+                    tapes.append({
+                        "tape_id": row[0],
+                        "label": row[1],
+                        "status": row[2] if isinstance(row[2], str) else row[2].value,
+                        "media_type": row[3],
+                        "generation": row[4],
+                        "serial_number": row[5],
+                        "location": row[6],
+                        "capacity_bytes": row[7],
+                        "used_bytes": row[8],
+                        "usage_percent": (row[8] / row[7] * 100) if row[7] > 0 else 0,
+                        "write_count": row[9],
+                        "read_count": row[10],
+                        "load_count": row[11],
+                        "health_score": row[12],
+                        "first_use_date": row[13].isoformat() if row[13] else None,
+                        "last_erase_date": row[14].isoformat() if row[14] else None,
+                        "expiry_date": row[15].isoformat() if row[15] else None,
+                        "retention_months": row[16],
+                        "backup_set_count": row[17],
+                        "notes": row[18]
+                    })
         finally:
-            session.close()
+            conn.close()
             
         return {
             "success": True,
