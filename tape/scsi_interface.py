@@ -234,6 +234,18 @@ class SCSIInterface:
 
                         if tape_info:
                             device_info.update(tape_info)
+                        
+                        # 检查是否为IBM LTO磁带机
+                        vendor = device_info.get('vendor', '').upper()
+                        model = device_info.get('model', '').upper()
+                        if 'IBM' in vendor and 'ULT3580' in model:
+                            device_info.update({
+                                'is_ibm_lto': True,
+                                'lto_generation': self._extract_lto_generation(model),
+                                'supports_worm': True,
+                                'supports_encryption': True,
+                                'native_capacity': self._get_lto_capacity(model)
+                            })
 
                         devices.append(device_info)
 
