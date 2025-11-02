@@ -172,7 +172,8 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
                 "label": request.label,
                 "serial_number": request.serial_number,
                 "created_date": datetime.now(),
-                "expiry_date": expiry_date
+                "expiry_date": expiry_date,
+                "tape_uuid": str(tape_uuid)  # 将UUID写入标签
             }
             
             # 写入物理磁带标签

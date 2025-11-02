@@ -1085,7 +1085,7 @@ class SCSIInterface:
             return {'success': False, 'error': str(e)}
 
     async def get_physical_tape_uuid(self, device_path: str = None) -> Optional[str]:
-        """获取磁带物理UUID - 优先使用Windows Storage API，失败则尝试VPD Page 0x83"""
+        """获取磁带物理UUID - 优先读取磁带标签中的UUID，失败则使用Windows Storage API生成"""
         try:
             if not device_path and self.tape_devices:
                 device_path = self.tape_devices[0]['path']
@@ -1094,12 +1094,20 @@ class SCSIInterface:
                 logger.error("没有指定设备路径")
                 return None
 
-            # Windows平台优先使用Storage API
+            # 优先尝试从磁带标签读取UUID
+            logger.info("尝试从磁带标签读取UUID...")
+            tape_uuid = await self._read_uuid_from_tape_label(device_path)
+            if tape_uuid:
+                logger.info(f"从磁带标签读取到UUID: {tape_uuid}")
+                return tape_uuid
+            
+            # Windows平台使用Storage API读取序列号生成UUID
             if self.system == "Windows":
                 uuid = await self._get_windows_storage_uuid(device_path)
                 if uuid:
+                    logger.info("从Windows Storage API获取UUID成功")
                     return uuid
-                logger.info("Windows Storage API读取失败，尝试SCSI命令")
+                logger.info("Windows Storage API读取失败，尝试SCSI VPD命令")
 
             # 获取VPD Page 0x83 (Device Identification)
             result = await self.send_ibm_specific_command(
@@ -1163,6 +1171,60 @@ class SCSIInterface:
 
         except Exception as e:
             logger.error(f"获取物理磁带UUID失败: {str(e)}")
+            return None
+
+    async def _read_uuid_from_tape_label(self, device_path: str) -> Optional[str]:
+        """从磁带标签读取UUID"""
+        try:
+            import json
+            
+            # 倒带到开头
+            await self.rewind_tape(device_path)
+            
+            # 读取第一个数据块（256字节）
+            block_size = 256
+            result = await self.read_tape_data(device_path=device_path, block_number=0, block_count=1, block_size=block_size)
+            
+            if not result or not result.get('success'):
+                logger.debug("无法读取磁带标签")
+                return None
+            
+            if 'data' not in result:
+                logger.debug("磁带标签读取结果中缺少data字段")
+                return None
+            
+            data = result['data']
+            if len(data) < 16:
+                logger.debug("磁带标签数据太短")
+                return None
+            
+            # 解析头部信息
+            header_length = int.from_bytes(data[0:4], 'big')
+            version = data[4:8].decode('ascii', errors='ignore')
+            
+            if version != 'TAF1':
+                logger.debug(f"不支持的磁带标签格式: {version}")
+                return None
+            
+            # 提取元数据
+            if header_length > 0 and header_length < len(data) - 16:
+                metadata_bytes = data[8:8+header_length]
+                metadata_json = metadata_bytes.decode('utf-8', errors='ignore')
+                metadata = json.loads(metadata_json)
+                
+                # 尝试从metadata中获取UUID
+                tape_uuid = metadata.get('tape_uuid') or metadata.get('uuid')
+                if tape_uuid:
+                    logger.info(f"从磁带标签读取到UUID: {tape_uuid}")
+                    return tape_uuid
+                
+                logger.debug("磁带标签中没有UUID字段")
+                return None
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"从磁带标签读取UUID失败: {str(e)}")
             return None
 
     async def _get_windows_storage_uuid(self, device_path: str) -> Optional[str]:
