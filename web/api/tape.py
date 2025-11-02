@@ -35,58 +35,89 @@ class CreateTapeRequest(BaseModel):
 
 
 @router.post("/create")
-async def create_tape(request: CreateTapeRequest, http_request: Request, db = Depends(get_db)):
+async def create_tape(request: CreateTapeRequest, http_request: Request):
     """创建新磁带记录"""
     try:
         system = http_request.app.state.system
         if not system:
             raise HTTPException(status_code=500, detail="系统未初始化")
 
-        # 检查磁带ID是否已存在
-        from models.tape import TapeCartridge, TapeStatus
+        # 使用psycopg2直接连接，避免openGauss版本解析问题
+        import psycopg2
+        from config.settings import get_settings
         from datetime import datetime, timedelta
-        from sqlalchemy import select
         
-        session = db
-        # 检查是否已存在
-        stmt = select(TapeCartridge).where(TapeCartridge.tape_id == request.tape_id)
-        result = await session.execute(stmt)
-        existing = result.scalar_one_or_none()
+        settings = get_settings()
+        database_url = settings.DATABASE_URL
         
-        if existing:
-            return {
-                "success": False,
-                "message": f"磁带 {request.tape_id} 已存在"
-            }
+        # 解析URL
+        if database_url.startswith("opengauss://"):
+            database_url = database_url.replace("opengauss://", "postgresql://", 1)
         
-        # 计算容量
-        capacity_bytes = request.capacity_gb * (1024 ** 3) if request.capacity_gb else 18000000000000  # 默认18TB
+        import re
+        pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
+        match = re.match(pattern, database_url)
         
-        # 计算过期日期
-        expiry_date = datetime.now() + timedelta(days=request.retention_months * 30)
+        if not match:
+            raise ValueError("无法解析数据库连接URL")
         
-        # 创建新磁带
-        new_tape = TapeCartridge(
-            tape_id=request.tape_id,
-            label=request.label,
-            serial_number=request.serial_number,
-            media_type=request.media_type,
-            generation=request.generation,
-            capacity_bytes=capacity_bytes,
-            used_bytes=0,
-            location=request.location,
-            notes=request.notes,
-            retention_months=request.retention_months,
-            status=TapeStatus.NEW,
-            manufactured_date=datetime.now(),
-            expiry_date=expiry_date,
-            auto_erase=True
+        username, password, host, port, database = match.groups()
+        
+        # 连接数据库
+        conn = psycopg2.connect(
+            host=host,
+            port=port,
+            user=username,
+            password=password,
+            database=database
         )
         
-        session.add(new_tape)
-        await session.commit()
+        try:
+            with conn.cursor() as cur:
+                # 检查磁带ID是否已存在
+                cur.execute("SELECT tape_id FROM tape_cartridges WHERE tape_id = %s", (request.tape_id,))
+                existing = cur.fetchone()
+                
+                if existing:
+                    return {
+                        "success": False,
+                        "message": f"磁带 {request.tape_id} 已存在"
+                    }
+                
+                # 计算容量
+                capacity_bytes = request.capacity_gb * (1024 ** 3) if request.capacity_gb else 18000000000000  # 默认18TB
+                
+                # 计算过期日期
+                expiry_date = datetime.now() + timedelta(days=request.retention_months * 30)
+                
+                # 插入新磁带
+                cur.execute("""
+                    INSERT INTO tape_cartridges 
+                    (tape_id, label, status, media_type, generation, serial_number, location,
+                     capacity_bytes, used_bytes, retention_months, notes, manufactured_date, expiry_date, auto_erase)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    request.tape_id,
+                    request.label,
+                    'new',  # TapeStatus.NEW
+                    request.media_type,
+                    request.generation,
+                    request.serial_number,
+                    request.location,
+                    capacity_bytes,
+                    0,
+                    request.retention_months,
+                    request.notes,
+                    datetime.now(),
+                    expiry_date,
+                    True
+                ))
+                
+                conn.commit()
+                logger.info(f"创建磁带记录: {request.tape_id}")
         
-        logger.info(f"创建磁带记录: {request.tape_id}")
+        finally:
+            conn.close()
         
         return {
             "success": True,
