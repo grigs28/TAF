@@ -560,8 +560,8 @@ function renderTapeList(tapes) {
                         <div class="card-body">
                             <div class="d-flex justify-content-between align-items-start mb-2">
                                 <div>
-                                    <h6 class="card-title mb-0">${tape.tape_id}</h6>
-                                    <small class="text-muted">序列号: ${tape.serial_number || 'N/A'}</small>
+                                    <h6 class="card-title mb-0">${tape.label || tape.tape_id}</h6>
+                                    <small class="text-muted">磁带ID: ${tape.tape_id} | 序列号: ${tape.serial_number || 'N/A'}</small>
                                 </div>
                                 <span class="badge bg-${status.class}">${status.text}</span>
                             </div>
