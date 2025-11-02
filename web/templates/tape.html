@@ -345,7 +345,7 @@
                         </div>
                         <div class="col-md-6 mb-3">
                             <label class="form-label">位置</label>
-                            <input type="text" class="form-control" id="tapeLocation" placeholder="存储柜 A-1">
+                            <input type="text" class="form-control" id="tapeLocation" value="机房" placeholder="机房">
                     </div>
                     </div>
                     <div class="mb-3">
@@ -570,7 +570,7 @@ function renderTapeList(tapes) {
                             </div>
                             <div class="mb-2">
                                 <small class="text-muted">类型: </small>
-                                <span>LTO-${tape.generation}</span>
+                                <span>LTO-${tape.generation} / ${formatBytes(tape.capacity_bytes)}</span>
                             </div>
                             <div class="mb-2">
                                 <small class="text-muted">容量: </small>
