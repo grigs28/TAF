@@ -678,35 +678,6 @@ document.addEventListener('DOMContentLoaded', function() {
             btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-1"></i>扫描中...';
             
             try {
-                // 先检查磁带格式
-                const checkResponse = await fetch('/api/tape/check-format');
-                const checkResult = await checkResponse.json();
-                
-                // 只有在成功且未格式化时才提示格式化
-                if (checkResult.success && checkResult.formatted === false) {
-                    // 磁带未格式化，提示用户
-                    const shouldFormat = confirm('磁带未格式化，是否先进行格式化？\n点击"确定"格式化，点击"取消"跳过。');
-                    if (shouldFormat) {
-                        const formatResponse = await fetch('/api/tape/format', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({force: false})
-                        });
-                        const formatResult = await formatResponse.json();
-                        
-                        if (!formatResult.success) {
-                            alert('⚠️ 格式化失败：' + (formatResult.message || '未知错误'));
-                            btn.disabled = false;
-                            btn.innerHTML = originalHtml;
-                            return;
-                        }
-                        alert('✅ 磁带格式化成功');
-                    }
-                } else if (checkResult.success === false) {
-                    // 检查失败，但继续扫描设备信息
-                    console.warn('检查磁带格式失败:', checkResult.message || '未知错误');
-                }
-                
                 const response = await fetch('/api/system/tape/scan');
                 const result = await response.json();
                 
