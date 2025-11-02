@@ -643,10 +643,8 @@ document.addEventListener('DOMContentLoaded', function() {
                     // 如果有LTO信息，自动选择类型和容量
                     if (device.is_ibm_lto && device.lto_generation) {
                         const ltoGen = device.lto_generation;
-                        console.log('LTO Generation:', ltoGen);
                         const tapeTypeValue = `LTO-${ltoGen}`;
                         document.getElementById('tapeType').value = tapeTypeValue;
-                        console.log('Setting tapeType to:', tapeTypeValue);
                         
                         // 根据LTO代数设置容量
                         const capacityMap = {
@@ -659,10 +657,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         if (capacityMap[ltoGen]) {
                             const capacityValue = capacityMap[ltoGen];
                             document.getElementById('tapeCapacity').value = capacityValue;
-                            console.log('Setting tapeCapacity to:', capacityValue);
                         }
-                    } else {
-                        console.log('Not IBM LTO or no generation. is_ibm_lto:', device.is_ibm_lto, 'generation:', device.lto_generation);
                     }
                     
                     // 生成磁带标签（基于当前日期和索引）
