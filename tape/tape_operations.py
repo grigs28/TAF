@@ -415,13 +415,15 @@ class TapeOperations:
                             content = f.read().strip()
                             lines = content.split('\n')
                             
-                            if lines and lines[0].startswith('TAPE_'):
+                            # 读取第一行作为tape_id（支持TAPE_或TAP开头，或者任何非空第一行）
+                            if lines and lines[0].strip():
                                 # 解析LTFS格式的标签文件
-                                tape_id = lines[0]
+                                tape_id = lines[0].strip()
                                 metadata = {'tape_id': tape_id, 'label': tape_id}
                                 
                                 # 解析其他字段
                                 for line in lines[1:]:
+                                    line = line.strip()
                                     if line.startswith('Created:'):
                                         try:
                                             metadata['created_date'] = line.split(':', 1)[1].strip()
@@ -435,6 +437,8 @@ class TapeOperations:
                                 
                                 logger.info(f"从LTFS读取磁带标签成功: {tape_id}")
                                 return metadata
+                            else:
+                                logger.warning(f"LTFS标签文件为空或格式不正确: {ltfs_label_file}")
                 except Exception as e:
                     logger.debug(f"从LTFS读取标签失败: {str(e)}")
             
