@@ -19,7 +19,7 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 from config.settings import Settings
-from config.database import DatabaseManager
+from config.database import db_manager
 from web.app import create_app
 from utils.logger import setup_logging
 from utils.scheduler import BackupScheduler
@@ -34,7 +34,7 @@ class TapeBackupSystem:
 
     def __init__(self):
         self.settings = Settings()
-        self.db_manager = DatabaseManager()
+        self.db_manager = db_manager  # 使用全局 db_manager
         self.scheduler = BackupScheduler()
         self.tape_manager = TapeManager()
         self.backup_engine = BackupEngine()
