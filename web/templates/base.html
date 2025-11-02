@@ -11,6 +11,25 @@
     <link href="{{ url_for('static', path='/css/bootstrap-icons.css') }}" rel="stylesheet">
     <!-- 自定义CSS -->
     <link href="{{ url_for('static', path='/css/ai.css') }}" rel="stylesheet">
+    <!-- 强制模态框不透明 -->
+    <style>
+        .modal-content {
+            background: #0d1626 !important;
+            opacity: 1 !important;
+        }
+        .modal-body {
+            background: #0d1626 !important;
+            opacity: 1 !important;
+        }
+        .modal-header {
+            background: #0d1626 !important;
+            opacity: 1 !important;
+        }
+        .modal-footer {
+            background: #0d1626 !important;
+            opacity: 1 !important;
+        }
+    </style>
 
     {% block extra_css %}{% endblock %}
 </head>
