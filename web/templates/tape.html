@@ -57,7 +57,7 @@
                     <div class="ai-icon mb-2">
                         <i class="bi bi-collection"></i>
                     </div>
-                    <h3 class="mb-0">12</h3>
+                    <h3 class="mb-0" id="statTotalTapes">-</h3>
                     <small class="text-secondary">总磁带数</small>
                 </div>
             </div>
@@ -68,7 +68,7 @@
                     <div class="ai-icon mb-2">
                         <i class="bi bi-circle"></i>
                     </div>
-                    <h3 class="mb-0">8</h3>
+                    <h3 class="mb-0" id="statAvailableTapes">-</h3>
                     <small class="text-secondary">可用</small>
                 </div>
             </div>
@@ -79,7 +79,7 @@
                     <div class="ai-icon mb-2">
                         <i class="bi bi-play-circle"></i>
                     </div>
-                    <h3 class="mb-0">2</h3>
+                    <h3 class="mb-0" id="statInUseTapes">-</h3>
                     <small class="text-secondary">使用中</small>
                 </div>
             </div>
@@ -90,7 +90,7 @@
                     <div class="ai-icon mb-2">
                         <i class="bi bi-exclamation-triangle"></i>
                     </div>
-                    <h3 class="mb-0">1</h3>
+                    <h3 class="mb-0" id="statFullTapes">-</h3>
                     <small class="text-secondary">已满</small>
                 </div>
             </div>
@@ -101,7 +101,7 @@
                     <div class="ai-icon mb-2">
                         <i class="bi bi-clock"></i>
                     </div>
-                    <h3 class="mb-0">1</h3>
+                    <h3 class="mb-0" id="statExpiredTapes">-</h3>
                     <small class="text-secondary">已过期</small>
                 </div>
             </div>
@@ -112,7 +112,7 @@
                     <div class="ai-icon mb-2">
                         <i class="bi bi-x-circle"></i>
                     </div>
-                    <h3 class="mb-0">0</h3>
+                    <h3 class="mb-0" id="statErrorTapes">-</h3>
                     <small class="text-secondary">故障</small>
                 </div>
             </div>
@@ -172,201 +172,10 @@
         <div class="col-12">
             <div class="service-card">
                 <div class="card-body">
-                    <div class="row">
-                        <!-- 磁带卡片 1 -->
-                        <div class="col-lg-3 col-md-4 col-sm-6 mb-3">
-                            <div class="service-card">
-                                <div class="card-body">
-                                    <div class="d-flex justify-content-between align-items-start mb-2">
-                                        <div>
-                                            <h6 class="card-title mb-0">TAP001</h6>
-                                            <small class="text-muted">序列号: STK123456789</small>
-                                        </div>
-                                        <span class="badge bg-success">可用</span>
-                                    </div>
-                                    <div class="mb-2">
-                                        <div class="health-indicator health-excellent"></div>
-                                        <small>健康状态: 优秀</small>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">类型: </small>
-                                        <span>LTO-8</span>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">容量: </small>
-                                        <span>0 GB / 12 TB</span>
-                                    </div>
-                                    <div class="mb-2">
-                                        <div class="progress" style="height: 6px;">
-                                            <div class="progress-bar bg-success" style="width: 0%"></div>
-                                        </div>
-                                        <small class="text-muted">0% 使用</small>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">位置: </small>
-                                        <span>存储柜 A-1</span>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">最后使用: </small>
-                                        <span>2025-09-15</span>
-                                    </div>
-                                    <div class="d-flex justify-content-between">
-                                        <button class="btn btn-sm btn-outline-primary">
-                                            <i class="bi bi-info-circle"></i> 详情
-                                        </button>
-                                        <button class="btn btn-sm btn-outline-warning">
-                                            <i class="bi bi-pencil"></i> 编辑
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- 磁带卡片 2 -->
-                        <div class="col-lg-3 col-md-4 col-sm-6 mb-3">
-                            <div class="service-cardin-use">
-                                <div class="card-body">
-                                    <div class="d-flex justify-content-between align-items-start mb-2">
-                                        <div>
-                                            <h6 class="card-title mb-0">TAP002</h6>
-                                            <small class="text-muted">序列号: STK987654321</small>
-                                        </div>
-                                        <span class="badge bg-primary">使用中</span>
-                                    </div>
-                                    <div class="mb-2">
-                                        <div class="health-indicator health-good"></div>
-                                        <small>健康状态: 良好</small>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">类型: </small>
-                                        <span>LTO-8</span>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">容量: </small>
-                                        <span>8.5 GB / 12 TB</span>
-                                    </div>
-                                    <div class="mb-2">
-                                        <div class="progress" style="height: 6px;">
-                                            <div class="progress-bar bg-info" style="width: 70%"></div>
-                                        </div>
-                                        <small class="text-muted">70% 使用</small>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">位置: </small>
-                                        <span>驱动器 1</span>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">当前任务: </small>
-                                        <span>月度备份</span>
-                                    </div>
-                                    <div class="d-flex justify-content-between">
-                                        <button class="btn btn-sm btn-outline-primary">
-                                            <i class="bi bi-info-circle"></i> 详情
-                                        </button>
-                                        <button class="btn btn-sm btn-outline-danger">
-                                            <i class="bi bi-stop-circle"></i> 停止
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- 磁带卡片 3 -->
-                        <div class="col-lg-3 col-md-4 col-sm-6 mb-3">
-                            <div class="service-cardfull">
-                                <div class="card-body">
-                                    <div class="d-flex justify-content-between align-items-start mb-2">
-                                        <div>
-                                            <h6 class="card-title mb-0">TAP003</h6>
-                                            <small class="text-muted">序列号: STK555666777</small>
-                                        </div>
-                                        <span class="badge bg-danger">已满</span>
-                                    </div>
-                                    <div class="mb-2">
-                                        <div class="health-indicator health-warning"></div>
-                                        <small>健康状态: 警告</small>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">类型: </small>
-                                        <span>LTO-8</span>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">容量: </small>
-                                        <span>12 TB / 12 TB</span>
-                                    </div>
-                                    <div class="mb-2">
-                                        <div class="progress" style="height: 6px;">
-                                            <div class="progress-bar bg-danger" style="width: 100%"></div>
-                                        </div>
-                                        <small class="text-muted">100% 使用</small>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">位置: </small>
-                                        <span>存储柜 B-2</span>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">最后写入: </small>
-                                        <span>2025-10-15</span>
-                                    </div>
-                                    <div class="d-flex justify-content-between">
-                                        <button class="btn btn-sm btn-outline-primary">
-                                            <i class="bi bi-info-circle"></i> 详情
-                                        </button>
-                                        <button class="btn btn-sm btn-outline-warning">
-                                            <i class="bi bi-backspace"></i> 擦除
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- 磁带卡片 4 -->
-                        <div class="col-lg-3 col-md-4 col-sm-6 mb-3">
-                            <div class="service-cardexpired">
-                                <div class="card-body">
-                                    <div class="d-flex justify-content-between align-items-start mb-2">
-                                        <div>
-                                            <h6 class="card-title mb-0">TAP004</h6>
-                                            <small class="text-muted">序列号: STK111222333</small>
-                                        </div>
-                                        <span class="badge bg-secondary">已过期</span>
-                                    </div>
-                                    <div class="mb-2">
-                                        <div class="health-indicator health-unknown"></div>
-                                        <small>健康状态: 未知</small>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">类型: </small>
-                                        <span>LTO-7</span>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">容量: </small>
-                                        <span>9.2 GB / 6 TB</span>
-                                    </div>
-                                    <div class="mb-2">
-                                        <div class="progress" style="height: 6px;">
-                                            <div class="progress-bar bg-secondary" style="width: 100%"></div>
-                                        </div>
-                                        <small class="text-muted">已过期</small>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">位置: </small>
-                                        <span>存储柜 C-3</span>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">过期时间: </small>
-                                        <span>2025-09-30</span>
-                                    </div>
-                                    <div class="d-flex justify-content-between">
-                                        <button class="btn btn-sm btn-outline-primary">
-                                            <i class="bi bi-info-circle"></i> 详情
-                                        </button>
-                                        <button class="btn btn-sm btn-outline-success">
-                                            <i class="bi bi-arrow-counterclockwise"></i> 回收
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
+                    <div class="row" id="tapeListContainer">
+                        <!-- 磁带卡片将在这里动态生成 -->
+                        <div class="col-12 text-center text-muted py-4">
+                            <i class="bi bi-arrow-clockwise spinner"></i> 加载中...
                         </div>
                     </div>
                 </div>
@@ -529,8 +338,147 @@
 </div>
 
 <script>
+// 加载磁带数据
+async function loadTapeStatistics() {
+    try {
+        const response = await fetch('/api/tape/inventory');
+        const result = await response.json();
+        
+        if (result) {
+            document.getElementById('statTotalTapes').textContent = result.total_tapes || 0;
+            document.getElementById('statAvailableTapes').textContent = result.available_tapes || 0;
+            document.getElementById('statInUseTapes').textContent = result.in_use_tapes || 0;
+            
+            // 计算已满磁带数（需要从列表统计）
+            const listResponse = await fetch('/api/tape/list');
+            const listResult = await listResponse.json();
+            const fullTapes = listResult.tapes ? listResult.tapes.filter(t => t.status === 'full').length : 0;
+            document.getElementById('statFullTapes').textContent = fullTapes;
+            
+            document.getElementById('statExpiredTapes').textContent = result.expired_tapes || 0;
+            
+            // 计算故障磁带数（需要从列表统计）
+            const errorTapes = listResult.tapes ? listResult.tapes.filter(t => t.status === 'error').length : 0;
+            document.getElementById('statErrorTapes').textContent = errorTapes;
+        }
+    } catch (error) {
+        console.error('加载磁带统计失败:', error);
+    }
+}
+
+// 加载磁带列表
+async function loadTapeList() {
+    try {
+        const response = await fetch('/api/tape/list');
+        const result = await response.json();
+        
+        const container = document.getElementById('tapeListContainer');
+        
+        if (result.success && result.tapes && result.tapes.length > 0) {
+            container.innerHTML = '';
+            
+            result.tapes.forEach(tape => {
+                // 状态样式
+                const statusConfig = {
+                    'available': {class: 'success', text: '可用'},
+                    'in_use': {class: 'primary', text: '使用中'},
+                    'full': {class: 'danger', text: '已满'},
+                    'expired': {class: 'secondary', text: '已过期'},
+                    'error': {class: 'danger', text: '故障'},
+                    'maintenance': {class: 'warning', text: '维护中'},
+                    'new': {class: 'info', text: '新建'}
+                };
+                const status = statusConfig[tape.status] || {class: 'secondary', text: tape.status};
+                
+                // 健康状态
+                const getHealthIndicator = (score) => {
+                    if (score >= 80) return '<span class="health-indicator health-excellent"></span>优秀';
+                    if (score >= 60) return '<span class="health-indicator health-good"></span>良好';
+                    if (score >= 40) return '<span class="health-indicator health-warning"></span>警告';
+                    return '<span class="health-indicator health-critical"></span>严重';
+                };
+                
+                // 容量格式化
+                const formatBytes = (bytes) => {
+                    if (bytes >= 1024 ** 4) return (bytes / (1024 ** 4)).toFixed(1) + ' TB';
+                    if (bytes >= 1024 ** 3) return (bytes / (1024 ** 3)).toFixed(1) + ' GB';
+                    if (bytes >= 1024 ** 2) return (bytes / (1024 ** 2)).toFixed(1) + ' MB';
+                    return bytes + ' B';
+                };
+                
+                // 进度条颜色
+                const getProgressColor = (percent) => {
+                    if (percent >= 90) return 'danger';
+                    if (percent >= 70) return 'warning';
+                    return 'success';
+                };
+                
+                const cardHtml = `
+                    <div class="col-lg-3 col-md-4 col-sm-6 mb-3">
+                        <div class="service-card tape-${tape.status}">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between align-items-start mb-2">
+                                    <div>
+                                        <h6 class="card-title mb-0">${tape.tape_id}</h6>
+                                        <small class="text-muted">序列号: ${tape.serial_number || 'N/A'}</small>
+                                    </div>
+                                    <span class="badge bg-${status.class}">${status.text}</span>
+                                </div>
+                                <div class="mb-2">
+                                    ${getHealthIndicator(tape.health_score)}
+                                </div>
+                                <div class="mb-2">
+                                    <small class="text-muted">类型: </small>
+                                    <span>LTO-${tape.generation}</span>
+                                </div>
+                                <div class="mb-2">
+                                    <small class="text-muted">容量: </small>
+                                    <span>${formatBytes(tape.used_bytes)} / ${formatBytes(tape.capacity_bytes)}</span>
+                                </div>
+                                <div class="mb-2">
+                                    <div class="progress" style="height: 6px;">
+                                        <div class="progress-bar bg-${getProgressColor(tape.usage_percent)}" style="width: ${tape.usage_percent}%"></div>
+                                    </div>
+                                    <small class="text-muted">${tape.usage_percent.toFixed(1)}% 使用</small>
+                                </div>
+                                ${tape.location ? `<div class="mb-2">
+                                    <small class="text-muted">位置: </small>
+                                    <span>${tape.location}</span>
+                                </div>` : ''}
+                                ${tape.first_use_date ? `<div class="mb-2">
+                                    <small class="text-muted">首次使用: </small>
+                                    <span>${new Date(tape.first_use_date).toLocaleDateString()}</span>
+                                </div>` : ''}
+                                <div class="d-flex justify-content-between">
+                                    <button class="btn btn-sm btn-outline-primary">
+                                        <i class="bi bi-info-circle"></i> 详情
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-warning">
+                                        <i class="bi bi-pencil"></i> 编辑
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                
+                container.insertAdjacentHTML('beforeend', cardHtml);
+            });
+        } else {
+            container.innerHTML = '<div class="col-12 text-center text-muted py-4">暂无磁带</div>';
+        }
+    } catch (error) {
+        console.error('加载磁带列表失败:', error);
+        document.getElementById('tapeListContainer').innerHTML = '<div class="col-12 text-center text-danger py-4">加载失败</div>';
+    }
+}
+
 // 扫描磁带功能
 document.addEventListener('DOMContentLoaded', function() {
+    // 页面加载时加载数据
+    loadTapeStatistics();
+    loadTapeList();
+    
     // 监听模态框显示事件，执行扫描
     const scanModal = document.getElementById('scanTapeModal');
     if (scanModal) {
@@ -815,6 +763,9 @@ document.addEventListener('DOMContentLoaded', function() {
                     document.getElementById('tapeCapacity').value = '';
                     document.getElementById('tapeLocation').value = '';
                     document.getElementById('tapeRemark').value = '';
+                    // 刷新列表和统计
+                    loadTapeStatistics();
+                    loadTapeList();
                 } else {
                     alert('❌ 添加失败：' + result.message);
                 }

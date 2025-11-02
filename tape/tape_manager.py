@@ -367,6 +367,64 @@ class TapeManager:
     async def get_inventory_status(self) -> Dict[str, Any]:
         """获取库存状态"""
         try:
+            # 优先从数据库获取统计信息
+            try:
+                from models.tape import TapeCartridge as ORMTapeCartridge, TapeStatus as ORMTapeStatus
+                from config.database import get_db
+                from sqlalchemy import select, func
+                from datetime import datetime
+                
+                async for db in get_db():
+                    # 统计总数和各状态数量
+                    stmt_total = select(func.count(ORMTapeCartridge.id))
+                    total_tapes = (await db.execute(stmt_total)).scalar() or 0
+                    
+                    stmt_available = select(func.count(ORMTapeCartridge.id)).where(
+                        ORMTapeCartridge.status == ORMTapeStatus.AVAILABLE
+                    )
+                    available_tapes = (await db.execute(stmt_available)).scalar() or 0
+                    
+                    stmt_in_use = select(func.count(ORMTapeCartridge.id)).where(
+                        ORMTapeCartridge.status == ORMTapeStatus.IN_USE
+                    )
+                    in_use_tapes = (await db.execute(stmt_in_use)).scalar() or 0
+                    
+                    # 统计过期磁带
+                    now = datetime.now()
+                    stmt_expired = select(func.count(ORMTapeCartridge.id)).where(
+                        ORMTapeCartridge.expiry_date < now
+                    )
+                    expired_tapes = (await db.execute(stmt_expired)).scalar() or 0
+                    
+                    # 统计容量
+                    stmt_capacity = select(
+                        func.sum(ORMTapeCartridge.capacity_bytes),
+                        func.sum(ORMTapeCartridge.used_bytes)
+                    )
+                    result = await db.execute(stmt_capacity)
+                    row = result.first()
+                    total_capacity = row[0] or 0
+                    used_capacity = row[1] or 0
+                    
+                    break
+                
+                return {
+                    'total_tapes': total_tapes,
+                    'available_tapes': available_tapes,
+                    'in_use_tapes': in_use_tapes,
+                    'expired_tapes': expired_tapes,
+                    'total_capacity_bytes': total_capacity,
+                    'used_capacity_bytes': used_capacity,
+                    'free_capacity_bytes': total_capacity - used_capacity,
+                    'usage_percent': (used_capacity / total_capacity * 100) if total_capacity > 0 else 0,
+                    'current_tape': self.current_tape.tape_id if self.current_tape else None
+                }
+                
+            except ImportError:
+                # 如果数据库模型不可用，回退到内存数据
+                pass
+            
+            # 回退到内存数据
             total_tapes = len(self.tape_cartridges)
             available_tapes = len([t for t in self.tape_cartridges.values() if t.status == TapeStatus.AVAILABLE])
             in_use_tapes = len([t for t in self.tape_cartridges.values() if t.status == TapeStatus.IN_USE])
