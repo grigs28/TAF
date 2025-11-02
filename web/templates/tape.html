@@ -391,6 +391,24 @@ async function loadTapeStatistics() {
 // 存储所有磁带数据用于筛选
 let allTapesData = [];
 
+// 生成磁带标签和序列号的辅助函数
+function generateTapeLabel() {
+    const selectedMonth = document.getElementById('tapeMonth').value;
+    const now = new Date();
+    const month = selectedMonth || String(now.getMonth() + 1).padStart(2, '0');
+    const year = now.getFullYear().toString().substring(2);
+    const day = String(now.getDate()).padStart(2, '0');
+    const dateStr = year + month + day;
+    const randomPart = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+    return `TAP${dateStr}${randomPart}`;
+}
+
+function generateTapeSerial() {
+    const prefix = 'STK';
+    const timestamp = Date.now().toString();
+    return prefix + timestamp.substring(timestamp.length - 9);
+}
+
 // 筛选和搜索磁带列表
 function filterTapeList() {
     const container = document.getElementById('tapeListContainer');
@@ -636,23 +654,25 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
     
+    // 月份选择改变时自动刷新标签和序列号
+    const tapeMonthSelect = document.getElementById('tapeMonth');
+    if (tapeMonthSelect) {
+        tapeMonthSelect.addEventListener('change', function() {
+            // 如果标签和序列号都有值或者是扫描后的，自动刷新
+            const tapeLabel = document.getElementById('tapeLabel').value;
+            const tapeSerial = document.getElementById('tapeSerial').value;
+            if (tapeLabel || tapeSerial) {
+                document.getElementById('tapeLabel').value = generateTapeLabel();
+                document.getElementById('tapeSerial').value = generateTapeSerial();
+            }
+        });
+    }
+    
     // 生成磁带标签
     const generateLabelBtn = document.getElementById('generateLabelBtn');
     if (generateLabelBtn) {
         generateLabelBtn.addEventListener('click', function() {
-            // 获取选定的月份
-            const selectedMonth = document.getElementById('tapeMonth').value;
-            const now = new Date();
-            
-            // 使用选定月份或当前月份
-            const month = selectedMonth || String(now.getMonth() + 1).padStart(2, '0');
-            const year = now.getFullYear().toString().substring(2);
-            const day = String(now.getDate()).padStart(2, '0');
-            const dateStr = year + month + day;
-            
-            // 生成随机数
-            const randomPart = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
-            document.getElementById('tapeLabel').value = `TAP${dateStr}${randomPart}`;
+            document.getElementById('tapeLabel').value = generateTapeLabel();
         });
     }
     
@@ -660,11 +680,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const generateSerialBtn = document.getElementById('generateSerialBtn');
     if (generateSerialBtn) {
         generateSerialBtn.addEventListener('click', function() {
-            // 生成基于时间戳的序列号
-            const prefix = 'STK';
-            const timestamp = Date.now().toString();
-            const serial = prefix + timestamp.substring(timestamp.length - 9);
-            document.getElementById('tapeSerial').value = serial;
+            document.getElementById('tapeSerial').value = generateTapeSerial();
         });
     }
     
@@ -684,14 +700,18 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (result.success && result.devices && result.devices.length > 0) {
                     // 使用第一个设备的信息填充表单
                     const device = result.devices[0];
+                    console.log('扫描到的设备信息:', device);
                     
                     // 如果有LTO信息，自动选择类型和容量
                     if (device.is_ibm_lto && device.lto_generation) {
+                        console.log('检测到IBM LTO设备，代数:', device.lto_generation);
                         const ltoGen = device.lto_generation;
                         const tapeTypeValue = `LTO-${ltoGen}`;
+                        console.log('设置磁带类型为:', tapeTypeValue);
                         const tapeTypeSelect = document.getElementById('tapeType');
                         if (tapeTypeSelect) {
                             tapeTypeSelect.value = tapeTypeValue;
+                            console.log('磁带类型已设置');
                         }
                         
                         // 根据LTO代数设置容量
@@ -704,28 +724,20 @@ document.addEventListener('DOMContentLoaded', function() {
                         };
                         if (capacityMap[ltoGen]) {
                             const capacityValue = capacityMap[ltoGen];
+                            console.log('设置容量为:', capacityValue);
                             const tapeCapacitySelect = document.getElementById('tapeCapacity');
                             if (tapeCapacitySelect) {
                                 tapeCapacitySelect.value = capacityValue;
+                                console.log('容量已设置');
                             }
                         }
+                    } else {
+                        console.log('未检测到IBM LTO信息 - is_ibm_lto:', device.is_ibm_lto, 'generation:', device.lto_generation);
                     }
                     
-                    // 生成磁带标签
-                    const selectedMonth = document.getElementById('tapeMonth').value;
-                    const now = new Date();
-                    const month = selectedMonth || String(now.getMonth() + 1).padStart(2, '0');
-                    const year = now.getFullYear().toString().substring(2);
-                    const day = String(now.getDate()).padStart(2, '0');
-                    const dateStr = year + month + day;
-                    const randomPart = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
-                    document.getElementById('tapeLabel').value = `TAP${dateStr}${randomPart}`;
-                    
-                    // 生成序列号
-                    const prefix = 'STK';
-                    const timestamp = Date.now().toString();
-                    const serial = prefix + timestamp.substring(timestamp.length - 9);
-                    document.getElementById('tapeSerial').value = serial;
+                    // 生成磁带标签和序列号
+                    document.getElementById('tapeLabel').value = generateTapeLabel();
+                    document.getElementById('tapeSerial').value = generateTapeSerial();
                     
                     alert('✅ 扫描成功，已自动填充信息');
                 } else {
