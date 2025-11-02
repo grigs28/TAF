@@ -104,6 +104,25 @@ class SCSIInterface:
             # IOCTL控制码
             self.IOCTL_SCSI_PASS_THROUGH_DIRECT = 0x4D014  # DIRECT版本
             self.IOCTL_SCSI_PASS_THROUGH = 0x4D002  # 使用缓冲区的版本
+            self.IOCTL_STORAGE_GET_MEDIA_SERIAL_NUMBER = 0x002D0C04  # 获取介质序列号
+            
+            # Storage Property Query结构
+            class STORAGE_PROPERTY_QUERY(Structure):
+                _fields_ = [
+                    ("PropertyId", wintypes.ULONG),
+                    ("QueryType", wintypes.ULONG),
+                    ("AdditionalParameters", wintypes.UCHAR * 1)
+                ]
+            
+            class STORAGE_SERIAL_NUMBER_DATA(Structure):
+                _fields_ = [
+                    ("Version", wintypes.ULONG),
+                    ("Size", wintypes.ULONG),
+                    ("SerialNumber", wintypes.UCHAR * 128)
+                ]
+            
+            self.STORAGE_PROPERTY_QUERY = STORAGE_PROPERTY_QUERY
+            self.STORAGE_SERIAL_NUMBER_DATA = STORAGE_SERIAL_NUMBER_DATA
 
         except Exception as e:
             logger.error(f"Windows SCSI接口初始化失败: {str(e)}")
@@ -1066,7 +1085,7 @@ class SCSIInterface:
             return {'success': False, 'error': str(e)}
 
     async def get_physical_tape_uuid(self, device_path: str = None) -> Optional[str]:
-        """获取磁带物理UUID - 从VPD Page 0x83 (Device Identification)"""
+        """获取磁带物理UUID - 优先使用Windows Storage API，失败则尝试VPD Page 0x83"""
         try:
             if not device_path and self.tape_devices:
                 device_path = self.tape_devices[0]['path']
@@ -1074,6 +1093,13 @@ class SCSIInterface:
             if not device_path:
                 logger.error("没有指定设备路径")
                 return None
+
+            # Windows平台优先使用Storage API
+            if self.system == "Windows":
+                uuid = await self._get_windows_storage_uuid(device_path)
+                if uuid:
+                    return uuid
+                logger.info("Windows Storage API读取失败，尝试SCSI命令")
 
             # 获取VPD Page 0x83 (Device Identification)
             result = await self.send_ibm_specific_command(
@@ -1138,6 +1164,93 @@ class SCSIInterface:
         except Exception as e:
             logger.error(f"获取物理磁带UUID失败: {str(e)}")
             return None
+
+    async def _get_windows_storage_uuid(self, device_path: str) -> Optional[str]:
+        """使用Windows Storage API获取磁带物理UUID"""
+        try:
+            if not hasattr(self, 'IOCTL_STORAGE_GET_MEDIA_SERIAL_NUMBER'):
+                logger.debug("IOCTL_STORAGE_GET_MEDIA_SERIAL_NUMBER未定义")
+                return None
+            
+            # 打开设备
+            handle = self.create_file(
+                device_path,
+                0x80000000,  # GENERIC_READ
+                1,           # FILE_SHARE_READ | FILE_SHARE_WRITE
+                None,
+                3,           # OPEN_EXISTING
+                0x80,        # FILE_ATTRIBUTE_NORMAL
+                None
+            )
+
+            if handle == -1:
+                logger.debug(f"无法打开设备: {device_path}")
+                return None
+
+            try:
+                # 查询存储属性
+                query = self.STORAGE_PROPERTY_QUERY()
+                query.PropertyId = 3  # StorageAdapterProperty
+                query.QueryType = 0
+                
+                # 使用不同的IOCTL
+                # IOCTL_STORAGE_GET_MEDIA_SERIAL_NUMBER = 0x002D0C04
+                serial_data = self.STORAGE_SERIAL_NUMBER_DATA()
+                
+                result = self.device_io_control(
+                    handle,
+                    self.IOCTL_STORAGE_GET_MEDIA_SERIAL_NUMBER,
+                    None,
+                    0,
+                    byref(serial_data),
+                    sizeof(serial_data),
+                    None,
+                    None
+                )
+                
+                if result:
+                    # 读取序列号
+                    serial_bytes = bytes(serial_data.SerialNumber)
+                    # 去除尾部的null字节
+                    serial_str = serial_bytes.rstrip(b'\x00').decode('utf-8', errors='ignore').strip()
+                    if serial_str:
+                        logger.info(f"从Windows Storage API读取到序列号: {serial_str}")
+                        # 将序列号转换为UUID格式
+                        uuid_str = self._serial_to_uuid(serial_str)
+                        return uuid_str
+                
+                error_code = self.kernel32.GetLastError()
+                logger.debug(f"IOCTL_STORAGE_GET_MEDIA_SERIAL_NUMBER失败: 错误代码={error_code}")
+                
+            finally:
+                self.kernel32.CloseHandle(handle)
+
+        except Exception as e:
+            logger.debug(f"使用Windows Storage API读取UUID失败: {str(e)}")
+        
+        return None
+
+    def _serial_to_uuid(self, serial: str) -> str:
+        """将序列号转换为UUID格式"""
+        try:
+            import hashlib
+            # 使用序列号生成确定性UUID
+            namespace = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"  # 标准UUID命名空间
+            name = f"{namespace}:{serial}".encode('utf-8')
+            sha5 = hashlib.sha1(name).digest()
+            
+            # 生成UUID v5
+            uuid_bytes = bytearray(sha5[:16])
+            uuid_bytes[6] = (uuid_bytes[6] & 0x0F) | 0x50  # Version 5
+            uuid_bytes[8] = (uuid_bytes[8] & 0x3F) | 0x80  # Variant 10
+            
+            # 格式化为标准UUID字符串
+            uuid_str = f"{uuid_bytes[0:4].hex()}-{uuid_bytes[4:6].hex()}-{uuid_bytes[6:8].hex()}-{uuid_bytes[8:10].hex()}-{uuid_bytes[10:16].hex()}"
+            return uuid_str
+
+        except Exception as e:
+            logger.error(f"序列号转UUID失败: {str(e)}")
+            return ""
 
     def _eui64_to_uuid(self, eui64: bytes) -> Optional[str]:
         """将EUI-64标识符转换为UUID格式"""
