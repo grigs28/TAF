@@ -55,12 +55,14 @@ class DatabaseManager:
                 )
             else:
                 # PostgreSQL/openGauss支持连接池
+                # 对于openGauss，禁用版本检查以避免无法解析版本号的问题
                 self.engine = create_engine(
                     database_url,
                     pool_size=self.settings.DB_POOL_SIZE,
                     max_overflow=self.settings.DB_MAX_OVERFLOW,
                     echo=self.settings.DEBUG,
-                    pool_pre_ping=True
+                    pool_pre_ping=True,
+                    connect_args={"server_version_check": False} if "opengauss" in database_url.lower() else {}
                 )
                 self.async_engine = create_async_engine(
                     async_database_url,
