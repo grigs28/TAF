@@ -178,9 +178,36 @@ class SCSIInterface:
                 import wmi
                 c = wmi.WMI()
                 for tape in c.Win32_TapeDrive():
+                    # 获取DOS设备路径，优先使用PHYSICALDRIVE
+                    # 尝试从DeviceID或其他属性获取DOS路径
+                    tape_path = None
+                    device_id = tape.DeviceID
+                    
+                    # 尝试找到DOS设备路径
+                    for drive_num in range(10):  # 尝试0-9
+                        test_path = f"\\\\.\\PHYSICALDRIVE{drive_num}"
+                        if await self._test_tape_device_access(test_path):
+                            tape_path = test_path
+                            logger.info(f"找到DOS设备路径: {test_path} (DeviceID: {device_id})")
+                            break
+                    
+                    # 如果没有找到PHYSICALDRIVE，尝试TAPE路径
+                    if not tape_path:
+                        for tape_num in range(4):  # 尝试TAPE0-3
+                            test_path = f"\\\\.\\TAPE{tape_num}"
+                            if await self._test_tape_device_access(test_path):
+                                tape_path = test_path
+                                logger.info(f"找到DOS设备路径: {test_path} (DeviceID: {device_id})")
+                                break
+                    
+                    # 如果还是没找到，使用DeviceID作为fallback
+                    if not tape_path:
+                        tape_path = device_id
+                        logger.warning(f"无法找到有效的DOS设备路径，使用DeviceID: {device_id}")
+                    
                     # 获取详细的设备信息
                     device_info = {
-                        'path': tape.DeviceID,
+                        'path': tape_path,
                         'type': 'SCSI',
                         'vendor': getattr(tape, 'Manufacturer', 'Unknown'),
                         'model': getattr(tape, 'Name', 'Unknown'),
@@ -188,7 +215,8 @@ class SCSIInterface:
                         'status': 'online',
                         'scsi_bus': getattr(tape, 'SCSIBus', 'Unknown'),
                         'scsi_target_id': getattr(tape, 'SCSITargetId', 'Unknown'),
-                        'scsi_lun': getattr(tape, 'SCSILogicalUnit', 'Unknown')
+                        'scsi_lun': getattr(tape, 'SCSILogicalUnit', 'Unknown'),
+                        'wmi_device_id': device_id  # 保存原始WMI DeviceID
                     }
 
                     # 检查是否为IBM LTO磁带机
