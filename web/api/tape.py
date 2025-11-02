@@ -99,7 +99,7 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
                 """, (
                     request.tape_id,
                     request.label,
-                    'new',  # TapeStatus.NEW
+                    'available',  # 使用'available'状态，因为数据库中可能没有'new'
                     request.media_type,
                     request.generation,
                     request.serial_number,
@@ -161,32 +161,66 @@ async def read_tape_label(request: Request):
 async def check_tape_exists(tape_id: str, request: Request):
     """检查磁带是否存在"""
     try:
-        from models.tape import TapeCartridge
-        from config.database import get_db
-        from sqlalchemy import select
+        # 使用psycopg2直接连接，避免openGauss版本解析问题
+        import psycopg2
+        from config.settings import get_settings
+        from datetime import datetime
         
-        async for db in get_db():
-            stmt = select(TapeCartridge).where(TapeCartridge.tape_id == tape_id)
-            result = await db.execute(stmt)
-            existing = result.scalar_one_or_none()
-            
-            if existing:
-                # 检查是否过期
-                from datetime import datetime
-                is_expired = existing.expiry_date and datetime.now() > existing.expiry_date
+        settings = get_settings()
+        database_url = settings.DATABASE_URL
+        
+        # 解析URL
+        if database_url.startswith("opengauss://"):
+            database_url = database_url.replace("opengauss://", "postgresql://", 1)
+        
+        import re
+        pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
+        match = re.match(pattern, database_url)
+        
+        if not match:
+            raise ValueError("无法解析数据库连接URL")
+        
+        username, password, host, port, database = match.groups()
+        
+        # 连接数据库
+        conn = psycopg2.connect(
+            host=host,
+            port=port,
+            user=username,
+            password=password,
+            database=database
+        )
+        
+        try:
+            with conn.cursor() as cur:
+                # 查询磁带是否存在
+                cur.execute("""
+                    SELECT tape_id, label, status, expiry_date
+                    FROM tape_cartridges
+                    WHERE tape_id = %s
+                """, (tape_id,))
                 
-                return {
-                    "exists": True,
-                    "tape_id": existing.tape_id,
-                    "label": existing.label,
-                    "status": existing.status.value,
-                    "is_expired": is_expired,
-                    "expiry_date": existing.expiry_date.isoformat() if existing.expiry_date else None
-                }
-            else:
-                return {
-                    "exists": False
-                }
+                row = cur.fetchone()
+                
+                if row:
+                    # 检查是否过期
+                    is_expired = row[3] and datetime.now() > row[3]
+                    
+                    return {
+                        "exists": True,
+                        "tape_id": row[0],
+                        "label": row[1],
+                        "status": row[2] if isinstance(row[2], str) else row[2].value,
+                        "is_expired": is_expired,
+                        "expiry_date": row[3].isoformat() if row[3] else None
+                    }
+                else:
+                    return {
+                        "exists": False
+                    }
+        
+        finally:
+            conn.close()
         
     except Exception as e:
         logger.error(f"检查磁带存在性失败: {str(e)}")
