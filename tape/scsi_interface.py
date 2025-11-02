@@ -102,7 +102,8 @@ class SCSIInterface:
             self.device_io_control = self.kernel32.DeviceIoControl
             
             # IOCTL控制码
-            self.IOCTL_SCSI_PASS_THROUGH_DIRECT = 0x4D014
+            self.IOCTL_SCSI_PASS_THROUGH_DIRECT = 0x4D014  # DIRECT版本
+            self.IOCTL_SCSI_PASS_THROUGH = 0x4D002  # 使用缓冲区的版本
 
         except Exception as e:
             logger.error(f"Windows SCSI接口初始化失败: {str(e)}")
@@ -321,13 +322,14 @@ class SCSIInterface:
 
     async def execute_scsi_command(self, device_path: str, cdb: bytes,
                                  data_direction: int = 0, data_length: int = 0,
+                                 data: bytes = b'',
                                  timeout: int = 30) -> Dict[str, Any]:
         """执行SCSI命令"""
         try:
             if self.system == "Windows":
-                return await self._execute_windows_scsi(device_path, cdb, data_direction, data_length, timeout)
+                return await self._execute_windows_scsi(device_path, cdb, data_direction, data_length, data, timeout)
             elif self.system == "Linux":
-                return await self._execute_linux_scsi(device_path, cdb, data_direction, data_length, timeout)
+                return await self._execute_linux_scsi(device_path, cdb, data_direction, data_length, data, timeout)
 
         except Exception as e:
             logger.error(f"执行SCSI命令失败: {str(e)}")
@@ -335,7 +337,7 @@ class SCSIInterface:
 
     async def _execute_windows_scsi(self, device_path: str, cdb: bytes,
                                   data_direction: int, data_length: int,
-                                  timeout: int) -> Dict[str, Any]:
+                                  data: bytes, timeout: int) -> Dict[str, Any]:
         """执行Windows SCSI命令"""
         try:
             # Windows SPTI实现
@@ -379,10 +381,17 @@ class SCSIInterface:
                     if i < 16:
                         sptwb.Spt.Cdb[i] = byte
                 
-                # 调用DeviceIoControl
+                # 如果数据方向是OUT，复制数据到缓冲区
+                if data_direction == 0 and data and len(data) > 0:
+                    if len(data) > len(sptwb.Data):
+                        return {'success': False, 'error': f'数据长度 {len(data)} 超过缓冲区大小 {len(sptwb.Data)}'}
+                    for i, byte in enumerate(data):
+                        sptwb.Data[i] = byte
+                
+                # 调用DeviceIoControl - 使用IOCTL_SCSI_PASS_THROUGH因为有内置缓冲区
                 result = self.device_io_control(
                     handle,
-                    self.IOCTL_SCSI_PASS_THROUGH_DIRECT,
+                    self.IOCTL_SCSI_PASS_THROUGH,
                     byref(sptwb),
                     sizeof(sptwb),
                     byref(sptwb),
@@ -395,8 +404,8 @@ class SCSIInterface:
                     if sptwb.Spt.ScsiStatus == 0:
                         # 成功，返回数据
                         if data_direction == 1 and data_length > 0:
-                            data = bytes(sptwb.Data[:data_length])
-                            return {'success': True, 'data': data}
+                            read_data = bytes(sptwb.Data[:data_length])
+                            return {'success': True, 'data': read_data}
                         else:
                             return {'success': True, 'data': b''}
                     else:
@@ -420,7 +429,7 @@ class SCSIInterface:
 
     async def _execute_linux_scsi(self, device_path: str, cdb: bytes,
                                 data_direction: int, data_length: int,
-                                timeout: int) -> Dict[str, Any]:
+                                data: bytes, timeout: int) -> Dict[str, Any]:
         """执行Linux SCSI命令"""
         try:
             with open(device_path, 'rb+') as fd:
@@ -438,6 +447,12 @@ class SCSIInterface:
                 sense_buffer = create_string_buffer(32)
                 data_buffer = create_string_buffer(data_length) if data_length > 0 else None
 
+                # 如果数据方向是OUT，复制数据到缓冲区
+                if data_direction == 0 and data and len(data) > 0 and data_buffer:
+                    for i, byte in enumerate(data):
+                        if i < data_length:
+                            data_buffer[i] = byte
+
                 hdr.cmdp = cast(cdb_buffer, c_void_p)
                 hdr.sbp = cast(sense_buffer, c_void_p)
                 if data_buffer:
@@ -448,8 +463,8 @@ class SCSIInterface:
 
                 # 检查结果
                 if hdr.status == 0:
-                    data = data_buffer.raw[:data_length] if data_buffer else b''
-                    return {'success': True, 'data': data}
+                    read_data = data_buffer.raw[:data_length] if data_buffer else b''
+                    return {'success': True, 'data': read_data}
                 else:
                     return {
                         'success': False,
@@ -799,9 +814,9 @@ class SCSIInterface:
                 # Windows设备访问测试
                 handle = self.create_file(
                     device_path,
-                    0x80000000,  # GENERIC_READ
-                    0x80000000,  # GENERIC_WRITE
+                    0x80000000 | 0x40000000,  # GENERIC_READ | GENERIC_WRITE
                     0,
+                    None,
                     3,           # OPEN_EXISTING
                     0x80,        # FILE_ATTRIBUTE_NORMAL
                     None
@@ -1146,6 +1161,7 @@ class SCSIInterface:
                 device_path, cdb,
                 data_direction=0,  # OUT
                 data_length=len(data),
+                data=data,
                 timeout=300
             )
 
@@ -1155,13 +1171,14 @@ class SCSIInterface:
 
     async def execute_scsi_command_with_retry(self, device_path: str, cdb: bytes,
                                             data_direction: int = 0, data_length: int = 0,
+                                            data: bytes = b'',
                                             timeout: int = 30, max_retries: int = 3) -> Dict[str, Any]:
         """执行SCSI命令（带重试机制）"""
         last_error = None
 
         for attempt in range(max_retries):
             result = await self.execute_scsi_command(
-                device_path, cdb, data_direction, data_length, timeout
+                device_path, cdb, data_direction, data_length, data, timeout
             )
 
             if result['success']:
