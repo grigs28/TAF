@@ -192,14 +192,23 @@ class SCSIInterface:
                     }
 
                     # 检查是否为IBM LTO磁带机
-                    if 'IBM' in device_info['vendor'].upper() and 'ULT3580' in device_info['model'].upper():
+                    # 从模型名称或DeviceID中检查
+                    model_upper = device_info.get('model', '').upper()
+                    path_upper = device_info.get('path', '').upper()
+                    if 'ULT3580' in model_upper or 'VEN_IBM' in path_upper:
+                        # 如果vendor不是IBM，尝试从model或path中提取
+                        if 'IBM' not in device_info.get('vendor', '').upper() and 'IBM' in model_upper:
+                            device_info['vendor'] = 'IBM'
+                        
                         device_info.update({
                             'is_ibm_lto': True,
-                            'lto_generation': self._extract_lto_generation(device_info['model']),
+                            'lto_generation': self._extract_lto_generation(model_upper),
                             'supports_worm': True,
                             'supports_encryption': True,
-                            'native_capacity': self._get_lto_capacity(device_info['model'])
+                            'native_capacity': self._get_lto_capacity(model_upper)
                         })
+                        
+                        logger.info(f"识别为IBM LTO-{device_info.get('lto_generation', 0)}磁带机")
 
                     devices.append(device_info)
                     logger.info(f"发现磁带设备: {device_info['vendor']} {device_info['model']}")
@@ -238,14 +247,22 @@ class SCSIInterface:
                         # 检查是否为IBM LTO磁带机
                         vendor = device_info.get('vendor', '').upper()
                         model = device_info.get('model', '').upper()
-                        if 'IBM' in vendor and 'ULT3580' in model:
+                        path_upper = device_info.get('path', '').upper()
+                        if 'ULT3580' in model or 'VEN_IBM' in path_upper:
+                            # 如果vendor不是IBM，尝试从model或path中提取
+                            if 'IBM' not in vendor and 'IBM' in model:
+                                device_info['vendor'] = 'IBM'
+                            
+                            lto_gen = self._extract_lto_generation(model)
                             device_info.update({
                                 'is_ibm_lto': True,
-                                'lto_generation': self._extract_lto_generation(model),
+                                'lto_generation': lto_gen,
                                 'supports_worm': True,
                                 'supports_encryption': True,
                                 'native_capacity': self._get_lto_capacity(model)
                             })
+                            
+                            logger.info(f"识别为IBM LTO-{lto_gen}磁带机")
 
                         devices.append(device_info)
 
@@ -279,14 +296,23 @@ class SCSIInterface:
                         }
 
                         # 检查是否为IBM LTO磁带机
-                        if 'IBM' in vendor.upper() and 'ULT3580' in model.upper():
+                        vendor_upper = vendor.upper()
+                        model_upper = model.upper()
+                        if 'ULT3580' in model_upper:
+                            # 如果vendor不是IBM，尝试从model中提取
+                            if 'IBM' not in vendor_upper and 'IBM' in model_upper:
+                                vendor = 'IBM'
+                            
+                            lto_gen = self._extract_lto_generation(model_upper)
                             device_info.update({
                                 'is_ibm_lto': True,
-                                'lto_generation': self._extract_lto_generation(model),
+                                'lto_generation': lto_gen,
                                 'supports_worm': True,
                                 'supports_encryption': True,
-                                'native_capacity': self._get_lto_capacity(model)
+                                'native_capacity': self._get_lto_capacity(model_upper)
                             })
+                            
+                            logger.info(f"识别为IBM LTO-{lto_gen}磁带机")
 
                         devices.append(device_info)
                         logger.info(f"发现磁带设备: {device_path} - {vendor} {model}")

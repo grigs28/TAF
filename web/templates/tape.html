@@ -731,6 +731,9 @@ document.addEventListener('DOMContentLoaded', function() {
                     
                     const device = result.devices[0];
                     
+                    // 调试：打印完整设备信息
+                    console.log('扫描到的完整设备信息:', JSON.stringify(device, null, 2));
+                    
                     // 生成详细的扫描结果HTML
                     let html = '<div class="alert alert-success"><i class="bi bi-check-circle me-2"></i>扫描成功！检测到以下设备信息：</div>';
                     html += '<div class="table-responsive"><table class="table table-sm">';
@@ -741,13 +744,23 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (device.product) html += `<tr><th>产品:</th><td>${device.product}</td></tr>`;
                     if (device.serial) html += `<tr><th>序列号:</th><td>${device.serial}</td></tr>`;
                     
-                    // LTO信息
+                    // LTO信息 - 强制显示（用于调试）
                     if (device.is_ibm_lto && device.lto_generation) {
                         html += `<tr><th>设备类型:</th><td><span class="badge bg-info">IBM LTO-${device.lto_generation}</span></td></tr>`;
                         const capacityMap = {9: '18TB', 8: '12TB', 7: '6TB', 6: '2.5TB', 5: '1.5TB'};
                         if (capacityMap[device.lto_generation]) {
                             html += `<tr><th>建议容量:</th><td>${capacityMap[device.lto_generation]}</td></tr>`;
                         }
+                    } else if (device.model && device.model.includes('ULT3580')) {
+                        // 如果model包含ULT3580但is_ibm_lto未设置，尝试从model提取
+                        console.log('检测到ULT3580但is_ibm_lto未设置，尝试提取代数');
+                        html += `<tr><th>设备信息:</th><td><span class="badge bg-warning">IBM磁带设备（待识别代数）</span></td></tr>`;
+                    }
+                    
+                    // 显示原生容量（如果存在）
+                    if (device.native_capacity) {
+                        const tb = (device.native_capacity / (1024 ** 4)).toFixed(1);
+                        html += `<tr><th>原生容量:</th><td>${tb} TB</td></tr>`;
                     }
                     
                     // 其他信息
