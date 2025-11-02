@@ -7,7 +7,6 @@ Database Management Module
 
 import asyncio
 import logging
-import re
 from typing import AsyncGenerator, Optional
 from sqlalchemy import create_engine, MetaData
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
@@ -121,68 +120,14 @@ class DatabaseManager:
             # 导入所有模型以确保它们被注册
             from models import backup, tape, user, system_log, system_config
 
-            # 处理openGauss版本检测问题，使用psycopg2直接连接创建表
-            database_url = self.settings.DATABASE_URL
-            if "opengauss" in database_url.lower():
-                logger.info("检测到openGauss数据库，使用psycopg2创建表...")
-                await self._create_tables_with_psycopg2()
-            else:
-                # 普通PostgreSQL/SQLite使用SQLAlchemy
-                with self.engine.begin() as conn:
-                    Base.metadata.create_all(conn)
-                logger.info("数据库表创建完成")
+            # 直接使用SQLAlchemy引擎来创建表，因为它会自动处理枚举类型和所有PostgreSQL特性
+            with self.engine.begin() as conn:
+                Base.metadata.create_all(conn)
+            logger.info("数据库表创建完成")
 
         except Exception as e:
             logger.error(f"创建数据库表失败: {str(e)}")
             raise
-    
-    async def _create_tables_with_psycopg2(self):
-        """使用psycopg2直接连接创建表（解决openGauss版本解析问题）"""
-        import psycopg2
-        from models import backup, tape, user, system_log, system_config
-        
-        # 解析数据库URL获取连接信息
-        database_url = self.settings.DATABASE_URL
-        if database_url.startswith("opengauss://"):
-            database_url = database_url.replace("opengauss://", "postgresql://", 1)
-        
-        pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
-        match = re.match(pattern, database_url)
-        if not match:
-            raise ValueError("无法解析数据库连接URL")
-        
-        username, password, host, port, database = match.groups()
-        
-        # 使用psycopg2直接连接
-        conn = psycopg2.connect(
-            host=host,
-            port=port,
-            user=username,
-            password=password,
-            database=database
-        )
-        
-        try:
-            # 创建一个临时的PostgreSQL引擎用于生成SQL
-            from sqlalchemy import create_engine
-            from sqlalchemy.schema import CreateTable
-            temp_engine = create_engine("postgresql://", pool_pre_ping=False)
-            
-            with conn.cursor() as cur:
-                # 使用SQLAlchemy的metadata生成SQL（指定PostgreSQL方言）
-                for table in Base.metadata.sorted_tables:
-                    create_sql = str(CreateTable(table).compile(compile_kwargs={"literal_binds": True}, dialect=temp_engine.dialect))
-                    # 执行创建表语句
-                    cur.execute(create_sql)
-                    logger.info(f"创建表: {table.name}")
-            
-            conn.commit()
-            logger.info("使用psycopg2成功创建数据库表")
-        except Exception as e:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
 
     def get_sync_session(self) -> Session:
         """获取同步数据库会话"""
