@@ -163,11 +163,15 @@ class DatabaseManager:
         )
         
         try:
+            # 创建一个临时的PostgreSQL引擎用于生成SQL
+            from sqlalchemy import create_engine
+            from sqlalchemy.schema import CreateTable
+            temp_engine = create_engine("postgresql://", pool_pre_ping=False)
+            
             with conn.cursor() as cur:
-                # 使用SQLAlchemy的metadata生成SQL
-                from sqlalchemy.schema import CreateTable
+                # 使用SQLAlchemy的metadata生成SQL（指定PostgreSQL方言）
                 for table in Base.metadata.sorted_tables:
-                    create_sql = str(CreateTable(table).compile(compile_kwargs={"literal_binds": True}))
+                    create_sql = str(CreateTable(table).compile(compile_kwargs={"literal_binds": True}, dialect=temp_engine.dialect))
                     # 执行创建表语句
                     cur.execute(create_sql)
                     logger.info(f"创建表: {table.name}")
