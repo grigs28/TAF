@@ -4,6 +4,19 @@
 
 本文档遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/) 格式。
 
+## [0.0.7] - 2024-11-02
+
+### 移除
+
+#### UUID功能完全移除
+- ✅ 移除所有UUID相关功能和代码
+  - 从数据库模型中删除`tape_uuid`和`set_uuid`字段
+  - 删除物理UUID读取相关的所有SCSI接口方法
+  - 移除UUID读取失败的错误对话框
+  - 删除磁带列表中的UUID显示
+  - 简化磁带创建流程，取消UUID验证要求
+  - 清理所有UUID相关的Windows Storage API和VPD读取代码
+
 ## [0.0.6] - 2024-11-02
 
 ### 新增
