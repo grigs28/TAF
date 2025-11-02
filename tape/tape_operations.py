@@ -453,6 +453,12 @@ class TapeOperations:
                 logger.error("SCSI接口未初始化")
                 return False
             
+            # 先尝试格式化磁带（新磁带需要格式化才能写入）
+            logger.info("准备格式化磁带...")
+            format_result = await self.scsi_interface.format_tape()
+            if not format_result:
+                logger.warning("磁带格式化失败，尝试继续写入标签")
+            
             # 准备磁带元数据
             metadata = {
                 "tape_id": tape_info.get("tape_id"),
@@ -460,7 +466,7 @@ class TapeOperations:
                 "serial_number": tape_info.get("serial_number"),
                 "created_date": tape_info.get("created_date"),
                 "expiry_date": tape_info.get("expiry_date"),
-                "system_version": "TAF_0.0.4"
+                "system_version": "TAF_0.0.6"
             }
             
             # 将元数据序列化为JSON
