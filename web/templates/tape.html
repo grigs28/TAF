@@ -284,9 +284,34 @@
                     </div>
                     <div class="row">
                         <div class="col-md-6 mb-3">
-                            <label class="form-label">磁带标签</label>
-                            <input type="text" class="form-control" id="tapeLabel" placeholder="TAP001" required>
+                            <label class="form-label">月份</label>
+                            <select class="form-select" id="tapeMonth">
+                                <option value="">选择月份</option>
+                                <option value="01">1月</option>
+                                <option value="02">2月</option>
+                                <option value="03">3月</option>
+                                <option value="04">4月</option>
+                                <option value="05">5月</option>
+                                <option value="06">6月</option>
+                                <option value="07">7月</option>
+                                <option value="08">8月</option>
+                                <option value="09">9月</option>
+                                <option value="10">10月</option>
+                                <option value="11">11月</option>
+                                <option value="12">12月</option>
+                            </select>
                         </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">磁带标签</label>
+                            <div class="input-group">
+                                <input type="text" class="form-control" id="tapeLabel" placeholder="TAP001" required>
+                                <button type="button" class="btn btn-outline-secondary" id="generateLabelBtn" title="生成标签">
+                                    <i class="bi bi-arrow-clockwise"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row">
                         <div class="col-md-6 mb-3">
                             <label class="form-label">序列号</label>
                             <div class="input-group">
@@ -296,8 +321,6 @@
                                 </button>
                             </div>
                         </div>
-                    </div>
-                    <div class="row">
                         <div class="col-md-6 mb-3">
                             <label class="form-label">磁带类型</label>
                             <select class="form-select" id="tapeType" required>
@@ -308,6 +331,8 @@
                                 <option value="LTO-6">LTO-6</option>
                             </select>
                         </div>
+                    </div>
+                    <div class="row">
                         <div class="col-md-6 mb-3">
                             <label class="form-label">容量</label>
                             <select class="form-select" id="tapeCapacity" required>
@@ -318,10 +343,10 @@
                                 <option value="2.5TB">2.5 TB (LTO-6)</option>
                             </select>
                         </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">位置</label>
+                            <input type="text" class="form-control" id="tapeLocation" placeholder="存储柜 A-1">
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label">位置</label>
-                        <input type="text" class="form-control" id="tapeLocation" placeholder="存储柜 A-1">
                     </div>
                     <div class="mb-3">
                         <label class="form-label">备注</label>
@@ -611,6 +636,26 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
     
+    // 生成磁带标签
+    const generateLabelBtn = document.getElementById('generateLabelBtn');
+    if (generateLabelBtn) {
+        generateLabelBtn.addEventListener('click', function() {
+            // 获取选定的月份
+            const selectedMonth = document.getElementById('tapeMonth').value;
+            const now = new Date();
+            
+            // 使用选定月份或当前月份
+            const month = selectedMonth || String(now.getMonth() + 1).padStart(2, '0');
+            const year = now.getFullYear().toString().substring(2);
+            const day = String(now.getDate()).padStart(2, '0');
+            const dateStr = year + month + day;
+            
+            // 生成随机数
+            const randomPart = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+            document.getElementById('tapeLabel').value = `TAP${dateStr}${randomPart}`;
+        });
+    }
+    
     // 生成序列号
     const generateSerialBtn = document.getElementById('generateSerialBtn');
     if (generateSerialBtn) {
@@ -633,6 +678,31 @@ document.addEventListener('DOMContentLoaded', function() {
             btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-1"></i>扫描中...';
             
             try {
+                // 先检查磁带格式
+                const checkResponse = await fetch('/api/tape/check-format');
+                const checkResult = await checkResponse.json();
+                
+                if (checkResult.success && !checkResult.formatted) {
+                    // 磁带未格式化，提示用户
+                    const shouldFormat = confirm('磁带未格式化，是否先进行格式化？\n点击"确定"格式化，点击"取消"跳过。');
+                    if (shouldFormat) {
+                        const formatResponse = await fetch('/api/tape/format', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({force: false})
+                        });
+                        const formatResult = await formatResponse.json();
+                        
+                        if (!formatResult.success) {
+                            alert('⚠️ 格式化失败：' + formatResult.message);
+                            btn.disabled = false;
+                            btn.innerHTML = originalHtml;
+                            return;
+                        }
+                        alert('✅ 磁带格式化成功');
+                    }
+                }
+                
                 const response = await fetch('/api/system/tape/scan');
                 const result = await response.json();
                 
@@ -644,7 +714,10 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (device.is_ibm_lto && device.lto_generation) {
                         const ltoGen = device.lto_generation;
                         const tapeTypeValue = `LTO-${ltoGen}`;
-                        document.getElementById('tapeType').value = tapeTypeValue;
+                        const tapeTypeSelect = document.getElementById('tapeType');
+                        if (tapeTypeSelect) {
+                            tapeTypeSelect.value = tapeTypeValue;
+                        }
                         
                         // 根据LTO代数设置容量
                         const capacityMap = {
@@ -656,15 +729,20 @@ document.addEventListener('DOMContentLoaded', function() {
                         };
                         if (capacityMap[ltoGen]) {
                             const capacityValue = capacityMap[ltoGen];
-                            document.getElementById('tapeCapacity').value = capacityValue;
+                            const tapeCapacitySelect = document.getElementById('tapeCapacity');
+                            if (tapeCapacitySelect) {
+                                tapeCapacitySelect.value = capacityValue;
+                            }
                         }
                     }
                     
-                    // 生成磁带标签（基于当前日期和索引）
+                    // 生成磁带标签
+                    const selectedMonth = document.getElementById('tapeMonth').value;
                     const now = new Date();
-                    const dateStr = now.getFullYear().toString().substring(2) + 
-                                   String(now.getMonth() + 1).padStart(2, '0') + 
-                                   String(now.getDate()).padStart(2, '0');
+                    const month = selectedMonth || String(now.getMonth() + 1).padStart(2, '0');
+                    const year = now.getFullYear().toString().substring(2);
+                    const day = String(now.getDate()).padStart(2, '0');
+                    const dateStr = year + month + day;
                     const randomPart = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
                     document.getElementById('tapeLabel').value = `TAP${dateStr}${randomPart}`;
                     
@@ -825,6 +903,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     document.getElementById('tapeCapacity').value = '';
                     document.getElementById('tapeLocation').value = '';
                     document.getElementById('tapeRemark').value = '';
+                    document.getElementById('tapeMonth').value = '';
                     // 刷新列表和统计
                     loadTapeList().then(() => {
                         loadTapeStatistics();
