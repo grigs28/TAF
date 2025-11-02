@@ -519,7 +519,7 @@ async def check_tape_exists(tape_id: str, request: Request):
         import psycopg2
         import psycopg2.extras
         from config.settings import get_settings
-        from datetime import datetime
+        from datetime import datetime, timezone
         
         settings = get_settings()
         database_url = settings.DATABASE_URL
@@ -561,7 +561,8 @@ async def check_tape_exists(tape_id: str, request: Request):
                     # 检查是否过期（仅比较年月）
                     is_expired = False
                     if row[3]:  # expiry_date
-                        now = datetime.now()
+                        # 使用timezone-aware datetime进行比较
+                        now = datetime.now(timezone.utc)
                         expiry_date = row[3]
                         # 比较年月
                         if (now.year > expiry_date.year) or (now.year == expiry_date.year and now.month >= expiry_date.month):
