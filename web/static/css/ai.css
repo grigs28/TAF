@@ -893,18 +893,24 @@ body {
     background: #0d1626 !important;
     border: 1px solid var(--card-border);
     color: var(--text-primary);
+    opacity: 1 !important;
+}
+
+.modal-body {
+    background: #0d1626 !important;
+    opacity: 1 !important;
 }
 
 .modal-header {
     border-bottom: 1px solid rgba(0, 170, 255, 0.2);
-}
-
-.modal-body {
-    font-size: var(--font-size-modal);
+    background: #0d1626 !important;
+    opacity: 1 !important;
 }
 
 .modal-footer {
     border-top: 1px solid rgba(0, 170, 255, 0.2);
+    background: #0d1626 !important;
+    opacity: 1 !important;
 }
 
 /* Bootstrap按钮样式补充 */
