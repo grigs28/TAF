@@ -39,6 +39,7 @@
   - **UUID读取失败处理**：显示友好的错误对话框并提供重试按钮
   - **Windows Storage API支持**：使用IOCTL_STORAGE_GET_MEDIA_SERIAL_NUMBER读取磁带序列号并生成UUID
   - **WMI到DOS路径映射**：自动将WMI DeviceID转换为Windows DOS设备路径
+  - **磁带设备路径验证**：优先使用\\.\TAPEn路径，通过INQUIRY命令验证设备类型确保准确性
   - **磁带标签UUID存储**：将UUID写入磁带标签，实现真正的物理关联
   - **MODE SENSE条码读取**：从MODE SENSE Page 0x03读取磁带条码生成UUID
 

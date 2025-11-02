@@ -948,13 +948,13 @@ class SCSIInterface:
                     device_type = result['data'][0] & 0x1F
                     # 设备类型1 = 磁带设备
                     if device_type == 1:
-                        logger.debug(f"验证为磁带设备: {device_path}")
+                        logger.info(f"验证为磁带设备: {device_path}")
                         return True
                     else:
-                        logger.debug(f"设备类型不匹配: {device_path}, type={device_type} (期望1=磁带)")
+                        logger.info(f"设备类型不匹配: {device_path}, type={device_type} (期望1=磁带)")
                         return False
             except Exception as e:
-                logger.debug(f"INQUIRY验证失败 {device_path}: {str(e)}")
+                logger.info(f"INQUIRY验证失败 {device_path}: {str(e)}")
                 return False
             
             return False
