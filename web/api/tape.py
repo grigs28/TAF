@@ -111,8 +111,23 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
                 # 计算过期日期
                 expiry_date = datetime.now() + timedelta(days=request.retention_months * 30)
                 
-                # 生成UUID
-                tape_uuid = uuid.uuid4()
+                # 尝试从物理磁带获取UUID，失败则生成新的
+                tape_uuid_str = None
+                try:
+                    system = http_request.app.state.system
+                    if system and system.tape_manager:
+                        tape_uuid_str = await system.tape_manager.scsi_interface.get_physical_tape_uuid()
+                        if tape_uuid_str:
+                            logger.info(f"从物理磁带读取UUID: {tape_uuid_str}")
+                except Exception as e:
+                    logger.warning(f"读取物理磁带UUID失败: {str(e)}")
+                
+                # 如果没有读取到物理UUID，则生成新的
+                if tape_uuid_str:
+                    tape_uuid = uuid.UUID(tape_uuid_str)
+                else:
+                    tape_uuid = uuid.uuid4()
+                    logger.info(f"生成新UUID: {tape_uuid}")
                 
                 # 插入新磁带
                 cur.execute("""

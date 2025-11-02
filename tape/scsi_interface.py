@@ -1037,6 +1037,104 @@ class SCSIInterface:
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
+    async def get_physical_tape_uuid(self, device_path: str = None) -> Optional[str]:
+        """获取磁带物理UUID - 从VPD Page 0x83 (Device Identification)"""
+        try:
+            if not device_path and self.tape_devices:
+                device_path = self.tape_devices[0]['path']
+
+            if not device_path:
+                logger.error("没有指定设备路径")
+                return None
+
+            # 获取VPD Page 0x83 (Device Identification)
+            result = await self.send_ibm_specific_command(
+                device_path,
+                "inquiry_vpd",
+                {'page_code': 0x83}
+            )
+
+            if not result.get('success'):
+                logger.warning(f"无法读取VPD Page 0x83: {result.get('error', '未知错误')}")
+                return None
+
+            # 解析VPD数据
+            vpd_hex = result.get('vpd_data', '')
+            if not vpd_hex:
+                logger.warning("VPD数据为空")
+                return None
+
+            vpd_data = bytes.fromhex(vpd_hex)
+
+            # VPD Page 0x83格式: [page_code(1)] [page_length(1)] [descriptor(s)]
+            if len(vpd_data) < 4:
+                logger.warning("VPD数据太短")
+                return None
+
+            page_length = vpd_data[1]
+            
+            # 解析描述符
+            offset = 4  # 跳过page_code和page_length
+            while offset + 4 <= len(vpd_data) and offset < page_length + 2:
+                # 描述符格式: [protocol_id(1)] [code_set(4 bits)] [association(2 bits)] [ident_type(6 bits)]
+                #               [reserved] [length] [identifier]
+                if vpd_data[offset] == 0:  # Protocol ID 0 (PCIe/NVMe)
+                    desc_type = vpd_data[offset + 1]
+                    desc_length = vpd_data[offset + 3]
+                    
+                    if desc_type & 0xF0 == 0x20:  # EUI-64 identifier
+                        if offset + 4 + desc_length <= len(vpd_data):
+                            identifier = vpd_data[offset + 4:offset + 4 + desc_length]
+                            # 将EUI-64转换为UUID格式
+                            uuid_str = self._eui64_to_uuid(identifier)
+                            if uuid_str:
+                                logger.info(f"从VPD Page 0x83读取到物理UUID: {uuid_str}")
+                                return uuid_str
+                    
+                    offset += 4 + desc_length
+                elif vpd_data[offset] == 1:  # Protocol ID 1 (Fibre Channel)
+                    desc_type = vpd_data[offset + 1]
+                    desc_length = vpd_data[offset + 3]
+                    offset += 4 + desc_length
+                elif vpd_data[offset] == 5:  # Protocol ID 5 (iSCSI)
+                    desc_type = vpd_data[offset + 1]
+                    desc_length = vpd_data[offset + 3]
+                    offset += 4 + desc_length
+                else:
+                    desc_length = vpd_data[offset + 3]
+                    offset += 4 + desc_length
+
+            logger.warning("VPD Page 0x83中未找到有效的UUID标识符")
+            return None
+
+        except Exception as e:
+            logger.error(f"获取物理磁带UUID失败: {str(e)}")
+            return None
+
+    def _eui64_to_uuid(self, eui64: bytes) -> Optional[str]:
+        """将EUI-64标识符转换为UUID格式"""
+        try:
+            if len(eui64) != 8:
+                logger.warning(f"EUI-64长度不正确: {len(eui64)}")
+                return None
+
+            # EUI-64转UUID (按照IEEE EUI-64规范)
+            # 将EUI-64与UUID相结合
+            uuid_bytes = bytearray([0] * 16)
+            uuid_bytes[0:8] = eui64
+            
+            # 设置UUID version (4) 和 variant bits
+            uuid_bytes[6] = (uuid_bytes[6] & 0x0F) | 0x40  # Version 4
+            uuid_bytes[8] = (uuid_bytes[8] & 0x3F) | 0x80  # Variant 10
+            
+            # 格式化为标准UUID字符串
+            uuid_str = f"{uuid_bytes[0:4].hex()}-{uuid_bytes[4:6].hex()}-{uuid_bytes[6:8].hex()}-{uuid_bytes[8:10].hex()}-{uuid_bytes[10:16].hex()}"
+            return uuid_str
+
+        except Exception as e:
+            logger.error(f"EUI-64转UUID失败: {str(e)}")
+            return None
+
     async def get_tape_position(self, device_path: str = None) -> Dict[str, Any]:
         """获取磁带位置信息"""
         try:
