@@ -399,13 +399,16 @@ async def update_tape(tape_id: str, request: UpdateTapeRequest, http_request: Re
 @router.get("/read-label")
 async def read_tape_label(request: Request):
     """读取磁带标签"""
+    logger.info("读取磁带标签API被调用")
     try:
         system = request.app.state.system
         if not system:
             raise HTTPException(status_code=500, detail="系统未初始化")
         
         # 通过磁带操作读取标签
+        logger.info("准备调用tape_operations._read_tape_label")
         metadata = await system.tape_manager.tape_operations._read_tape_label()
+        logger.info(f"读取结果: {metadata is not None}")
         
         if metadata:
             return {
@@ -419,7 +422,7 @@ async def read_tape_label(request: Request):
             }
         
     except Exception as e:
-        logger.error(f"读取磁带标签失败: {str(e)}")
+        logger.error(f"读取磁带标签失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
