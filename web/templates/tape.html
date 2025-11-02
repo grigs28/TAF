@@ -349,16 +349,13 @@ async function loadTapeStatistics() {
             document.getElementById('statAvailableTapes').textContent = result.available_tapes || 0;
             document.getElementById('statInUseTapes').textContent = result.in_use_tapes || 0;
             
-            // 计算已满磁带数（需要从列表统计）
-            const listResponse = await fetch('/api/tape/list');
-            const listResult = await listResponse.json();
-            const fullTapes = listResult.tapes ? listResult.tapes.filter(t => t.status === 'full').length : 0;
+            // 使用allTapesData统计已满和故障磁带
+            const fullTapes = allTapesData.filter(t => t.status === 'full').length;
             document.getElementById('statFullTapes').textContent = fullTapes;
             
             document.getElementById('statExpiredTapes').textContent = result.expired_tapes || 0;
             
-            // 计算故障磁带数（需要从列表统计）
-            const errorTapes = listResult.tapes ? listResult.tapes.filter(t => t.status === 'error').length : 0;
+            const errorTapes = allTapesData.filter(t => t.status === 'error').length;
             document.getElementById('statErrorTapes').textContent = errorTapes;
         }
     } catch (error) {
@@ -537,9 +534,10 @@ async function loadTapeList() {
 
 // 扫描磁带功能
 document.addEventListener('DOMContentLoaded', function() {
-    // 页面加载时加载数据
-    loadTapeStatistics();
-    loadTapeList();
+    // 页面加载时加载数据（先加载列表再加载统计）
+    loadTapeList().then(() => {
+        loadTapeStatistics();
+    });
     
     // 筛选器事件监听
     document.getElementById('statusFilter').addEventListener('change', filterTapeList);
@@ -833,8 +831,9 @@ document.addEventListener('DOMContentLoaded', function() {
                     document.getElementById('tapeLocation').value = '';
                     document.getElementById('tapeRemark').value = '';
                     // 刷新列表和统计
-                    loadTapeStatistics();
-                    loadTapeList();
+                    loadTapeList().then(() => {
+                        loadTapeStatistics();
+                    });
                 } else {
                     alert('❌ 添加失败：' + result.message);
                 }
