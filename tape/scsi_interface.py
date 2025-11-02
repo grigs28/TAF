@@ -203,20 +203,22 @@ class SCSIInterface:
                     device_id = tape.DeviceID
                     
                     # 尝试找到DOS设备路径
-                    for drive_num in range(10):  # 尝试0-9
-                        test_path = f"\\\\.\\PHYSICALDRIVE{drive_num}"
-                        if await self._test_tape_device_access(test_path):
+                    # 优先使用TAPE路径（\\.\TAPEn），如果失败再尝试PHYSICALDRIVE
+                    for tape_num in range(4):  # 尝试TAPE0-3
+                        test_path = f"\\\\.\\TAPE{tape_num}"
+                        if await self._test_tape_device_access_and_verify(test_path):
                             tape_path = test_path
                             logger.info(f"找到DOS设备路径: {test_path} (DeviceID: {device_id})")
                             break
                     
-                    # 如果没有找到PHYSICALDRIVE，尝试TAPE路径
+                    # 如果没有找到TAPE路径，尝试PHYSICALDRIVE（但不推荐，可能误匹配系统盘）
                     if not tape_path:
-                        for tape_num in range(4):  # 尝试TAPE0-3
-                            test_path = f"\\\\.\\TAPE{tape_num}"
-                            if await self._test_tape_device_access(test_path):
+                        logger.warning("未找到TAPE设备路径，尝试PHYSICALDRIVE（可能不准确）")
+                        for drive_num in range(10):  # 尝试0-9
+                            test_path = f"\\\\.\\PHYSICALDRIVE{drive_num}"
+                            if await self._test_tape_device_access_and_verify(test_path):
                                 tape_path = test_path
-                                logger.info(f"找到DOS设备路径: {test_path} (DeviceID: {device_id})")
+                                logger.warning(f"找到DOS设备路径: {test_path} (DeviceID: {device_id})")
                                 break
                     
                     # 如果还是没找到，使用DeviceID作为fallback
@@ -929,6 +931,38 @@ class SCSIInterface:
 
         return False
 
+    async def _test_tape_device_access_and_verify(self, device_path: str) -> bool:
+        """测试磁带设备访问并验证是否是真正的磁带设备"""
+        try:
+            # 先测试基本访问
+            if not await self._test_tape_device_access(device_path):
+                return False
+            
+            # 尝试发送INQUIRY命令验证是否是磁带设备
+            try:
+                # 发送INQUIRY命令获取设备信息
+                cdb = bytes([0x12, 0x00, 0x00, 0x00, 36, 0x00])  # INQUIRY命令
+                result = await self.execute_scsi_command(device_path, cdb, data_direction=1, data_length=36)
+                
+                if result.get('success') and result.get('data') and len(result.get('data', [])) >= 36:
+                    device_type = result['data'][0] & 0x1F
+                    # 设备类型1 = 磁带设备
+                    if device_type == 1:
+                        logger.debug(f"验证为磁带设备: {device_path}")
+                        return True
+                    else:
+                        logger.debug(f"设备类型不匹配: {device_path}, type={device_type} (期望1=磁带)")
+                        return False
+            except Exception as e:
+                logger.debug(f"INQUIRY验证失败 {device_path}: {str(e)}")
+                return False
+            
+            return False
+
+        except Exception as e:
+            logger.debug(f"验证磁带设备失败 {device_path}: {str(e)}")
+            return False
+
     async def send_ibm_specific_command(self, device_path: str, command_type: str,
                                       parameters: Dict[str, Any] = None) -> Dict[str, Any]:
         """发送IBM特定的SCSI命令"""
@@ -1299,6 +1333,24 @@ class SCSIInterface:
             if not hasattr(self, 'IOCTL_STORAGE_GET_MEDIA_SERIAL_NUMBER'):
                 logger.debug("IOCTL_STORAGE_GET_MEDIA_SERIAL_NUMBER未定义")
                 return None
+            
+            # 如果device_path是WMI DeviceID格式，尝试找到有效的DOS路径
+            if device_path and not device_path.startswith('\\\\.\\'):
+                # 尝试查找TAPE或PHYSICALDRIVE路径
+                for tape_num in range(4):
+                    test_path = f"\\\\.\\TAPE{tape_num}"
+                    if await self._test_tape_device_access(test_path):
+                        device_path = test_path
+                        logger.info(f"为Windows Storage API使用TAPE路径: {device_path}")
+                        break
+                else:
+                    # 尝试PHYSICALDRIVE
+                    for drive_num in range(10):
+                        test_path = f"\\\\.\\PHYSICALDRIVE{drive_num}"
+                        if await self._test_tape_device_access_and_verify(test_path):
+                            device_path = test_path
+                            logger.info(f"为Windows Storage API使用PHYSICALDRIVE路径: {device_path}")
+                            break
             
             # 打开设备
             handle = self.create_file(
