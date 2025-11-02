@@ -34,6 +34,16 @@ class CreateTapeRequest(BaseModel):
     retention_months: int = 6
 
 
+class UpdateTapeRequest(BaseModel):
+    """更新磁带请求模型"""
+    serial_number: Optional[str] = None
+    media_type: Optional[str] = None
+    generation: Optional[int] = None
+    capacity_gb: Optional[int] = None
+    location: Optional[str] = None
+    notes: Optional[str] = None
+
+
 @router.post("/create")
 async def create_tape(request: CreateTapeRequest, http_request: Request):
     """创建新磁带记录"""
@@ -127,6 +137,112 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
         
     except Exception as e:
         logger.error(f"创建磁带记录失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/{tape_id}")
+async def update_tape(tape_id: str, request: UpdateTapeRequest, http_request: Request):
+    """更新磁带记录"""
+    try:
+        system = http_request.app.state.system
+        if not system:
+            raise HTTPException(status_code=500, detail="系统未初始化")
+
+        # 使用psycopg2直接连接，避免openGauss版本解析问题
+        import psycopg2
+        from config.settings import get_settings
+        
+        settings = get_settings()
+        database_url = settings.DATABASE_URL
+        
+        # 解析URL
+        if database_url.startswith("opengauss://"):
+            database_url = database_url.replace("opengauss://", "postgresql://", 1)
+        
+        import re
+        pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
+        match = re.match(pattern, database_url)
+        
+        if not match:
+            raise ValueError("无法解析数据库连接URL")
+        
+        username, password, host, port, database = match.groups()
+        
+        # 连接数据库
+        conn = psycopg2.connect(
+            host=host,
+            port=port,
+            user=username,
+            password=password,
+            database=database
+        )
+        
+        try:
+            with conn.cursor() as cur:
+                # 检查磁带是否存在
+                cur.execute("SELECT tape_id FROM tape_cartridges WHERE tape_id = %s", (tape_id,))
+                existing = cur.fetchone()
+                
+                if not existing:
+                    return {
+                        "success": False,
+                        "message": f"磁带 {tape_id} 不存在"
+                    }
+                
+                # 构建更新字段和值
+                update_fields = []
+                update_values = []
+                
+                if request.serial_number is not None:
+                    update_fields.append("serial_number = %s")
+                    update_values.append(request.serial_number)
+                if request.media_type is not None:
+                    update_fields.append("media_type = %s")
+                    update_values.append(request.media_type)
+                if request.generation is not None:
+                    update_fields.append("generation = %s")
+                    update_values.append(request.generation)
+                if request.capacity_gb is not None:
+                    capacity_bytes = request.capacity_gb * (1024 ** 3)
+                    update_fields.append("capacity_bytes = %s")
+                    update_values.append(capacity_bytes)
+                if request.location is not None:
+                    update_fields.append("location = %s")
+                    update_values.append(request.location)
+                if request.notes is not None:
+                    update_fields.append("notes = %s")
+                    update_values.append(request.notes)
+                
+                # 如果没有需要更新的字段，返回错误
+                if not update_fields:
+                    return {
+                        "success": False,
+                        "message": "没有提供需要更新的字段"
+                    }
+                
+                # 构建并执行更新SQL
+                update_sql = f"""
+                    UPDATE tape_cartridges
+                    SET {', '.join(update_fields)}
+                    WHERE tape_id = %s
+                """
+                update_values.append(tape_id)
+                cur.execute(update_sql, update_values)
+                
+                conn.commit()
+                logger.info(f"更新磁带记录: {tape_id}")
+        
+        finally:
+            conn.close()
+        
+        return {
+            "success": True,
+            "message": f"磁带 {tape_id} 更新成功",
+            "tape_id": tape_id
+        }
+        
+    except Exception as e:
+        logger.error(f"更新磁带记录失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

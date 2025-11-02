@@ -261,12 +261,12 @@
     </div>
 </div>
 
-<!-- 添加磁带模态框 -->
+<!-- 添加/编辑磁带模态框 -->
 <div class="modal fade" id="addTapeModal" tabindex="-1" data-bs-backdrop="false">
     <div class="modal-dialog modal-lg">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">添加新磁带</h5>
+                <h5 class="modal-title" id="addTapeModalTitle">添加新磁带</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
@@ -356,7 +356,7 @@
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                <button type="button" class="btn btn-primary" id="confirmAddTapeBtn">添加磁带</button>
+                <button type="button" class="btn btn-primary" id="confirmAddTapeBtn">保存</button>
             </div>
         </div>
     </div>
@@ -382,6 +382,32 @@
 </div>
 
 <script>
+// 重置磁带表单状态
+function resetTapeForm() {
+    // 清空表单
+    document.getElementById('tapeLabel').value = '';
+    document.getElementById('tapeSerial').value = '';
+    document.getElementById('tapeType').value = '';
+    document.getElementById('tapeCapacity').value = '';
+    document.getElementById('tapeLocation').value = '';
+    document.getElementById('tapeRemark').value = '';
+    document.getElementById('tapeMonth').value = '';
+    
+    // 恢复表单状态
+    document.getElementById('tapeLabel').readOnly = false;
+    document.getElementById('tapeMonth').disabled = false;
+    document.getElementById('scanForAddTapeBtn').style.display = '';
+    document.getElementById('readTapeLabelBtn').style.display = '';
+    document.getElementById('generateLabelBtn').style.display = '';
+    document.getElementById('generateSerialBtn').style.display = '';
+    
+    // 重置模态框标题
+    document.getElementById('addTapeModalTitle').textContent = '添加新磁带';
+    
+    // 隐藏标签信息区域
+    document.getElementById('tapeLabelInfo').classList.add('d-none');
+}
+
 // 加载磁带数据
 async function loadTapeStatistics() {
     try {
@@ -893,7 +919,6 @@ document.addEventListener('DOMContentLoaded', function() {
             const btn = this;
             const originalHtml = btn.innerHTML;
             btn.disabled = true;
-            btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-2"></i>添加中...';
             
             try {
                 // 获取表单数据
@@ -915,51 +940,99 @@ document.addEventListener('DOMContentLoaded', function() {
                 // 从类型中提取代数 (LTO-9 -> 9)
                 const generation = parseInt(tapeType.replace('LTO-', ''));
                 
-                // 从容量中提取并转换为GB (18TB -> 18432GB)
-                const capacityValue = parseInt(tapeCapacity.replace('TB', ''));
-                const capacityGB = capacityValue * 1024;  // TB转GB
+                // 检查是否为编辑模式
+                const modal = document.getElementById('addTapeModal');
+                const isEditMode = modal.dataset.editMode === 'true';
                 
-                // 构建请求数据
-                const requestData = {
-                    tape_id: tapeLabel,  // 使用label作为tape_id
-                    label: tapeLabel,
-                    serial_number: tapeSerial,
-                    media_type: 'LTO',
-                    generation: generation,
-                    capacity_gb: capacityGB,
-                    location: tapeLocation,
-                    notes: tapeRemark,
-                    retention_months: 6
-                };
-                
-                // 发送创建请求
-                const response = await fetch('/api/tape/create', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(requestData)
-                });
-                
-                const result = await response.json();
-                
-                if (result.success) {
-                    alert('✅ ' + result.message);
-                    // 关闭模态框
-                    const modal = bootstrap.Modal.getInstance(document.getElementById('addTapeModal'));
-                    modal.hide();
-                    // 清空表单
-                    document.getElementById('tapeLabel').value = '';
-                    document.getElementById('tapeSerial').value = '';
-                    document.getElementById('tapeType').value = '';
-                    document.getElementById('tapeCapacity').value = '';
-                    document.getElementById('tapeLocation').value = '';
-                    document.getElementById('tapeRemark').value = '';
-                    document.getElementById('tapeMonth').value = '';
-                    // 刷新列表和统计
-                    loadTapeList().then(() => {
-                        loadTapeStatistics();
+                if (isEditMode) {
+                    // 编辑模式：使用PUT请求更新
+                    btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-2"></i>更新中...';
+                    const tapeId = modal.dataset.editTapeId;
+                    
+                    // 从容量中提取并转换为GB (18TB -> 18432GB)
+                    const capacityValue = parseInt(tapeCapacity.replace('TB', ''));
+                    const capacityGB = capacityValue * 1024;  // TB转GB
+                    
+                    // 构建请求数据
+                    const requestData = {
+                        serial_number: tapeSerial,
+                        media_type: 'LTO',
+                        generation: generation,
+                        capacity_gb: capacityGB,
+                        location: tapeLocation,
+                        notes: tapeRemark
+                    };
+                    
+                    // 发送更新请求
+                    const response = await fetch(`/api/tape/${tapeId}`, {
+                        method: 'PUT',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(requestData)
                     });
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        alert('✅ ' + result.message);
+                        // 关闭模态框
+                        const modalInstance = bootstrap.Modal.getInstance(modal);
+                        modalInstance.hide();
+                        // 重置编辑模式标记
+                        modal.dataset.editMode = 'false';
+                        delete modal.dataset.editTapeId;
+                        // 重置表单状态
+                        resetTapeForm();
+                        // 刷新列表和统计
+                        loadTapeList().then(() => {
+                            loadTapeStatistics();
+                        });
+                    } else {
+                        alert('❌ 更新失败：' + result.message);
+                    }
                 } else {
-                    alert('❌ 添加失败：' + result.message);
+                    // 添加模式：使用POST请求创建
+                    btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-2"></i>添加中...';
+                    
+                    // 从容量中提取并转换为GB (18TB -> 18432GB)
+                    const capacityValue = parseInt(tapeCapacity.replace('TB', ''));
+                    const capacityGB = capacityValue * 1024;  // TB转GB
+                    
+                    // 构建请求数据
+                    const requestData = {
+                        tape_id: tapeLabel,  // 使用label作为tape_id
+                        label: tapeLabel,
+                        serial_number: tapeSerial,
+                        media_type: 'LTO',
+                        generation: generation,
+                        capacity_gb: capacityGB,
+                        location: tapeLocation,
+                        notes: tapeRemark,
+                        retention_months: 6
+                    };
+                    
+                    // 发送创建请求
+                    const response = await fetch('/api/tape/create', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(requestData)
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        alert('✅ ' + result.message);
+                        // 关闭模态框
+                        const modalInstance = bootstrap.Modal.getInstance(modal);
+                        modalInstance.hide();
+                        // 重置表单状态
+                        resetTapeForm();
+                        // 刷新列表和统计
+                        loadTapeList().then(() => {
+                            loadTapeStatistics();
+                        });
+                    } else {
+                        alert('❌ 添加失败：' + result.message);
+                    }
                 }
             } catch (error) {
                 alert('❌ 添加失败：' + error.message);
@@ -1048,7 +1121,40 @@ function editTape(tapeId) {
         return;
     }
     
-    alert(`编辑磁带功能开发中: ${tapeId}`);
+    // 设置模态框标题
+    document.getElementById('addTapeModalTitle').textContent = '编辑磁带';
+    
+    // 禁用磁带ID和标签编辑（主键不允许修改）
+    document.getElementById('tapeLabel').readOnly = true;
+    
+    // 隐藏扫描和读取标签按钮（编辑模式不需要）
+    document.getElementById('scanForAddTapeBtn').style.display = 'none';
+    document.getElementById('readTapeLabelBtn').style.display = 'none';
+    
+    // 填充表单数据
+    document.getElementById('tapeLabel').value = tape.tape_id;
+    document.getElementById('tapeSerial').value = tape.serial_number || '';
+    document.getElementById('tapeType').value = `LTO-${tape.generation}`;
+    
+    // 容量从GB转TB显示
+    const capacityTB = Math.round(tape.capacity_bytes / (1024 ** 4));
+    document.getElementById('tapeCapacity').value = `${capacityTB}TB`;
+    
+    document.getElementById('tapeLocation').value = tape.location || '';
+    document.getElementById('tapeRemark').value = tape.notes || '';
+    
+    // 月份下拉条不适用编辑模式
+    document.getElementById('tapeMonth').disabled = true;
+    document.getElementById('generateLabelBtn').style.display = 'none';
+    document.getElementById('generateSerialBtn').style.display = 'none';
+    
+    // 设置编辑模式标记
+    document.getElementById('addTapeModal').dataset.editMode = 'true';
+    document.getElementById('addTapeModal').dataset.editTapeId = tapeId;
+    
+    // 显示模态框
+    const modal = new bootstrap.Modal(document.getElementById('addTapeModal'));
+    modal.show();
 }
 </script>
 
