@@ -14,6 +14,13 @@ from config.database import get_db
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# 添加一个测试路由，验证路由系统是否工作
+@router.get("/test-read-label")
+async def test_read_label(request: Request):
+    """测试路由"""
+    logger.critical("========== 测试路由被调用 ==========")
+    raise HTTPException(status_code=500, detail="测试路由工作正常！如果你看到这个错误，说明路由系统正常")
+
 
 class TapeConfigRequest(BaseModel):
     """磁带配置请求模型"""
@@ -201,6 +208,43 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
         
     except Exception as e:
         logger.error(f"创建磁带记录失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/read-label")
+async def read_tape_label(request: Request):
+    """读取磁带标签"""
+    logger.info("========== 读取磁带标签API被调用 ==========")
+    try:
+        logger.info("检查系统实例...")
+        system = request.app.state.system
+        if not system:
+            logger.error("系统未初始化")
+            raise HTTPException(status_code=500, detail="系统未初始化")
+        
+        logger.info("系统实例检查通过，准备调用tape_operations._read_tape_label")
+        
+        # 通过磁带操作读取标签
+        metadata = await system.tape_manager.tape_operations._read_tape_label()
+        
+        logger.info(f"读取标签完成，结果: {metadata is not None}")
+        if metadata:
+            logger.info(f"成功读取标签: {metadata.get('tape_id', 'N/A')}")
+            return {
+                "success": True,
+                "metadata": metadata
+            }
+        else:
+            logger.warning("无法读取磁带标签或磁带为空")
+            return {
+                "success": False,
+                "message": "无法读取磁带标签或磁带为空"
+            }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"读取磁带标签异常: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -396,34 +440,6 @@ async def update_tape(tape_id: str, request: UpdateTapeRequest, http_request: Re
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/read-label")
-async def read_tape_label(request: Request):
-    """读取磁带标签"""
-    logger.info("读取磁带标签API被调用")
-    try:
-        system = request.app.state.system
-        if not system:
-            raise HTTPException(status_code=500, detail="系统未初始化")
-        
-        # 通过磁带操作读取标签
-        logger.info("准备调用tape_operations._read_tape_label")
-        metadata = await system.tape_manager.tape_operations._read_tape_label()
-        logger.info(f"读取结果: {metadata is not None}")
-        
-        if metadata:
-            return {
-                "success": True,
-                "metadata": metadata
-            }
-        else:
-            return {
-                "success": False,
-                "message": "无法读取磁带标签或磁带为空"
-            }
-        
-    except Exception as e:
-        logger.error(f"读取磁带标签失败: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/write-label")

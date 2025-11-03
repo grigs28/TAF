@@ -22,7 +22,7 @@ from config.settings import Settings
 from config.database import db_manager
 from web.app import create_app
 from utils.logger import setup_logging
-from utils.scheduler import BackupScheduler
+from utils.scheduler import TaskScheduler
 from tape.tape_manager import TapeManager
 from backup.backup_engine import BackupEngine
 from recovery.recovery_engine import RecoveryEngine
@@ -35,7 +35,7 @@ class TapeBackupSystem:
     def __init__(self):
         self.settings = Settings()
         self.db_manager = db_manager  # 使用全局 db_manager
-        self.scheduler = BackupScheduler()
+        self.scheduler = TaskScheduler()
         self.tape_manager = TapeManager()
         self.backup_engine = BackupEngine()
         self.recovery_engine = RecoveryEngine()

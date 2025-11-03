@@ -41,6 +41,125 @@
 .log-warning { border-left-color: #ffc107; }
 .log-error { border-left-color: #dc3545; }
 .log-debug { border-left-color: #6c757d; }
+
+/* 目录浏览器深色主题样式 */
+#directoryBrowserModal .modal-content,
+#directoryBrowserModal .modal-header,
+#directoryBrowserModal .modal-body,
+#directoryBrowserModal .modal-footer {
+    background: #0d1626 !important;
+    color: #ffffff !important;
+}
+
+#directoryBrowserModal .form-control,
+#directoryBrowserModal .form-control-sm {
+    background-color: #1a2332 !important;
+    border-color: #2d3a4f !important;
+    color: #ffffff !important;
+}
+
+#directoryBrowserModal .form-control:focus,
+#directoryBrowserModal .form-control-sm:focus {
+    background-color: #1a2332 !important;
+    border-color: #00aaff !important;
+    color: #ffffff !important;
+    box-shadow: 0 0 0 0.2rem rgba(0, 170, 255, 0.25) !important;
+}
+
+#directoryBrowserModal .form-control::placeholder,
+#directoryBrowserModal .form-control-sm::placeholder {
+    color: #6c757d !important;
+}
+
+#directoryBrowserModal .list-group-item {
+    background-color: #1a2332 !important;
+    border-color: #2d3a4f !important;
+    color: #ffffff !important;
+}
+
+#directoryBrowserModal .list-group-item:hover,
+#directoryBrowserModal .list-group-item-action:hover {
+    background-color: #252f42 !important;
+    color: #ffffff !important;
+}
+
+#directoryBrowserModal .list-group-item.active {
+    background-color: #00aaff !important;
+    border-color: #00aaff !important;
+    color: #ffffff !important;
+}
+
+#directoryBrowserModal .bg-light {
+    background-color: #1a2332 !important;
+    color: #ffffff !important;
+}
+
+#directoryBrowserModal .text-muted {
+    color: #9ca3af !important;
+}
+
+#directoryBrowserModal .text-primary {
+    color: #00aaff !important;
+}
+
+#directoryBrowserModal .text-secondary {
+    color: #9ca3af !important;
+}
+
+#directoryBrowserModal h6 {
+    color: #ffffff !important;
+}
+
+#directoryBrowserModal .btn-outline-secondary {
+    border-color: #2d3a4f !important;
+    color: #ffffff !important;
+}
+
+#directoryBrowserModal .btn-outline-secondary:hover {
+    background-color: #2d3a4f !important;
+    border-color: #2d3a4f !important;
+    color: #ffffff !important;
+}
+
+/* 备份源路径列表深色主题样式 */
+#backupSourcePathsList .card {
+    background-color: #1a2332 !important;
+    border-color: #2d3a4f !important;
+    color: #ffffff !important;
+}
+
+#backupSourcePathsList .card-body {
+    background-color: #1a2332 !important;
+    color: #ffffff !important;
+}
+
+#backupSourcePathsList code {
+    background-color: #0d1626 !important;
+    color: #00aaff !important;
+    border: 1px solid #2d3a4f !important;
+    padding: 4px 8px !important;
+    border-radius: 4px !important;
+}
+
+#backupSourcePathsList .text-primary {
+    color: #00aaff !important;
+}
+
+#backupSourcePathsList .btn-outline-danger {
+    border-color: #dc3545 !important;
+    color: #dc3545 !important;
+}
+
+#backupSourcePathsList .btn-outline-danger:hover {
+    background-color: #dc3545 !important;
+    border-color: #dc3545 !important;
+    color: #ffffff !important;
+}
+
+#backupSourcePathsList .badge.bg-info {
+    background-color: #00aaff !important;
+    color: #ffffff !important;
+}
 </style>
 {% endblock %}
 
@@ -419,61 +538,34 @@
                         <div class="tab-pane fade" id="scheduler" role="tabpanel">
                             <div class="row">
                                 <div class="col-12">
+                                    <div class="d-flex justify-content-between align-items-center mb-3">
+                                        <h6 class="mb-0">
+                                            <i class="bi bi-clock-history me-2"></i>计划任务管理
+                                        </h6>
+                                        <button class="btn btn-primary btn-sm" id="addScheduledTaskBtn">
+                                            <i class="bi bi-plus-circle me-1"></i>添加任务
+                                        </button>
+                                    </div>
                                     <div class="setting-card service-card mb-3">
                                         <div class="card-body">
-                                            <h6 class="card-title">定时任务配置</h6>
                                             <div class="table-responsive">
-                                                <table class="table">
+                                                <table class="table table-hover">
                                                     <thead>
                                                         <tr>
                                                             <th>任务名称</th>
-                                                            <th>Cron表达式</th>
+                                                            <th>调度类型</th>
+                                                            <th>调度配置</th>
                                                             <th>状态</th>
                                                             <th>下次执行</th>
+                                                            <th>上次执行</th>
+                                                            <th>执行统计</th>
                                                             <th>操作</th>
                                                         </tr>
                                                     </thead>
-                                                    <tbody>
+                                                    <tbody id="scheduledTasksTableBody">
                                                         <tr>
-                                                            <td>月度完整备份</td>
-                                                            <td><code>0 2 1 * *</code></td>
-                                                            <td><span class="badge bg-success">启用</span></td>
-                                                            <td>2025-11-01 02:00</td>
-                                                            <td>
-                                                                <button class="btn btn-sm btn-outline-primary">
-                                                                    <i class="bi bi-pencil"></i>
-                                                                </button>
-                                                                <button class="btn btn-sm btn-outline-secondary">
-                                                                    <i class="bi bi-play"></i>
-                                                                </button>
-                                                            </td>
-                                                        </tr>
-                                                        <tr>
-                                                            <td>保留期检查</td>
-                                                            <td><code>0 3 * * *</code></td>
-                                                            <td><span class="badge bg-success">启用</span></td>
-                                                            <td>今天 03:00</td>
-                                                            <td>
-                                                                <button class="btn btn-sm btn-outline-primary">
-                                                                    <i class="bi bi-pencil"></i>
-                                                                </button>
-                                                                <button class="btn btn-sm btn-outline-secondary">
-                                                                    <i class="bi bi-play"></i>
-                                                                </button>
-                                                            </td>
-                                                        </tr>
-                                                        <tr>
-                                                            <td>系统健康检查</td>
-                                                            <td><code>*/30 * * * *</code></td>
-                                                            <td><span class="badge bg-success">启用</span></td>
-                                                            <td>30分钟后</td>
-                                                            <td>
-                                                                <button class="btn btn-sm btn-outline-primary">
-                                                                    <i class="bi bi-pencil"></i>
-                                                                </button>
-                                                                <button class="btn btn-sm btn-outline-secondary">
-                                                                    <i class="bi bi-play"></i>
-                                                                </button>
+                                                            <td colspan="8" class="text-center text-muted">
+                                                                <i class="bi bi-hourglass-split me-2"></i>加载中...
                                                             </td>
                                                         </tr>
                                                     </tbody>
@@ -1052,5 +1144,404 @@ function addNotificationUserToList(phone, name, remark) {
     container.appendChild(userDiv);
 }
 </script>
+
+<!-- 计划任务管理模态框 -->
+<div class="modal fade" id="scheduledTaskModal" tabindex="-1" aria-labelledby="scheduledTaskModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="scheduledTaskModalLabel">
+                    <i class="bi bi-clock me-2"></i>计划任务
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <form id="scheduledTaskForm">
+                    <div class="mb-3">
+                        <label for="taskName" class="form-label">任务名称 <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="taskName" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="taskDescription" class="form-label">任务描述</label>
+                        <textarea class="form-control" id="taskDescription" rows="2"></textarea>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label for="scheduleType" class="form-label">调度类型 <span class="text-danger">*</span></label>
+                            <select class="form-select" id="scheduleType" required>
+                                <option value="">请选择</option>
+                                <option value="once">一次性任务</option>
+                                <option value="interval">间隔任务</option>
+                                <option value="daily">每日任务</option>
+                                <option value="weekly">每周任务</option>
+                                <option value="monthly">每月任务</option>
+                                <option value="yearly">每年任务</option>
+                                <option value="cron">Cron表达式</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label for="actionType" class="form-label">任务动作类型 <span class="text-danger">*</span></label>
+                            <select class="form-select" id="actionType" required>
+                                <option value="">请选择</option>
+                                <option value="backup">备份任务</option>
+                                <option value="recovery">恢复任务</option>
+                                <option value="cleanup">清理任务</option>
+                                <option value="health_check">健康检查</option>
+                                <option value="retention_check">保留期检查</option>
+                                <option value="custom">自定义任务</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <!-- 调度配置面板 -->
+                    <div class="mb-3">
+                        <label class="form-label">调度配置</label>
+                        
+                        <!-- 一次性任务配置 -->
+                        <div id="onceConfig" class="schedule-config-panel" style="display: none;">
+                            <div class="input-group">
+                                <input type="text" class="form-control" id="onceDateTime" placeholder="选择日期和时间" readonly>
+                                <button class="btn btn-outline-secondary" type="button" id="onceDateTimeBtn">
+                                    <i class="bi bi-calendar3 me-1"></i>选择
+                                </button>
+                            </div>
+                            <input type="datetime-local" class="form-control d-none" id="onceDateTimeHidden">
+                        </div>
+                        
+                        <!-- 间隔任务配置 -->
+                        <div id="intervalConfig" class="schedule-config-panel" style="display: none;">
+                            <div class="row">
+                                <div class="col-8">
+                                    <input type="number" class="form-control" id="intervalValue" placeholder="间隔值" min="1">
+                                </div>
+                                <div class="col-4">
+                                    <select class="form-select" id="intervalUnit">
+                                        <option value="minutes">分钟</option>
+                                        <option value="hours">小时</option>
+                                        <option value="days">天</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- 每日任务配置 -->
+                        <div id="dailyConfig" class="schedule-config-panel" style="display: none;">
+                            <div class="input-group">
+                                <input type="text" class="form-control" id="dailyTime" value="02:00" placeholder="选择时间" readonly>
+                                <button class="btn btn-outline-secondary" type="button" id="dailyTimeBtn">
+                                    <i class="bi bi-clock me-1"></i>选择
+                                </button>
+                            </div>
+                            <input type="time" class="form-control d-none" id="dailyTimeHidden" value="02:00">
+                        </div>
+                        
+                        <!-- 每周任务配置 -->
+                        <div id="weeklyConfig" class="schedule-config-panel" style="display: none;">
+                            <div class="row">
+                                <div class="col-6">
+                                    <select class="form-select" id="weeklyDay">
+                                        <option value="0">周一</option>
+                                        <option value="1">周二</option>
+                                        <option value="2">周三</option>
+                                        <option value="3">周四</option>
+                                        <option value="4">周五</option>
+                                        <option value="5">周六</option>
+                                        <option value="6">周日</option>
+                                    </select>
+                                </div>
+                                <div class="col-6">
+                                    <div class="input-group">
+                                        <input type="text" class="form-control" id="weeklyTime" value="02:00" placeholder="选择时间" readonly>
+                                        <button class="btn btn-outline-secondary" type="button" id="weeklyTimeBtn">
+                                            <i class="bi bi-clock"></i>
+                                        </button>
+                                    </div>
+                                    <input type="time" class="form-control d-none" id="weeklyTimeHidden" value="02:00">
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- 每月任务配置 -->
+                        <div id="monthlyConfig" class="schedule-config-panel" style="display: none;">
+                            <div class="row">
+                                <div class="col-6">
+                                    <input type="number" class="form-control" id="monthlyDay" placeholder="日期" min="1" max="31" value="1">
+                                </div>
+                                <div class="col-6">
+                                    <div class="input-group">
+                                        <input type="text" class="form-control" id="monthlyTime" value="02:00" placeholder="选择时间" readonly>
+                                        <button class="btn btn-outline-secondary" type="button" id="monthlyTimeBtn">
+                                            <i class="bi bi-clock"></i>
+                                        </button>
+                                    </div>
+                                    <input type="time" class="form-control d-none" id="monthlyTimeHidden" value="02:00">
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- 每年任务配置 -->
+                        <div id="yearlyConfig" class="schedule-config-panel" style="display: none;">
+                            <div class="row mb-2">
+                                <div class="col-4">
+                                    <input type="number" class="form-control" id="yearlyMonth" placeholder="月份" min="1" max="12" value="1">
+                                </div>
+                                <div class="col-4">
+                                    <input type="number" class="form-control" id="yearlyDay" placeholder="日期" min="1" max="31" value="1">
+                                </div>
+                                <div class="col-4">
+                                    <div class="input-group">
+                                        <input type="text" class="form-control" id="yearlyTime" value="02:00" placeholder="选择时间" readonly>
+                                        <button class="btn btn-outline-secondary" type="button" id="yearlyTimeBtn">
+                                            <i class="bi bi-clock"></i>
+                                        </button>
+                                    </div>
+                                    <input type="time" class="form-control d-none" id="yearlyTimeHidden" value="02:00">
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Cron表达式配置 -->
+                        <div id="cronConfig" class="schedule-config-panel" style="display: none;">
+                            <input type="text" class="form-control" id="cronExpression" placeholder="例如: 0 2 * * *">
+                            <small class="text-muted">格式: 分钟 小时 日 月 星期</small>
+                        </div>
+                    </div>
+                    
+                    <!-- 动作配置（根据任务类型动态显示） -->
+                    <div class="mb-3" id="actionConfigSection">
+                        <label class="form-label">动作配置</label>
+                        
+                        <!-- 备份任务配置 -->
+                        <div id="backupActionConfig" class="action-config-panel" style="display: none;">
+                            <div class="mb-3">
+                                <label class="form-label">备份源路径 <span class="text-danger">*</span></label>
+                                <div class="input-group mb-2">
+                                    <input type="text" class="form-control" id="backupSourcePath" placeholder="输入或选择目录路径">
+                                    <button class="btn btn-outline-secondary" type="button" id="browseSourcePathBtn" title="浏览目录">
+                                        <i class="bi bi-folder-open me-1"></i>浏览
+                                    </button>
+                                    <button class="btn btn-primary" type="button" id="addSourcePathBtn" onclick="SchedulerManager.addSourcePath()" title="添加路径">
+                                        <i class="bi bi-plus-circle me-1"></i>添加
+                                    </button>
+                                </div>
+                                <div id="backupSourcePathsList" class="mb-2">
+                                    <!-- 已选择的源路径列表 -->
+                                </div>
+                                <small class="text-muted">可添加多个备份源路径，点击"浏览"选择服务器端目录，或手动输入路径（支持网络路径如 \\\\server\\share）</small>
+                            </div>
+                            <div class="row">
+                                <div class="col-md-6 mb-3">
+                                    <label class="form-label">备份类型</label>
+                                    <select class="form-select" id="backupTaskType">
+                                        <option value="full">完整备份</option>
+                                        <option value="incremental">增量备份</option>
+                                        <option value="differential">差异备份</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-6 mb-3">
+                                    <label class="form-label">目标磁带机</label>
+                                    <select class="form-select" id="backupTapeDevice">
+                                        <option value="">自动选择可用磁带机</option>
+                                        <!-- 动态加载磁带机列表 -->
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="row">
+                                <div class="col-md-4 mb-3">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" id="backupCompression" checked>
+                                        <label class="form-check-label" for="backupCompression">启用压缩</label>
+                                    </div>
+                                </div>
+                                <div class="col-md-4 mb-3">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" id="backupEncryption">
+                                        <label class="form-check-label" for="backupEncryption">启用加密</label>
+                                    </div>
+                                </div>
+                                <div class="col-md-4 mb-3">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" id="taskEnabled" checked>
+                                        <label class="form-check-label" for="taskEnabled">启用任务</label>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">排除模式（每行一个）</label>
+                                <textarea class="form-control font-monospace" id="backupExcludePatterns" rows="3" placeholder="*.tmp&#10;*.log&#10;temp/"></textarea>
+                                <small class="text-muted">支持通配符模式，每行一个</small>
+                            </div>
+                        </div>
+                        
+                        <!-- 恢复任务配置 -->
+                        <div id="recoveryActionConfig" class="action-config-panel" style="display: none;">
+                            <div class="mb-3">
+                                <label class="form-label">备份集ID</label>
+                                <input type="text" class="form-control" id="recoveryBackupSetId" placeholder="输入备份集ID">
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">恢复目标路径</label>
+                                <div class="input-group">
+                                    <input type="text" class="form-control" id="recoveryTargetPath" placeholder="输入恢复目标路径">
+                                    <button class="btn btn-outline-secondary" type="button" id="browseRecoveryPathBtn">
+                                        <i class="bi bi-folder-open me-1"></i>浏览
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- 清理任务配置 -->
+                        <div id="cleanupActionConfig" class="action-config-panel" style="display: none;">
+                            <div class="mb-3">
+                                <label class="form-label">保留天数</label>
+                                <input type="number" class="form-control" id="cleanupRetentionDays" value="180" min="1">
+                                <small class="text-muted">超过此天数的备份将被清理</small>
+                            </div>
+                        </div>
+                        
+                        <!-- 健康检查配置 -->
+                        <div id="healthCheckActionConfig" class="action-config-panel" style="display: none;">
+                            <p class="text-muted">健康检查任务无需额外配置</p>
+                        </div>
+                        
+                        <!-- 保留期检查配置 -->
+                        <div id="retentionCheckActionConfig" class="action-config-panel" style="display: none;">
+                            <p class="text-muted">保留期检查任务无需额外配置</p>
+                        </div>
+                        
+                        <!-- 自定义任务配置 -->
+                        <div id="customActionConfig" class="action-config-panel" style="display: none;">
+                            <div class="mb-3">
+                                <label class="form-label">自定义配置 (JSON格式)</label>
+                                <textarea class="form-control font-monospace" id="customActionConfigJson" rows="5" placeholder='{"command": "...", "args": [...]}'></textarea>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="SchedulerManager.saveTask()">
+                    <i class="bi bi-check-circle me-1"></i>保存
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 计划任务管理JavaScript -->
+<script type="module">
+// 确保 axios 已加载
+if (typeof window.axios === 'undefined') {
+    console.error('axios 未加载，请确保在页面中引入了 axios.min.js');
+}
+
+import { SchedulerManager } from '/static/js/modules/system/scheduler.js';
+
+// 将SchedulerManager挂载到window对象，以便在HTML中使用
+window.SchedulerManager = SchedulerManager;
+
+// 页面加载完成后初始化
+document.addEventListener('DOMContentLoaded', function() {
+    // 当计划任务标签页激活时初始化
+    const schedulerTab = document.getElementById('scheduler-tab');
+    if (schedulerTab) {
+        schedulerTab.addEventListener('shown.bs.tab', function() {
+            if (!window.SchedulerManager.initialized) {
+                window.SchedulerManager.init();
+                window.SchedulerManager.initialized = true;
+            }
+        });
+        
+        // 如果标签页已经激活，立即初始化
+        if (schedulerTab.classList.contains('active')) {
+            window.SchedulerManager.init();
+            window.SchedulerManager.initialized = true;
+        }
+    }
+});
+</script>
+
+<!-- 目录浏览器模态框 -->
+<div class="modal fade" id="directoryBrowserModal" tabindex="-1" aria-labelledby="directoryBrowserModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-xl" style="max-width: 90%;">
+        <div class="modal-content" style="height: 80vh;">
+            <div class="modal-header">
+                <h5 class="modal-title" id="directoryBrowserModalLabel">
+                    <i class="bi bi-folder2-open me-2"></i>选择目录
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body p-0" style="display: flex; flex-direction: row; height: calc(80vh - 120px); overflow: hidden;">
+                <!-- 左侧：驱动器/目录树 -->
+                <div class="border-end" style="width: 300px; overflow-y: auto; background-color: #1a2332;">
+                    <div class="p-3">
+                        <h6 class="mb-3">
+                            <i class="bi bi-hdd-stack me-2"></i>驱动器
+                        </h6>
+                        <div id="drivesList" class="list-group">
+                            <!-- 驱动器列表 -->
+                        </div>
+                        
+                        <h6 class="mt-4 mb-3">
+                            <i class="bi bi-share me-2"></i>网络路径
+                        </h6>
+                        <div class="mb-3">
+                            <input type="text" class="form-control form-control-sm" id="networkPathInput" 
+                                   placeholder="例如: \\\\192.168.1.100\\share 或 //server/share">
+                            <button class="btn btn-sm btn-primary mt-2 w-100" type="button" id="addNetworkPathBtn">
+                                <i class="bi bi-plus-circle me-1"></i>添加网络路径
+                            </button>
+                        </div>
+                        
+                        <!-- 当前路径面包屑 -->
+                        <div class="mt-4">
+                            <h6 class="mb-2">当前路径</h6>
+                            <div id="currentPathBreadcrumb" class="small text-muted" style="word-break: break-all;">
+                                -
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 右侧：目录和文件列表 -->
+                <div style="flex: 1; overflow-y: auto;">
+                    <div class="p-3 border-bottom" style="background-color: #1a2332;">
+                        <div class="d-flex align-items-center justify-content-between">
+                            <div class="flex-grow-1">
+                                <input type="text" class="form-control form-control-sm" id="browserCurrentPath" 
+                                       placeholder="当前路径" readonly>
+                            </div>
+                            <button class="btn btn-sm btn-outline-secondary ms-2" type="button" id="refreshBrowserBtn">
+                                <i class="bi bi-arrow-clockwise"></i>刷新
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="p-3">
+                        <div id="directoryItemsList">
+                            <div class="text-center text-muted py-5">
+                                <i class="bi bi-folder-x display-4 d-block mb-3"></i>
+                                <p>请选择驱动器或输入网络路径</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div class="flex-grow-1">
+                    <input type="text" class="form-control" id="selectedPathInput" 
+                           placeholder="选中的路径或手动输入路径" style="font-family: monospace;">
+                </div>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="confirmPathBtn">
+                    <i class="bi bi-check-circle me-1"></i>确定
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
 
 {% endblock %}

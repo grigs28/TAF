@@ -36,9 +36,22 @@
         <h5 class="mb-0">
             <i class="bi bi-cloud-upload me-2"></i>备份管理
         </h5>
-        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createBackupModal">
-            <i class="bi bi-plus-circle me-2"></i>创建备份任务
-        </button>
+        <div class="btn-group">
+            <button class="btn btn-success" onclick="window.location.href='/system#scheduler'; setTimeout(() => { const btn = document.getElementById('addScheduledTaskBtn'); if (btn) btn.click(); }, 500);">
+                <i class="bi bi-calendar-check me-2"></i>创建计划备份
+            </button>
+            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createBackupModal">
+                <i class="bi bi-plus-circle me-2"></i>立即执行备份
+            </button>
+        </div>
+    </div>
+    
+    <!-- 提示信息 -->
+    <div class="alert alert-info alert-dismissible fade show" role="alert">
+        <i class="bi bi-info-circle me-2"></i>
+        <strong>提示：</strong>推荐使用 <a href="/system#scheduler" class="alert-link">计划任务模块</a> 创建定期备份任务，支持多种调度方式（每日、每周、每月等）。
+        此处的"立即执行备份"适用于临时的一次性备份需求。
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
     </div>
 
     <!-- 统计信息 -->

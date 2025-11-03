@@ -11,6 +11,7 @@ from .tape import TapeCartridge, TapeUsage, TapeLog
 from .user import User, Role, Permission
 from .system_log import SystemLog, OperationLog, ErrorLog
 from .system_config import SystemConfig
+from .scheduled_task import ScheduledTask, ScheduledTaskLog, ScheduleType, ScheduledTaskStatus, TaskActionType
 
 __all__ = [
     # 基础类
@@ -37,5 +38,12 @@ __all__ = [
     'ErrorLog',
     
     # 系统配置
-    'SystemConfig'
+    'SystemConfig',
+    
+    # 计划任务相关
+    'ScheduledTask',
+    'ScheduledTaskLog',
+    'ScheduleType',
+    'ScheduledTaskStatus',
+    'TaskActionType'
 ]

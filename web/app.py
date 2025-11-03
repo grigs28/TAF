@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 
 from config.settings import get_settings
 from utils.logger import get_logger
-from web.api import backup, recovery, tape, system, user
+from web.api import backup, recovery, tape, system, user, scheduler
 from web.middleware.auth_middleware import AuthMiddleware
 from web.middleware.logging_middleware import LoggingMiddleware
 
@@ -83,6 +83,7 @@ def create_app(system_instance=None) -> FastAPI:
     app.include_router(tape.router, prefix="/api/tape", tags=["磁带管理"])
     app.include_router(system.router, prefix="/api/system", tags=["系统管理"])
     app.include_router(user.router, prefix="/api/user", tags=["用户管理"])
+    app.include_router(scheduler.router, prefix="/api/scheduler", tags=["计划任务管理"])
 
     # 存储系统实例引用
     app.state.system = system_instance

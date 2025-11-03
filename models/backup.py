@@ -42,6 +42,8 @@ class BackupTask(BaseModel):
     task_type = Column(Enum(BackupTaskType), nullable=False, comment="任务类型")
     description = Column(Text, comment="任务描述")
     status = Column(Enum(BackupTaskStatus), default=BackupTaskStatus.PENDING, comment="任务状态")
+    is_template = Column(Boolean, default=False, comment="是否为模板（配置）")
+    template_id = Column(Integer, ForeignKey("backup_tasks.id"), nullable=True, comment="模板ID（如果是执行记录）")
 
     # 备份配置
     source_paths = Column(JSON, comment="源路径列表")
@@ -67,7 +69,8 @@ class BackupTask(BaseModel):
     compressed_bytes = Column(BigInteger, default=0, comment="压缩后字节数")
 
     # 磁带信息
-    tape_id = Column(String(50), comment="使用的磁带ID")
+    tape_device = Column(String(200), comment="目标磁带机设备（模板配置）")
+    tape_id = Column(String(50), comment="使用的磁带ID（执行记录）")
     backup_set_id = Column(String(50), comment="备份集ID")
 
     # 结果信息

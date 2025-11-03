@@ -118,7 +118,7 @@ class DatabaseManager:
         """创建数据库表"""
         try:
             # 导入所有模型以确保它们被注册
-            from models import backup, tape, user, system_log, system_config
+            from models import backup, tape, user, system_log, system_config, scheduled_task
             import psycopg2
             import re
             
