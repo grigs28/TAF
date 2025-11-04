@@ -130,7 +130,7 @@ class TapeBackupSystem:
             logger.error(f"系统初始化过程中发生未预期的错误: {str(e)}")
             logger.info("系统将继续启动，以便用户在Web界面中检查和配置")
 
-    async def start(self):
+    async def start(self, shutdown_event=None):
         """启动系统服务"""
         try:
             logger = logging.getLogger(__name__)
