@@ -19,6 +19,7 @@ from .action_handlers import get_action_handler
 from .schedule_calculator import calculate_next_run_time
 from utils.log_utils import log_operation, log_system
 from .task_storage import record_run_start, record_run_end, acquire_task_lock, release_task_lock
+from .db_utils import is_opengauss, get_opengauss_connection
 
 logger = logging.getLogger(__name__)
 
@@ -57,30 +58,44 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
                 result_message=f"任务执行开始 (执行ID: {execution_id})"
             )
             
-            # 更新任务状态为运行中
-            async with db_manager.AsyncSessionLocal() as session:
-                scheduled_task.status = ScheduledTaskStatus.RUNNING
-                scheduled_task.last_run_time = start_time
-                session.add(scheduled_task)
-                await session.commit()
+            # 更新任务状态为运行中（openGauss使用原生SQL，其他使用SQLAlchemy）
+            if is_opengauss():
+                conn = await get_opengauss_connection()
+                try:
+                    await conn.execute(
+                        """
+                        UPDATE scheduled_tasks
+                        SET status = $1::scheduledtaskstatus, last_run_time = $2
+                        WHERE id = $3
+                        """,
+                        'running', start_time, scheduled_task.id
+                    )
+                finally:
+                    await conn.close()
+            else:
+                async with db_manager.AsyncSessionLocal() as session:
+                    scheduled_task.status = ScheduledTaskStatus.RUNNING
+                    scheduled_task.last_run_time = start_time
+                    session.add(scheduled_task)
+                    await session.commit()
             
-            # 创建执行日志
-            task_log = ScheduledTaskLog(
-                scheduled_task_id=scheduled_task.id,
-                execution_id=execution_id,
-                started_at=start_time,
-                status='running'
-            )
-            
-            async with db_manager.AsyncSessionLocal() as session:
-                session.add(task_log)
-                await session.commit()
-
-            # openGauss 原生记录运行开始
-            try:
-                await record_run_start(scheduled_task.id, execution_id, start_time)
-            except Exception:
-                pass
+            # 创建执行日志（openGauss使用原生SQL，其他使用SQLAlchemy）
+            if is_opengauss():
+                # openGauss 原生记录运行开始
+                try:
+                    await record_run_start(scheduled_task.id, execution_id, start_time)
+                except Exception:
+                    pass
+            else:
+                task_log = ScheduledTaskLog(
+                    scheduled_task_id=scheduled_task.id,
+                    execution_id=execution_id,
+                    started_at=start_time,
+                    status='running'
+                )
+                async with db_manager.AsyncSessionLocal() as session:
+                    session.add(task_log)
+                    await session.commit()
             
             # 执行任务动作
             action_type = scheduled_task.action_type
@@ -104,43 +119,86 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
             end_time = datetime.now()
             duration = int((end_time - start_time).total_seconds() * 1000)  # 转换为毫秒
             
-            # 更新执行日志
-            async with db_manager.AsyncSessionLocal() as session:
-                stmt = select(ScheduledTaskLog).where(ScheduledTaskLog.execution_id == execution_id)
-                log_result = await session.execute(stmt)
-                task_log = log_result.scalar_one()
+            # 更新执行日志和任务统计（openGauss使用原生SQL，其他使用SQLAlchemy）
+            if is_opengauss():
+                # openGauss 原生记录结束（成功）
+                try:
+                    await record_run_end(execution_id, end_time, 'success', result=result)
+                except Exception:
+                    pass
                 
-                task_log.completed_at = end_time
-                task_log.duration = duration // 1000  # 秒
-                task_log.status = 'success'
-                task_log.result = result
-                
-                # 更新任务统计
-                scheduled_task.total_runs = (scheduled_task.total_runs or 0) + 1
-                scheduled_task.success_runs = (scheduled_task.success_runs or 0) + 1
-                scheduled_task.last_success_time = end_time
-                scheduled_task.status = ScheduledTaskStatus.ACTIVE
-                
-                # 计算平均执行时长
-                if scheduled_task.average_duration:
-                    scheduled_task.average_duration = int(
-                        (scheduled_task.average_duration + duration // 1000) / 2
+                # 更新任务统计（使用原生SQL）
+                conn = await get_opengauss_connection()
+                try:
+                    # 获取当前统计值
+                    current_task = await conn.fetchrow(
+                        """
+                        SELECT total_runs, success_runs, average_duration
+                        FROM scheduled_tasks
+                        WHERE id = $1
+                        """,
+                        scheduled_task.id
                     )
-                else:
-                    scheduled_task.average_duration = duration // 1000
-                
-                # 计算下次执行时间
-                next_run = calculate_next_run_time(scheduled_task)
-                scheduled_task.next_run_time = next_run
-                
-                session.add(scheduled_task)
-                await session.commit()
-
-            # openGauss 原生记录结束（成功）
-            try:
-                await record_run_end(execution_id, end_time, 'success', result=result)
-            except Exception:
-                pass
+                    
+                    total_runs = (current_task['total_runs'] or 0) + 1
+                    success_runs = (current_task['success_runs'] or 0) + 1
+                    
+                    # 计算平均执行时长
+                    avg_duration = duration // 1000  # 秒
+                    if current_task['average_duration']:
+                        avg_duration = int((current_task['average_duration'] + avg_duration) / 2)
+                    
+                    # 计算下次执行时间
+                    next_run = calculate_next_run_time(scheduled_task)
+                    
+                    # 更新任务
+                    await conn.execute(
+                        """
+                        UPDATE scheduled_tasks
+                        SET status = $1::scheduledtaskstatus,
+                            last_success_time = $2,
+                            total_runs = $3,
+                            success_runs = $4,
+                            average_duration = $5,
+                            next_run_time = $6
+                        WHERE id = $7
+                        """,
+                        'active', end_time, total_runs, success_runs, avg_duration, next_run, scheduled_task.id
+                    )
+                finally:
+                    await conn.close()
+            else:
+                # 使用SQLAlchemy更新
+                async with db_manager.AsyncSessionLocal() as session:
+                    stmt = select(ScheduledTaskLog).where(ScheduledTaskLog.execution_id == execution_id)
+                    log_result = await session.execute(stmt)
+                    task_log = log_result.scalar_one()
+                    
+                    task_log.completed_at = end_time
+                    task_log.duration = duration // 1000  # 秒
+                    task_log.status = 'success'
+                    task_log.result = result
+                    
+                    # 更新任务统计
+                    scheduled_task.total_runs = (scheduled_task.total_runs or 0) + 1
+                    scheduled_task.success_runs = (scheduled_task.success_runs or 0) + 1
+                    scheduled_task.last_success_time = end_time
+                    scheduled_task.status = ScheduledTaskStatus.ACTIVE
+                    
+                    # 计算平均执行时长
+                    if scheduled_task.average_duration:
+                        scheduled_task.average_duration = int(
+                            (scheduled_task.average_duration + duration // 1000) / 2
+                        )
+                    else:
+                        scheduled_task.average_duration = duration // 1000
+                    
+                    # 计算下次执行时间
+                    next_run = calculate_next_run_time(scheduled_task)
+                    scheduled_task.next_run_time = next_run
+                    
+                    session.add(scheduled_task)
+                    await session.commit()
 
             # 释放任务锁
             try:
@@ -192,35 +250,72 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
             
             logger.error(f"任务执行失败 {scheduled_task.task_name}: {error_msg}")
             
-            # 更新执行日志
-            try:
-                async with db_manager.AsyncSessionLocal() as session:
-                    stmt = select(ScheduledTaskLog).where(ScheduledTaskLog.execution_id == execution_id)
-                    log_result = await session.execute(stmt)
-                    task_log = log_result.scalar_one()
-                    
-                    task_log.completed_at = end_time
-                    task_log.duration = duration // 1000  # 秒
-                    task_log.status = 'failed'
-                    task_log.error_message = error_msg
-                    
-                    # 更新任务统计
-                    scheduled_task.total_runs = (scheduled_task.total_runs or 0) + 1
-                    scheduled_task.failure_runs = (scheduled_task.failure_runs or 0) + 1
-                    scheduled_task.last_failure_time = end_time
-                    scheduled_task.last_error = error_msg
-                    scheduled_task.status = ScheduledTaskStatus.ERROR
-                    
-                    session.add(scheduled_task)
-                    await session.commit()
-            except Exception as db_error:
-                logger.error(f"更新任务日志失败: {str(db_error)}")
-
-            # openGauss 原生记录结束（失败）
-            try:
-                await record_run_end(execution_id, end_time, 'failed', result=None, error_message=error_msg)
-            except Exception:
-                pass
+            # 更新执行日志和任务统计（openGauss使用原生SQL，其他使用SQLAlchemy）
+            if is_opengauss():
+                # openGauss 原生记录结束（失败）
+                try:
+                    await record_run_end(execution_id, end_time, 'failed', result=None, error_message=error_msg)
+                except Exception:
+                    pass
+                
+                # 更新任务统计（使用原生SQL）
+                try:
+                    conn = await get_opengauss_connection()
+                    try:
+                        # 获取当前统计值
+                        current_task = await conn.fetchrow(
+                            """
+                            SELECT total_runs, failure_runs
+                            FROM scheduled_tasks
+                            WHERE id = $1
+                            """,
+                            scheduled_task.id
+                        )
+                        
+                        total_runs = (current_task['total_runs'] or 0) + 1
+                        failure_runs = (current_task['failure_runs'] or 0) + 1
+                        
+                        # 更新任务
+                        await conn.execute(
+                            """
+                            UPDATE scheduled_tasks
+                            SET status = $1::scheduledtaskstatus,
+                                total_runs = $2,
+                                failure_runs = $3,
+                                last_failure_time = $4,
+                                last_error = $5
+                            WHERE id = $6
+                            """,
+                            'error', total_runs, failure_runs, end_time, error_msg, scheduled_task.id
+                        )
+                    finally:
+                        await conn.close()
+                except Exception as db_error:
+                    logger.error(f"更新任务日志失败: {str(db_error)}")
+            else:
+                # 使用SQLAlchemy更新
+                try:
+                    async with db_manager.AsyncSessionLocal() as session:
+                        stmt = select(ScheduledTaskLog).where(ScheduledTaskLog.execution_id == execution_id)
+                        log_result = await session.execute(stmt)
+                        task_log = log_result.scalar_one()
+                        
+                        task_log.completed_at = end_time
+                        task_log.duration = duration // 1000  # 秒
+                        task_log.status = 'failed'
+                        task_log.error_message = error_msg
+                        
+                        # 更新任务统计
+                        scheduled_task.total_runs = (scheduled_task.total_runs or 0) + 1
+                        scheduled_task.failure_runs = (scheduled_task.failure_runs or 0) + 1
+                        scheduled_task.last_failure_time = end_time
+                        scheduled_task.last_error = error_msg
+                        scheduled_task.status = ScheduledTaskStatus.ERROR
+                        
+                        session.add(scheduled_task)
+                        await session.commit()
+                except Exception as db_error:
+                    logger.error(f"更新任务日志失败: {str(db_error)}")
 
             # 释放任务锁
             try:

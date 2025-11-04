@@ -167,21 +167,37 @@ async def acquire_task_lock(task_id: int, execution_id: str) -> bool:
                     CREATE TABLE IF NOT EXISTS task_locks (
                         task_id INTEGER PRIMARY KEY,
                         execution_id VARCHAR(64) NOT NULL,
-                        locked_at TIMESTAMP WITH TIME ZONE NOT NULL
+                        locked_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                        is_active BOOLEAN DEFAULT TRUE
                     )
                     """
                 )
-                # 尝试插入锁记录，如果已存在则获取失败
-                rec = await conn.fetchrow(
+                # openGauss不支持ON CONFLICT，改用先检查再插入的方式
+                existing = await conn.fetchrow(
                     """
-                    INSERT INTO task_locks (task_id, execution_id, locked_at)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT (task_id) DO NOTHING
-                    RETURNING task_id
+                    SELECT task_id FROM task_locks
+                    WHERE task_id = $1 AND is_active = TRUE
                     """,
-                    task_id, execution_id, datetime.now()
+                    task_id
                 )
-                return rec is not None
+                if existing:
+                    # 锁已存在，获取失败
+                    return False
+                
+                # 插入新锁记录
+                try:
+                    await conn.execute(
+                        """
+                        INSERT INTO task_locks (task_id, execution_id, locked_at, is_active)
+                        VALUES ($1, $2, $3, TRUE)
+                        """,
+                        task_id, execution_id, datetime.now()
+                    )
+                    return True
+                except Exception as insert_error:
+                    # 如果插入失败（可能是并发插入），返回False
+                    logger.warning(f"插入任务锁失败（可能被其他进程占用）: {str(insert_error)}")
+                    return False
             finally:
                 await conn.close()
         else:

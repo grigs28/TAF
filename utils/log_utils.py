@@ -211,7 +211,7 @@ async def log_system(
                     )
                 """
                 
-                # 准备参数
+                # 准备参数（确保task_id和user_id是字符串或None）
                 params = [
                     level.value if isinstance(level, Enum) else str(level),
                     category.value if isinstance(category, Enum) else str(category),
@@ -220,8 +220,8 @@ async def log_system(
                     function,
                     file_path,
                     line_number,
-                    user_id,
-                    task_id,
+                    str(user_id) if user_id is not None else None,
+                    str(task_id) if task_id is not None else None,  # task_id必须是字符串
                     log_time,
                     json.dumps(details) if details else None,
                     exception_type,
