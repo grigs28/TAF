@@ -357,6 +357,9 @@ async function loadAllTasks() {
         
         if (tasks && tasks.length > 0) {
             tasks.forEach(task => {
+                // 调试：输出任务信息
+                console.log('渲染任务:', task.task_id, task.task_name, 'from_scheduler:', task.from_scheduler, 'enabled:', task.enabled);
+                
                 const sourcePaths = Array.isArray(task.source_paths) ? task.source_paths.join(', ') : (task.source_paths || (task.is_template ? '计划任务' : 'N/A'));
                 const row = document.createElement('tr');
                 row.className = task.is_template ? 'table-warning' : '';
@@ -690,57 +693,72 @@ document.addEventListener('DOMContentLoaded', async function() {
         searchBtn.addEventListener('click', loadAllTasks);
     }
     
-    // 绑定操作按钮事件（使用事件委托，只需绑定一次）
-    const tbody = document.getElementById('allTasksTable');
-    if (tbody) {
-        tbody.addEventListener('click', function(e) {
-            // 处理点击图标或按钮的情况
-            let btn = e.target;
-            if (btn.tagName === 'I' || btn.tagName === 'i') {
-                // 如果点击的是图标，找父元素按钮
-                btn = btn.closest('button');
-            } else if (btn.tagName !== 'BUTTON') {
-                // 如果点击的不是按钮，尝试找最近的按钮
-                btn = btn.closest('button');
-            }
-            
-            if (!btn) return;
-            
-            const btnGroup = btn.closest('.btn-group');
-            if (!btnGroup) return;
-            
-            const taskId = parseInt(btnGroup.dataset.taskId);
-            if (!taskId || isNaN(taskId)) {
-                console.warn('无法获取任务ID:', btnGroup.dataset);
-                return;
-            }
-            
-            const fromScheduler = btnGroup.dataset.fromScheduler === 'true';
-            const enabled = btnGroup.dataset.enabled === 'true';
-            
-            // 阻止默认行为
-            e.preventDefault();
-            e.stopPropagation();
-            
-            // 根据按钮类名执行对应操作
-            if (btn.classList.contains('btn-action-enable')) {
-                console.log('点击启用按钮，任务ID:', taskId);
-                enableBackupTask(taskId);
-            } else if (btn.classList.contains('btn-action-disable')) {
-                console.log('点击禁用按钮，任务ID:', taskId);
-                disableBackupTask(taskId);
-            } else if (btn.classList.contains('btn-action-run')) {
-                console.log('点击运行按钮，任务ID:', taskId);
-                runBackupTask(taskId);
-            } else if (btn.classList.contains('btn-action-edit')) {
-                console.log('点击编辑按钮，任务ID:', taskId, 'from_scheduler:', fromScheduler);
-                editBackupTask(taskId, fromScheduler);
-            } else if (btn.classList.contains('btn-action-delete')) {
-                console.log('点击删除按钮，任务ID:', taskId, 'from_scheduler:', fromScheduler);
-                deleteBackupTask(taskId, fromScheduler);
-            }
-        });
-    }
+    // 绑定操作按钮事件（使用事件委托，绑定到document，确保动态生成的按钮也能响应）
+    document.addEventListener('click', function(e) {
+        // 检查点击是否在任务表格中
+        const tbody = document.getElementById('allTasksTable');
+        if (!tbody || !tbody.contains(e.target)) return;
+        
+        // 处理点击图标或按钮的情况
+        let btn = e.target;
+        if (btn.tagName === 'I' || btn.tagName === 'i') {
+            // 如果点击的是图标，找父元素按钮
+            btn = btn.closest('button');
+        } else if (btn.tagName !== 'BUTTON') {
+            // 如果点击的不是按钮，尝试找最近的按钮
+            btn = btn.closest('button');
+        }
+        
+        if (!btn) return;
+        
+        // 检查按钮是否有操作类名
+        if (!btn.classList.contains('btn-action-enable') && 
+            !btn.classList.contains('btn-action-disable') && 
+            !btn.classList.contains('btn-action-run') && 
+            !btn.classList.contains('btn-action-edit') && 
+            !btn.classList.contains('btn-action-delete')) {
+            return;
+        }
+        
+        const btnGroup = btn.closest('.btn-group');
+        if (!btnGroup) {
+            console.warn('无法找到按钮组');
+            return;
+        }
+        
+        const taskId = parseInt(btnGroup.dataset.taskId);
+        if (!taskId || isNaN(taskId)) {
+            console.warn('无法获取任务ID:', btnGroup.dataset);
+            return;
+        }
+        
+        const fromScheduler = btnGroup.dataset.fromScheduler === 'true';
+        const enabled = btnGroup.dataset.enabled === 'true';
+        
+        // 阻止默认行为
+        e.preventDefault();
+        e.stopPropagation();
+        
+        console.log('点击按钮:', btn.className, '任务ID:', taskId, 'from_scheduler:', fromScheduler);
+        
+        // 根据按钮类名执行对应操作
+        if (btn.classList.contains('btn-action-enable')) {
+            console.log('执行启用操作，任务ID:', taskId);
+            enableBackupTask(taskId);
+        } else if (btn.classList.contains('btn-action-disable')) {
+            console.log('执行禁用操作，任务ID:', taskId);
+            disableBackupTask(taskId);
+        } else if (btn.classList.contains('btn-action-run')) {
+            console.log('执行运行操作，任务ID:', taskId);
+            runBackupTask(taskId);
+        } else if (btn.classList.contains('btn-action-edit')) {
+            console.log('执行编辑操作，任务ID:', taskId, 'from_scheduler:', fromScheduler);
+            editBackupTask(taskId, fromScheduler);
+        } else if (btn.classList.contains('btn-action-delete')) {
+            console.log('执行删除操作，任务ID:', taskId, 'from_scheduler:', fromScheduler);
+            deleteBackupTask(taskId, fromScheduler);
+        }
+    });
     
     // 每30秒刷新一次
     setInterval(function() {
