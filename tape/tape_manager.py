@@ -76,43 +76,99 @@ class TapeManager:
     async def _load_tape_inventory(self):
         """加载磁带库存信息"""
         try:
-            # 这里应该从数据库加载磁带信息
-            # 暂时创建示例数据
-            sample_tapes = [
-                TapeCartridge(
-                    tape_id="TAPE001",
-                    label="备份磁带001",
-                    status=TapeStatus.AVAILABLE,
-                    capacity_bytes=self.settings.MAX_VOLUME_SIZE,
-                    used_bytes=0,
-                    created_date=datetime.now() - timedelta(days=30),
-                    expiry_date=datetime.now() + timedelta(days=150),
-                    location="磁带柜-1-A"
-                ),
-                TapeCartridge(
-                    tape_id="TAPE002",
-                    label="备份磁带002",
-                    status=TapeStatus.IN_USE,
-                    capacity_bytes=self.settings.MAX_VOLUME_SIZE,
-                    used_bytes=1073741824,  # 1GB
-                    created_date=datetime.now() - timedelta(days=60),
-                    expiry_date=datetime.now() + timedelta(days=120),
-                    location="磁带柜-1-B"
-                )
-            ]
-
-            for tape in sample_tapes:
-                self.tape_cartridges[tape.tape_id] = tape
-
-            logger.info(f"加载了 {len(self.tape_cartridges)} 个磁带信息")
-
+            # 从数据库加载磁带信息
+            await self._load_tape_inventory_from_db()
         except Exception as e:
             logger.error(f"加载磁带库存信息失败: {str(e)}")
+    
+    async def _load_tape_inventory_from_db(self):
+        """从数据库加载磁带库存信息"""
+        try:
+            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+            
+            if is_opengauss():
+                # 使用 openGauss 原生 SQL 查询
+                conn = await get_opengauss_connection()
+                try:
+                    rows = await conn.fetch(
+                        """
+                        SELECT tape_id, label, status, created_date, expiry_date,
+                               capacity_bytes, used_bytes, serial_number, location
+                        FROM tape_cartridges
+                        ORDER BY created_date DESC
+                        """
+                    )
+                    
+                    for row in rows:
+                        tape = TapeCartridge(
+                            tape_id=row['tape_id'],
+                            label=row['label'],
+                            status=TapeStatus(row['status']) if row['status'] else TapeStatus.AVAILABLE,
+                            created_date=row['created_date'],
+                            expiry_date=row['expiry_date'],
+                            capacity_bytes=row['capacity_bytes'] or 0,
+                            used_bytes=row['used_bytes'] or 0,
+                            serial_number=row['serial_number'] or '',
+                            location=row['location'] or ''
+                        )
+                        self.tape_cartridges[tape.tape_id] = tape
+                    
+                    logger.info(f"从数据库加载了 {len(rows)} 个磁带信息")
+                finally:
+                    await conn.close()
+            else:
+                # 非 openGauss 数据库，暂时使用示例数据
+                sample_tapes = [
+                    TapeCartridge(
+                        tape_id="TAPE001",
+                        label="备份磁带001",
+                        status=TapeStatus.AVAILABLE,
+                        capacity_bytes=self.settings.MAX_VOLUME_SIZE,
+                        used_bytes=0,
+                        created_date=datetime.now() - timedelta(days=30),
+                        expiry_date=datetime.now() + timedelta(days=150),
+                        location="磁带柜-1-A"
+                    ),
+                ]
+                for tape in sample_tapes:
+                    self.tape_cartridges[tape.tape_id] = tape
+                logger.info(f"加载了 {len(self.tape_cartridges)} 个磁带信息（示例数据）")
+        except Exception as e:
+            logger.error(f"从数据库加载磁带库存信息失败: {str(e)}")
+            # 如果加载失败，至少确保内存中有示例数据
+            if not self.tape_cartridges:
+                logger.warning("使用示例数据作为后备")
+                sample_tapes = [
+                    TapeCartridge(
+                        tape_id="TAPE001",
+                        label="备份磁带001",
+                        status=TapeStatus.AVAILABLE,
+                        capacity_bytes=self.settings.MAX_VOLUME_SIZE,
+                        used_bytes=0,
+                        created_date=datetime.now() - timedelta(days=30),
+                        expiry_date=datetime.now() + timedelta(days=150),
+                        location="磁带柜-1-A"
+                    ),
+                ]
+                for tape in sample_tapes:
+                    self.tape_cartridges[tape.tape_id] = tape
 
     async def get_available_tape(self) -> Optional[TapeCartridge]:
         """获取可用磁带"""
         try:
+            # 如果内存中没有磁带，先从数据库加载
+            if not self.tape_cartridges:
+                await self._load_tape_inventory_from_db()
+            
             # 查找可用磁带
+            for tape in self.tape_cartridges.values():
+                if tape.status == TapeStatus.AVAILABLE and not tape.is_expired():
+                    return tape
+
+            # 如果没有可用磁带，尝试从数据库重新加载
+            await self._load_tape_inventory_from_db()
+            
+            # 再次查找可用磁带
             for tape in self.tape_cartridges.values():
                 if tape.status == TapeStatus.AVAILABLE and not tape.is_expired():
                     return tape

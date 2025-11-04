@@ -9,11 +9,19 @@ import os
 import asyncio
 import logging
 import hashlib
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable
 import py7zr
 import psutil
+
+# 尝试导入 tqdm，如果不可用则使用简单的文本进度条
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
 
 from config.settings import get_settings
 from config.database import get_db
@@ -180,14 +188,36 @@ class BackupEngine:
 
             # 2. 获取可用磁带
             logger.info("获取可用磁带...")
-            available_tape = await self.tape_manager.get_available_tape()
-            if not available_tape:
-                raise RuntimeError("没有可用的磁带")
+            # 检查备份任务配置中的磁带设备
+            tape_device = backup_task.tape_device if hasattr(backup_task, 'tape_device') else None
+            
+            # 如果选择"自动磁带机"，优先检查当前驱动器中的磁带
+            if not tape_device or tape_device == 'auto' or tape_device == 'all' or tape_device == '自动选择磁带机':
+                logger.info("使用自动磁带机选择，先检查当前驱动器中的磁带...")
+                # 尝试从当前驱动器获取磁带
+                current_tape = await self._get_current_drive_tape()
+                if current_tape:
+                    logger.info(f"使用当前驱动器中的磁带: {current_tape.tape_id}")
+                    available_tape = current_tape
+                else:
+                    # 当前驱动器没有磁带，从数据库选择
+                    logger.info("当前驱动器没有磁带，从数据库选择可用磁带...")
+                    available_tape = await self.tape_manager.get_available_tape()
+                    if not available_tape:
+                        raise RuntimeError("没有可用的磁带")
+            else:
+                # 指定了磁带设备，按原逻辑处理
+                available_tape = await self.tape_manager.get_available_tape()
+                if not available_tape:
+                    raise RuntimeError("没有可用的磁带")
 
-            # 3. 加载磁带
-            logger.info(f"加载磁带: {available_tape.tape_id}")
-            if not await self.tape_manager.load_tape(available_tape.tape_id):
-                raise RuntimeError(f"加载磁带失败: {available_tape.tape_id}")
+            # 3. 如果磁带不在当前驱动器，需要加载
+            if not self.tape_manager.current_tape or self.tape_manager.current_tape.tape_id != available_tape.tape_id:
+                logger.info(f"加载磁带: {available_tape.tape_id}")
+                if not await self.tape_manager.load_tape(available_tape.tape_id):
+                    raise RuntimeError(f"加载磁带失败: {available_tape.tape_id}")
+            else:
+                logger.info(f"磁带已在驱动器: {available_tape.tape_id}")
 
             backup_task.tape_id = available_tape.tape_id
 
@@ -301,6 +331,77 @@ class BackupEngine:
 
         logger.info(f"扫描完成，共找到 {len(file_list)} 个文件")
         return file_list
+
+    async def _get_current_drive_tape(self) -> Optional[TapeCartridge]:
+        """获取当前驱动器中的磁带"""
+        try:
+            if not self.tape_manager:
+                logger.warning("磁带管理器未初始化")
+                return None
+            
+            # 检查当前磁带管理器是否已有当前磁带
+            if self.tape_manager.current_tape:
+                logger.info(f"当前驱动器已有磁带: {self.tape_manager.current_tape.tape_id}")
+                return self.tape_manager.current_tape
+            
+            # 尝试扫描当前驱动器中的磁带标签
+            try:
+                tape_ops = self.tape_manager.tape_operations
+                if tape_ops and hasattr(tape_ops, '_read_tape_label'):
+                    label_info = await tape_ops._read_tape_label()
+                    if label_info and label_info.get('tape_id'):
+                        tape_id = label_info.get('tape_id')
+                        logger.info(f"从驱动器扫描到磁带标签: {tape_id}")
+                        
+                        # 检查数据库中是否有该磁带
+                        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+                        if is_opengauss():
+                            conn = await get_opengauss_connection()
+                            try:
+                                row = await conn.fetchrow(
+                                    """
+                                    SELECT tape_id, label, status, created_date, expiry_date,
+                                           capacity_bytes, used_bytes, serial_number
+                                    FROM tape_cartridges
+                                    WHERE tape_id = $1
+                                    """,
+                                    tape_id
+                                )
+                                
+                                if row:
+                                    # 磁带在数据库中，创建 TapeCartridge 对象
+                                    from tape.tape_cartridge import TapeStatus
+                                    tape = TapeCartridge(
+                                        tape_id=row['tape_id'],
+                                        label=row['label'],
+                                        status=TapeStatus(row['status']) if row['status'] else TapeStatus.AVAILABLE,
+                                        created_date=row['created_date'],
+                                        expiry_date=row['expiry_date'],
+                                        capacity_bytes=row['capacity_bytes'] or 0,
+                                        used_bytes=row['used_bytes'] or 0,
+                                        serial_number=row['serial_number'] or ''
+                                    )
+                                    # 更新磁带管理器的当前磁带
+                                    self.tape_manager.current_tape = tape
+                                    self.tape_manager.tape_cartridges[tape_id] = tape
+                                    logger.info(f"从数据库加载磁带信息: {tape_id}")
+                                    return tape
+                                else:
+                                    # 磁带不在数据库中，但驱动器中有磁带，创建新记录
+                                    logger.info(f"驱动器中的磁带不在数据库中，创建新记录: {tape_id}")
+                                    # 这里可以创建新记录，但暂时返回 None，让系统从数据库选择
+                                    # 或者可以在这里创建新记录
+                                    return None
+                            finally:
+                                await conn.close()
+            except Exception as e:
+                logger.warning(f"扫描当前驱动器磁带失败: {str(e)}")
+                return None
+                
+            return None
+        except Exception as e:
+            logger.error(f"获取当前驱动器磁带失败: {str(e)}")
+            return None
 
     async def _get_file_info(self, file_path: Path) -> Optional[Dict]:
         """获取文件信息"""
