@@ -193,32 +193,73 @@ async def acquire_task_lock(task_id: int, execution_id: str) -> bool:
                 except Exception as e:
                     # 字段可能已存在或其他错误，记录警告但继续
                     logger.warning(f"检查/添加 is_active 字段失败（忽略继续）: {str(e)}")
-                # openGauss不支持ON CONFLICT，改用先检查再插入的方式
+                # openGauss不支持ON CONFLICT，改用先检查再插入/更新的方式
                 existing = await conn.fetchrow(
                     """
-                    SELECT task_id FROM task_locks
-                    WHERE task_id = $1 AND is_active = TRUE
+                    SELECT task_id, is_active FROM task_locks
+                    WHERE task_id = $1
                     """,
                     task_id
                 )
-                if existing:
-                    # 锁已存在，获取失败
-                    return False
                 
-                # 插入新锁记录
-                try:
-                    await conn.execute(
-                        """
-                        INSERT INTO task_locks (task_id, execution_id, locked_at, is_active)
-                        VALUES ($1, $2, $3, TRUE)
-                        """,
-                        task_id, execution_id, datetime.now()
-                    )
-                    return True
-                except Exception as insert_error:
-                    # 如果插入失败（可能是并发插入），返回False
-                    logger.warning(f"插入任务锁失败（可能被其他进程占用）: {str(insert_error)}")
-                    return False
+                if existing:
+                    # 记录已存在
+                    if existing['is_active']:
+                        # 锁已激活，获取失败
+                        logger.debug(f"任务 {task_id} 已有活跃锁，获取失败")
+                        return False
+                    else:
+                        # 锁已失效（解锁后），更新为活跃状态
+                        await conn.execute(
+                            """
+                            UPDATE task_locks
+                            SET execution_id = $1, locked_at = $2, is_active = TRUE
+                            WHERE task_id = $3
+                            """,
+                            execution_id, datetime.now(), task_id
+                        )
+                        logger.info(f"任务 {task_id} 的锁已重新激活（更新现有记录）")
+                        return True
+                else:
+                    # 记录不存在，插入新锁记录
+                    try:
+                        await conn.execute(
+                            """
+                            INSERT INTO task_locks (task_id, execution_id, locked_at, is_active)
+                            VALUES ($1, $2, $3, TRUE)
+                            """,
+                            task_id, execution_id, datetime.now()
+                        )
+                        logger.info(f"任务 {task_id} 的新锁已创建")
+                        return True
+                    except Exception as insert_error:
+                        # 如果插入失败（可能是并发插入），再次检查并尝试更新
+                        existing_after = await conn.fetchrow(
+                            """
+                            SELECT task_id, is_active FROM task_locks
+                            WHERE task_id = $1
+                            """,
+                            task_id
+                        )
+                        if existing_after:
+                            if existing_after['is_active']:
+                                logger.warning(f"任务 {task_id} 在并发插入时被其他进程占用")
+                                return False
+                            else:
+                                # 更新失效的锁
+                                await conn.execute(
+                                    """
+                                    UPDATE task_locks
+                                    SET execution_id = $1, locked_at = $2, is_active = TRUE
+                                    WHERE task_id = $3
+                                    """,
+                                    execution_id, datetime.now(), task_id
+                                )
+                                logger.info(f"任务 {task_id} 的锁已重新激活（并发插入后更新）")
+                                return True
+                        else:
+                            logger.warning(f"插入任务锁失败（可能被其他进程占用）: {str(insert_error)}")
+                            return False
             finally:
                 await conn.close()
         else:
