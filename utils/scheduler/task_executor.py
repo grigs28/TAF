@@ -18,7 +18,7 @@ from sqlalchemy import select
 from .action_handlers import get_action_handler
 from .schedule_calculator import calculate_next_run_time
 from utils.log_utils import log_operation, log_system
-from .task_storage import record_run_start, record_run_end
+from .task_storage import record_run_start, record_run_end, acquire_task_lock, release_task_lock
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,20 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
         start_time = datetime.now()
         
         try:
+            # 获取任务并发锁（openGauss原生），获取失败则跳过
+            got_lock = await acquire_task_lock(scheduled_task.id, execution_id)
+            if not got_lock:
+                await log_system(
+                    level=LogLevel.INFO,
+                    category=LogCategory.SCHEDULER,
+                    message="任务已在执行中，跳过",
+                    module="scheduler",
+                    function="task_executor",
+                    task_id=scheduled_task.id,
+                    details={"execution_id": execution_id}
+                )
+                return
+
             # 记录任务执行开始日志
             await log_operation(
                 operation_type=OperationType.SCHEDULER_RUN,
@@ -127,6 +141,12 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
                 await record_run_end(execution_id, end_time, 'success', result=result)
             except Exception:
                 pass
+
+            # 释放任务锁
+            try:
+                await release_task_lock(scheduled_task.id, execution_id)
+            except Exception:
+                pass
             
             logger.info(f"任务执行成功: {scheduled_task.task_name} (执行ID: {execution_id})")
             
@@ -199,6 +219,12 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
             # openGauss 原生记录结束（失败）
             try:
                 await record_run_end(execution_id, end_time, 'failed', result=None, error_message=error_msg)
+            except Exception:
+                pass
+
+            # 释放任务锁
+            try:
+                await release_task_lock(scheduled_task.id, execution_id)
             except Exception:
                 pass
             

@@ -154,6 +154,64 @@ async def record_run_end(execution_id: str, completed_at: datetime, status: str,
         logger.warning(f"记录任务结束失败（忽略继续）: {str(e)}")
 
 
+# ===== 并发锁（openGauss原生）=====
+async def acquire_task_lock(task_id: int, execution_id: str) -> bool:
+    """尝试获取任务锁（同一任务仅允许一个运行实例）"""
+    try:
+        if is_opengauss():
+            conn = await get_opengauss_connection()
+            try:
+                # 确保锁表存在（task_id 唯一）
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS task_locks (
+                        task_id INTEGER PRIMARY KEY,
+                        execution_id VARCHAR(64) NOT NULL,
+                        locked_at TIMESTAMP WITH TIME ZONE NOT NULL
+                    )
+                    """
+                )
+                # 尝试插入锁记录，如果已存在则获取失败
+                rec = await conn.fetchrow(
+                    """
+                    INSERT INTO task_locks (task_id, execution_id, locked_at)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (task_id) DO NOTHING
+                    RETURNING task_id
+                    """,
+                    task_id, execution_id, datetime.now()
+                )
+                return rec is not None
+            finally:
+                await conn.close()
+        else:
+            return True
+    except Exception as e:
+        logger.warning(f"获取任务锁失败（忽略并继续）: {str(e)}")
+        return True
+
+
+async def release_task_lock(task_id: int, execution_id: str) -> None:
+    """释放任务锁"""
+    try:
+        if is_opengauss():
+            conn = await get_opengauss_connection()
+            try:
+                await conn.execute(
+                    """
+                    DELETE FROM task_locks
+                    WHERE task_id = $1 AND execution_id = $2
+                    """,
+                    task_id, execution_id
+                )
+            finally:
+                await conn.close()
+        else:
+            pass
+    except Exception as e:
+        logger.warning(f"释放任务锁失败（忽略继续）: {str(e)}")
+
+
 async def get_task_by_id(task_id: int) -> Optional[ScheduledTask]:
     """根据ID获取计划任务"""
     try:
