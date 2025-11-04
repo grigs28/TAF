@@ -95,6 +95,14 @@ class TapeBackupSystem:
             except Exception as dingtalk_error:
                 logger.warning(f"通知系统初始化失败: {str(dingtalk_error)}")
 
+            # 绑定依赖（备份引擎需要磁带管理器与通知器）
+            try:
+                if hasattr(self.backup_engine, "set_dependencies"):
+                    self.backup_engine.set_dependencies(self.tape_manager, self.dingtalk_notifier)
+                    logger.info("备份引擎依赖已绑定：TapeManager, DingTalkNotifier")
+            except Exception as dep_error:
+                logger.warning(f"绑定备份引擎依赖失败: {str(dep_error)}")
+
             # 初始化Web应用
             self.web_app = create_app(self)
             logger.info("Web应用初始化完成")
