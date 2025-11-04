@@ -262,13 +262,19 @@ async def get_backup_tasks(
                 param_index = 1
                 
                 # 默认返回所有记录（模板+执行记录）；当 status/task_type 为 'all' 或空时不加过滤
-                if status and status.lower() != 'all':
+                normalized_status = (status or '').lower()
+                include_not_run = normalized_status in ('not_run', '未运行')
+                if status and normalized_status not in ('all', 'not_run', '未运行'):
                     # 以文本方式匹配，避免依赖枚举类型存在
                     where_clauses.append(f"LOWER(status::text) = LOWER(${param_index})")
                     params.append(status)
                     param_index += 1
+                # 未运行：仅限从 backup_tasks 侧筛选“未启动”的pending记录
+                if include_not_run:
+                    where_clauses.append("(started_at IS NULL) AND LOWER(status::text)=LOWER('PENDING')")
                 
-                if task_type and task_type.lower() != 'all':
+                normalized_type = (task_type or '').lower()
+                if task_type and normalized_type != 'all':
                     # 以文本方式匹配，避免依赖枚举类型存在
                     where_clauses.append(f"LOWER(task_type::text) = LOWER(${param_index})")
                     params.append(task_type)
@@ -281,7 +287,7 @@ async def get_backup_tasks(
                 
                 where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
                 
-                # 构建查询（包含模板与执行记录）
+                # 构建查询（包含模板与执行记录）- 不在SQL层做分页，合并后在内存分页
                 sql = f"""
                     SELECT id, task_name, task_type, status, progress_percent, total_files, 
                            processed_files, total_bytes, processed_bytes, created_at, started_at, 
@@ -289,10 +295,7 @@ async def get_backup_tasks(
                     FROM backup_tasks
                     WHERE {where_sql}
                     ORDER BY created_at DESC
-                    LIMIT ${param_index} OFFSET ${param_index + 1}
                 """
-                params.extend([limit, offset])
-                
                 rows = await conn.fetch(sql, *params)
                 
                 # 转换为响应格式
@@ -328,8 +331,67 @@ async def get_backup_tasks(
                         "tape_device": row["tape_device"],
                         "source_paths": source_paths
                     })
-                
-                return tasks
+                # 追加计划任务（未运行模板）
+                # 仅当无状态过滤或过滤为pending/all时返回
+                include_sched = (not status) or (normalized_status in ("all", "pending", 'not_run', '未运行'))
+                if include_sched:
+                    sched_where = ["LOWER(action_type::text)=LOWER('BACKUP')"]
+                    sched_params = []
+                    if q and q.strip():
+                        sched_where.append("task_name ILIKE $1")
+                        sched_params.append(f"%{q.strip()}%")
+                    # 任务类型筛选
+                    if task_type and normalized_type != 'all':
+                        # 从 action_config->task_type 里匹配（字符串包含）
+                        # openGauss json 提取可后续增强，这里简化为 ILIKE 检测
+                        if sched_params:
+                            sched_where.append("action_config ILIKE $2")
+                            sched_params.append(f"%\"task_type\": \"{task_type}\"%")
+                        else:
+                            sched_where.append("action_config ILIKE $1")
+                            sched_params.append(f"%\"task_type\": \"{task_type}\"%")
+                    # 未运行：计划任务自然视作未运行
+                    sched_sql = f"""
+                        SELECT id, task_name, status, created_at, started_at, completed_at, action_config
+                        FROM scheduled_tasks
+                        WHERE {' AND '.join(sched_where)}
+                        ORDER BY created_at DESC
+                    """
+                    sched_rows = await conn.fetch(sched_sql, *sched_params)
+                    for srow in sched_rows:
+                        # 从action_config中提取task_type/tape_device
+                        atype = 'full'
+                        tdev = None
+                        try:
+                            acfg = srow["action_config"]
+                            if isinstance(acfg, str):
+                                acfg = json.loads(acfg)
+                            if isinstance(acfg, dict):
+                                atype = acfg.get('task_type') or atype
+                                tdev = acfg.get('tape_device')
+                        except:
+                            pass
+                        tasks.append({
+                            "task_id": srow["id"],
+                            "task_name": srow["task_name"],
+                            "task_type": atype,
+                            "status": "pending",  # 计划任务视为未运行
+                            "progress_percent": 0.0,
+                            "total_files": 0,
+                            "processed_files": 0,
+                            "total_bytes": 0,
+                            "processed_bytes": 0,
+                            "created_at": srow["created_at"],
+                            "started_at": None,
+                            "completed_at": None,
+                            "error_message": None,
+                            "is_template": True,
+                            "tape_device": tdev,
+                            "source_paths": None
+                        })
+                # 合并后排序与分页
+                tasks.sort(key=lambda x: x.get('created_at') or datetime.min, reverse=True)
+                return tasks[offset:offset+limit]
             finally:
                 await conn.close()
         else:
@@ -679,10 +741,14 @@ async def get_backup_statistics(http_request: Request):
             conn = await get_opengauss_connection()
             try:
                 # 总任务数（包含模板与执行记录）
-                total_row = await conn.fetchrow(
-                    "SELECT COUNT(*) as total FROM backup_tasks"
-                )
+                total_row = await conn.fetchrow("SELECT COUNT(*) as total FROM backup_tasks")
                 total_tasks = total_row["total"] if total_row else 0
+                # 计划任务中的备份任务数量（计入总任务与pending）
+                sched_total_row = await conn.fetchrow(
+                    "SELECT COUNT(*) as total FROM scheduled_tasks WHERE LOWER(action_type::text)=LOWER('BACKUP')"
+                )
+                sched_total = sched_total_row["total"] if sched_total_row else 0
+                total_tasks += sched_total
                 
                 # 按状态统计（执行记录与模板均统计各自status）
                 completed_row = await conn.fetchrow(
@@ -707,7 +773,7 @@ async def get_backup_statistics(http_request: Request):
                     "SELECT COUNT(*) as total FROM backup_tasks WHERE LOWER(status::text)=LOWER($1)",
                     BackupTaskStatus.PENDING.value
                 )
-                pending_tasks = pending_row["total"] if pending_row else 0
+                pending_tasks = (pending_row["total"] if pending_row else 0) + sched_total
                 
                 # 成功率
                 success_rate = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0.0
