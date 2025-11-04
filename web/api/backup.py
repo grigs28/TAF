@@ -265,13 +265,13 @@ async def get_backup_tasks(
                 
                 if status:
                     # 以文本方式匹配，避免依赖枚举类型存在
-                    where_clauses.append(f"LOWER(status::text) = LOWER($${param_index}$$)")
+                    where_clauses.append(f"LOWER(status::text) = LOWER(${param_index})")
                     params.append(status)
                     param_index += 1
                 
                 if task_type:
                     # 以文本方式匹配，避免依赖枚举类型存在
-                    where_clauses.append(f"LOWER(task_type::text) = LOWER($${param_index}$$)")
+                    where_clauses.append(f"LOWER(task_type::text) = LOWER(${param_index})")
                     params.append(task_type)
                     param_index += 1
                 
