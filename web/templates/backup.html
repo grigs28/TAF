@@ -426,69 +426,93 @@ async function editBackupTask(taskId, isScheduler) {
         }
     }
     
-    if (isScheduler) {
+    if (isScheduler === true || isScheduler === 'true') {
         // 直接调用计划任务的编辑功能
         window.SchedulerManager.editTask(taskId);
-    } else {
-        // 备份任务模板：转换为计划任务格式并填充表单
+        return;
+    }
+    
+    // 备份任务模板：转换为计划任务格式并填充表单
+    try {
+        let backupTask;
         try {
+            // 尝试获取备份任务详情
             const response = await fetch(`/api/backup/tasks/${taskId}`);
-            const backupTask = await response.json();
-            
-            // 尝试通过任务名称查找计划任务
-            try {
-                const schedResponse = await fetch(`/api/scheduler/tasks`);
-                const schedTasks = await schedResponse.json();
-                const matchingTask = schedTasks.find(t => t.task_name === backupTask.task_name);
-                
-                if (matchingTask) {
-                    // 找到对应的计划任务，直接编辑
-                    window.SchedulerManager.editTask(matchingTask.id);
+            if (!response.ok) {
+                // 如果404，说明可能是计划任务的ID，尝试直接编辑计划任务
+                if (response.status === 404) {
+                    console.log('备份任务不存在，尝试作为计划任务编辑:', taskId);
+                    window.SchedulerManager.editTask(taskId);
                     return;
                 }
-            } catch (error) {
-                console.log('查找计划任务失败，将使用备份任务模板数据:', error);
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
-            
-            // 没有对应的计划任务，将备份任务模板转换为计划任务格式
-            const sourcePaths = backupTask.source_paths || [];
-            const excludePatterns = Array.isArray(backupTask.exclude_patterns) 
-                ? backupTask.exclude_patterns 
-                : (backupTask.exclude_patterns ? backupTask.exclude_patterns.split('\n') : []);
-            
-            // 构建计划任务格式的数据
-            const schedulerTaskData = {
-                id: null, // 新建任务
-                task_name: backupTask.task_name || '',
-                description: backupTask.description || '',
-                schedule_type: 'once', // 默认一次性任务
-                schedule_config: {
-                    datetime: new Date().toISOString().replace('T', ' ').substring(0, 19)
-                },
-                action_type: 'backup',
-                action_config: {
-                    source_paths: sourcePaths,
-                    task_type: backupTask.task_type || 'full',
-                    tape_device: backupTask.tape_device || null,
-                    target_type: backupTask.tape_device ? 'tape' : 'storage',
-                    tape_devices: backupTask.tape_device ? [backupTask.tape_device] : [],
-                    compression_enabled: backupTask.compression_enabled !== false,
-                    encryption_enabled: backupTask.encryption_enabled === true,
-                    exclude_patterns: excludePatterns
-                },
-                enabled: true
-            };
-            
-            // 填充表单并打开模态框
-            window.SchedulerManager.fillForm(schedulerTaskData);
-            window.SchedulerManager.currentTask = null; // 标记为新建任务
-            
-            const modal = new bootstrap.Modal(document.getElementById('scheduledTaskModal'));
-            modal.show();
+            backupTask = await response.json();
         } catch (error) {
-            console.error('编辑备份任务失败:', error);
-            alert('编辑失败: ' + error.message);
+            // 如果获取失败，尝试作为计划任务编辑
+            console.log('获取备份任务失败，尝试作为计划任务编辑:', error);
+            try {
+                window.SchedulerManager.editTask(taskId);
+                return;
+            } catch (schedError) {
+                console.error('编辑计划任务也失败:', schedError);
+                throw error;
+            }
         }
+        
+        // 尝试通过任务名称查找计划任务
+        try {
+            const schedResponse = await fetch(`/api/scheduler/tasks`);
+            const schedTasks = await schedResponse.json();
+            const matchingTask = schedTasks.find(t => t.task_name === backupTask.task_name);
+            
+            if (matchingTask) {
+                // 找到对应的计划任务，直接编辑
+                window.SchedulerManager.editTask(matchingTask.id);
+                return;
+            }
+        } catch (error) {
+            console.log('查找计划任务失败，将使用备份任务模板数据:', error);
+        }
+        
+        // 没有对应的计划任务，将备份任务模板转换为计划任务格式
+        const sourcePaths = backupTask.source_paths || [];
+        const excludePatterns = Array.isArray(backupTask.exclude_patterns) 
+            ? backupTask.exclude_patterns 
+            : (backupTask.exclude_patterns ? backupTask.exclude_patterns.split('\n') : []);
+        
+        // 构建计划任务格式的数据
+        const schedulerTaskData = {
+            id: null, // 新建任务
+            task_name: backupTask.task_name || '',
+            description: backupTask.description || '',
+            schedule_type: 'once', // 默认一次性任务
+            schedule_config: {
+                datetime: new Date().toISOString().replace('T', ' ').substring(0, 19)
+            },
+            action_type: 'backup',
+            action_config: {
+                source_paths: sourcePaths,
+                task_type: backupTask.task_type || 'full',
+                tape_device: backupTask.tape_device || null,
+                target_type: backupTask.tape_device ? 'tape' : 'storage',
+                tape_devices: backupTask.tape_device ? [backupTask.tape_device] : [],
+                compression_enabled: backupTask.compression_enabled !== false,
+                encryption_enabled: backupTask.encryption_enabled === true,
+                exclude_patterns: excludePatterns
+            },
+            enabled: true
+        };
+        
+        // 填充表单并打开模态框
+        window.SchedulerManager.fillForm(schedulerTaskData);
+        window.SchedulerManager.currentTask = null; // 标记为新建任务
+        
+        const modal = new bootstrap.Modal(document.getElementById('scheduledTaskModal'));
+        modal.show();
+    } catch (error) {
+        console.error('编辑备份任务失败:', error);
+        alert('编辑失败: ' + error.message);
     }
 }
 
