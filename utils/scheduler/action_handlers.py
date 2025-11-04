@@ -303,7 +303,6 @@ class BackupActionHandler(ActionHandler):
                                 if isinstance(running_task, dict) and running_task.get('started_at'):
                                     started_at = running_task.get('started_at')
                                     if isinstance(started_at, str):
-                                        from datetime import datetime
                                         started_at = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
                                     running_duration = (now - started_at).total_seconds()
                                     if running_duration > 86400:  # 超过24小时

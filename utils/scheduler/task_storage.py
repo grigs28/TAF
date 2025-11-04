@@ -174,15 +174,25 @@ async def acquire_task_lock(task_id: int, execution_id: str) -> bool:
                 )
                 # 如果表已存在但缺少is_active字段，添加它
                 try:
-                    await conn.execute(
+                    # 检查字段是否存在
+                    column_exists = await conn.fetchval(
                         """
-                        ALTER TABLE task_locks
-                        ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'task_locks' AND column_name = 'is_active'
                         """
                     )
-                except Exception:
-                    # 字段可能已存在，忽略错误
-                    pass
+                    if not column_exists:
+                        # 字段不存在，添加它
+                        await conn.execute(
+                            """
+                            ALTER TABLE task_locks
+                            ADD COLUMN is_active BOOLEAN DEFAULT TRUE
+                            """
+                        )
+                        logger.info("已为 task_locks 表添加 is_active 字段")
+                except Exception as e:
+                    # 字段可能已存在或其他错误，记录警告但继续
+                    logger.warning(f"检查/添加 is_active 字段失败（忽略继续）: {str(e)}")
                 # openGauss不支持ON CONFLICT，改用先检查再插入的方式
                 existing = await conn.fetchrow(
                     """
