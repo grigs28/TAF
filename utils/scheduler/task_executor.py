@@ -241,6 +241,41 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
                 duration_ms=duration
             )
             
+        except KeyboardInterrupt:
+            # 处理 Ctrl+C 中断
+            end_time = datetime.now()
+            duration = int((end_time - start_time).total_seconds() * 1000)
+            error_msg = "任务被用户中断（Ctrl+C）"
+            logger.warning(f"任务执行被中断: {scheduled_task.task_name}")
+            
+            # 释放任务锁
+            try:
+                await release_task_lock(scheduled_task.id, execution_id)
+            except Exception:
+                pass
+            
+            # 更新任务状态为错误
+            try:
+                if is_opengauss():
+                    conn = await get_opengauss_connection()
+                    try:
+                        await conn.execute(
+                            """
+                            UPDATE scheduled_tasks
+                            SET status = $1::scheduledtaskstatus,
+                                last_error = $2
+                            WHERE id = $3
+                            """,
+                            'error', error_msg, scheduled_task.id
+                        )
+                    finally:
+                        await conn.close()
+            except Exception:
+                pass
+            
+            # 重新抛出异常，让上层处理
+            raise
+            
         except Exception as e:
             end_time = datetime.now()
             duration = int((end_time - start_time).total_seconds() * 1000)  # 转换为毫秒

@@ -204,19 +204,43 @@ class TapeBackupSystem:
             logger.error(f"系统关闭时发生错误: {str(e)}")
 
 
+def setup_signal_handlers(system):
+    """设置信号处理器"""
+    shutdown_event = asyncio.Event()
+    
+    def signal_handler(signum, frame):
+        """处理信号"""
+        logger = logging.getLogger(__name__)
+        logger.info(f"收到信号 {signum}，准备关闭系统...")
+        # 设置关闭事件
+        shutdown_event.set()
+    
+    # 注册信号处理器
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    if hasattr(signal, 'SIGBREAK'):  # Windows
+        signal.signal(signal.SIGBREAK, signal_handler)
+    
+    return shutdown_event
+
+
 async def main():
     """主函数"""
     system = TapeBackupSystem()
+    
+    # 设置信号处理器
+    shutdown_event = setup_signal_handlers(system)
 
     try:
         # 初始化系统
         await system.initialize()
 
-        # 启动系统服务
-        await system.start()
+        # 启动系统服务（传入关闭事件）
+        await system.start(shutdown_event)
 
     except KeyboardInterrupt:
-        logging.getLogger(__name__).info("收到中断信号，正在关闭系统...")
+        logger = logging.getLogger(__name__)
+        logger.info("收到中断信号（KeyboardInterrupt），正在关闭系统...")
         await system.shutdown()
 
     except Exception as e:
@@ -224,6 +248,13 @@ async def main():
         logger.error(f"系统运行时发生错误: {str(e)}")
         await system.shutdown()
         sys.exit(1)
+    
+    finally:
+        # 确保在退出前释放所有锁
+        try:
+            await system.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
