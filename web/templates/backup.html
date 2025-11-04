@@ -370,6 +370,27 @@ async function loadAllTasks() {
                     <td>${formatBytes(task.processed_bytes || 0)}</td>
                     <td>
                         <div class="btn-group btn-group-sm">
+                            ${task.from_scheduler ? `
+                                ${task.enabled === false ? `
+                                    <button class="btn btn-outline-success" onclick="enableBackupTask(${task.task_id})" title="启用">
+                                        <i class="bi bi-play"></i>
+                                    </button>
+                                ` : `
+                                    <button class="btn btn-outline-warning" onclick="disableBackupTask(${task.task_id})" title="禁用">
+                                        <i class="bi bi-pause"></i>
+                                    </button>
+                                `}
+                                <button class="btn btn-outline-info" onclick="runBackupTask(${task.task_id})" title="立即运行">
+                                    <i class="bi bi-play-circle"></i>
+                                </button>
+                            ` : `
+                                <button class="btn btn-outline-warning" title="禁用" disabled>
+                                    <i class="bi bi-pause"></i>
+                                </button>
+                                <button class="btn btn-outline-info" title="立即运行" disabled>
+                                    <i class="bi bi-play-circle"></i>
+                                </button>
+                            `}
                             <button class="btn btn-outline-primary" onclick="editBackupTask(${task.task_id}, ${task.from_scheduler || false})" title="编辑">
                                 <i class="bi bi-pencil"></i>
                             </button>
@@ -409,6 +430,73 @@ function downloadBackup(taskId) {
 function retryTask(taskId) {
     // TODO: 实现重试任务
     console.log('重试任务:', taskId);
+}
+
+// 禁用备份任务（计划任务）
+async function disableBackupTask(taskId) {
+    if (!confirm('确定要禁用此计划任务吗？')) {
+        return;
+    }
+    try {
+        const response = await fetch(`/api/scheduler/tasks/${taskId}/disable`, {
+            method: 'POST'
+        });
+        const result = await response.json();
+        if (result.success) {
+            alert('任务已禁用');
+            loadAllTasks();
+        } else {
+            alert('禁用失败: ' + (result.message || '未知错误'));
+        }
+    } catch (error) {
+        console.error('禁用任务失败:', error);
+        alert('禁用失败: ' + error.message);
+    }
+}
+
+// 启用备份任务（计划任务）
+async function enableBackupTask(taskId) {
+    if (!confirm('确定要启用此计划任务吗？')) {
+        return;
+    }
+    try {
+        const response = await fetch(`/api/scheduler/tasks/${taskId}/enable`, {
+            method: 'POST'
+        });
+        const result = await response.json();
+        if (result.success) {
+            alert('任务已启用');
+            loadAllTasks();
+        } else {
+            alert('启用失败: ' + (result.message || '未知错误'));
+        }
+    } catch (error) {
+        console.error('启用任务失败:', error);
+        alert('启用失败: ' + error.message);
+    }
+}
+
+// 运行备份任务（计划任务）
+async function runBackupTask(taskId) {
+    if (!confirm('确定要立即运行此计划任务吗？')) {
+        return;
+    }
+    try {
+        const response = await fetch(`/api/scheduler/tasks/${taskId}/run`, {
+            method: 'POST'
+        });
+        const result = await response.json();
+        if (result.success) {
+            alert('任务已启动');
+            loadAllTasks();
+            loadRunningTasks();
+        } else {
+            alert('运行失败: ' + (result.message || '未知错误'));
+        }
+    } catch (error) {
+        console.error('运行任务失败:', error);
+        alert('运行失败: ' + error.message);
+    }
 }
 
 // 编辑备份任务
