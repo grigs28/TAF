@@ -199,6 +199,10 @@
     </div>
 </div>
 
+<!-- 引入计划任务模态框 -->
+{% include 'system/_modal_scheduler_task.html' %}
+{% include 'system/_modal_directory_browser.html' %}
+
 <script>
 // 加载备份统计数据
 async function loadBackupStatistics() {
@@ -366,26 +370,8 @@ async function loadAllTasks() {
                     <td>${formatBytes(task.processed_bytes || 0)}</td>
                     <td>
                         <div class="btn-group btn-group-sm">
-                            ${task.from_scheduler ? `
-                                ${task.enabled === false ? `
-                                    <button class="btn btn-outline-success" onclick="enableBackupTask(${task.task_id})" title="启用">
-                                        <i class="bi bi-play"></i>
-                                    </button>
-                                ` : `
-                                    <button class="btn btn-outline-warning" onclick="disableBackupTask(${task.task_id})" title="禁用">
-                                        <i class="bi bi-pause"></i>
-                                    </button>
-                                `}
-                            ` : `
-                                <button class="btn btn-outline-warning" onclick="disableBackupTask(${task.task_id})" title="禁用" disabled>
-                                    <i class="bi bi-pause"></i>
-                                </button>
-                            `}
                             <button class="btn btn-outline-primary" onclick="editBackupTask(${task.task_id}, ${task.from_scheduler || false})" title="编辑">
                                 <i class="bi bi-pencil"></i>
-                            </button>
-                            <button class="btn btn-outline-info" onclick="runBackupTask(${task.task_id})" title="立即运行" ${task.from_scheduler ? '' : 'disabled'}>
-                                <i class="bi bi-play-circle"></i>
                             </button>
                             <button class="btn btn-outline-danger" onclick="deleteBackupTask(${task.task_id}, ${task.from_scheduler || false})" title="删除">
                                 <i class="bi bi-trash"></i>
@@ -425,103 +411,49 @@ function retryTask(taskId) {
     console.log('重试任务:', taskId);
 }
 
-// 禁用备份任务（计划任务）
-async function disableBackupTask(taskId) {
-    if (!confirm('确定要禁用此计划任务吗？')) {
-        return;
-    }
-    try {
-        const response = await fetch(`/api/scheduler/tasks/${taskId}/disable`, {
-            method: 'POST'
-        });
-        const result = await response.json();
-        if (result.success) {
-            alert('任务已禁用');
-            loadAllTasks();
-        } else {
-            alert('禁用失败: ' + (result.message || '未知错误'));
-        }
-    } catch (error) {
-        console.error('禁用任务失败:', error);
-        alert('禁用失败: ' + error.message);
-    }
-}
-
-// 启用备份任务（计划任务）
-async function enableBackupTask(taskId) {
-    if (!confirm('确定要启用此计划任务吗？')) {
-        return;
-    }
-    try {
-        const response = await fetch(`/api/scheduler/tasks/${taskId}/enable`, {
-            method: 'POST'
-        });
-        const result = await response.json();
-        if (result.success) {
-            alert('任务已启用');
-            loadAllTasks();
-        } else {
-            alert('启用失败: ' + (result.message || '未知错误'));
-        }
-    } catch (error) {
-        console.error('启用任务失败:', error);
-        alert('启用失败: ' + error.message);
-    }
-}
-
 // 编辑备份任务
-function editBackupTask(taskId, isScheduler) {
-    if (isScheduler) {
-        // 跳转到计划任务页面并打开编辑模态框
-        window.location.href = `/system#scheduler`;
-        setTimeout(() => {
-            if (window.SchedulerManager) {
-                window.SchedulerManager.editTask(taskId);
-            } else {
-                alert('请先加载计划任务页面');
-            }
-        }, 500);
-    } else {
-        // 编辑备份任务模板
-        // 先获取任务详情
-        fetch(`/api/backup/tasks/${taskId}`)
-            .then(response => response.json())
-            .then(task => {
-                // TODO: 打开编辑模态框，填充表单
-                // 这里可以创建一个编辑模态框，类似于计划任务的编辑
-                alert('编辑备份任务模板功能：\n' + 
-                      '任务名称: ' + task.task_name + '\n' +
-                      '任务类型: ' + task.task_type + '\n' +
-                      '源路径: ' + (task.source_paths ? task.source_paths.join(', ') : '无') + '\n' +
-                      '编辑模态框功能待实现');
-            })
-            .catch(error => {
-                console.error('获取任务详情失败:', error);
-                alert('获取任务详情失败: ' + error.message);
-            });
-    }
-}
-
-// 运行备份任务（计划任务）
-async function runBackupTask(taskId) {
-    if (!confirm('确定要立即运行此计划任务吗？')) {
-        return;
-    }
-    try {
-        const response = await fetch(`/api/scheduler/tasks/${taskId}/run`, {
-            method: 'POST'
-        });
-        const result = await response.json();
-        if (result.success) {
-            alert('任务已启动');
-            loadAllTasks();
-            loadRunningTasks();
-        } else {
-            alert('运行失败: ' + (result.message || '未知错误'));
+async function editBackupTask(taskId, isScheduler) {
+    // 确保 SchedulerManager 已加载
+    if (!window.SchedulerManager) {
+        // 动态加载 SchedulerManager
+        try {
+            const module = await import('/static/js/modules/system/scheduler.js');
+            window.SchedulerManager = module.SchedulerManager;
+        } catch (error) {
+            console.error('加载 SchedulerManager 失败:', error);
+            alert('无法加载计划任务管理器，请刷新页面重试');
+            return;
         }
-    } catch (error) {
-        console.error('运行任务失败:', error);
-        alert('运行失败: ' + error.message);
+    }
+    
+    if (isScheduler) {
+        // 直接调用计划任务的编辑功能
+        window.SchedulerManager.editTask(taskId);
+    } else {
+        // 备份任务模板：需要先查询对应的计划任务ID
+        // 备份任务模板可能关联到计划任务，或者需要转换为计划任务格式
+        // 这里先尝试通过任务名称查找对应的计划任务
+        try {
+            const response = await fetch(`/api/backup/tasks/${taskId}`);
+            const task = await response.json();
+            
+            // 尝试通过任务名称查找计划任务
+            const schedResponse = await fetch(`/api/scheduler/tasks`);
+            const schedTasks = await schedResponse.json();
+            const matchingTask = schedTasks.find(t => t.task_name === task.task_name);
+            
+            if (matchingTask) {
+                // 找到对应的计划任务，直接编辑
+                window.SchedulerManager.editTask(matchingTask.id);
+            } else {
+                // 没有对应的计划任务，提示用户
+                alert('此备份任务模板没有对应的计划任务。\n' +
+                      '请先在计划任务模块中创建对应的计划任务。');
+            }
+        } catch (error) {
+            console.error('编辑备份任务失败:', error);
+            alert('编辑失败: ' + error.message);
+        }
     }
 }
 
