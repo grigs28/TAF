@@ -240,6 +240,7 @@ async def create_backup_task(
 async def get_backup_tasks(
     status: Optional[str] = None,
     task_type: Optional[str] = None,
+    q: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
     http_request: Request = None
@@ -260,24 +261,27 @@ async def get_backup_tasks(
                 params = []
                 param_index = 1
                 
-                # 只查询非模板任务（执行记录）
-                where_clauses.append("is_template = false")
-                
-                if status:
+                # 默认返回所有记录（模板+执行记录）；当 status/task_type 为 'all' 或空时不加过滤
+                if status and status.lower() != 'all':
                     # 以文本方式匹配，避免依赖枚举类型存在
                     where_clauses.append(f"LOWER(status::text) = LOWER(${param_index})")
                     params.append(status)
                     param_index += 1
                 
-                if task_type:
+                if task_type and task_type.lower() != 'all':
                     # 以文本方式匹配，避免依赖枚举类型存在
                     where_clauses.append(f"LOWER(task_type::text) = LOWER(${param_index})")
                     params.append(task_type)
                     param_index += 1
+
+                if q and q.strip():
+                    where_clauses.append(f"task_name ILIKE ${param_index}")
+                    params.append(f"%{q.strip()}%")
+                    param_index += 1
                 
                 where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
                 
-                # 构建查询
+                # 构建查询（包含模板与执行记录）
                 sql = f"""
                     SELECT id, task_name, task_type, status, progress_percent, total_files, 
                            processed_files, total_bytes, processed_bytes, created_at, started_at, 
@@ -335,21 +339,24 @@ async def get_backup_tasks(
             
             async with db_manager.AsyncSessionLocal() as session:
                 # 构建查询
-                stmt = select(BackupTask).where(BackupTask.is_template == False)
+                stmt = select(BackupTask)
                 
-                if status:
+                if status and status.lower() != 'all':
                     try:
                         status_enum = BackupTaskStatus(status)
                         stmt = stmt.where(BackupTask.status == status_enum)
                     except ValueError:
                         pass
                 
-                if task_type:
+                if task_type and task_type.lower() != 'all':
                     try:
                         task_type_enum = BackupTaskType(task_type)
                         stmt = stmt.where(BackupTask.task_type == task_type_enum)
                     except ValueError:
                         pass
+                if q and q.strip():
+                    from sqlalchemy import or_
+                    stmt = stmt.where(BackupTask.task_name.ilike(f"%{q.strip()}%"))
                 
                 # 按创建时间倒序排列
                 stmt = stmt.order_by(desc(BackupTask.created_at))
@@ -671,14 +678,13 @@ async def get_backup_statistics(http_request: Request):
             # 使用原生SQL查询
             conn = await get_opengauss_connection()
             try:
-                # 只查询非模板任务（执行记录）
-                # 总任务数
+                # 总任务数（包含模板与执行记录）
                 total_row = await conn.fetchrow(
-                    "SELECT COUNT(*) as total FROM backup_tasks WHERE is_template = false"
+                    "SELECT COUNT(*) as total FROM backup_tasks"
                 )
                 total_tasks = total_row["total"] if total_row else 0
                 
-                # 按状态统计
+                # 按状态统计（执行记录与模板均统计各自status）
                 completed_row = await conn.fetchrow(
                     "SELECT COUNT(*) as total FROM backup_tasks WHERE is_template = false AND LOWER(status::text)=LOWER($1)",
                     BackupTaskStatus.COMPLETED.value
@@ -698,7 +704,7 @@ async def get_backup_statistics(http_request: Request):
                 running_tasks = running_row["total"] if running_row else 0
                 
                 pending_row = await conn.fetchrow(
-                    "SELECT COUNT(*) as total FROM backup_tasks WHERE is_template = false AND LOWER(status::text)=LOWER($1)",
+                    "SELECT COUNT(*) as total FROM backup_tasks WHERE LOWER(status::text)=LOWER($1)",
                     BackupTaskStatus.PENDING.value
                 )
                 pending_tasks = pending_row["total"] if pending_row else 0
