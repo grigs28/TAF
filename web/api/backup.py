@@ -389,8 +389,18 @@ async def get_backup_tasks(
                             "tape_device": tdev,
                             "source_paths": None
                         })
-                # 合并后排序与分页
-                tasks.sort(key=lambda x: x.get('created_at') or datetime.min, reverse=True)
+                # 合并后排序与分页（统一为时间戳，避免aware/naive比较异常）
+                def _ts(val):
+                    try:
+                        if not val:
+                            return 0.0
+                        if isinstance(val, (int, float)):
+                            return float(val)
+                        # datetime
+                        return val.timestamp()
+                    except Exception:
+                        return 0.0
+                tasks.sort(key=lambda x: _ts(x.get('created_at')), reverse=True)
                 return tasks[offset:offset+limit]
             finally:
                 await conn.close()
