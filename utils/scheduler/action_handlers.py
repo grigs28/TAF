@@ -6,7 +6,7 @@ Task Action Handlers
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from models.scheduled_task import ScheduledTask, TaskActionType
@@ -44,6 +44,74 @@ class BackupActionHandler(ActionHandler):
             raise ValueError("备份引擎未初始化")
         
         try:
+            # 执行前判定：周期内是否已成功执行、是否正在执行、磁带标签是否当月
+            now = datetime.now(timezone.utc)
+            if scheduled_task:
+                # 1) 周期检查（按任务的 schedule_type 推断周期：日/周/月/年）
+                cycle_ok = True
+                last_success = scheduled_task.last_success_time
+                schedule_type = getattr(scheduled_task, 'schedule_type', None)
+                if last_success:
+                    if schedule_type and getattr(schedule_type, 'value', '').lower() in ('daily', 'day'):
+                        cycle_ok = (last_success.date() != now.date())
+                    elif schedule_type and getattr(schedule_type, 'value', '').lower() in ('weekly', 'week'):
+                        cycle_ok = (last_success.isocalendar().week != now.isocalendar().week or last_success.year != now.year)
+                    elif schedule_type and getattr(schedule_type, 'value', '').lower() in ('monthly', 'month'):
+                        cycle_ok = (last_success.year != now.year or last_success.month != now.month)
+                    elif schedule_type and getattr(schedule_type, 'value', '').lower() in ('yearly', 'year'):
+                        cycle_ok = (last_success.year != now.year)
+                    else:
+                        # 未明确类型，默认按日
+                        cycle_ok = (last_success.date() != now.date())
+                # 如果周期内已执行过，则跳过
+                if not cycle_ok:
+                    logger.info("当前周期内已成功执行，跳过本次备份")
+                    return {"status": "skipped", "message": "当前周期已执行"}
+
+                # 2) 运行中检查（根据任务状态）
+                if getattr(scheduled_task, 'status', None) and str(scheduled_task.status).upper().endswith('RUNNING'):
+                    logger.info("任务仍在执行中，跳过本次备份")
+                    return {"status": "skipped", "message": "任务正在执行中"}
+
+                # 3) 磁带标签是否当月（从 LTFS 标签或磁带头读取）
+                # 仅当备份目标为磁带时要求当月
+                target_is_tape = False
+                try:
+                    # 从 scheduled_task.action_config 读取备份目标
+                    action_cfg = scheduled_task.action_config or {}
+                    target_is_tape = (action_cfg.get('backup_target') == 'tape') or ('tape_device' in action_cfg)
+                except Exception:
+                    pass
+                if target_is_tape and self.system_instance and getattr(self.system_instance, 'tape_manager', None):
+                    tape_ops = getattr(self.system_instance.tape_manager, 'tape_operations', None)
+                    if tape_ops and hasattr(tape_ops, '_read_tape_label'):
+                        metadata = await tape_ops._read_tape_label()
+                        # 无标签时允许继续，后续会自动提示换盘逻辑在业务层处理
+                        if metadata and (metadata.get('created_date') or metadata.get('tape_id')):
+                            try:
+                                # 优先使用 created_date
+                                created_dt = None
+                                if metadata.get('created_date'):
+                                    try:
+                                        created_dt = datetime.fromisoformat(str(metadata['created_date']).replace('Z','+00:00'))
+                                    except Exception:
+                                        created_dt = None
+                                if created_dt:
+                                    if not (created_dt.year == now.year and created_dt.month == now.month):
+                                        raise ValueError("当前磁带非当月，请更换磁带后重试")
+                                else:
+                                    # 备用：从 tape_id 推断（如 TAPyymmddxxx）
+                                    tape_id = str(metadata.get('tape_id', ''))
+                                    if len(tape_id) >= 7 and tape_id.upper().startswith('TAP'):
+                                        yy = int(tape_id[3:5])
+                                        mm = int(tape_id[5:7])
+                                        year = 2000 + yy
+                                        if not (year == now.year and mm == now.month):
+                                            raise ValueError("当前磁带标签非当月，请更换磁带后重试")
+                            except ValueError as ve:
+                                # 记录并抛出以触发通知与日志
+                                logger.warning(str(ve))
+                                raise
             # 如果有备份任务模板ID，从模板加载配置
             template_task = None
             if backup_task_id:
