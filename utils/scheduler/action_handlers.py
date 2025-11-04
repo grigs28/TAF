@@ -14,6 +14,8 @@ from models.backup import BackupTask, BackupTaskType, BackupTaskStatus
 from config.database import db_manager
 from sqlalchemy import select, and_
 from utils.log_utils import log_system, LogLevel, LogCategory, log_operation, OperationType
+from .db_utils import is_opengauss, get_opengauss_connection
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -67,11 +69,55 @@ class BackupActionHandler(ActionHandler):
                 # 如果周期内已执行过，则跳过
                 if not cycle_ok:
                     logger.info("当前周期内已成功执行，跳过本次备份")
+                    try:
+                        await log_operation(
+                            operation_type=OperationType.SCHEDULER_RUN,
+                            resource_type="scheduler",
+                            resource_id=str(getattr(scheduled_task, 'id', '')),
+                            resource_name=getattr(scheduled_task, 'task_name', ''),
+                            operation_name="执行计划任务",
+                            operation_description="跳过：当前周期已执行",
+                            category="scheduler",
+                            success=True,
+                            result_message="跳过执行（当前周期已执行）"
+                        )
+                        await log_system(
+                            level=LogLevel.INFO,
+                            category=LogCategory.SCHEDULER,
+                            message="计划任务跳过：当前周期已执行",
+                            module="utils.scheduler.action_handlers",
+                            function="BackupActionHandler.execute",
+                            task_id=getattr(scheduled_task, 'id', None)
+                        )
+                    except Exception:
+                        pass
                     return {"status": "skipped", "message": "当前周期已执行"}
 
                 # 2) 运行中检查（根据任务状态）
                 if getattr(scheduled_task, 'status', None) and str(scheduled_task.status).upper().endswith('RUNNING'):
                     logger.info("任务仍在执行中，跳过本次备份")
+                    try:
+                        await log_operation(
+                            operation_type=OperationType.SCHEDULER_RUN,
+                            resource_type="scheduler",
+                            resource_id=str(getattr(scheduled_task, 'id', '')),
+                            resource_name=getattr(scheduled_task, 'task_name', ''),
+                            operation_name="执行计划任务",
+                            operation_description="跳过：任务正在执行中",
+                            category="scheduler",
+                            success=True,
+                            result_message="跳过执行（任务正在执行中）"
+                        )
+                        await log_system(
+                            level=LogLevel.INFO,
+                            category=LogCategory.SCHEDULER,
+                            message="计划任务跳过：任务正在执行中",
+                            module="utils.scheduler.action_handlers",
+                            function="BackupActionHandler.execute",
+                            task_id=getattr(scheduled_task, 'id', None)
+                        )
+                    except Exception:
+                        pass
                     return {"status": "skipped", "message": "任务正在执行中"}
 
                 # 3) 磁带标签是否当月（从 LTFS 标签或磁带头读取）
@@ -120,22 +166,81 @@ class BackupActionHandler(ActionHandler):
                                         await notifier.send_tape_notification(tape_id=tape_id, action='change_required')
                                 except Exception:
                                     pass
+                                # 记录日志
+                                try:
+                                    await log_operation(
+                                        operation_type=OperationType.BACKUP_START,
+                                        resource_type="backup",
+                                        resource_name=(getattr(scheduled_task, 'task_name', '') or '计划任务'),
+                                        operation_name="更换磁带提醒",
+                                        operation_description="当前磁带标签非当月，提醒更换磁带",
+                                        category="backup",
+                                        success=False,
+                                        error_message=str(ve)
+                                    )
+                                    await log_system(
+                                        level=LogLevel.WARNING,
+                                        category=LogCategory.BACKUP,
+                                        message="当前磁带标签非当月，提醒更换磁带",
+                                        module="utils.scheduler.action_handlers",
+                                        function="BackupActionHandler.execute",
+                                    )
+                                except Exception:
+                                    pass
                                 raise
             # 如果有备份任务模板ID，从模板加载配置
             template_task = None
             if backup_task_id:
-                async with db_manager.AsyncSessionLocal() as session:
-                    stmt = select(BackupTask).where(
-                        and_(
-                            BackupTask.id == backup_task_id,
-                            BackupTask.is_template == True
+                if is_opengauss():
+                    # openGauss 原生SQL查询
+                    conn = await get_opengauss_connection()
+                    try:
+                        row = await conn.fetchrow(
+                            """
+                            SELECT id, task_name, task_type, source_paths, exclude_patterns,
+                                   compression_enabled, encryption_enabled, retention_days,
+                                   description, tape_device, status, is_template, template_id,
+                                   created_at, updated_at
+                            FROM backup_tasks
+                            WHERE id = $1 AND is_template = TRUE
+                            """,
+                            backup_task_id
                         )
-                    )
-                    result = await session.execute(stmt)
-                    template_task = result.scalar_one_or_none()
-                    
-                    if not template_task:
-                        raise ValueError(f"备份任务模板不存在: {backup_task_id}")
+                        if not row:
+                            raise ValueError(f"备份任务模板不存在: {backup_task_id}")
+                        
+                        # 转换为 BackupTask 对象（简化版，只包含需要的字段）
+                        template_task = type('BackupTask', (), {
+                            'id': row['id'],
+                            'task_name': row['task_name'],
+                            'task_type': BackupTaskType(row['task_type']) if row['task_type'] else None,
+                            'source_paths': row['source_paths'] if isinstance(row['source_paths'], list) else json.loads(row['source_paths']) if row['source_paths'] else [],
+                            'exclude_patterns': row['exclude_patterns'] if isinstance(row['exclude_patterns'], list) else json.loads(row['exclude_patterns']) if row['exclude_patterns'] else [],
+                            'compression_enabled': row['compression_enabled'],
+                            'encryption_enabled': row['encryption_enabled'],
+                            'retention_days': row['retention_days'],
+                            'description': row['description'],
+                            'tape_device': row['tape_device'],
+                            'status': BackupTaskStatus(row['status']) if row['status'] else None,
+                            'is_template': row['is_template'],
+                            'template_id': row['template_id'],
+                        })()
+                    finally:
+                        await conn.close()
+                else:
+                    # 使用SQLAlchemy查询
+                    async with db_manager.AsyncSessionLocal() as session:
+                        stmt = select(BackupTask).where(
+                            and_(
+                                BackupTask.id == backup_task_id,
+                                BackupTask.is_template == True
+                            )
+                        )
+                        result = await session.execute(stmt)
+                        template_task = result.scalar_one_or_none()
+                        
+                        if not template_task:
+                            raise ValueError(f"备份任务模板不存在: {backup_task_id}")
             
             # 执行前检查：判断同一个模板的任务是否还在执行中
             if template_task or scheduled_task:
@@ -145,34 +250,52 @@ class BackupActionHandler(ActionHandler):
                 
                 if template_id:
                     # 检查是否有相同模板的任务正在执行
-                    async with db_manager.AsyncSessionLocal() as session:
-                        stmt = select(BackupTask).where(
-                            and_(
-                                BackupTask.template_id == template_id,
-                                BackupTask.status == BackupTaskStatus.RUNNING
+                    if is_opengauss():
+                        # openGauss 原生SQL查询
+                        conn = await get_opengauss_connection()
+                        try:
+                            running_task_row = await conn.fetchrow(
+                                """
+                                SELECT id FROM backup_tasks
+                                WHERE template_id = $1 AND status = $2
+                                LIMIT 1
+                                """,
+                                template_id, 'running'
                             )
-                        )
-                        result = await session.execute(stmt)
-                        running_task = result.scalar_one_or_none()
-                        
-                        if running_task:
-                            # 检查任务是否在同一时间执行（同一天同一个调度任务）
-                            now = datetime.now()
-                            if scheduled_task and scheduled_task.last_run_time:
-                                last_run_date = scheduled_task.last_run_time.date()
-                                today = now.date()
-                                
-                                # 如果上次执行在今天，且任务还在运行，跳过本次执行
-                                if last_run_date == today:
-                                    logger.warning(
-                                        f"跳过执行：模板 {template_id} 的任务仍在执行中 "
-                                        f"(运行中的任务ID: {running_task.id})"
-                                    )
-                                    return {
-                                        "status": "skipped",
-                                        "message": "相同模板的任务仍在执行中，已跳过本次执行",
-                                        "running_task_id": running_task.id
-                                    }
+                            running_task = running_task_row if running_task_row else None
+                        finally:
+                            await conn.close()
+                    else:
+                        # 使用SQLAlchemy查询
+                        async with db_manager.AsyncSessionLocal() as session:
+                            stmt = select(BackupTask).where(
+                                and_(
+                                    BackupTask.template_id == template_id,
+                                    BackupTask.status == BackupTaskStatus.RUNNING
+                                )
+                            )
+                            result = await session.execute(stmt)
+                            running_task = result.scalar_one_or_none()
+                    
+                    if running_task:
+                        # 检查任务是否在同一时间执行（同一天同一个调度任务）
+                        now = datetime.now()
+                        if scheduled_task and scheduled_task.last_run_time:
+                            last_run_date = scheduled_task.last_run_time.date()
+                            today = now.date()
+                            
+                            # 如果上次执行在今天，且任务还在运行，跳过本次执行
+                            if last_run_date == today:
+                                running_task_id = running_task.get('id') if isinstance(running_task, dict) else (running_task.id if hasattr(running_task, 'id') else None)
+                                logger.warning(
+                                    f"跳过执行：模板 {template_id} 的任务仍在执行中 "
+                                    f"(运行中的任务ID: {running_task_id})"
+                                )
+                                return {
+                                    "status": "skipped",
+                                    "message": "相同模板的任务仍在执行中，已跳过本次执行",
+                                    "running_task_id": running_task_id
+                                }
                             
                             # 如果任务运行超过一天，记录警告但继续执行
                             if running_task.started_at:
@@ -244,26 +367,80 @@ class BackupActionHandler(ActionHandler):
                 pass
 
             # 创建备份任务执行记录（不是模板）
-            async with db_manager.AsyncSessionLocal() as session:
-                backup_task = BackupTask(
-                    task_name=task_name,
-                    task_type=task_type,
-                    source_paths=source_paths,
-                    exclude_patterns=exclude_patterns,
-                    compression_enabled=compression_enabled,
-                    encryption_enabled=encryption_enabled,
-                    retention_days=retention_days,
-                    description=description,
-                    tape_device=tape_device,  # 保存磁带设备配置（执行时会选择）
-                    status=BackupTaskStatus.PENDING,
-                    is_template=False,  # 标记为执行记录
-                    template_id=template_task.id if template_task else None,  # 关联模板
-                    created_by='scheduled_task'
-                )
-                
-                session.add(backup_task)
-                await session.commit()
-                await session.refresh(backup_task)
+            if is_opengauss():
+                # openGauss 原生SQL插入
+                conn = await get_opengauss_connection()
+                try:
+                    backup_task_id = await conn.fetchval(
+                        """
+                        INSERT INTO backup_tasks (
+                            task_name, task_type, source_paths, exclude_patterns,
+                            compression_enabled, encryption_enabled, retention_days,
+                            description, tape_device, status, is_template, template_id,
+                            created_by, created_at, updated_at
+                        ) VALUES (
+                            $1, $2::backuptasktype, $3, $4,
+                            $5, $6, $7,
+                            $8, $9, $10::backuptaskstatus, FALSE, $11,
+                            $12, $13, $13
+                        ) RETURNING id
+                        """,
+                        task_name,
+                        task_type.value if hasattr(task_type, 'value') else str(task_type),
+                        json.dumps(source_paths) if source_paths else None,
+                        json.dumps(exclude_patterns) if exclude_patterns else None,
+                        compression_enabled,
+                        encryption_enabled,
+                        retention_days,
+                        description,
+                        tape_device,
+                        'pending',
+                        template_task.id if template_task else None,
+                        'scheduled_task',
+                        datetime.now()
+                    )
+                    
+                    # 创建一个简化的 BackupTask 对象用于后续使用
+                    backup_task = type('BackupTask', (), {
+                        'id': backup_task_id,
+                        'task_name': task_name,
+                        'task_type': task_type,
+                        'source_paths': source_paths,
+                        'exclude_patterns': exclude_patterns,
+                        'compression_enabled': compression_enabled,
+                        'encryption_enabled': encryption_enabled,
+                        'retention_days': retention_days,
+                        'description': description,
+                        'tape_device': tape_device,
+                        'status': BackupTaskStatus.PENDING,
+                        'is_template': False,
+                        'template_id': template_task.id if template_task else None,
+                        'created_by': 'scheduled_task',
+                    })()
+                finally:
+                    await conn.close()
+            else:
+                # 使用SQLAlchemy插入
+                async with db_manager.AsyncSessionLocal() as session:
+                    backup_task = BackupTask(
+                        task_name=task_name,
+                        task_type=task_type,
+                        source_paths=source_paths,
+                        exclude_patterns=exclude_patterns,
+                        compression_enabled=compression_enabled,
+                        encryption_enabled=encryption_enabled,
+                        retention_days=retention_days,
+                        description=description,
+                        tape_device=tape_device,  # 保存磁带设备配置（执行时会选择）
+                        status=BackupTaskStatus.PENDING,
+                        is_template=False,  # 标记为执行记录
+                        template_id=template_task.id if template_task else None,  # 关联模板
+                        created_by='scheduled_task'
+                    )
+                    
+                    session.add(backup_task)
+                    await session.commit()
+                    await session.refresh(backup_task)
             
             # 完整备份前：擦除但保留标签文件
             if (template_task and template_task.task_type == BackupTaskType.FULL) or (not template_task and task_type == BackupTaskType.FULL):
