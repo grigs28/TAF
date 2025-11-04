@@ -495,7 +495,26 @@ async function deleteBackupTask(taskId, isScheduler) {
 }
 
 // 页面加载时加载数据
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', async function() {
+    // 确保 SchedulerManager 已加载
+    if (!window.SchedulerManager) {
+        try {
+            const module = await import('/static/js/modules/system/scheduler.js');
+            window.SchedulerManager = module.SchedulerManager;
+            // 初始化 SchedulerManager（但不加载任务列表）
+            if (!window.SchedulerManager.initialized) {
+                await window.SchedulerManager.loadTapeDevices();
+                window.SchedulerManager.setupEventListeners();
+                window.SchedulerManager.setupActionTypeChange();
+                window.SchedulerManager.setupDatePickers();
+                window.SchedulerManager.setupDirectoryBrowsers();
+                window.SchedulerManager.initialized = true;
+            }
+        } catch (error) {
+            console.error('加载 SchedulerManager 失败:', error);
+        }
+    }
+    
     loadBackupStatistics();
     loadRunningTasks();
     loadAllTasks();
