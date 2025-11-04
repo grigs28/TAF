@@ -215,7 +215,8 @@ async def release_task_lock(task_id: int, execution_id: str) -> None:
             try:
                 await conn.execute(
                     """
-                    DELETE FROM task_locks
+                    UPDATE task_locks
+                    SET is_active = FALSE
                     WHERE task_id = $1 AND execution_id = $2
                     """,
                     task_id, execution_id
