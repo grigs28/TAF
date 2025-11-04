@@ -313,10 +313,10 @@ class BackupActionHandler(ActionHandler):
                                 if hasattr(running_task, 'started_at') and running_task.started_at:
                                     running_duration = (now - running_task.started_at).total_seconds()
                                     if running_duration > 86400:  # 超过24小时
-                                    logger.warning(
-                                        f"警告：模板 {template_id} 的任务已运行超过24小时 "
-                                        f"(任务ID: {running_task.id})"
-                                    )
+                                        logger.warning(
+                                            f"警告：模板 {template_id} 的任务已运行超过24小时 "
+                                            f"(任务ID: {running_task.id})"
+                                        )
             
             # 从模板或配置中获取备份参数（若缺省则从系统实例配置补齐）
             if template_task:
