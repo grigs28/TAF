@@ -187,6 +187,7 @@ class DatabaseManager:
                 # 先创建枚举类型（明确定义所有枚举类型）
                 from models.scheduled_task import ScheduleType, ScheduledTaskStatus, TaskActionType
                 from models.system_log import LogLevel, LogCategory, OperationType, ErrorLevel
+                from models.backup import BackupTaskType, BackupTaskStatus
                 
                 # 定义所有需要的枚举类型（确保名称和值正确）
                 enum_definitions = {
@@ -197,6 +198,8 @@ class DatabaseManager:
                     'logcategory': [e.value for e in LogCategory],  # ['system', 'backup', 'recovery', 'tape', 'user', 'security', 'performance', 'api', 'web', 'database']
                     'operationtype': [e.value for e in OperationType],  # 所有操作类型
                     'errorlevel': [e.value for e in ErrorLevel],  # ['low', 'medium', 'high', 'critical']
+                    'backuptasktype': [e.value for e in BackupTaskType],  # ['full', 'incremental', 'differential', 'monthly_full']
+                    'backuptaskstatus': [e.value for e in BackupTaskStatus],  # ['pending', 'running', 'completed', 'failed', 'cancelled', 'paused']
                 }
                 
                 for enum_name, enum_values in enum_definitions.items():
