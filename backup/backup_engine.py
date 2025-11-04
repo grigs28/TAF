@@ -246,20 +246,60 @@ class BackupEngine:
     async def _scan_source_files(self, source_paths: List[str], exclude_patterns: List[str]) -> List[Dict]:
         """扫描源文件"""
         file_list = []
+        
+        if not source_paths:
+            logger.warning("源路径列表为空")
+            return file_list
 
-        for source_path in source_paths:
-            source_path = Path(source_path)
-            if source_path.is_file():
-                file_info = await self._get_file_info(source_path)
-                if file_info and not self._should_exclude_file(file_info['path'], exclude_patterns):
-                    file_list.append(file_info)
-            elif source_path.is_dir():
-                for file_path in source_path.rglob('*'):
-                    if file_path.is_file():
-                        file_info = await self._get_file_info(file_path)
-                        if file_info and not self._should_exclude_file(file_info['path'], exclude_patterns):
-                            file_list.append(file_info)
+        for idx, source_path_str in enumerate(source_paths):
+            logger.info(f"扫描源路径 {idx + 1}/{len(source_paths)}: {source_path_str}")
+            source_path = Path(source_path_str)
+            
+            # 检查路径是否存在
+            if not source_path.exists():
+                logger.warning(f"源路径不存在，跳过: {source_path_str}")
+                continue
+            
+            try:
+                if source_path.is_file():
+                    logger.debug(f"扫描文件: {source_path_str}")
+                    file_info = await self._get_file_info(source_path)
+                    if file_info and not self._should_exclude_file(file_info['path'], exclude_patterns):
+                        file_list.append(file_info)
+                        logger.debug(f"已添加文件: {file_info['path']}")
+                elif source_path.is_dir():
+                    logger.info(f"扫描目录: {source_path_str}")
+                    scanned_count = 0
+                    excluded_count = 0
+                    
+                    # 使用 rglob 递归扫描，但需要处理可能的异常
+                    try:
+                        for file_path in source_path.rglob('*'):
+                            if file_path.is_file():
+                                scanned_count += 1
+                                # 每扫描100个文件输出一次进度
+                                if scanned_count % 100 == 0:
+                                    logger.info(f"已扫描 {scanned_count} 个文件，找到 {len(file_list)} 个有效文件...")
+                                
+                                file_info = await self._get_file_info(file_path)
+                                if file_info:
+                                    if not self._should_exclude_file(file_info['path'], exclude_patterns):
+                                        file_list.append(file_info)
+                                    else:
+                                        excluded_count += 1
+                    except Exception as e:
+                        logger.error(f"扫描目录时发生错误 {source_path_str}: {str(e)}")
+                        # 继续扫描其他路径
+                        continue
+                    
+                    logger.info(f"目录扫描完成: {source_path_str}, 扫描 {scanned_count} 个文件, 有效 {len(file_list)} 个, 排除 {excluded_count} 个")
+                else:
+                    logger.warning(f"源路径既不是文件也不是目录: {source_path_str}")
+            except Exception as e:
+                logger.error(f"处理源路径失败 {source_path_str}: {str(e)}")
+                continue
 
+        logger.info(f"扫描完成，共找到 {len(file_list)} 个文件")
         return file_list
 
     async def _get_file_info(self, file_path: Path) -> Optional[Dict]:
