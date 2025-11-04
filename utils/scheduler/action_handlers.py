@@ -13,6 +13,7 @@ from models.scheduled_task import ScheduledTask, TaskActionType
 from models.backup import BackupTask, BackupTaskType, BackupTaskStatus
 from config.database import db_manager
 from sqlalchemy import select, and_
+from utils.log_utils import log_system, LogLevel, LogCategory, log_operation, OperationType
 
 logger = logging.getLogger(__name__)
 
@@ -267,17 +268,58 @@ class BackupActionHandler(ActionHandler):
             # 完整备份前：擦除但保留标签文件
             if (template_task and template_task.task_type == BackupTaskType.FULL) or (not template_task and task_type == BackupTaskType.FULL):
                 try:
+                    await log_system(
+                        level=LogLevel.INFO,
+                        category=LogCategory.BACKUP,
+                        message="开始完整备份前擦除（保留标签）",
+                        module="utils.scheduler.action_handlers",
+                        function="BackupActionHandler.execute",
+                    )
                     if self.system_instance and getattr(self.system_instance, 'tape_manager', None):
                         tape_ops = getattr(self.system_instance.tape_manager, 'tape_operations', None)
                         if tape_ops and hasattr(tape_ops, 'erase_preserve_label'):
                             ok = await tape_ops.erase_preserve_label()
                             if not ok:
                                 logger.warning("完整备份前擦除失败，将尝试继续执行备份")
+                                await log_system(
+                                    level=LogLevel.WARNING,
+                                    category=LogCategory.BACKUP,
+                                    message="完整备份前擦除失败，继续执行",
+                                    module="utils.scheduler.action_handlers",
+                                    function="BackupActionHandler.execute",
+                                )
                 except Exception as _:
                     logger.warning("完整备份前擦除异常，将尝试继续执行备份")
+                    await log_system(
+                        level=LogLevel.WARNING,
+                        category=LogCategory.BACKUP,
+                        message="完整备份前擦除异常，继续执行",
+                        module="utils.scheduler.action_handlers",
+                        function="BackupActionHandler.execute",
+                    )
 
             # 执行备份任务
+            await log_system(
+                level=LogLevel.INFO,
+                category=LogCategory.BACKUP,
+                message="开始执行备份任务",
+                module="utils.scheduler.action_handlers",
+                function="BackupActionHandler.execute",
+                details={"backup_task_id": getattr(backup_task, 'id', None), "task_name": task_name}
+            )
             success = await self.system_instance.backup_engine.execute_backup_task(backup_task)
+            await log_system(
+                level=LogLevel.INFO if success else LogLevel.ERROR,
+                category=LogCategory.BACKUP,
+                message="备份任务执行结束" + ("(成功)" if success else "(失败)"),
+                module="utils.scheduler.action_handlers",
+                function="BackupActionHandler.execute",
+                details={
+                    "backup_task_id": getattr(backup_task, 'id', None),
+                    "total_bytes": getattr(backup_task, 'total_bytes', None),
+                    "total_files": getattr(backup_task, 'total_files', None),
+                }
+            )
             
             if success:
                 # 成功通知
