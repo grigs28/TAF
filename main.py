@@ -153,6 +153,15 @@ class TapeBackupSystem:
             logger.info(f"Web服务启动在端口 {self.settings.WEB_PORT}")
             logger.info(f"访问地址: http://localhost:{self.settings.WEB_PORT}")
 
+            # 如果提供了关闭事件，创建一个任务来监控它
+            if shutdown_event:
+                async def shutdown_monitor():
+                    await shutdown_event.wait()
+                    logger.info("收到关闭信号，准备关闭服务...")
+                    await self.shutdown()
+                
+                asyncio.create_task(shutdown_monitor())
+
             await serve(self.web_app, config)
 
         except Exception as e:
