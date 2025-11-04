@@ -1,5 +1,17 @@
 <!-- 系统日志 -->
 <div class="tab-pane fade" id="logs" role="tabpanel">
+    <style>
+        /* 日志列表样式：深底白字，左侧宽色条 */
+        #logContainer .log-entry{background:rgba(255,255,255,0.05);color:#e6e8ef;border-radius:6px;overflow:hidden}
+        #logContainer .log-entry .log-bar{width:10px;flex:0 0 10px}
+        #logContainer .log-entry .content{padding:10px 12px}
+        /* 颜色条按级别 */
+        #logContainer .bar-debug{background:#6c757d}
+        #logContainer .bar-info{background:#17a2b8}
+        #logContainer .bar-warning{background:#ffc107}
+        #logContainer .bar-error{background:#dc3545}
+        #logContainer .bar-critical{background:#8b0000}
+    </style>
     <div class="row">
         <div class="col-12">
             <div class="setting-card service-card mb-3">
