@@ -352,7 +352,7 @@ async def get_backup_tasks(
                             sched_params.append(f"%\"task_type\": \"{task_type}\"%")
                     # 未运行：计划任务自然视作未运行
                     sched_sql = f"""
-                        SELECT id, task_name, status, created_at, started_at, completed_at, action_config
+                        SELECT id, task_name, status, created_at, action_config
                         FROM scheduled_tasks
                         WHERE {' AND '.join(sched_where)}
                         ORDER BY created_at DESC
