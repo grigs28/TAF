@@ -264,24 +264,16 @@ async def get_backup_tasks(
                 where_clauses.append("is_template = false")
                 
                 if status:
-                    try:
-                        # 验证状态值
-                        BackupTaskStatus(status)
-                        where_clauses.append(f"status = CAST(${param_index} AS backuptaskstatus)")
-                        params.append(status)
-                        param_index += 1
-                    except ValueError:
-                        pass
+                    # 以文本方式匹配，避免依赖枚举类型存在
+                    where_clauses.append(f"LOWER(status::text) = LOWER($${param_index}$$)")
+                    params.append(status)
+                    param_index += 1
                 
                 if task_type:
-                    try:
-                        # 验证类型值
-                        BackupTaskType(task_type)
-                        where_clauses.append(f"task_type = CAST(${param_index} AS backuptasktype)")
-                        params.append(task_type)
-                        param_index += 1
-                    except ValueError:
-                        pass
+                    # 以文本方式匹配，避免依赖枚举类型存在
+                    where_clauses.append(f"LOWER(task_type::text) = LOWER($${param_index}$$)")
+                    params.append(task_type)
+                    param_index += 1
                 
                 where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
                 
@@ -688,25 +680,25 @@ async def get_backup_statistics(http_request: Request):
                 
                 # 按状态统计
                 completed_row = await conn.fetchrow(
-                    "SELECT COUNT(*) as total FROM backup_tasks WHERE is_template = false AND status = CAST($1 AS backuptaskstatus)",
+                    "SELECT COUNT(*) as total FROM backup_tasks WHERE is_template = false AND LOWER(status::text)=LOWER($1)",
                     BackupTaskStatus.COMPLETED.value
                 )
                 completed_tasks = completed_row["total"] if completed_row else 0
                 
                 failed_row = await conn.fetchrow(
-                    "SELECT COUNT(*) as total FROM backup_tasks WHERE is_template = false AND status = CAST($1 AS backuptaskstatus)",
+                    "SELECT COUNT(*) as total FROM backup_tasks WHERE is_template = false AND LOWER(status::text)=LOWER($1)",
                     BackupTaskStatus.FAILED.value
                 )
                 failed_tasks = failed_row["total"] if failed_row else 0
                 
                 running_row = await conn.fetchrow(
-                    "SELECT COUNT(*) as total FROM backup_tasks WHERE is_template = false AND status = CAST($1 AS backuptaskstatus)",
+                    "SELECT COUNT(*) as total FROM backup_tasks WHERE is_template = false AND LOWER(status::text)=LOWER($1)",
                     BackupTaskStatus.RUNNING.value
                 )
                 running_tasks = running_row["total"] if running_row else 0
                 
                 pending_row = await conn.fetchrow(
-                    "SELECT COUNT(*) as total FROM backup_tasks WHERE is_template = false AND status = CAST($1 AS backuptaskstatus)",
+                    "SELECT COUNT(*) as total FROM backup_tasks WHERE is_template = false AND LOWER(status::text)=LOWER($1)",
                     BackupTaskStatus.PENDING.value
                 )
                 pending_tasks = pending_row["total"] if pending_row else 0
@@ -719,7 +711,7 @@ async def get_backup_statistics(http_request: Request):
                     """
                     SELECT COALESCE(SUM(processed_bytes), 0) as total 
                     FROM backup_tasks 
-                    WHERE is_template = false AND status = CAST($1 AS backuptaskstatus)
+                    WHERE is_template = false AND LOWER(status::text)=LOWER($1)
                     """,
                     BackupTaskStatus.COMPLETED.value
                 )
@@ -731,8 +723,8 @@ async def get_backup_statistics(http_request: Request):
                     """
                     SELECT 
                         COUNT(*) as total,
-                        COUNT(*) FILTER (WHERE status = CAST($1 AS backuptaskstatus)) as completed,
-                        COUNT(*) FILTER (WHERE status = CAST($2 AS backuptaskstatus)) as failed,
+                        COUNT(*) FILTER (WHERE LOWER(status::text)=LOWER($1)) as completed,
+                        COUNT(*) FILTER (WHERE LOWER(status::text)=LOWER($2)) as failed,
                         COALESCE(SUM(processed_bytes), 0) as data
                     FROM backup_tasks
                     WHERE is_template = false AND created_at >= $3
@@ -753,7 +745,7 @@ async def get_backup_statistics(http_request: Request):
                     SELECT AVG(EXTRACT(EPOCH FROM (completed_at - started_at))) as avg_duration
                     FROM backup_tasks
                     WHERE is_template = false 
-                      AND status = CAST($1 AS backuptaskstatus)
+                      AND LOWER(status::text)=LOWER($1)
                       AND completed_at IS NOT NULL 
                       AND started_at IS NOT NULL
                     """,
@@ -769,7 +761,7 @@ async def get_backup_statistics(http_request: Request):
                         COALESCE(SUM(compressed_bytes), 0) as compressed
                     FROM backup_tasks
                     WHERE is_template = false 
-                      AND status = CAST($1 AS backuptaskstatus)
+                      AND LOWER(status::text)=LOWER($1)
                       AND compressed_bytes > 0
                     """,
                     BackupTaskStatus.COMPLETED.value
