@@ -369,18 +369,18 @@ async function loadAllTasks() {
                     <td>${formatDateTime(task.completed_at)}</td>
                     <td>${formatBytes(task.processed_bytes || 0)}</td>
                     <td>
-                        <div class="btn-group btn-group-sm">
+                        <div class="btn-group btn-group-sm" data-task-id="${task.task_id}" data-from-scheduler="${task.from_scheduler || false}" data-enabled="${task.enabled !== false}">
                             ${task.from_scheduler ? `
                                 ${task.enabled === false ? `
-                                    <button class="btn btn-outline-success" onclick="enableBackupTask(${task.task_id})" title="启用">
+                                    <button class="btn btn-outline-success btn-action-enable" title="启用">
                                         <i class="bi bi-play"></i>
                                     </button>
                                 ` : `
-                                    <button class="btn btn-outline-warning" onclick="disableBackupTask(${task.task_id})" title="禁用">
+                                    <button class="btn btn-outline-warning btn-action-disable" title="禁用">
                                         <i class="bi bi-pause"></i>
                                     </button>
                                 `}
-                                <button class="btn btn-outline-info" onclick="runBackupTask(${task.task_id})" title="立即运行">
+                                <button class="btn btn-outline-info btn-action-run" title="立即运行">
                                     <i class="bi bi-play-circle"></i>
                                 </button>
                             ` : `
@@ -391,10 +391,10 @@ async function loadAllTasks() {
                                     <i class="bi bi-play-circle"></i>
                                 </button>
                             `}
-                            <button class="btn btn-outline-primary" onclick="editBackupTask(${task.task_id}, ${task.from_scheduler || false})" title="编辑">
+                            <button class="btn btn-outline-primary btn-action-edit" title="编辑">
                                 <i class="bi bi-pencil"></i>
                             </button>
-                            <button class="btn btn-outline-danger" onclick="deleteBackupTask(${task.task_id}, ${task.from_scheduler || false})" title="删除">
+                            <button class="btn btn-outline-danger btn-action-delete" title="删除">
                                 <i class="bi bi-trash"></i>
                             </button>
                         </div>
@@ -413,6 +413,7 @@ async function loadAllTasks() {
         }
     }
 }
+
 
 // 查看任务详情
 function viewTaskDetails(taskId) {
@@ -687,6 +688,41 @@ document.addEventListener('DOMContentLoaded', async function() {
     }
     if (searchBtn) {
         searchBtn.addEventListener('click', loadAllTasks);
+    }
+    
+    // 绑定操作按钮事件（使用事件委托，只需绑定一次）
+    const tbody = document.getElementById('allTasksTable');
+    if (tbody) {
+        tbody.addEventListener('click', function(e) {
+            const btn = e.target.closest('button');
+            if (!btn) return;
+            
+            const btnGroup = btn.closest('.btn-group');
+            if (!btnGroup) return;
+            
+            const taskId = parseInt(btnGroup.dataset.taskId);
+            if (!taskId) return;
+            
+            const fromScheduler = btnGroup.dataset.fromScheduler === 'true';
+            const enabled = btnGroup.dataset.enabled === 'true';
+            
+            if (btn.classList.contains('btn-action-enable')) {
+                e.preventDefault();
+                enableBackupTask(taskId);
+            } else if (btn.classList.contains('btn-action-disable')) {
+                e.preventDefault();
+                disableBackupTask(taskId);
+            } else if (btn.classList.contains('btn-action-run')) {
+                e.preventDefault();
+                runBackupTask(taskId);
+            } else if (btn.classList.contains('btn-action-edit')) {
+                e.preventDefault();
+                editBackupTask(taskId, fromScheduler);
+            } else if (btn.classList.contains('btn-action-delete')) {
+                e.preventDefault();
+                deleteBackupTask(taskId, fromScheduler);
+            }
+        });
     }
     
     // 每30秒刷新一次
