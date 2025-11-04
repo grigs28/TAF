@@ -250,6 +250,28 @@ async def release_task_lock(task_id: int, execution_id: str) -> None:
         logger.warning(f"释放任务锁失败（忽略继续）: {str(e)}")
 
 
+async def release_all_active_locks() -> None:
+    """释放所有活跃的任务锁（用于程序退出时清理）"""
+    try:
+        if is_opengauss():
+            conn = await get_opengauss_connection()
+            try:
+                result = await conn.execute(
+                    """
+                    UPDATE task_locks
+                    SET is_active = FALSE
+                    WHERE is_active = TRUE
+                    """
+                )
+                logger.info(f"已释放所有活跃的任务锁")
+            finally:
+                await conn.close()
+        else:
+            pass
+    except Exception as e:
+        logger.warning(f"释放所有任务锁失败（忽略继续）: {str(e)}")
+
+
 async def get_task_by_id(task_id: int) -> Optional[ScheduledTask]:
     """根据ID获取计划任务"""
     try:

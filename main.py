@@ -11,6 +11,7 @@ import sys
 import os
 import logging
 import asyncio
+import signal
 from pathlib import Path
 from datetime import datetime
 
@@ -156,6 +157,13 @@ class TapeBackupSystem:
         try:
             logger = logging.getLogger(__name__)
             logger.info("正在关闭系统服务...")
+
+            # 释放所有活跃的任务锁
+            try:
+                from utils.scheduler.task_storage import release_all_active_locks
+                await release_all_active_locks()
+            except Exception as e:
+                logger.warning(f"释放任务锁失败: {str(e)}")
 
             # 停止计划任务
             if self.scheduler:
