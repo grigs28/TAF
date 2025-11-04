@@ -482,8 +482,23 @@ function editBackupTask(taskId, isScheduler) {
             }
         }, 500);
     } else {
-        // TODO: 实现编辑备份任务模板
-        alert('编辑备份任务模板功能待实现');
+        // 编辑备份任务模板
+        // 先获取任务详情
+        fetch(`/api/backup/tasks/${taskId}`)
+            .then(response => response.json())
+            .then(task => {
+                // TODO: 打开编辑模态框，填充表单
+                // 这里可以创建一个编辑模态框，类似于计划任务的编辑
+                alert('编辑备份任务模板功能：\n' + 
+                      '任务名称: ' + task.task_name + '\n' +
+                      '任务类型: ' + task.task_type + '\n' +
+                      '源路径: ' + (task.source_paths ? task.source_paths.join(', ') : '无') + '\n' +
+                      '编辑模态框功能待实现');
+            })
+            .catch(error => {
+                console.error('获取任务详情失败:', error);
+                alert('获取任务详情失败: ' + error.message);
+            });
     }
 }
 
@@ -529,8 +544,17 @@ async function deleteBackupTask(taskId, isScheduler) {
                 alert('删除失败: ' + (result.message || '未知错误'));
             }
         } else {
-            // TODO: 实现删除备份任务模板
-            alert('删除备份任务模板功能待实现');
+            // 删除备份任务模板
+            const response = await fetch(`/api/backup/tasks/${taskId}`, {
+                method: 'DELETE'
+            });
+            const result = await response.json();
+            if (result.success) {
+                alert('备份任务模板已删除');
+                loadAllTasks();
+            } else {
+                alert('删除失败: ' + (result.message || '未知错误'));
+            }
         }
     } catch (error) {
         console.error('删除任务失败:', error);

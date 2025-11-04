@@ -42,6 +42,19 @@ class BackupTaskRequest(BaseModel):
     tape_device: Optional[str] = Field(None, description="目标磁带机设备（可选）")
 
 
+class BackupTaskUpdate(BaseModel):
+    """备份任务更新模型（更新模板配置）"""
+    task_name: Optional[str] = Field(None, description="任务名称")
+    source_paths: Optional[List[str]] = Field(None, description="源路径列表")
+    task_type: Optional[BackupTaskType] = Field(None, description="任务类型")
+    exclude_patterns: Optional[List[str]] = Field(None, description="排除模式")
+    compression_enabled: Optional[bool] = Field(None, description="是否启用压缩")
+    encryption_enabled: Optional[bool] = Field(None, description="是否启用加密")
+    retention_days: Optional[int] = Field(None, description="保留天数")
+    description: Optional[str] = Field(None, description="任务描述")
+    tape_device: Optional[str] = Field(None, description="目标磁带机设备（可选）")
+
+
 class BackupTaskResponse(BaseModel):
     """备份任务响应模型"""
     task_id: int
@@ -610,6 +623,320 @@ async def get_backup_templates(
     except Exception as e:
         logger.error(f"获取备份任务模板列表失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/tasks/{task_id}")
+async def update_backup_task(
+    task_id: int,
+    request: BackupTaskUpdate,
+    http_request: Request
+):
+    """更新备份任务模板"""
+    start_time = datetime.now()
+    
+    try:
+        # 验证：只能更新模板
+        if is_opengauss():
+            conn = await get_opengauss_connection()
+            try:
+                row = await conn.fetchrow(
+                    "SELECT is_template FROM backup_tasks WHERE id = $1",
+                    task_id
+                )
+                if not row:
+                    raise HTTPException(status_code=404, detail="备份任务不存在")
+                if not row["is_template"]:
+                    raise HTTPException(status_code=400, detail="只能更新备份任务模板，不能更新执行记录")
+            finally:
+                await conn.close()
+        else:
+            from config.database import db_manager
+            from sqlalchemy import select
+            async with db_manager.AsyncSessionLocal() as session:
+                stmt = select(BackupTask).where(BackupTask.id == task_id)
+                result = await session.execute(stmt)
+                task = result.scalar_one_or_none()
+                if not task:
+                    raise HTTPException(status_code=404, detail="备份任务不存在")
+                if not task.is_template:
+                    raise HTTPException(status_code=400, detail="只能更新备份任务模板，不能更新执行记录")
+        
+        import json
+        
+        # 构建更新字段
+        updates = {}
+        if request.task_name is not None:
+            updates["task_name"] = request.task_name
+        if request.task_type is not None:
+            updates["task_type"] = request.task_type.value
+        if request.source_paths is not None:
+            updates["source_paths"] = json.dumps(request.source_paths) if request.source_paths else None
+        if request.exclude_patterns is not None:
+            updates["exclude_patterns"] = json.dumps(request.exclude_patterns) if request.exclude_patterns else None
+        if request.compression_enabled is not None:
+            updates["compression_enabled"] = request.compression_enabled
+        if request.encryption_enabled is not None:
+            updates["encryption_enabled"] = request.encryption_enabled
+        if request.retention_days is not None:
+            updates["retention_days"] = request.retention_days
+        if request.description is not None:
+            updates["description"] = request.description
+        if request.tape_device is not None:
+            updates["tape_device"] = request.tape_device
+        
+        if not updates:
+            raise HTTPException(status_code=400, detail="没有提供要更新的字段")
+        
+        updates["updated_at"] = datetime.now()
+        
+        if is_opengauss():
+            # 使用原生SQL更新
+            conn = await get_opengauss_connection()
+            try:
+                # 构建更新SQL
+                set_clauses = []
+                params = []
+                param_index = 1
+                
+                for key, value in updates.items():
+                    if key == "task_type":
+                        set_clauses.append(f"task_type = CAST(${param_index} AS backuptasktype)")
+                    elif key == "updated_at":
+                        set_clauses.append(f"updated_at = ${param_index}")
+                    else:
+                        set_clauses.append(f"{key} = ${param_index}")
+                    params.append(value)
+                    param_index += 1
+                
+                params.append(task_id)
+                update_sql = f"""
+                    UPDATE backup_tasks
+                    SET {', '.join(set_clauses)}
+                    WHERE id = ${param_index}
+                """
+                await conn.execute(update_sql, *params)
+                
+                # 记录操作日志
+                client_ip = http_request.client.host if http_request.client else None
+                duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                await log_operation(
+                    operation_type=OperationType.UPDATE,
+                    resource_type="backup",
+                    resource_id=str(task_id),
+                    resource_name=f"备份任务模板: {updates.get('task_name', task_id)}",
+                    operation_name="更新备份任务模板",
+                    operation_description=f"更新备份任务模板: {updates.get('task_name', task_id)}",
+                    category="backup",
+                    success=True,
+                    result_message="备份任务模板已更新",
+                    old_values={},
+                    new_values=updates,
+                    changed_fields=list(updates.keys()),
+                    ip_address=client_ip,
+                    request_method="PUT",
+                    request_url=str(http_request.url),
+                    duration_ms=duration_ms
+                )
+                
+                return {"success": True, "message": "备份任务模板已更新"}
+            finally:
+                await conn.close()
+        else:
+            # 使用SQLAlchemy更新
+            from config.database import db_manager
+            async with db_manager.AsyncSessionLocal() as session:
+                stmt = select(BackupTask).where(BackupTask.id == task_id)
+                result = await session.execute(stmt)
+                task = result.scalar_one_or_none()
+                
+                if not task:
+                    raise HTTPException(status_code=404, detail="备份任务不存在")
+                
+                # 更新字段
+                for key, value in updates.items():
+                    if hasattr(task, key):
+                        setattr(task, key, value)
+                
+                await session.commit()
+                await session.refresh(task)
+                
+                # 记录操作日志
+                client_ip = http_request.client.host if http_request.client else None
+                duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                await log_operation(
+                    operation_type=OperationType.UPDATE,
+                    resource_type="backup",
+                    resource_id=str(task_id),
+                    resource_name=f"备份任务模板: {task.task_name}",
+                    operation_name="更新备份任务模板",
+                    operation_description=f"更新备份任务模板: {task.task_name}",
+                    category="backup",
+                    success=True,
+                    result_message="备份任务模板已更新",
+                    old_values={},
+                    new_values=updates,
+                    changed_fields=list(updates.keys()),
+                    ip_address=client_ip,
+                    request_method="PUT",
+                    request_url=str(http_request.url),
+                    duration_ms=duration_ms
+                )
+                
+                return {"success": True, "message": "备份任务模板已更新"}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        
+        # 记录失败的操作日志
+        client_ip = http_request.client.host if http_request.client else None
+        await log_operation(
+            operation_type=OperationType.UPDATE,
+            resource_type="backup",
+            resource_id=str(task_id),
+            operation_name="更新备份任务模板",
+            operation_description=f"更新备份任务模板失败: {error_msg}",
+            category="backup",
+            success=False,
+            error_message=error_msg,
+            ip_address=client_ip,
+            request_method="PUT",
+            request_url=str(http_request.url),
+            duration_ms=duration_ms
+        )
+        
+        logger.error(f"更新备份任务模板失败: {error_msg}", exc_info=True)
+        raise HTTPException(status_code=500, detail=error_msg)
+
+
+@router.delete("/tasks/{task_id}")
+async def delete_backup_task(task_id: int, http_request: Request):
+    """删除备份任务模板"""
+    start_time = datetime.now()
+    
+    try:
+        # 验证：只能删除模板
+        task_name = None
+        if is_opengauss():
+            conn = await get_opengauss_connection()
+            try:
+                row = await conn.fetchrow(
+                    "SELECT task_name, is_template FROM backup_tasks WHERE id = $1",
+                    task_id
+                )
+                if not row:
+                    raise HTTPException(status_code=404, detail="备份任务不存在")
+                if not row["is_template"]:
+                    raise HTTPException(status_code=400, detail="只能删除备份任务模板，不能删除执行记录")
+                task_name = row["task_name"]
+            finally:
+                await conn.close()
+        else:
+            from config.database import db_manager
+            from sqlalchemy import select
+            async with db_manager.AsyncSessionLocal() as session:
+                stmt = select(BackupTask).where(BackupTask.id == task_id)
+                result = await session.execute(stmt)
+                task = result.scalar_one_or_none()
+                if not task:
+                    raise HTTPException(status_code=404, detail="备份任务不存在")
+                if not task.is_template:
+                    raise HTTPException(status_code=400, detail="只能删除备份任务模板，不能删除执行记录")
+                task_name = task.task_name
+        
+        if is_opengauss():
+            # 使用原生SQL删除
+            conn = await get_opengauss_connection()
+            try:
+                await conn.execute(
+                    "DELETE FROM backup_tasks WHERE id = $1",
+                    task_id
+                )
+                
+                # 记录操作日志
+                client_ip = http_request.client.host if http_request.client else None
+                duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                await log_operation(
+                    operation_type=OperationType.DELETE,
+                    resource_type="backup",
+                    resource_id=str(task_id),
+                    resource_name=f"备份任务模板: {task_name}",
+                    operation_name="删除备份任务模板",
+                    operation_description=f"删除备份任务模板: {task_name}",
+                    category="backup",
+                    success=True,
+                    result_message="备份任务模板已删除",
+                    ip_address=client_ip,
+                    request_method="DELETE",
+                    request_url=str(http_request.url),
+                    duration_ms=duration_ms
+                )
+                
+                return {"success": True, "message": "备份任务模板已删除"}
+            finally:
+                await conn.close()
+        else:
+            # 使用SQLAlchemy删除
+            from config.database import db_manager
+            async with db_manager.AsyncSessionLocal() as session:
+                stmt = select(BackupTask).where(BackupTask.id == task_id)
+                result = await session.execute(stmt)
+                task = result.scalar_one_or_none()
+                
+                if not task:
+                    raise HTTPException(status_code=404, detail="备份任务不存在")
+                
+                await session.delete(task)
+                await session.commit()
+                
+                # 记录操作日志
+                client_ip = http_request.client.host if http_request.client else None
+                duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                await log_operation(
+                    operation_type=OperationType.DELETE,
+                    resource_type="backup",
+                    resource_id=str(task_id),
+                    resource_name=f"备份任务模板: {task.task_name}",
+                    operation_name="删除备份任务模板",
+                    operation_description=f"删除备份任务模板: {task.task_name}",
+                    category="backup",
+                    success=True,
+                    result_message="备份任务模板已删除",
+                    ip_address=client_ip,
+                    request_method="DELETE",
+                    request_url=str(http_request.url),
+                    duration_ms=duration_ms
+                )
+                
+                return {"success": True, "message": "备份任务模板已删除"}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        
+        # 记录失败的操作日志
+        client_ip = http_request.client.host if http_request.client else None
+        await log_operation(
+            operation_type=OperationType.DELETE,
+            resource_type="backup",
+            resource_id=str(task_id),
+            operation_name="删除备份任务模板",
+            operation_description=f"删除备份任务模板失败: {error_msg}",
+            category="backup",
+            success=False,
+            error_message=error_msg,
+            ip_address=client_ip,
+            request_method="DELETE",
+            request_url=str(http_request.url),
+            duration_ms=duration_ms
+        )
+        
+        logger.error(f"删除备份任务模板失败: {error_msg}", exc_info=True)
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 @router.put("/tasks/{task_id}/cancel")
