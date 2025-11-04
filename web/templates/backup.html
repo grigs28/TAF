@@ -369,7 +369,7 @@ async function loadAllTasks() {
                     <td>${formatDateTime(task.completed_at)}</td>
                     <td>${formatBytes(task.processed_bytes || 0)}</td>
                     <td>
-                        <div class="btn-group btn-group-sm" data-task-id="${task.task_id}" data-from-scheduler="${task.from_scheduler || false}" data-enabled="${task.enabled !== false}">
+                        <div class="btn-group btn-group-sm" data-task-id="${task.task_id}" data-from-scheduler="${task.from_scheduler ? 'true' : 'false'}" data-enabled="${task.enabled !== false ? 'true' : 'false'}">
                             ${task.from_scheduler ? `
                                 ${task.enabled === false ? `
                                     <button class="btn btn-outline-success btn-action-enable" title="启用">
@@ -694,32 +694,49 @@ document.addEventListener('DOMContentLoaded', async function() {
     const tbody = document.getElementById('allTasksTable');
     if (tbody) {
         tbody.addEventListener('click', function(e) {
-            const btn = e.target.closest('button');
+            // 处理点击图标或按钮的情况
+            let btn = e.target;
+            if (btn.tagName === 'I' || btn.tagName === 'i') {
+                // 如果点击的是图标，找父元素按钮
+                btn = btn.closest('button');
+            } else if (btn.tagName !== 'BUTTON') {
+                // 如果点击的不是按钮，尝试找最近的按钮
+                btn = btn.closest('button');
+            }
+            
             if (!btn) return;
             
             const btnGroup = btn.closest('.btn-group');
             if (!btnGroup) return;
             
             const taskId = parseInt(btnGroup.dataset.taskId);
-            if (!taskId) return;
+            if (!taskId || isNaN(taskId)) {
+                console.warn('无法获取任务ID:', btnGroup.dataset);
+                return;
+            }
             
             const fromScheduler = btnGroup.dataset.fromScheduler === 'true';
             const enabled = btnGroup.dataset.enabled === 'true';
             
+            // 阻止默认行为
+            e.preventDefault();
+            e.stopPropagation();
+            
+            // 根据按钮类名执行对应操作
             if (btn.classList.contains('btn-action-enable')) {
-                e.preventDefault();
+                console.log('点击启用按钮，任务ID:', taskId);
                 enableBackupTask(taskId);
             } else if (btn.classList.contains('btn-action-disable')) {
-                e.preventDefault();
+                console.log('点击禁用按钮，任务ID:', taskId);
                 disableBackupTask(taskId);
             } else if (btn.classList.contains('btn-action-run')) {
-                e.preventDefault();
+                console.log('点击运行按钮，任务ID:', taskId);
                 runBackupTask(taskId);
             } else if (btn.classList.contains('btn-action-edit')) {
-                e.preventDefault();
+                console.log('点击编辑按钮，任务ID:', taskId, 'from_scheduler:', fromScheduler);
                 editBackupTask(taskId, fromScheduler);
             } else if (btn.classList.contains('btn-action-delete')) {
-                e.preventDefault();
+                console.log('点击删除按钮，任务ID:', taskId, 'from_scheduler:', fromScheduler);
                 deleteBackupTask(taskId, fromScheduler);
             }
         });
