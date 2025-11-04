@@ -111,6 +111,14 @@ class BackupActionHandler(ActionHandler):
                             except ValueError as ve:
                                 # 记录并抛出以触发通知与日志
                                 logger.warning(str(ve))
+                                # 通知：需要更换磁带
+                                try:
+                                    if self.system_instance and getattr(self.system_instance, 'dingtalk_notifier', None):
+                                        notifier = self.system_instance.dingtalk_notifier
+                                        tape_id = (metadata.get('tape_id') if metadata else '') or '未知磁带'
+                                        await notifier.send_tape_notification(tape_id=tape_id, action='change_required')
+                                except Exception:
+                                    pass
                                 raise
             # 如果有备份任务模板ID，从模板加载配置
             template_task = None
@@ -207,6 +215,17 @@ class BackupActionHandler(ActionHandler):
             if not source_paths:
                 raise ValueError("备份源路径不能为空")
             
+            # 发送“开始”通知
+            try:
+                if self.system_instance and getattr(self.system_instance, 'dingtalk_notifier', None):
+                    await self.system_instance.dingtalk_notifier.send_backup_notification(
+                        backup_name=(template_task.task_name if template_task else task_name),
+                        status='started',
+                        details=None
+                    )
+            except Exception:
+                pass
+
             # 创建备份任务执行记录（不是模板）
             async with db_manager.AsyncSessionLocal() as session:
                 backup_task = BackupTask(
@@ -245,6 +264,19 @@ class BackupActionHandler(ActionHandler):
             success = await self.system_instance.backup_engine.execute_backup_task(backup_task)
             
             if success:
+                # 成功通知
+                try:
+                    if self.system_instance and getattr(self.system_instance, 'dingtalk_notifier', None):
+                        await self.system_instance.dingtalk_notifier.send_backup_notification(
+                            backup_name=(template_task.task_name if template_task else task_name),
+                            status='success',
+                            details={
+                                'size': backup_task.total_bytes,
+                                'file_count': backup_task.total_files
+                            }
+                        )
+                except Exception:
+                    pass
                 return {
                     "status": "success",
                     "message": "备份任务执行成功",
@@ -261,6 +293,16 @@ class BackupActionHandler(ActionHandler):
                 
         except Exception as e:
             logger.error(f"执行备份动作失败: {str(e)}")
+            # 失败通知
+            try:
+                if self.system_instance and getattr(self.system_instance, 'dingtalk_notifier', None):
+                    await self.system_instance.dingtalk_notifier.send_backup_notification(
+                        backup_name=(template_task.task_name if 'template_task' in locals() and template_task else (config.get('task_name','计划备份'))),
+                        status='failed',
+                        details={'error': str(e)}
+                    )
+            except Exception:
+                pass
             raise
 
 
