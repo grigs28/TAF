@@ -256,6 +256,18 @@ async def release_task_locks_by_task(task_id: int) -> None:
         if is_opengauss():
             conn = await get_opengauss_connection()
             try:
+                # 先查询有多少锁被释放
+                count_row = await conn.fetchrow(
+                    """
+                    SELECT COUNT(*) as count
+                    FROM task_locks
+                    WHERE task_id = $1 AND is_active = TRUE
+                    """,
+                    task_id
+                )
+                lock_count = count_row['count'] if count_row else 0
+                
+                # 执行解锁
                 await conn.execute(
                     """
                     UPDATE task_locks
@@ -264,6 +276,11 @@ async def release_task_locks_by_task(task_id: int) -> None:
                     """,
                     task_id
                 )
+                
+                if lock_count > 0:
+                    logger.info(f"已释放任务 {task_id} 的 {lock_count} 个活跃锁")
+                else:
+                    logger.info(f"任务 {task_id} 没有活跃锁需要释放")
             finally:
                 await conn.close()
         else:
@@ -278,6 +295,17 @@ async def release_all_active_locks() -> None:
         if is_opengauss():
             conn = await get_opengauss_connection()
             try:
+                # 先查询有多少锁被释放
+                count_row = await conn.fetchrow(
+                    """
+                    SELECT COUNT(*) as count
+                    FROM task_locks
+                    WHERE is_active = TRUE
+                    """
+                )
+                lock_count = count_row['count'] if count_row else 0
+                
+                # 执行解锁
                 result = await conn.execute(
                     """
                     UPDATE task_locks
@@ -285,7 +313,11 @@ async def release_all_active_locks() -> None:
                     WHERE is_active = TRUE
                     """
                 )
-                logger.info(f"已释放所有活跃的任务锁")
+                
+                if lock_count > 0:
+                    logger.info(f"已释放所有活跃的任务锁，共 {lock_count} 个")
+                else:
+                    logger.info("没有活跃的任务锁需要释放")
             finally:
                 await conn.close()
         else:

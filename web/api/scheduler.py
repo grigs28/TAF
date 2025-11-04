@@ -14,7 +14,8 @@ from datetime import datetime
 from models.scheduled_task import ScheduledTask, ScheduledTaskLog, ScheduleType, ScheduledTaskStatus, TaskActionType
 from models.system_log import OperationType
 from utils.scheduler import TaskScheduler
-from utils.log_utils import log_operation
+from utils.log_utils import log_operation, log_system
+from models.system_log import LogLevel, LogCategory
 from utils.scheduler.task_storage import release_task_locks_by_task, release_all_active_locks
 
 logger = logging.getLogger(__name__)
@@ -522,6 +523,17 @@ async def unlock_scheduled_task(task_id: int, request: Request = None):
         if not task:
             raise HTTPException(status_code=404, detail="计划任务不存在")
 
+        # 记录解锁操作日志
+        await log_system(
+            level=LogLevel.INFO,
+            category=LogCategory.SCHEDULER,
+            message=f"开始解锁计划任务: {task.task_name} (ID: {task_id})",
+            module="web.api.scheduler",
+            function="unlock_scheduled_task",
+            task_id=task_id,
+            details={"task_name": task.task_name, "task_id": task_id}
+        )
+        
         await release_task_locks_by_task(task_id)
 
         await log_operation(
@@ -538,6 +550,17 @@ async def unlock_scheduled_task(task_id: int, request: Request = None):
             request_url=f"/api/scheduler/tasks/{task_id}/unlock",
             ip_address=request.client.host if request and request.client else None
         )
+        
+        # 记录系统日志（成功）
+        await log_system(
+            level=LogLevel.INFO,
+            category=LogCategory.SCHEDULER,
+            message=f"解锁计划任务成功: {task.task_name} (ID: {task_id})",
+            module="web.api.scheduler",
+            function="unlock_scheduled_task",
+            task_id=task_id,
+            details={"task_name": task.task_name, "task_id": task_id}
+        )
 
         return {"success": True, "message": "已解锁该任务的所有锁"}
 
@@ -545,6 +568,8 @@ async def unlock_scheduled_task(task_id: int, request: Request = None):
         raise
     except Exception as e:
         logger.error(f"解锁计划任务失败: {str(e)}")
+        
+        # 记录操作日志（失败）
         await log_operation(
             operation_type=OperationType.SCHEDULER_STOP,
             resource_type="scheduler",
@@ -558,6 +583,21 @@ async def unlock_scheduled_task(task_id: int, request: Request = None):
             request_url=f"/api/scheduler/tasks/{task_id}/unlock",
             ip_address=request.client.host if request and request.client else None
         )
+        
+        # 记录系统日志（失败）
+        import traceback
+        await log_system(
+            level=LogLevel.ERROR,
+            category=LogCategory.SCHEDULER,
+            message=f"解锁计划任务失败: {str(e)}",
+            module="web.api.scheduler",
+            function="unlock_scheduled_task",
+            task_id=task_id,
+            details={"task_id": task_id, "error": str(e)},
+            exception_type=type(e).__name__,
+            stack_trace=traceback.format_exc()
+        )
+        
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -569,6 +609,16 @@ async def unlock_all_tasks(request: Request = None):
         if not system:
             raise HTTPException(status_code=500, detail="系统未初始化")
 
+        # 记录解锁操作日志
+        await log_system(
+            level=LogLevel.WARNING,
+            category=LogCategory.SCHEDULER,
+            message="开始解锁所有活跃任务锁（谨慎操作）",
+            module="web.api.scheduler",
+            function="unlock_all_tasks",
+            details={"operation": "unlock_all"}
+        )
+        
         await release_all_active_locks()
 
         await log_operation(
@@ -584,6 +634,16 @@ async def unlock_all_tasks(request: Request = None):
             request_url="/api/scheduler/tasks/unlock-all",
             ip_address=request.client.host if request and request.client else None
         )
+        
+        # 记录系统日志（成功）
+        await log_system(
+            level=LogLevel.WARNING,
+            category=LogCategory.SCHEDULER,
+            message="解锁所有活跃任务锁完成",
+            module="web.api.scheduler",
+            function="unlock_all_tasks",
+            details={"operation": "unlock_all", "result": "success"}
+        )
 
         return {"success": True, "message": "已解锁所有活跃任务锁"}
 
@@ -591,6 +651,8 @@ async def unlock_all_tasks(request: Request = None):
         raise
     except Exception as e:
         logger.error(f"解锁所有任务失败: {str(e)}")
+        
+        # 记录操作日志（失败）
         await log_operation(
             operation_type=OperationType.SCHEDULER_STOP,
             resource_type="scheduler",
@@ -604,6 +666,20 @@ async def unlock_all_tasks(request: Request = None):
             request_url="/api/scheduler/tasks/unlock-all",
             ip_address=request.client.host if request and request.client else None
         )
+        
+        # 记录系统日志（失败）
+        import traceback
+        await log_system(
+            level=LogLevel.ERROR,
+            category=LogCategory.SCHEDULER,
+            message=f"解锁所有任务失败: {str(e)}",
+            module="web.api.scheduler",
+            function="unlock_all_tasks",
+            details={"operation": "unlock_all", "error": str(e)},
+            exception_type=type(e).__name__,
+            stack_trace=traceback.format_exc()
+        )
+        
         raise HTTPException(status_code=500, detail=str(e))
 
 

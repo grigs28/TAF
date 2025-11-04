@@ -49,9 +49,21 @@ class TapeOperations:
             # 2. 执行加载操作
             # 3. 验证磁带是否成功加载
 
-            # 检查设备就绪状态
+            # 检查设备就绪状态（增加重试和更详细的错误信息）
+            logger.info("检查磁带设备就绪状态...")
             if not await self._wait_for_tape_ready():
-                logger.error("磁带设备未就绪")
+                logger.error("磁带设备未就绪，可能原因：设备未连接、磁带未加载、设备忙或故障")
+                # 尝试获取更详细的设备状态信息
+                try:
+                    devices = await self.scsi_interface.scan_tape_devices()
+                    if not devices:
+                        logger.error("未检测到任何磁带设备")
+                    else:
+                        logger.info(f"检测到 {len(devices)} 个磁带设备")
+                        for device in devices:
+                            logger.info(f"设备: {device.get('path', 'N/A')} - {device.get('vendor', 'N/A')} {device.get('model', 'N/A')}")
+                except Exception as dev_error:
+                    logger.warning(f"获取设备信息失败: {str(dev_error)}")
                 return False
 
             # 执行倒带操作
@@ -253,13 +265,23 @@ class TapeOperations:
     async def _wait_for_tape_ready(self, timeout: int = 30) -> bool:
         """等待磁带就绪"""
         try:
-            for _ in range(timeout):
-                if await self.scsi_interface.test_unit_ready():
-                    return True
-                await asyncio.sleep(1)
+            logger.debug(f"开始等待磁带就绪（超时: {timeout}秒）...")
+            for attempt in range(timeout):
+                try:
+                    if await self.scsi_interface.test_unit_ready():
+                        logger.debug(f"磁带设备已就绪（第 {attempt + 1} 次尝试）")
+                        return True
+                except Exception as test_error:
+                    logger.debug(f"第 {attempt + 1} 次就绪检查失败: {str(test_error)}")
+                    # 继续重试，不立即返回
+                
+                if attempt < timeout - 1:  # 最后一次不需要等待
+                    await asyncio.sleep(1)
+            
+            logger.warning(f"等待 {timeout} 秒后磁带设备仍未就绪")
             return False
         except Exception as e:
-            logger.error(f"等待磁带就绪失败: {str(e)}")
+            logger.error(f"等待磁带就绪过程异常: {str(e)}")
             return False
 
     async def _rewind(self) -> bool:
