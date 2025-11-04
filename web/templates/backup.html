@@ -376,37 +376,20 @@ async function loadAllTasks() {
                                         <i class="bi bi-pause"></i>
                                     </button>
                                 `}
-                                <button class="btn btn-outline-primary" onclick="editBackupTask(${task.task_id}, true)" title="编辑">
-                                    <i class="bi bi-pencil"></i>
-                                </button>
-                                <button class="btn btn-outline-info" onclick="runBackupTask(${task.task_id})" title="立即运行">
-                                    <i class="bi bi-play-circle"></i>
-                                </button>
-                                <button class="btn btn-outline-danger" onclick="deleteBackupTask(${task.task_id}, true)" title="删除">
-                                    <i class="bi bi-trash"></i>
-                                </button>
                             ` : `
-                                <button class="btn btn-outline-primary" onclick="viewTaskDetails(${task.task_id})" title="查看详情">
-                                    <i class="bi bi-eye"></i>
+                                <button class="btn btn-outline-warning" onclick="disableBackupTask(${task.task_id})" title="禁用" disabled>
+                                    <i class="bi bi-pause"></i>
                                 </button>
-                                ${task.status === 'completed' ? `
-                                    <button class="btn btn-outline-warning" onclick="downloadBackup(${task.task_id})" title="下载备份">
-                                        <i class="bi bi-download"></i>
-                                    </button>
-                                ` : task.status === 'failed' ? `
-                                    <button class="btn btn-outline-danger" onclick="retryTask(${task.task_id})" title="重试">
-                                        <i class="bi bi-arrow-repeat"></i>
-                                    </button>
-                                ` : ''}
-                                ${task.is_template ? `
-                                    <button class="btn btn-outline-primary" onclick="editBackupTask(${task.task_id}, false)" title="编辑">
-                                        <i class="bi bi-pencil"></i>
-                                    </button>
-                                    <button class="btn btn-outline-danger" onclick="deleteBackupTask(${task.task_id}, false)" title="删除">
-                                        <i class="bi bi-trash"></i>
-                                    </button>
-                                ` : ''}
                             `}
+                            <button class="btn btn-outline-primary" onclick="editBackupTask(${task.task_id}, ${task.from_scheduler || false})" title="编辑">
+                                <i class="bi bi-pencil"></i>
+                            </button>
+                            <button class="btn btn-outline-info" onclick="runBackupTask(${task.task_id})" title="立即运行" ${task.from_scheduler ? '' : 'disabled'}>
+                                <i class="bi bi-play-circle"></i>
+                            </button>
+                            <button class="btn btn-outline-danger" onclick="deleteBackupTask(${task.task_id}, ${task.from_scheduler || false})" title="删除">
+                                <i class="bi bi-trash"></i>
+                            </button>
                         </div>
                     </td>
                 `;
