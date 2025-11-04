@@ -1,0 +1,93 @@
+<!-- 系统日志 -->
+<div class="tab-pane fade" id="logs" role="tabpanel">
+    <div class="row">
+        <div class="col-12">
+            <div class="setting-card service-card mb-3">
+                <div class="card-body">
+                    <h6 class="card-title">系统日志</h6>
+                    
+                    <!-- 筛选条件 -->
+                    <div class="row mb-3">
+                        <div class="col-md-3">
+                            <label class="form-label small">分类</label>
+                            <select class="form-select form-select-sm bg-dark text-light" id="logCategory">
+                                <option value="">所有分类</option>
+                                <option value="system">系统</option>
+                                <option value="tape">磁带</option>
+                                <option value="backup">备份</option>
+                                <option value="recovery">恢复</option>
+                                <option value="user">用户</option>
+                                <option value="security">安全</option>
+                                <option value="scheduler">计划任务</option>
+                                <option value="api">API</option>
+                                <option value="database">数据库</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small">级别</label>
+                            <select class="form-select form-select-sm bg-dark text-light" id="logLevel">
+                                <option value="">所有级别</option>
+                                <option value="debug">调试</option>
+                                <option value="info">信息</option>
+                                <option value="warning">警告</option>
+                                <option value="error">错误</option>
+                                <option value="critical">严重</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small">操作类型</label>
+                            <select class="form-select form-select-sm bg-dark text-light" id="logOperationType">
+                                <option value="">所有操作</option>
+                                <option value="login">登录</option>
+                                <option value="logout">登出</option>
+                                <option value="tape_load">加载磁带</option>
+                                <option value="tape_scan">扫描磁带</option>
+                                <option value="tape_read_label">读取标签</option>
+                                <option value="backup_start">备份开始</option>
+                                <option value="backup_complete">备份完成</option>
+                                <option value="recovery_start">恢复开始</option>
+                                <option value="recovery_complete">恢复完成</option>
+                                <option value="scheduler_create">创建计划任务</option>
+                                <option value="scheduler_update">更新计划任务</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small">操作</label>
+                            <div class="d-flex gap-2">
+                                <button class="btn btn-outline-primary btn-sm flex-fill" id="refreshLogsBtn">
+                                    <i class="bi bi-arrow-clockwise me-1"></i>刷新
+                                </button>
+                                <button class="btn btn-outline-secondary btn-sm flex-fill" id="clearLogsBtn">
+                                    <i class="bi bi-trash me-1"></i>清空
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 日志列表 -->
+                    <div class="log-container" id="logContainer" style="height: 500px; overflow-y: auto; background: rgba(20, 30, 48, 0.6); padding: 10px; border-radius: 4px;">
+                        <div class="text-center text-muted py-5">
+                            <i class="bi bi-hourglass-split me-2"></i>加载中...
+                        </div>
+                    </div>
+                    
+                    <!-- 分页 -->
+                    <div class="d-flex justify-content-between align-items-center mt-3">
+                        <div class="text-muted small" id="logPaginationInfo">
+                            显示 0-0 条，共 0 条
+                        </div>
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn btn-outline-secondary" id="logPrevPage" disabled>
+                                <i class="bi bi-chevron-left"></i>上一页
+                            </button>
+                            <button class="btn btn-outline-secondary" id="logNextPage" disabled>
+                                下一页<i class="bi bi-chevron-right"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+

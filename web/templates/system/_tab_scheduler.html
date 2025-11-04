@@ -1,0 +1,43 @@
+<!-- 计划任务 -->
+<div class="tab-pane fade" id="scheduler" role="tabpanel">
+    <div class="row">
+        <div class="col-12">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h6 class="mb-0">
+                    <i class="bi bi-clock-history me-2"></i>计划任务管理
+                </h6>
+                <button class="btn btn-primary btn-sm" id="addScheduledTaskBtn">
+                    <i class="bi bi-plus-circle me-1"></i>添加任务
+                </button>
+            </div>
+            <div class="setting-card service-card mb-3">
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <thead>
+                                <tr>
+                                    <th>任务名称</th>
+                                    <th>调度类型</th>
+                                    <th>调度配置</th>
+                                    <th>状态</th>
+                                    <th>下次执行</th>
+                                    <th>上次执行</th>
+                                    <th>执行统计</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="scheduledTasksTableBody">
+                                <tr>
+                                    <td colspan="8" class="text-center text-muted">
+                                        <i class="bi bi-hourglass-split me-2"></i>加载中...
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+

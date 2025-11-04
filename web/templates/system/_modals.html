@@ -1,0 +1,36 @@
+<!-- 添加通知人员模态框 -->
+<div class="modal fade" id="addNotificationUserModal" tabindex="-1" data-bs-backdrop="false">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">添加通知人员</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">手机号</label>
+                    <input type="tel" class="form-control" id="notificationPhone" placeholder="13293513336" required>
+                    <small class="text-muted">11位手机号码</small>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">姓名</label>
+                    <input type="text" class="form-control" id="notificationName" placeholder="张管理员">
+                    <small class="text-muted">通知人员姓名</small>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">备注</label>
+                    <input type="text" class="form-control" id="notificationRemark" placeholder="系统管理员">
+                    <small class="text-muted">可选的备注信息</small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="addNotificationUser()">添加</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% include 'system/_modal_scheduler_task.html' %}
+{% include 'system/_modal_directory_browser.html' %}
+

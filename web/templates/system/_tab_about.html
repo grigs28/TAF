@@ -1,0 +1,51 @@
+<!-- 关于系统 -->
+<div class="tab-pane fade" id="about" role="tabpanel">
+    <div class="row">
+        <div class="col-md-6">
+            <div class="setting-card service-card mb-3">
+                <div class="card-body text-center">
+                    <h5 class="card-title">{{ app_name }}</h5>
+                    <p class="text-muted">企业级磁带备份系统</p>
+                    <hr>
+                    <div class="text-start">
+                        <p><strong>版本:</strong> <a href="#" id="about-version-link" style="text-decoration: underline; cursor: pointer;">{{ version }}</a></p>
+                        <p><strong>构建日期:</strong> 2024-11-01</p>
+                        <p><strong>Python版本:</strong> 3.10.19</p>
+                        <p><strong>运行时间:</strong> <span id="uptime">计算中...</span></p>
+                        <p><strong>许可证:</strong> 企业版</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="setting-card service-card mb-3">
+                <div class="card-body">
+                    <h6 class="card-title">系统组件</h6>
+                    <div class="list-group list-group-flush">
+                        <div class="list-group-item d-flex justify-content-between">
+                            <span>FastAPI</span>
+                            <span class="badge bg-success">0.104.1</span>
+                        </div>
+                        <div class="list-group-item d-flex justify-content-between">
+                            <span>SQLAlchemy</span>
+                            <span class="badge bg-success">2.0.23</span>
+                        </div>
+                        <div class="list-group-item d-flex justify-content-between">
+                            <span>Pydantic</span>
+                            <span class="badge bg-success">2.5.0</span>
+                        </div>
+                        <div class="list-group-item d-flex justify-content-between">
+                            <span>Hypercorn</span>
+                            <span class="badge bg-success">0.17.3</span>
+                        </div>
+                        <div class="list-group-item d-flex justify-content-between">
+                            <span>py7zr</span>
+                            <span class="badge bg-success">0.20.8</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+

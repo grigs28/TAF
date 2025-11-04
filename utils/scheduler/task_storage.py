@@ -1,0 +1,587 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+任务存储模块
+Task Storage Module - 处理所有数据库CRUD操作
+"""
+
+import logging
+import json
+from datetime import datetime
+from typing import Dict, Any, Optional, List
+
+from models.scheduled_task import ScheduledTask, ScheduleType, ScheduledTaskStatus, TaskActionType
+from models.system_log import OperationType
+from config.database import db_manager
+from sqlalchemy import select
+from .db_utils import is_opengauss, get_opengauss_connection
+from utils.log_utils import log_operation
+
+logger = logging.getLogger(__name__)
+
+
+def row_to_task(row) -> ScheduledTask:
+    """将数据库行转换为ScheduledTask对象"""
+    task = ScheduledTask()
+    task.id = row['id']
+    task.task_name = row['task_name']
+    task.description = row['description']
+    task.schedule_type = ScheduleType(row['schedule_type']) if row['schedule_type'] else None
+    task.action_type = TaskActionType(row['action_type']) if row['action_type'] else None
+    task.status = ScheduledTaskStatus(row['status']) if row['status'] else ScheduledTaskStatus.INACTIVE
+    task.schedule_config = json.loads(row['schedule_config']) if row['schedule_config'] and isinstance(row['schedule_config'], str) else (row['schedule_config'] if row['schedule_config'] else {})
+    task.action_config = json.loads(row['action_config']) if row['action_config'] and isinstance(row['action_config'], str) else (row['action_config'] if row['action_config'] else {})
+    task.enabled = row['enabled']
+    task.next_run_time = row['next_run_time']
+    task.last_run_time = row['last_run_time']
+    task.last_success_time = row.get('last_success_time')
+    task.last_failure_time = row.get('last_failure_time')
+    task.total_runs = row.get('total_runs') or 0
+    task.success_runs = row.get('success_runs') or 0
+    task.failure_runs = row.get('failure_runs') or 0
+    task.average_duration = row.get('average_duration')
+    task.last_error = row.get('last_error')
+    task.created_at = row.get('created_at')
+    task.updated_at = row.get('updated_at')
+    task.task_metadata = json.loads(row['task_metadata']) if row.get('task_metadata') and isinstance(row.get('task_metadata'), str) else (row.get('task_metadata') if row.get('task_metadata') else {})
+    task.tags = json.loads(row['tags']) if row.get('tags') and isinstance(row.get('tags'), str) else (row.get('tags') if row.get('tags') else [])
+    task.backup_task_id = row.get('backup_task_id')
+    return task
+
+
+async def load_tasks_from_db(enabled_only: bool = True) -> List[ScheduledTask]:
+    """从数据库加载计划任务"""
+    try:
+        if is_opengauss():
+            # 使用原生SQL查询
+            conn = await get_opengauss_connection()
+            try:
+                if enabled_only:
+                    rows = await conn.fetch("SELECT * FROM scheduled_tasks WHERE enabled = true ORDER BY id")
+                else:
+                    rows = await conn.fetch("SELECT * FROM scheduled_tasks ORDER BY id")
+                
+                # 转换为ScheduledTask对象
+                tasks = []
+                for row in rows:
+                    tasks.append(row_to_task(row))
+                
+                return tasks
+            finally:
+                await conn.close()
+        else:
+            # 非openGauss数据库，使用SQLAlchemy
+            async with db_manager.AsyncSessionLocal() as session:
+                stmt = select(ScheduledTask)
+                if enabled_only:
+                    stmt = stmt.where(ScheduledTask.enabled == True)
+                stmt = stmt.order_by(ScheduledTask.id)
+                result = await session.execute(stmt)
+                return list(result.scalars().all())
+                
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        logger.error(f"从数据库加载任务失败: {str(e)}")
+        logger.error(f"错误详情:\n{error_detail}")
+        return []
+
+
+async def get_task_by_id(task_id: int) -> Optional[ScheduledTask]:
+    """根据ID获取计划任务"""
+    try:
+        if is_opengauss():
+            # 使用原生asyncpg查询
+            conn = await get_opengauss_connection()
+            try:
+                row = await conn.fetchrow("SELECT * FROM scheduled_tasks WHERE id = $1", task_id)
+                if not row:
+                    return None
+                return row_to_task(row)
+            finally:
+                await conn.close()
+        else:
+            # 非openGauss数据库，使用SQLAlchemy
+            async with db_manager.AsyncSessionLocal() as session:
+                stmt = select(ScheduledTask).where(ScheduledTask.id == task_id)
+                result = await session.execute(stmt)
+                return result.scalar_one_or_none()
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        logger.error(f"获取计划任务失败: {str(e)}")
+        logger.error(f"错误详情:\n{error_detail}")
+        return None
+
+
+async def get_all_tasks(enabled_only: bool = False) -> List[ScheduledTask]:
+    """获取所有计划任务"""
+    try:
+        if is_opengauss():
+            # 使用原生asyncpg查询
+            conn = await get_opengauss_connection()
+            try:
+                # 构建查询SQL
+                if enabled_only:
+                    query = "SELECT * FROM scheduled_tasks WHERE enabled = true ORDER BY id"
+                else:
+                    query = "SELECT * FROM scheduled_tasks ORDER BY id"
+                
+                rows = await conn.fetch(query)
+                
+                # 将结果转换为ScheduledTask对象
+                tasks = []
+                for row in rows:
+                    tasks.append(row_to_task(row))
+                
+                return tasks
+            finally:
+                await conn.close()
+        else:
+            # 非openGauss数据库，使用SQLAlchemy
+            async with db_manager.AsyncSessionLocal() as session:
+                stmt = select(ScheduledTask)
+                if enabled_only:
+                    stmt = stmt.where(ScheduledTask.enabled == True)
+                stmt = stmt.order_by(ScheduledTask.id)
+                result = await session.execute(stmt)
+                return list(result.scalars().all())
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        logger.error(f"获取计划任务列表失败: {str(e)}")
+        logger.error(f"错误详情:\n{error_detail}")
+        return []
+
+
+async def add_task(scheduled_task: ScheduledTask) -> bool:
+    """添加计划任务"""
+    try:
+        if is_opengauss():
+            # 使用原生asyncpg插入
+            conn = await get_opengauss_connection()
+            try:
+                # 准备插入SQL
+                insert_sql = """
+                    INSERT INTO scheduled_tasks (
+                        task_name, description, schedule_type, schedule_config,
+                        action_type, action_config, enabled, status,
+                        next_run_time, last_run_time, last_success_time, last_failure_time,
+                        total_runs, success_runs, failure_runs, average_duration,
+                        last_error, task_metadata, tags, backup_task_id,
+                        created_at, updated_at
+                    ) VALUES (
+                        $1, $2, CAST($3 AS scheduletype), $4, CAST($5 AS taskactiontype), $6, $7, CAST($8 AS scheduledtaskstatus),
+                        $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+                    ) RETURNING id
+                """
+                
+                # 准备数据
+                schedule_config_json = json.dumps(scheduled_task.schedule_config) if scheduled_task.schedule_config else None
+                action_config_json = json.dumps(scheduled_task.action_config) if scheduled_task.action_config else None
+                task_metadata_json = json.dumps(scheduled_task.task_metadata) if hasattr(scheduled_task, 'task_metadata') and scheduled_task.task_metadata else None
+                tags_json = json.dumps(scheduled_task.tags) if hasattr(scheduled_task, 'tags') and scheduled_task.tags else None
+                
+                # 使用CAST确保枚举值正确转换
+                schedule_type_val = scheduled_task.schedule_type.value if scheduled_task.schedule_type else None
+                action_type_val = scheduled_task.action_type.value if scheduled_task.action_type else None
+                status_val = scheduled_task.status.value if scheduled_task.status else ScheduledTaskStatus.INACTIVE.value
+                
+                task_id = await conn.fetchval(
+                    insert_sql,
+                    scheduled_task.task_name,
+                    scheduled_task.description,
+                    schedule_type_val,
+                    schedule_config_json,
+                    action_type_val,
+                    action_config_json,
+                    scheduled_task.enabled,
+                    status_val,
+                    scheduled_task.next_run_time,
+                    scheduled_task.last_run_time,
+                    scheduled_task.last_success_time,
+                    scheduled_task.last_failure_time,
+                    scheduled_task.total_runs if hasattr(scheduled_task, 'total_runs') else 0,
+                    scheduled_task.success_runs if hasattr(scheduled_task, 'success_runs') else 0,
+                    scheduled_task.failure_runs if hasattr(scheduled_task, 'failure_runs') else 0,
+                    scheduled_task.average_duration if hasattr(scheduled_task, 'average_duration') else None,
+                    scheduled_task.last_error,
+                    task_metadata_json,
+                    tags_json,
+                    scheduled_task.backup_task_id if hasattr(scheduled_task, 'backup_task_id') else None,
+                    datetime.now(),
+                    datetime.now()
+                )
+                
+                scheduled_task.id = task_id
+                logger.info(f"使用原生SQL插入计划任务成功: {scheduled_task.task_name} (ID: {task_id})")
+                
+                # 记录操作日志
+                await log_operation(
+                    operation_type=OperationType.SCHEDULER_CREATE,
+                    resource_type="scheduler",
+                    resource_id=str(task_id),
+                    resource_name=scheduled_task.task_name,
+                    operation_name="创建计划任务",
+                    operation_description=f"创建计划任务: {scheduled_task.task_name}",
+                    category="scheduler",
+                    success=True,
+                    result_message=f"计划任务创建成功 (ID: {task_id})",
+                    new_values={
+                        "task_name": scheduled_task.task_name,
+                        "description": scheduled_task.description,
+                        "schedule_type": scheduled_task.schedule_type.value if scheduled_task.schedule_type else None,
+                        "action_type": scheduled_task.action_type.value if scheduled_task.action_type else None,
+                        "enabled": scheduled_task.enabled
+                    }
+                )
+                
+                return True
+            finally:
+                await conn.close()
+        else:
+            # 非openGauss数据库，使用SQLAlchemy
+            async with db_manager.AsyncSessionLocal() as session:
+                session.add(scheduled_task)
+                await session.commit()
+                await session.refresh(scheduled_task)
+                logger.info(f"使用SQLAlchemy插入计划任务成功: {scheduled_task.task_name} (ID: {scheduled_task.id})")
+                
+                # 记录操作日志
+                await log_operation(
+                    operation_type=OperationType.SCHEDULER_CREATE,
+                    resource_type="scheduler",
+                    resource_id=str(scheduled_task.id),
+                    resource_name=scheduled_task.task_name,
+                    operation_name="创建计划任务",
+                    operation_description=f"创建计划任务: {scheduled_task.task_name}",
+                    category="scheduler",
+                    success=True,
+                    result_message=f"计划任务创建成功 (ID: {scheduled_task.id})",
+                    new_values={
+                        "task_name": scheduled_task.task_name,
+                        "description": scheduled_task.description,
+                        "schedule_type": scheduled_task.schedule_type.value if scheduled_task.schedule_type else None,
+                        "action_type": scheduled_task.action_type.value if scheduled_task.action_type else None,
+                        "enabled": scheduled_task.enabled
+                    }
+                )
+                
+                return True
+            
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        logger.error(f"添加计划任务失败: {str(e)}")
+        logger.error(f"错误详情:\n{error_detail}")
+        
+        # 记录操作日志（失败）
+        task_name = getattr(scheduled_task, 'task_name', '未知任务')
+        await log_operation(
+            operation_type=OperationType.SCHEDULER_CREATE,
+            resource_type="scheduler",
+            resource_name=task_name,
+            operation_name="创建计划任务",
+            operation_description=f"创建计划任务失败: {task_name}",
+            category="scheduler",
+            success=False,
+            error_message=str(e)
+        )
+        
+        return False
+
+
+async def delete_task(task_id: int) -> bool:
+    """删除计划任务"""
+    try:
+        if is_opengauss():
+            # 使用原生asyncpg删除
+            conn = await get_opengauss_connection()
+            try:
+                # 先检查任务是否存在
+                row = await conn.fetchrow("SELECT task_name FROM scheduled_tasks WHERE id = $1", task_id)
+                if not row:
+                    logger.warning(f"未找到任务 ID: {task_id}")
+                    return False
+                
+                task_name = row['task_name']
+                
+                # 记录操作日志（删除前）
+                await log_operation(
+                    operation_type=OperationType.SCHEDULER_DELETE,
+                    resource_type="scheduler",
+                    resource_id=str(task_id),
+                    resource_name=task_name,
+                    operation_name="删除计划任务",
+                    operation_description=f"删除计划任务: {task_name}",
+                    category="scheduler",
+                    success=True,
+                    result_message=f"计划任务删除成功 (ID: {task_id})",
+                    old_values={
+                        "task_name": task_name,
+                        "task_id": task_id
+                    }
+                )
+                
+                # 删除任务
+                await conn.execute("DELETE FROM scheduled_tasks WHERE id = $1", task_id)
+                logger.info(f"使用原生SQL删除计划任务成功: {task_name} (ID: {task_id})")
+                return True
+            finally:
+                await conn.close()
+        else:
+            # 非openGauss数据库，使用SQLAlchemy
+            async with db_manager.AsyncSessionLocal() as session:
+                stmt = select(ScheduledTask).where(ScheduledTask.id == task_id)
+                result = await session.execute(stmt)
+                task = result.scalar_one_or_none()
+                
+                if task:
+                    task_name = task.task_name
+                    
+                    # 记录操作日志（删除前）
+                    await log_operation(
+                        operation_type=OperationType.SCHEDULER_DELETE,
+                        resource_type="scheduler",
+                        resource_id=str(task_id),
+                        resource_name=task_name,
+                        operation_name="删除计划任务",
+                        operation_description=f"删除计划任务: {task_name}",
+                        category="scheduler",
+                        success=True,
+                        result_message=f"计划任务删除成功 (ID: {task_id})",
+                        old_values={
+                            "task_name": task_name,
+                            "task_id": task_id
+                        }
+                    )
+                    
+                    await session.delete(task)
+                    await session.commit()
+                    logger.info(f"使用SQLAlchemy删除计划任务成功: {task_name} (ID: {task_id})")
+                    return True
+                else:
+                    logger.warning(f"未找到任务 ID: {task_id}")
+                    return False
+                    
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        logger.error(f"删除计划任务失败: {str(e)}")
+        logger.error(f"错误详情:\n{error_detail}")
+        
+        # 记录操作日志（失败）
+        await log_operation(
+            operation_type=OperationType.SCHEDULER_DELETE,
+            resource_type="scheduler",
+            resource_id=str(task_id),
+            operation_name="删除计划任务",
+            operation_description=f"删除计划任务失败 (ID: {task_id})",
+            category="scheduler",
+            success=False,
+            error_message=str(e)
+        )
+        
+        return False
+
+
+async def update_task(task_id: int, updates: Dict[str, Any], next_run_time: Optional[datetime] = None) -> Optional[ScheduledTask]:
+    """更新计划任务
+    
+    Returns:
+        更新后的ScheduledTask对象，如果失败则返回None
+    """
+    try:
+        if is_opengauss():
+            # 使用原生asyncpg更新
+            conn = await get_opengauss_connection()
+            try:
+                # 先获取任务
+                row = await conn.fetchrow("SELECT * FROM scheduled_tasks WHERE id = $1", task_id)
+                if not row:
+                    logger.warning(f"未找到任务 ID: {task_id}")
+                    return None
+                
+                # 转换为ScheduledTask对象
+                task = row_to_task(row)
+                
+                # 记录旧值（用于日志）
+                old_values = {
+                    "task_name": task.task_name,
+                    "description": task.description,
+                    "schedule_type": task.schedule_type.value if task.schedule_type else None,
+                    "action_type": task.action_type.value if task.action_type else None,
+                    "enabled": task.enabled,
+                    "status": task.status.value if task.status else None
+                }
+                
+                # 更新字段
+                for key, value in updates.items():
+                    if hasattr(task, key):
+                        setattr(task, key, value)
+                
+                # 如果提供了next_run_time，使用它，否则使用updates中的值
+                if next_run_time is not None:
+                    task.next_run_time = next_run_time
+                elif 'next_run_time' in updates:
+                    task.next_run_time = updates['next_run_time']
+                
+                # 构建更新SQL - 更新所有传入的字段
+                update_fields = []
+                update_values = []
+                param_index = 1
+                
+                # 处理所有更新的字段
+                for key, value in updates.items():
+                    if key == 'schedule_type':
+                        update_fields.append(f"schedule_type = CAST(${param_index} AS scheduletype)")
+                        update_values.append(value.value if value else None)
+                    elif key == 'action_type':
+                        update_fields.append(f"action_type = CAST(${param_index} AS taskactiontype)")
+                        update_values.append(value.value if value else None)
+                    elif key == 'status':
+                        update_fields.append(f"status = CAST(${param_index} AS scheduledtaskstatus)")
+                        update_values.append(value.value if value else None)
+                    elif key in ['schedule_config', 'action_config', 'task_metadata']:
+                        update_fields.append(f"{key} = ${param_index}")
+                        update_values.append(json.dumps(value) if value else None)
+                    elif key == 'tags':
+                        update_fields.append(f"tags = ${param_index}")
+                        update_values.append(json.dumps(value) if value else None)
+                    else:
+                        # 其他字段直接更新
+                        update_fields.append(f"{key} = ${param_index}")
+                        update_values.append(value)
+                    param_index += 1
+                
+                # 始终更新 next_run_time（如果重新计算过）和 updated_at
+                if next_run_time is not None or 'next_run_time' in updates:
+                    update_fields.append(f"next_run_time = ${param_index}")
+                    update_values.append(task.next_run_time)
+                    param_index += 1
+                
+                update_fields.append(f"updated_at = ${param_index}")
+                update_values.append(datetime.now())
+                param_index += 1
+                
+                # 添加task_id作为WHERE条件
+                update_values.append(task_id)
+                
+                # 执行更新
+                if update_fields:
+                    update_sql = f"""
+                        UPDATE scheduled_tasks 
+                        SET {', '.join(update_fields)}
+                        WHERE id = ${param_index}
+                    """
+                    
+                    await conn.execute(update_sql, *update_values)
+                logger.info(f"使用原生SQL更新计划任务成功: {task.task_name} (ID: {task_id})")
+                
+                # 记录操作日志
+                await log_operation(
+                    operation_type=OperationType.SCHEDULER_UPDATE,
+                    resource_type="scheduler",
+                    resource_id=str(task_id),
+                    resource_name=task.task_name,
+                    operation_name="更新计划任务",
+                    operation_description=f"更新计划任务: {task.task_name}",
+                    category="scheduler",
+                    success=True,
+                    result_message=f"计划任务更新成功 (ID: {task_id})",
+                    old_values=old_values,
+                    new_values={
+                        "task_name": task.task_name,
+                        "description": task.description,
+                        "schedule_type": task.schedule_type.value if task.schedule_type else None,
+                        "action_type": task.action_type.value if task.action_type else None,
+                        "enabled": task.enabled,
+                        "status": task.status.value if task.status else None
+                    },
+                    changed_fields=list(updates.keys())
+                )
+                
+                # 重新获取更新后的任务
+                return await get_task_by_id(task_id)
+            finally:
+                await conn.close()
+        else:
+            # 非openGauss数据库，使用SQLAlchemy
+            async with db_manager.AsyncSessionLocal() as session:
+                stmt = select(ScheduledTask).where(ScheduledTask.id == task_id)
+                result = await session.execute(stmt)
+                task = result.scalar_one_or_none()
+                
+                if not task:
+                    logger.warning(f"未找到任务 ID: {task_id}")
+                    return None
+                
+                # 记录旧值（用于日志）
+                old_values = {
+                    "task_name": task.task_name,
+                    "description": task.description,
+                    "schedule_type": task.schedule_type.value if task.schedule_type else None,
+                    "action_type": task.action_type.value if task.action_type else None,
+                    "enabled": task.enabled,
+                    "status": task.status.value if task.status else None
+                }
+                
+                # 更新字段
+                for key, value in updates.items():
+                    if hasattr(task, key):
+                        setattr(task, key, value)
+                
+                # 如果提供了next_run_time，使用它
+                if next_run_time is not None:
+                    task.next_run_time = next_run_time
+                
+                session.add(task)
+                await session.commit()
+                await session.refresh(task)
+                logger.info(f"使用SQLAlchemy更新计划任务成功: {task.task_name} (ID: {task_id})")
+                
+                # 记录操作日志
+                await log_operation(
+                    operation_type=OperationType.SCHEDULER_UPDATE,
+                    resource_type="scheduler",
+                    resource_id=str(task_id),
+                    resource_name=task.task_name,
+                    operation_name="更新计划任务",
+                    operation_description=f"更新计划任务: {task.task_name}",
+                    category="scheduler",
+                    success=True,
+                    result_message=f"计划任务更新成功 (ID: {task_id})",
+                    old_values=old_values,
+                    new_values={
+                        "task_name": task.task_name,
+                        "description": task.description,
+                        "schedule_type": task.schedule_type.value if task.schedule_type else None,
+                        "action_type": task.action_type.value if task.action_type else None,
+                        "enabled": task.enabled,
+                        "status": task.status.value if task.status else None
+                    },
+                    changed_fields=list(updates.keys())
+                )
+                
+                return task
+            
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        logger.error(f"更新计划任务失败: {str(e)}")
+        logger.error(f"错误详情:\n{error_detail}")
+        
+        # 记录操作日志（失败）
+        await log_operation(
+            operation_type=OperationType.SCHEDULER_UPDATE,
+            resource_type="scheduler",
+            resource_id=str(task_id),
+            operation_name="更新计划任务",
+            operation_description=f"更新计划任务失败 (ID: {task_id})",
+            category="scheduler",
+            success=False,
+            error_message=str(e)
+        )
+        
+        return None
+

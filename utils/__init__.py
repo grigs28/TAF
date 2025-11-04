@@ -6,12 +6,13 @@ Utility Module
 """
 
 from .logger import setup_logging, get_logger
-from .scheduler import BackupScheduler
+from .scheduler import BackupScheduler, TaskScheduler
 from .dingtalk_notifier import DingTalkNotifier
 
 __all__ = [
     'setup_logging',
     'get_logger',
     'BackupScheduler',
+    'TaskScheduler',
     'DingTalkNotifier'
 ]

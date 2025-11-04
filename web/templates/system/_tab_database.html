@@ -1,0 +1,104 @@
+<!-- 数据库设置 -->
+<div class="tab-pane fade" id="database" role="tabpanel">
+    <div class="row">
+        <div class="col-md-8">
+            <div class="setting-card service-card mb-3">
+                <div class="card-body">
+                    <h6 class="card-title">数据库连接配置</h6>
+                    <div class="mb-3">
+                        <label class="form-label">数据库类型</label>
+                        <select class="form-select" id="dbType">
+                            <option value="sqlite">SQLite</option>
+                            <option value="postgresql">PostgreSQL</option>
+                            <option value="opengauss">openGauss</option>
+                            <option value="mysql">MySQL</option>
+                        </select>
+                    </div>
+
+                    <!-- SQLite配置 -->
+                    <div id="sqliteConfig">
+                        <div class="mb-3">
+                            <label class="form-label">数据库路径</label>
+                            <input type="text" class="form-control" id="dbPath" placeholder="./backup_system.db">
+                            <small class="text-muted">SQLite数据库文件路径</small>
+                        </div>
+                    </div>
+
+                    <!-- PostgreSQL/openGauss/MySQL配置 -->
+                    <div id="serverDbConfig" style="display: none;">
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">数据库主机</label>
+                                <input type="text" class="form-control" id="dbHost" placeholder="192.168.0.20">
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">数据库端口</label>
+                                <input type="number" class="form-control" id="dbPort" placeholder="5560">
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">数据库名称</label>
+                            <input type="text" class="form-control" id="dbDatabase" placeholder="taf_codex_1">
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">用户名</label>
+                                <input type="text" class="form-control" id="dbUser" placeholder="grigs">
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">密码</label>
+                                <input type="password" class="form-control" id="dbPassword" placeholder="••••••••">
+                            </div>
+                        </div>
+                    </div>
+
+                    <hr>
+                    <h6 class="card-title mt-3">连接池配置</h6>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">连接池大小</label>
+                            <input type="number" class="form-control" id="poolSize" value="10" min="1" max="100">
+                            <small class="text-muted">并发连接数</small>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">最大溢出</label>
+                            <input type="number" class="form-control" id="maxOverflow" value="20" min="0" max="100">
+                            <small class="text-muted">超出连接池的连接数</small>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <button class="btn btn-outline-primary" id="testDbConnectionBtn">
+                            <i class="bi bi-plug me-2"></i>测试连接
+                        </button>
+                        <button class="btn btn-success" id="saveDbConfigBtn">
+                            <i class="bi bi-save me-2"></i>保存配置
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="setting-card service-card mb-3">
+                <div class="card-body">
+                    <h6 class="card-title">连接状态</h6>
+                    <div class="text-center" id="dbStatus">
+                        <div class="status-indicator status-online mb-2"></div>
+                        <p class="text-success" id="dbStatusText">已连接</p>
+                        <small class="text-muted" id="dbTypeText">SQLite</small>
+                    </div>
+                    <hr>
+                    <div class="d-flex justify-content-between">
+                        <small class="text-muted">连接池大小:</small>
+                        <small class="text-muted" id="currentPoolSize">10</small>
+                    </div>
+                    <div class="d-flex justify-content-between">
+                        <small class="text-muted">最大溢出:</small>
+                        <small class="text-muted" id="currentMaxOverflow">20</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+

@@ -6,15 +6,18 @@ Backup Management API
 """
 
 import logging
+import traceback
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func, desc
 
-from models.backup import BackupTask, BackupTaskType
+from models.backup import BackupTask, BackupTaskType, BackupTaskStatus
 from config.settings import get_settings
 from utils.logger import get_logger
+from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+from models.system_log import OperationType, LogCategory, LogLevel
+from utils.log_utils import log_operation, log_system
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -66,10 +69,9 @@ async def create_backup_task(
     此接口创建备份任务配置模板，不立即执行。
     创建的模板可以在计划任务模块中选择并执行。
     """
+    start_time = datetime.now()
+    
     try:
-        from config.database import db_manager
-        from models.backup import BackupTask, BackupTaskStatus
-        
         # 获取系统实例
         system = get_system_instance(http_request)
         if not system:
@@ -80,40 +82,158 @@ async def create_backup_task(
             if not path or not path.strip():
                 raise HTTPException(status_code=400, detail="源路径不能为空")
 
+        import json
+        
         # 创建备份任务模板
-        async with db_manager.AsyncSessionLocal() as session:
-            backup_task = BackupTask(
-                task_name=request.task_name,
-                task_type=request.task_type,
-                source_paths=request.source_paths,
-                exclude_patterns=request.exclude_patterns,
-                compression_enabled=request.compression_enabled,
-                encryption_enabled=request.encryption_enabled,
-                retention_days=request.retention_days,
-                description=request.description,
-                tape_device=request.tape_device,  # 保存磁带设备配置
-                status=BackupTaskStatus.PENDING,
-                is_template=True,  # 标记为模板
-                created_by='backup_api'
-            )
+        if is_opengauss():
+            # 使用原生SQL插入
+            conn = await get_opengauss_connection()
+            try:
+                task_id = await conn.fetchval(
+                    """
+                    INSERT INTO backup_tasks (
+                        task_name, task_type, status, is_template, source_paths, exclude_patterns,
+                        compression_enabled, encryption_enabled, retention_days, description,
+                        tape_device, created_at, updated_at, created_by
+                    ) VALUES (
+                        $1, CAST($2 AS backuptasktype), CAST($3 AS backuptaskstatus), $4, $5, $6,
+                        $7, $8, $9, $10,
+                        $11, $12, $13, $14
+                    )
+                    RETURNING id
+                    """,
+                    request.task_name,
+                    request.task_type.value,
+                    BackupTaskStatus.PENDING.value,
+                    True,  # is_template
+                    json.dumps(request.source_paths) if request.source_paths else None,
+                    json.dumps(request.exclude_patterns) if request.exclude_patterns else None,
+                    request.compression_enabled,
+                    request.encryption_enabled,
+                    request.retention_days,
+                    request.description,
+                    request.tape_device,
+                    datetime.now(),
+                    datetime.now(),
+                    'backup_api'
+                )
+                
+                # 记录操作日志
+                client_ip = http_request.client.host if http_request.client else None
+                duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                await log_operation(
+                    operation_type=OperationType.CREATE,
+                    resource_type="backup",
+                    resource_id=str(task_id),
+                    resource_name=f"备份任务模板: {request.task_name}",
+                    operation_name="创建备份任务模板",
+                    operation_description=f"创建备份任务配置模板: {request.task_name}",
+                    category="backup",
+                    success=True,
+                    result_message="备份任务配置已创建",
+                    new_values={
+                        "task_name": request.task_name,
+                        "task_type": request.task_type.value,
+                        "source_paths": request.source_paths,
+                        "tape_device": request.tape_device
+                    },
+                    ip_address=client_ip,
+                    request_method="POST",
+                    request_url=str(http_request.url),
+                    duration_ms=duration_ms
+                )
+                
+                return {
+                    "success": True,
+                    "task_id": task_id,
+                    "message": "备份任务配置已创建",
+                    "task_name": request.task_name,
+                    "is_template": True
+                }
+            finally:
+                await conn.close()
+        else:
+            # 使用SQLAlchemy插入
+            from config.database import db_manager
             
-            session.add(backup_task)
-            await session.commit()
-            await session.refresh(backup_task)
-            
-            return {
-                "success": True,
-                "task_id": backup_task.id,
-                "message": "备份任务配置已创建",
-                "task_name": backup_task.task_name,
-                "is_template": True
-            }
+            async with db_manager.AsyncSessionLocal() as session:
+                backup_task = BackupTask(
+                    task_name=request.task_name,
+                    task_type=request.task_type,
+                    source_paths=request.source_paths,
+                    exclude_patterns=request.exclude_patterns,
+                    compression_enabled=request.compression_enabled,
+                    encryption_enabled=request.encryption_enabled,
+                    retention_days=request.retention_days,
+                    description=request.description,
+                    tape_device=request.tape_device,
+                    status=BackupTaskStatus.PENDING,
+                    is_template=True,
+                    created_by='backup_api'
+                )
+                
+                session.add(backup_task)
+                await session.commit()
+                await session.refresh(backup_task)
+                
+                # 记录操作日志
+                client_ip = http_request.client.host if http_request.client else None
+                duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                await log_operation(
+                    operation_type=OperationType.CREATE,
+                    resource_type="backup",
+                    resource_id=str(backup_task.id),
+                    resource_name=f"备份任务模板: {request.task_name}",
+                    operation_name="创建备份任务模板",
+                    operation_description=f"创建备份任务配置模板: {request.task_name}",
+                    category="backup",
+                    success=True,
+                    result_message="备份任务配置已创建",
+                    new_values={
+                        "task_name": request.task_name,
+                        "task_type": request.task_type.value,
+                        "source_paths": request.source_paths,
+                        "tape_device": request.tape_device
+                    },
+                    ip_address=client_ip,
+                    request_method="POST",
+                    request_url=str(http_request.url),
+                    duration_ms=duration_ms
+                )
+                
+                return {
+                    "success": True,
+                    "task_id": backup_task.id,
+                    "message": "备份任务配置已创建",
+                    "task_name": backup_task.task_name,
+                    "is_template": True
+                }
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"创建备份任务配置失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        error_msg = str(e)
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        
+        # 记录失败的操作日志
+        client_ip = http_request.client.host if http_request.client else None
+        await log_operation(
+            operation_type=OperationType.CREATE,
+            resource_type="backup",
+            resource_name=f"备份任务模板: {request.task_name}",
+            operation_name="创建备份任务模板",
+            operation_description=f"创建备份任务配置模板失败: {error_msg}",
+            category="backup",
+            success=False,
+            error_message=error_msg,
+            ip_address=client_ip,
+            request_method="POST",
+            request_url=str(http_request.url),
+            duration_ms=duration_ms
+        )
+        
+        logger.error(f"创建备份任务配置失败: {error_msg}", exc_info=True)
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 @router.get("/tasks", response_model=List[BackupTaskResponse])
@@ -131,45 +251,220 @@ async def get_backup_tasks(
     - 通过备份管理模块立即执行的备份任务
     """
     try:
-        from config.database import db_manager
-        from sqlalchemy import select, desc
-        from models.backup import BackupTask, BackupTaskStatus, BackupTaskType
-        
-        async with db_manager.AsyncSessionLocal() as session:
-            # 构建查询
-            stmt = select(BackupTask)
+        if is_opengauss():
+            # 使用原生SQL查询
+            conn = await get_opengauss_connection()
+            try:
+                # 构建WHERE子句
+                where_clauses = []
+                params = []
+                param_index = 1
+                
+                # 只查询非模板任务（执行记录）
+                where_clauses.append("is_template = false")
+                
+                if status:
+                    try:
+                        # 验证状态值
+                        BackupTaskStatus(status)
+                        where_clauses.append(f"status = CAST(${param_index} AS backuptaskstatus)")
+                        params.append(status)
+                        param_index += 1
+                    except ValueError:
+                        pass
+                
+                if task_type:
+                    try:
+                        # 验证类型值
+                        BackupTaskType(task_type)
+                        where_clauses.append(f"task_type = CAST(${param_index} AS backuptasktype)")
+                        params.append(task_type)
+                        param_index += 1
+                    except ValueError:
+                        pass
+                
+                where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+                
+                # 构建查询
+                sql = f"""
+                    SELECT id, task_name, task_type, status, progress_percent, total_files, 
+                           processed_files, total_bytes, processed_bytes, created_at, started_at, 
+                           completed_at, error_message, is_template, tape_device, source_paths
+                    FROM backup_tasks
+                    WHERE {where_sql}
+                    ORDER BY created_at DESC
+                    LIMIT ${param_index} OFFSET ${param_index + 1}
+                """
+                params.extend([limit, offset])
+                
+                rows = await conn.fetch(sql, *params)
+                
+                # 转换为响应格式
+                import json
+                tasks = []
+                for row in rows:
+                    # 解析JSON字段
+                    source_paths = None
+                    if row["source_paths"]:
+                        try:
+                            if isinstance(row["source_paths"], str):
+                                source_paths = json.loads(row["source_paths"])
+                            else:
+                                source_paths = row["source_paths"]
+                        except:
+                            source_paths = None
+                    
+                    tasks.append({
+                        "task_id": row["id"],
+                        "task_name": row["task_name"],
+                        "task_type": row["task_type"].value if hasattr(row["task_type"], "value") else str(row["task_type"]),
+                        "status": row["status"].value if hasattr(row["status"], "value") else str(row["status"]),
+                        "progress_percent": float(row["progress_percent"]) if row["progress_percent"] else 0.0,
+                        "total_files": row["total_files"] or 0,
+                        "processed_files": row["processed_files"] or 0,
+                        "total_bytes": row["total_bytes"] or 0,
+                        "processed_bytes": row["processed_bytes"] or 0,
+                        "created_at": row["created_at"],
+                        "started_at": row["started_at"],
+                        "completed_at": row["completed_at"],
+                        "error_message": row["error_message"],
+                        "is_template": row["is_template"] or False,
+                        "tape_device": row["tape_device"],
+                        "source_paths": source_paths
+                    })
+                
+                return tasks
+            finally:
+                await conn.close()
+        else:
+            # 使用SQLAlchemy查询
+            from config.database import db_manager
+            from sqlalchemy import select, desc
             
-            # 应用过滤条件
-            if is_template is not None:
-                stmt = stmt.where(BackupTask.is_template == is_template)
+            async with db_manager.AsyncSessionLocal() as session:
+                # 构建查询
+                stmt = select(BackupTask).where(BackupTask.is_template == False)
+                
+                if status:
+                    try:
+                        status_enum = BackupTaskStatus(status)
+                        stmt = stmt.where(BackupTask.status == status_enum)
+                    except ValueError:
+                        pass
+                
+                if task_type:
+                    try:
+                        task_type_enum = BackupTaskType(task_type)
+                        stmt = stmt.where(BackupTask.task_type == task_type_enum)
+                    except ValueError:
+                        pass
+                
+                # 按创建时间倒序排列
+                stmt = stmt.order_by(desc(BackupTask.created_at))
+                
+                # 应用分页
+                stmt = stmt.limit(limit).offset(offset)
+                
+                result = await session.execute(stmt)
+                backup_tasks = result.scalars().all()
+                
+                # 转换为响应格式
+                tasks = []
+                for task in backup_tasks:
+                    tasks.append({
+                        "task_id": task.id,
+                        "task_name": task.task_name,
+                        "task_type": task.task_type.value,
+                        "status": task.status.value,
+                        "progress_percent": task.progress_percent or 0.0,
+                        "total_files": task.total_files or 0,
+                        "processed_files": task.processed_files or 0,
+                        "total_bytes": task.total_bytes or 0,
+                        "processed_bytes": task.processed_bytes or 0,
+                        "created_at": task.created_at,
+                        "started_at": task.started_at,
+                        "completed_at": task.completed_at,
+                        "error_message": task.error_message,
+                        "is_template": task.is_template or False,
+                        "tape_device": task.tape_device,
+                        "source_paths": task.source_paths
+                    })
+                
+                return tasks
+
+    except Exception as e:
+        logger.error(f"获取备份任务列表失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/tasks/{task_id}", response_model=BackupTaskResponse)
+async def get_backup_task(task_id: int, http_request: Request):
+    """获取备份任务详情"""
+    try:
+        if is_opengauss():
+            # 使用原生SQL查询
+            conn = await get_opengauss_connection()
+            try:
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, task_name, task_type, status, progress_percent, total_files, 
+                           processed_files, total_bytes, processed_bytes, created_at, started_at, 
+                           completed_at, error_message, is_template, tape_device, source_paths
+                    FROM backup_tasks
+                    WHERE id = $1
+                    """,
+                    task_id
+                )
+                
+                if not row:
+                    raise HTTPException(status_code=404, detail="备份任务不存在")
+                
+                # 解析JSON字段
+                import json
+                source_paths = None
+                if row["source_paths"]:
+                    try:
+                        if isinstance(row["source_paths"], str):
+                            source_paths = json.loads(row["source_paths"])
+                        else:
+                            source_paths = row["source_paths"]
+                    except:
+                        source_paths = None
+                
+                return {
+                    "task_id": row["id"],
+                    "task_name": row["task_name"],
+                    "task_type": row["task_type"].value if hasattr(row["task_type"], "value") else str(row["task_type"]),
+                    "status": row["status"].value if hasattr(row["status"], "value") else str(row["status"]),
+                    "progress_percent": float(row["progress_percent"]) if row["progress_percent"] else 0.0,
+                    "total_files": row["total_files"] or 0,
+                    "processed_files": row["processed_files"] or 0,
+                    "total_bytes": row["total_bytes"] or 0,
+                    "processed_bytes": row["processed_bytes"] or 0,
+                    "created_at": row["created_at"],
+                    "started_at": row["started_at"],
+                    "completed_at": row["completed_at"],
+                    "error_message": row["error_message"],
+                    "is_template": row["is_template"] or False,
+                    "tape_device": row["tape_device"],
+                    "source_paths": source_paths
+                }
+            finally:
+                await conn.close()
+        else:
+            # 使用SQLAlchemy查询
+            from config.database import db_manager
+            from sqlalchemy import select
             
-            if status:
-                try:
-                    status_enum = BackupTaskStatus(status)
-                    stmt = stmt.where(BackupTask.status == status_enum)
-                except ValueError:
-                    pass  # 无效的状态值，忽略过滤
-            
-            if task_type:
-                try:
-                    task_type_enum = BackupTaskType(task_type)
-                    stmt = stmt.where(BackupTask.task_type == task_type_enum)
-                except ValueError:
-                    pass  # 无效的类型值，忽略过滤
-            
-            # 按创建时间倒序排列
-            stmt = stmt.order_by(desc(BackupTask.created_at))
-            
-            # 应用分页
-            stmt = stmt.limit(limit).offset(offset)
-            
-            result = await session.execute(stmt)
-            backup_tasks = result.scalars().all()
-            
-            # 转换为响应格式
-            tasks = []
-            for task in backup_tasks:
-                tasks.append({
+            async with db_manager.AsyncSessionLocal() as session:
+                stmt = select(BackupTask).where(BackupTask.id == task_id)
+                result = await session.execute(stmt)
+                task = result.scalar_one_or_none()
+                
+                if not task:
+                    raise HTTPException(status_code=404, detail="备份任务不存在")
+                
+                return {
                     "task_id": task.id,
                     "task_name": task.task_name,
                     "task_type": task.task_type.value,
@@ -184,54 +479,14 @@ async def get_backup_tasks(
                     "completed_at": task.completed_at,
                     "error_message": task.error_message,
                     "is_template": task.is_template or False,
-                    "tape_device": task.tape_device  # 添加磁带设备信息
-                })
-            
-            return tasks
-
-    except Exception as e:
-        logger.error(f"获取备份任务列表失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/tasks/{task_id}", response_model=BackupTaskResponse)
-async def get_backup_task(task_id: int):
-    """获取备份任务详情"""
-    try:
-        from config.database import db_manager
-        from sqlalchemy import select
-        from models.backup import BackupTask
-        
-        async with db_manager.AsyncSessionLocal() as session:
-            stmt = select(BackupTask).where(BackupTask.id == task_id)
-            result = await session.execute(stmt)
-            task = result.scalar_one_or_none()
-            
-            if not task:
-                raise HTTPException(status_code=404, detail="备份任务不存在")
-            
-            return {
-                "task_id": task.id,
-                "task_name": task.task_name,
-                "task_type": task.task_type.value,
-                "status": task.status.value,
-                "progress_percent": task.progress_percent or 0.0,
-                "total_files": task.total_files or 0,
-                "processed_files": task.processed_files or 0,
-                "total_bytes": task.total_bytes or 0,
-                "processed_bytes": task.processed_bytes or 0,
-                "created_at": task.created_at,
-                "started_at": task.started_at,
-                "completed_at": task.completed_at,
-                "error_message": task.error_message,
-                "is_template": task.is_template or False,
-                "tape_device": task.tape_device
-            }
+                    "tape_device": task.tape_device,
+                    "source_paths": task.source_paths
+                }
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"获取备份任务详情失败: {str(e)}")
+        logger.error(f"获取备份任务详情失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -284,25 +539,114 @@ async def get_backup_templates(
 
 
 @router.put("/tasks/{task_id}/cancel")
-async def cancel_backup_task(task_id: int, http_request: Request = None):
+async def cancel_backup_task(task_id: int, http_request: Request):
     """取消备份任务（仅限执行记录）"""
+    start_time = datetime.now()
+    
     try:
         # 获取系统实例
         system = get_system_instance(http_request)
         if not system:
             raise HTTPException(status_code=500, detail="系统未初始化")
 
+        # 先获取任务信息用于日志
+        task_info = None
+        if is_opengauss():
+            conn = await get_opengauss_connection()
+            try:
+                row = await conn.fetchrow(
+                    "SELECT task_name, status FROM backup_tasks WHERE id = $1",
+                    task_id
+                )
+                if row:
+                    task_info = {
+                        "task_name": row["task_name"],
+                        "status": row["status"].value if hasattr(row["status"], "value") else str(row["status"])
+                    }
+            finally:
+                await conn.close()
+        else:
+            from config.database import db_manager
+            from sqlalchemy import select
+            async with db_manager.AsyncSessionLocal() as session:
+                stmt = select(BackupTask).where(BackupTask.id == task_id)
+                result = await session.execute(stmt)
+                task = result.scalar_one_or_none()
+                if task:
+                    task_info = {
+                        "task_name": task.task_name,
+                        "status": task.status.value
+                    }
+
         success = await system.backup_engine.cancel_task(task_id)
+        
+        # 记录操作日志
+        client_ip = http_request.client.host if http_request.client else None
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        
         if success:
+            await log_operation(
+                operation_type=OperationType.EXECUTE,
+                resource_type="backup",
+                resource_id=str(task_id),
+                resource_name=f"备份任务: {task_info.get('task_name') if task_info else '未知'}" if task_info else f"备份任务: {task_id}",
+                operation_name="取消备份任务",
+                operation_description=f"取消备份任务: {task_info.get('task_name') if task_info else task_id}",
+                category="backup",
+                success=True,
+                result_message="任务已取消",
+                ip_address=client_ip,
+                request_method="PUT",
+                request_url=str(http_request.url),
+                duration_ms=duration_ms
+            )
+            
             return {"success": True, "message": "任务已取消"}
         else:
+            await log_operation(
+                operation_type=OperationType.EXECUTE,
+                resource_type="backup",
+                resource_id=str(task_id),
+                resource_name=f"备份任务: {task_info.get('task_name') if task_info else '未知'}" if task_info else f"备份任务: {task_id}",
+                operation_name="取消备份任务",
+                operation_description=f"取消备份任务失败: 任务不存在或无法取消",
+                category="backup",
+                success=False,
+                error_message="任务不存在或无法取消",
+                ip_address=client_ip,
+                request_method="PUT",
+                request_url=str(http_request.url),
+                duration_ms=duration_ms
+            )
+            
             raise HTTPException(status_code=404, detail="任务不存在或无法取消")
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"取消备份任务失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        error_msg = str(e)
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        
+        # 记录失败的操作日志
+        client_ip = http_request.client.host if http_request.client else None
+        await log_operation(
+            operation_type=OperationType.EXECUTE,
+            resource_type="backup",
+            resource_id=str(task_id),
+            resource_name=f"备份任务: {task_id}",
+            operation_name="取消备份任务",
+            operation_description=f"取消备份任务失败: {error_msg}",
+            category="backup",
+            success=False,
+            error_message=error_msg,
+            ip_address=client_ip,
+            request_method="PUT",
+            request_url=str(http_request.url),
+            duration_ms=duration_ms
+        )
+        
+        logger.error(f"取消备份任务失败: {error_msg}", exc_info=True)
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 @router.get("/tasks/{task_id}/status")
@@ -328,84 +672,250 @@ async def get_task_status(task_id: int, http_request: Request = None):
 
 
 @router.get("/statistics")
-async def get_backup_statistics():
-    """获取备份统计信息"""
+async def get_backup_statistics(http_request: Request):
+    """获取备份统计信息（使用真实数据）"""
     try:
-        from config.database import db_manager
-        from sqlalchemy import select, func, and_
-        from models.backup import BackupTask, BackupTaskStatus
-        from datetime import datetime, timedelta
-        
-        async with db_manager.AsyncSessionLocal() as session:
-            # 总任务数
-            total_stmt = select(func.count(BackupTask.id))
-            total_result = await session.execute(total_stmt)
-            total_tasks = total_result.scalar() or 0
-            
-            # 按状态统计
-            completed_stmt = select(func.count(BackupTask.id)).where(BackupTask.status == BackupTaskStatus.COMPLETED)
-            completed_result = await session.execute(completed_stmt)
-            completed_tasks = completed_result.scalar() or 0
-            
-            failed_stmt = select(func.count(BackupTask.id)).where(BackupTask.status == BackupTaskStatus.FAILED)
-            failed_result = await session.execute(failed_stmt)
-            failed_tasks = failed_result.scalar() or 0
-            
-            running_stmt = select(func.count(BackupTask.id)).where(BackupTask.status == BackupTaskStatus.RUNNING)
-            running_result = await session.execute(running_stmt)
-            running_tasks = running_result.scalar() or 0
-            
-            pending_stmt = select(func.count(BackupTask.id)).where(BackupTask.status == BackupTaskStatus.PENDING)
-            pending_result = await session.execute(pending_stmt)
-            pending_tasks = pending_result.scalar() or 0
-            
-            # 成功率
-            success_rate = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0.0
-            
-            # 总备份数据量
-            bytes_stmt = select(func.sum(BackupTask.processed_bytes)).where(BackupTask.status == BackupTaskStatus.COMPLETED)
-            bytes_result = await session.execute(bytes_stmt)
-            total_data_backed_up = bytes_result.scalar() or 0
-            
-            # 最近24小时统计
-            twenty_four_hours_ago = datetime.now() - timedelta(hours=24)
-            recent_stmt = select(
-                func.count(BackupTask.id),
-                func.sum(func.case((BackupTask.status == BackupTaskStatus.COMPLETED, 1), else_=0)),
-                func.sum(func.case((BackupTask.status == BackupTaskStatus.FAILED, 1), else_=0)),
-                func.sum(BackupTask.processed_bytes)
-            ).where(BackupTask.created_at >= twenty_four_hours_ago)
-            recent_result = await session.execute(recent_stmt)
-            recent_row = recent_result.first()
-            
-            recent_total = recent_row[0] or 0
-            recent_completed = recent_row[1] or 0
-            recent_failed = recent_row[2] or 0
-            recent_data = recent_row[3] or 0
-            
-            # 平均任务时长（简化计算）
-            avg_duration = 3600  # 暂时使用默认值，后续可以从completed_at - started_at计算
-            
-            return {
-                "total_tasks": total_tasks,
-                "completed_tasks": completed_tasks,
-                "failed_tasks": failed_tasks,
-                "running_tasks": running_tasks,
-                "pending_tasks": pending_tasks,
-                "success_rate": round(success_rate, 2),
-                "total_data_backed_up": total_data_backed_up,
-                "compression_ratio": 0.65,  # 可以从BackupSet计算
-                "average_task_duration": avg_duration,
-                "recent_24h": {
-                    "total_tasks": recent_total,
-                    "completed_tasks": recent_completed,
-                    "failed_tasks": recent_failed,
-                    "data_backed_up": recent_data
+        if is_opengauss():
+            # 使用原生SQL查询
+            conn = await get_opengauss_connection()
+            try:
+                # 只查询非模板任务（执行记录）
+                # 总任务数
+                total_row = await conn.fetchrow(
+                    "SELECT COUNT(*) as total FROM backup_tasks WHERE is_template = false"
+                )
+                total_tasks = total_row["total"] if total_row else 0
+                
+                # 按状态统计
+                completed_row = await conn.fetchrow(
+                    "SELECT COUNT(*) as total FROM backup_tasks WHERE is_template = false AND status = CAST($1 AS backuptaskstatus)",
+                    BackupTaskStatus.COMPLETED.value
+                )
+                completed_tasks = completed_row["total"] if completed_row else 0
+                
+                failed_row = await conn.fetchrow(
+                    "SELECT COUNT(*) as total FROM backup_tasks WHERE is_template = false AND status = CAST($1 AS backuptaskstatus)",
+                    BackupTaskStatus.FAILED.value
+                )
+                failed_tasks = failed_row["total"] if failed_row else 0
+                
+                running_row = await conn.fetchrow(
+                    "SELECT COUNT(*) as total FROM backup_tasks WHERE is_template = false AND status = CAST($1 AS backuptaskstatus)",
+                    BackupTaskStatus.RUNNING.value
+                )
+                running_tasks = running_row["total"] if running_row else 0
+                
+                pending_row = await conn.fetchrow(
+                    "SELECT COUNT(*) as total FROM backup_tasks WHERE is_template = false AND status = CAST($1 AS backuptaskstatus)",
+                    BackupTaskStatus.PENDING.value
+                )
+                pending_tasks = pending_row["total"] if pending_row else 0
+                
+                # 成功率
+                success_rate = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0.0
+                
+                # 总备份数据量
+                bytes_row = await conn.fetchrow(
+                    """
+                    SELECT COALESCE(SUM(processed_bytes), 0) as total 
+                    FROM backup_tasks 
+                    WHERE is_template = false AND status = CAST($1 AS backuptaskstatus)
+                    """,
+                    BackupTaskStatus.COMPLETED.value
+                )
+                total_data_backed_up = bytes_row["total"] if bytes_row else 0
+                
+                # 最近24小时统计
+                twenty_four_hours_ago = datetime.now() - timedelta(hours=24)
+                recent_row = await conn.fetchrow(
+                    """
+                    SELECT 
+                        COUNT(*) as total,
+                        COUNT(*) FILTER (WHERE status = CAST($1 AS backuptaskstatus)) as completed,
+                        COUNT(*) FILTER (WHERE status = CAST($2 AS backuptaskstatus)) as failed,
+                        COALESCE(SUM(processed_bytes), 0) as data
+                    FROM backup_tasks
+                    WHERE is_template = false AND created_at >= $3
+                    """,
+                    BackupTaskStatus.COMPLETED.value,
+                    BackupTaskStatus.FAILED.value,
+                    twenty_four_hours_ago
+                )
+                
+                recent_total = recent_row["total"] if recent_row else 0
+                recent_completed = recent_row["completed"] if recent_row else 0
+                recent_failed = recent_row["failed"] if recent_row else 0
+                recent_data = recent_row["data"] if recent_row else 0
+                
+                # 平均任务时长（从completed_at - started_at计算）
+                avg_duration_row = await conn.fetchrow(
+                    """
+                    SELECT AVG(EXTRACT(EPOCH FROM (completed_at - started_at))) as avg_duration
+                    FROM backup_tasks
+                    WHERE is_template = false 
+                      AND status = CAST($1 AS backuptaskstatus)
+                      AND completed_at IS NOT NULL 
+                      AND started_at IS NOT NULL
+                    """,
+                    BackupTaskStatus.COMPLETED.value
+                )
+                avg_duration = int(avg_duration_row["avg_duration"]) if avg_duration_row and avg_duration_row["avg_duration"] else 3600
+                
+                # 压缩比（从compressed_bytes和processed_bytes计算）
+                compression_row = await conn.fetchrow(
+                    """
+                    SELECT 
+                        COALESCE(SUM(processed_bytes), 0) as processed,
+                        COALESCE(SUM(compressed_bytes), 0) as compressed
+                    FROM backup_tasks
+                    WHERE is_template = false 
+                      AND status = CAST($1 AS backuptaskstatus)
+                      AND compressed_bytes > 0
+                    """,
+                    BackupTaskStatus.COMPLETED.value
+                )
+                if compression_row and compression_row["processed"] > 0:
+                    compression_ratio = float(compression_row["compressed"]) / float(compression_row["processed"])
+                else:
+                    compression_ratio = 0.65  # 默认值
+                
+                return {
+                    "total_tasks": total_tasks,
+                    "completed_tasks": completed_tasks,
+                    "failed_tasks": failed_tasks,
+                    "running_tasks": running_tasks,
+                    "pending_tasks": pending_tasks,
+                    "success_rate": round(success_rate, 2),
+                    "total_data_backed_up": total_data_backed_up,
+                    "compression_ratio": round(compression_ratio, 2),
+                    "average_task_duration": avg_duration,
+                    "recent_24h": {
+                        "total_tasks": recent_total,
+                        "completed_tasks": recent_completed,
+                        "failed_tasks": recent_failed,
+                        "data_backed_up": recent_data
+                    }
                 }
-            }
+            finally:
+                await conn.close()
+        else:
+            # 使用SQLAlchemy查询
+            from config.database import db_manager
+            from sqlalchemy import select, func, and_
+            
+            async with db_manager.AsyncSessionLocal() as session:
+                # 总任务数（只查询非模板任务）
+                total_stmt = select(func.count(BackupTask.id)).where(BackupTask.is_template == False)
+                total_result = await session.execute(total_stmt)
+                total_tasks = total_result.scalar() or 0
+                
+                # 按状态统计
+                completed_stmt = select(func.count(BackupTask.id)).where(
+                    BackupTask.is_template == False,
+                    BackupTask.status == BackupTaskStatus.COMPLETED
+                )
+                completed_result = await session.execute(completed_stmt)
+                completed_tasks = completed_result.scalar() or 0
+                
+                failed_stmt = select(func.count(BackupTask.id)).where(
+                    BackupTask.is_template == False,
+                    BackupTask.status == BackupTaskStatus.FAILED
+                )
+                failed_result = await session.execute(failed_stmt)
+                failed_tasks = failed_result.scalar() or 0
+                
+                running_stmt = select(func.count(BackupTask.id)).where(
+                    BackupTask.is_template == False,
+                    BackupTask.status == BackupTaskStatus.RUNNING
+                )
+                running_result = await session.execute(running_stmt)
+                running_tasks = running_result.scalar() or 0
+                
+                pending_stmt = select(func.count(BackupTask.id)).where(
+                    BackupTask.is_template == False,
+                    BackupTask.status == BackupTaskStatus.PENDING
+                )
+                pending_result = await session.execute(pending_stmt)
+                pending_tasks = pending_result.scalar() or 0
+                
+                # 成功率
+                success_rate = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0.0
+                
+                # 总备份数据量
+                bytes_stmt = select(func.sum(BackupTask.processed_bytes)).where(
+                    BackupTask.is_template == False,
+                    BackupTask.status == BackupTaskStatus.COMPLETED
+                )
+                bytes_result = await session.execute(bytes_stmt)
+                total_data_backed_up = bytes_result.scalar() or 0
+                
+                # 最近24小时统计
+                twenty_four_hours_ago = datetime.now() - timedelta(hours=24)
+                recent_stmt = select(
+                    func.count(BackupTask.id),
+                    func.sum(func.case((BackupTask.status == BackupTaskStatus.COMPLETED, 1), else_=0)),
+                    func.sum(func.case((BackupTask.status == BackupTaskStatus.FAILED, 1), else_=0)),
+                    func.sum(BackupTask.processed_bytes)
+                ).where(
+                    BackupTask.is_template == False,
+                    BackupTask.created_at >= twenty_four_hours_ago
+                )
+                recent_result = await session.execute(recent_stmt)
+                recent_row = recent_result.first()
+                
+                recent_total = recent_row[0] or 0
+                recent_completed = recent_row[1] or 0
+                recent_failed = recent_row[2] or 0
+                recent_data = recent_row[3] or 0
+                
+                # 平均任务时长
+                avg_duration_stmt = select(
+                    func.avg(func.extract('epoch', BackupTask.completed_at - BackupTask.started_at))
+                ).where(
+                    BackupTask.is_template == False,
+                    BackupTask.status == BackupTaskStatus.COMPLETED,
+                    BackupTask.completed_at.isnot(None),
+                    BackupTask.started_at.isnot(None)
+                )
+                avg_duration_result = await session.execute(avg_duration_stmt)
+                avg_duration = int(avg_duration_result.scalar() or 3600)
+                
+                # 压缩比
+                compression_stmt = select(
+                    func.sum(BackupTask.processed_bytes),
+                    func.sum(BackupTask.compressed_bytes)
+                ).where(
+                    BackupTask.is_template == False,
+                    BackupTask.status == BackupTaskStatus.COMPLETED,
+                    BackupTask.compressed_bytes > 0
+                )
+                compression_result = await session.execute(compression_stmt)
+                compression_row = compression_result.first()
+                if compression_row and compression_row[0] and compression_row[0] > 0:
+                    compression_ratio = float(compression_row[1] or 0) / float(compression_row[0])
+                else:
+                    compression_ratio = 0.65
+                
+                return {
+                    "total_tasks": total_tasks,
+                    "completed_tasks": completed_tasks,
+                    "failed_tasks": failed_tasks,
+                    "running_tasks": running_tasks,
+                    "pending_tasks": pending_tasks,
+                    "success_rate": round(success_rate, 2),
+                    "total_data_backed_up": total_data_backed_up,
+                    "compression_ratio": round(compression_ratio, 2),
+                    "average_task_duration": avg_duration,
+                    "recent_24h": {
+                        "total_tasks": recent_total,
+                        "completed_tasks": recent_completed,
+                        "failed_tasks": recent_failed,
+                        "data_backed_up": recent_data
+                    }
+                }
 
     except Exception as e:
-        logger.error(f"获取备份统计信息失败: {str(e)}")
+        logger.error(f"获取备份统计信息失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

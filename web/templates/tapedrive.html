@@ -145,7 +145,7 @@
                     </div>
                 </div>
 
-                <div class="col-12">
+                <div class="col-12 mb-3">
                     <div class="setting-card service-card">
                         <div class="card-body">
                             <h6 class="card-title">已检测设备</h6>
@@ -156,6 +156,58 @@
                                 </p>
                             </div>
                         </div>
+                    </div>
+                </div>
+
+                <!-- 当前磁带信息卡片 -->
+                <div class="col-12">
+                    <div class="setting-card service-card">
+                        <div class="card-body">
+                            <h6 class="card-title">
+                                <i class="bi bi-database me-2"></i>当前磁带
+                            </h6>
+                            <div id="currentTapeCard" class="text-center py-3">
+                                <div class="text-muted">
+                                    <i class="bi bi-info-circle"></i>
+                                    <p class="mb-0">加载中...</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 磁带机操作历史 -->
+    <div class="row mt-4">
+        <div class="col-12">
+            <div class="service-card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">
+                        <i class="bi bi-clock-history me-2"></i>
+                        磁带机操作历史
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-sm">
+                            <thead>
+                                <tr>
+                                    <th>时间</th>
+                                    <th>操作</th>
+                                    <th>设备</th>
+                                    <th>用户</th>
+                                    <th>状态</th>
+                                    <th>备注</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tapeDriveHistoryTableBody">
+                                <tr>
+                                    <td colspan="6" class="text-center text-muted">加载中...</td>
+                                </tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
             </div>
@@ -170,6 +222,15 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // 页面加载时自动扫描设备
     scanDevicesOnLoad();
+    
+    // 加载操作历史
+    loadTapeDriveHistory();
+    
+    // 加载当前磁带信息
+    loadCurrentTape();
+    
+    // 定期刷新当前磁带信息（每30秒）
+    setInterval(loadCurrentTape, 30000);
     
     // 测试磁带连接
     document.getElementById('testTapeConnectionBtn').addEventListener('click', async function() {
@@ -191,9 +252,13 @@ document.addEventListener('DOMContentLoaded', function() {
             if (result.success) {
                 alert('✅ 磁带机连接测试成功！');
                 updateTapeStatus(result);
+                loadTapeDriveHistory();  // 刷新操作历史
+                loadCurrentTape();  // 刷新当前磁带信息
             } else {
                 alert('❌ 磁带机连接测试失败：' + result.message);
                 updateTapeStatus({ connected: false });
+                loadTapeDriveHistory();  // 刷新操作历史
+                loadCurrentTape();  // 刷新当前磁带信息
             }
         } catch (error) {
             alert('❌ 测试失败：' + error.message);
@@ -231,8 +296,10 @@ document.addEventListener('DOMContentLoaded', function() {
             
             if (result.success) {
                 alert('✅ 配置已保存');
+                loadTapeDriveHistory();  // 刷新操作历史
             } else {
                 alert('❌ 保存失败：' + result.message);
+                loadTapeDriveHistory();  // 刷新操作历史
             }
         } catch (error) {
             alert('❌ 保存失败：' + error.message);
@@ -256,9 +323,13 @@ document.addEventListener('DOMContentLoaded', function() {
             if (result.success && result.devices && result.devices.length > 0) {
                 displayDetectedDevices(result.devices);
                 alert(`✅ 检测到 ${result.devices.length} 个磁带设备！`);
+                loadTapeDriveHistory();  // 刷新操作历史
+                loadCurrentTape();  // 刷新当前磁带信息
             } else {
                 displayDetectedDevices([]);
                 alert('⚠️ 未检测到磁带设备');
+                loadTapeDriveHistory();  // 刷新操作历史
+                loadCurrentTape();  // 刷新当前磁带信息
             }
         } catch (error) {
             alert('❌ 扫描失败：' + error.message);
@@ -299,6 +370,9 @@ function loadTapeConfig() {
                     document.getElementById('autoTapeCleanup').checked = config.auto_tape_cleanup;
                 }
                 updateTapeStatus(data.status || {});
+                
+                // 加载配置后，立即加载当前磁带信息
+                loadCurrentTape();
             }
         })
         .catch(error => console.error('加载磁带配置失败:', error));
@@ -388,6 +462,233 @@ function scanDevicesOnLoad() {
             console.error('自动扫描设备失败:', error);
             displayDetectedDevices([]);
         });
+}
+
+// 加载磁带机操作历史
+async function loadTapeDriveHistory() {
+    try {
+        const tbody = document.getElementById('tapeDriveHistoryTableBody');
+        if (!tbody) return;
+        
+        // 显示加载中
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">加载中...</td></tr>';
+        
+        const response = await fetch('/api/system/tape/history?limit=50&offset=0');
+        const result = await response.json();
+        
+        if (result && result.success && result.history && result.history.length > 0) {
+            tbody.innerHTML = '';
+            
+            result.history.forEach(log => {
+                // 格式化时间
+                const time = log.time ? new Date(log.time).toLocaleString('zh-CN', {
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit'
+                }) : 'N/A';
+                
+                // 操作名称
+                const operation = log.operation || '操作';
+                
+                // 设备名称
+                const deviceName = log.device_name || '-';
+                
+                // 用户名
+                const username = log.username || 'system';
+                
+                // 状态徽章
+                const statusBadge = log.success 
+                    ? '<span class="badge bg-success">成功</span>' 
+                    : '<span class="badge bg-danger">失败</span>';
+                
+                // 备注信息
+                const message = log.message || '';
+                
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${time}</td>
+                    <td>${operation}</td>
+                    <td>${deviceName}</td>
+                    <td>${username}</td>
+                    <td>${statusBadge}</td>
+                    <td>${message}</td>
+                `;
+                tbody.appendChild(row);
+            });
+        } else {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">暂无操作历史</td></tr>';
+        }
+    } catch (error) {
+        console.error('加载磁带机操作历史失败:', error);
+        const tbody = document.getElementById('tapeDriveHistoryTableBody');
+        if (tbody) {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-danger">加载失败: ' + error.message + '</td></tr>';
+        }
+    }
+}
+
+// 加载当前磁带信息
+async function loadCurrentTape() {
+    try {
+        const card = document.getElementById('currentTapeCard');
+        if (!card) return;
+        
+        const response = await fetch('/api/tape/current');
+        const result = await response.json();
+        
+        // 检查是否有磁带信息
+        if (result && result.tape_id) {
+            // 有磁带，显示详细信息
+            const formatBytes = (bytes) => {
+                if (bytes >= 1024 ** 4) return (bytes / (1024 ** 4)).toFixed(2) + ' TB';
+                if (bytes >= 1024 ** 3) return (bytes / (1024 ** 3)).toFixed(2) + ' GB';
+                if (bytes >= 1024 ** 2) return (bytes / (1024 ** 2)).toFixed(2) + ' MB';
+                return bytes + ' B';
+            };
+            
+            const usagePercent = result.usage_percent || 0;
+            const progressColor = usagePercent >= 90 ? 'danger' : usagePercent >= 70 ? 'warning' : 'success';
+            
+            // 状态样式
+            const statusConfig = {
+                'AVAILABLE': {class: 'success', text: '可用'},
+                'available': {class: 'success', text: '可用'},
+                'IN_USE': {class: 'primary', text: '使用中'},
+                'in_use': {class: 'primary', text: '使用中'},
+                'FULL': {class: 'danger', text: '已满'},
+                'full': {class: 'danger', text: '已满'}
+            };
+            const status = statusConfig[result.status] || {class: 'secondary', text: result.status || '未知'};
+            
+            card.innerHTML = `
+                <div class="text-start">
+                    <div class="mb-2">
+                        <h6 class="mb-1">${result.label || result.tape_id}</h6>
+                        <small class="text-muted">磁带ID: ${result.tape_id}</small>
+                    </div>
+                    <div class="mb-2">
+                        <span class="badge bg-${status.class}">${status.text}</span>
+                    </div>
+                    <div class="mb-2">
+                        <small class="text-muted">容量: </small>
+                        <small>${formatBytes(result.capacity_bytes || 0)}</small>
+                    </div>
+                    <div class="mb-2">
+                        <small class="text-muted">已用: </small>
+                        <small>${formatBytes(result.used_bytes || 0)} / ${formatBytes(result.capacity_bytes || 0)}</small>
+                        <small class="text-muted"> (${usagePercent.toFixed(1)}%)</small>
+                    </div>
+                    <div class="mb-2">
+                        <div class="progress" style="height: 6px;">
+                            <div class="progress-bar bg-${progressColor}" style="width: ${usagePercent}%"></div>
+                        </div>
+                    </div>
+                    ${result.location ? `
+                    <div class="mb-2">
+                        <small class="text-muted">位置: </small>
+                        <small>${result.location}</small>
+                    </div>
+                    ` : ''}
+                    ${result.created_date ? `
+                    <div class="mb-2">
+                        <small class="text-muted">创建日期: </small>
+                        <small>${new Date(result.created_date).toLocaleDateString('zh-CN')}</small>
+                    </div>
+                    ` : ''}
+                    ${result.expiry_date ? `
+                    <div class="mb-2">
+                        <small class="text-muted">过期日期: </small>
+                        <small>${new Date(result.expiry_date).toLocaleDateString('zh-CN')}</small>
+                    </div>
+                    ` : ''}
+                </div>
+            `;
+        } else {
+            // 未处于“已加载”状态时，尝试直接读取磁带标签与设备信息
+            try {
+                const [labelResp, devicesResp] = await Promise.all([
+                    fetch('/api/tape/read-label'),
+                    fetch('/api/system/tape/scan')
+                ]);
+                const labelData = await labelResp.json();
+                const devicesData = await devicesResp.json();
+
+                if (labelData && labelData.success && labelData.metadata) {
+                    const m = labelData.metadata;
+                    const device = (devicesData && devicesData.success && devicesData.devices && devicesData.devices[0]) ? devicesData.devices[0] : null;
+
+                    const deviceInfo = device ? `${device.vendor || 'Unknown'} ${device.model || ''}`.trim() : '未检测到设备信息';
+                    const devicePath = device ? (device.path || '') : '';
+
+                    const createdText = m.created_date ? new Date(m.created_date).toLocaleDateString('zh-CN') : '';
+                    const expiryText = m.expiry_date ? new Date(m.expiry_date).toLocaleDateString('zh-CN') : '';
+
+                    card.innerHTML = `
+                        <div class="text-start">
+                            <div class="mb-2">
+                                <h6 class="mb-1">${m.label || m.tape_id || '未知磁带'}</h6>
+                                ${m.tape_id ? `<small class="text-muted">磁带ID: ${m.tape_id}</small>` : ''}
+                            </div>
+                            ${m.serial_number ? `
+                            <div class="mb-2">
+                                <small class="text-muted">序列号: </small>
+                                <small>${m.serial_number}</small>
+                            </div>` : ''}
+                            ${createdText ? `
+                            <div class="mb-2">
+                                <small class="text-muted">创建日期: </small>
+                                <small>${createdText}</small>
+                            </div>` : ''}
+                            ${expiryText ? `
+                            <div class="mb-2">
+                                <small class="text-muted">过期日期: </small>
+                                <small>${expiryText}</small>
+                            </div>` : ''}
+                            <hr class="my-2" />
+                            <div class="mb-1">
+                                <small class="text-muted">设备: </small>
+                                <small>${deviceInfo}</small>
+                            </div>
+                            ${devicePath ? `
+                            <div class="mb-1">
+                                <small class="text-muted">路径: </small>
+                                <code class="bg-dark text-light px-2 py-0 rounded">${devicePath}</code>
+                            </div>` : ''}
+                        </div>
+                    `;
+                } else {
+                    // 无法读取到标签
+                    card.innerHTML = `
+                        <div class="text-muted">
+                            <i class="bi bi-inbox" style="font-size: 2rem;"></i>
+                            <p class="mb-0 mt-2">当前没有加载的磁带</p>
+                        </div>
+                    `;
+                }
+            } catch (e) {
+                card.innerHTML = `
+                    <div class="text-muted">
+                        <i class="bi bi-inbox" style="font-size: 2rem;"></i>
+                        <p class="mb-0 mt-2">当前没有加载的磁带</p>
+                    </div>
+                `;
+            }
+        }
+    } catch (error) {
+        console.error('加载当前磁带信息失败:', error);
+        const card = document.getElementById('currentTapeCard');
+        if (card) {
+            card.innerHTML = `
+                <div class="text-danger">
+                    <i class="bi bi-exclamation-triangle"></i>
+                    <p class="mb-0">加载失败: ${error.message}</p>
+                </div>
+            `;
+        }
+    }
 }
 </script>
 {% endblock %}

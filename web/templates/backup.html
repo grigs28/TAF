@@ -40,9 +40,6 @@
             <button class="btn btn-success" onclick="window.location.href='/system#scheduler'; setTimeout(() => { const btn = document.getElementById('addScheduledTaskBtn'); if (btn) btn.click(); }, 500);">
                 <i class="bi bi-calendar-check me-2"></i>创建计划备份
             </button>
-            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createBackupModal">
-                <i class="bi bi-plus-circle me-2"></i>立即执行备份
-            </button>
         </div>
     </div>
     
@@ -50,7 +47,6 @@
     <div class="alert alert-info alert-dismissible fade show" role="alert">
         <i class="bi bi-info-circle me-2"></i>
         <strong>提示：</strong>推荐使用 <a href="/system#scheduler" class="alert-link">计划任务模块</a> 创建定期备份任务，支持多种调度方式（每日、每周、每月等）。
-        此处的"立即执行备份"适用于临时的一次性备份需求。
         <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
     </div>
 
@@ -62,7 +58,7 @@
                     <div class="d-flex justify-content-between align-items-center">
                         <div>
                             <h6 class="mb-2">总任务数</h6>
-                            <h3 class="mb-0">156</h3>
+                            <h3 class="mb-0" id="totalTasks">-</h3>
                         </div>
                         <div class="ai-icon">
                             <i class="bi bi-stack"></i>
@@ -77,7 +73,7 @@
                     <div class="d-flex justify-content-between align-items-center">
                         <div>
                             <h6 class="mb-2">成功</h6>
-                            <h3 class="mb-0">142</h3>
+                            <h3 class="mb-0" id="completedTasks">-</h3>
                         </div>
                         <div class="ai-icon">
                             <i class="bi bi-check-circle"></i>
@@ -92,7 +88,7 @@
                     <div class="d-flex justify-content-between align-items-center">
                         <div>
                             <h6 class="mb-2">运行中</h6>
-                            <h3 class="mb-0">3</h3>
+                            <h3 class="mb-0" id="runningTasks">-</h3>
                         </div>
                         <div class="ai-icon">
                             <i class="bi bi-hourglass-split"></i>
@@ -107,7 +103,7 @@
                     <div class="d-flex justify-content-between align-items-center">
                         <div>
                             <h6 class="mb-2">失败</h6>
-                            <h3 class="mb-0">11</h3>
+                            <h3 class="mb-0" id="failedTasks">-</h3>
                         </div>
                         <div class="ai-icon">
                             <i class="bi bi-x-circle"></i>
@@ -165,69 +161,9 @@
                     <h6 class="mb-3">
                         <i class="bi bi-hourglass-split me-2"></i>运行中的任务
                     </h6>
-                    <div class="row mb-4">
-                        <div class="col-md-6 col-lg-4 mb-3">
-                            <div class="service-card">
-                                <div class="card-body">
-                                    <div class="d-flex justify-content-between align-items-start mb-2">
-                                        <h6 class="card-title mb-0">月度完整备份</h6>
-                                        <span class="badge bg-primary">运行中</span>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">源路径:</small><br>
-                                        <code>/data</code>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">目标:</small><br>
-                                        <code>磁带 #TAP001</code>
-                                    </div>
-                                    <div class="mb-2">
-                                        <div class="d-flex justify-content-between align-items-center">
-                                            <small class="text-muted">进度:</small>
-                                            <small class="text-muted">65%</small>
-                                        </div>
-                                        <div class="progress" style="height: 6px;">
-                                            <div class="progress-bar bg-primary" style="width: 65%"></div>
-                                        </div>
-                                    </div>
-                                    <div class="d-flex justify-content-between">
-                                        <small class="text-muted">开始时间: 02:00:45</small>
-                                        <small class="text-muted">剩余: ~15分钟</small>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="col-md-6 col-lg-4 mb-3">
-                            <div class="service-card">
-                                <div class="card-body">
-                                    <div class="d-flex justify-content-between align-items-start mb-2">
-                                        <h6 class="card-title mb-0">增量备份</h6>
-                                        <span class="badge bg-primary">运行中</span>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">源路径:</small><br>
-                                        <code>/home</code>
-                                    </div>
-                                    <div class="mb-2">
-                                        <small class="text-muted">目标:</small><br>
-                                        <code>磁带 #TAP003</code>
-                                    </div>
-                                    <div class="mb-2">
-                                        <div class="d-flex justify-content-between align-items-center">
-                                            <small class="text-muted">进度:</small>
-                                            <small class="text-muted">32%</small>
-                                        </div>
-                                        <div class="progress" style="height: 6px;">
-                                            <div class="progress-bar bg-primary" style="width: 32%"></div>
-                                        </div>
-                                    </div>
-                                    <div class="d-flex justify-content-between">
-                                        <small class="text-muted">开始时间: 03:15:22</small>
-                                        <small class="text-muted">剩余: ~8分钟</small>
-                                    </div>
-                                </div>
-                            </div>
+                    <div class="row mb-4" id="runningTasksList">
+                        <div class="col-12">
+                            <p class="text-muted">加载中...</p>
                         </div>
                     </div>
 
@@ -249,57 +185,9 @@
                                     <th>操作</th>
                                 </tr>
                             </thead>
-                            <tbody>
+                            <tbody id="completedTasksTable">
                                 <tr>
-                                    <td><strong>完整备份-20251030</strong></td>
-                                    <td><span class="badge bg-info">完整备份</span></td>
-                                    <td><code>/data</code></td>
-                                    <td><span class="badge bg-success">成功</span></td>
-                                    <td>2025-10-30 02:00:00</td>
-                                    <td>2025-10-30 03:45:23</td>
-                                    <td>1.8 GB</td>
-                                    <td>
-                                        <button class="btn btn-sm btn-outline-primary">
-                                            <i class="bi bi-eye"></i>
-                                        </button>
-                                        <button class="btn btn-sm btn-outline-warning">
-                                            <i class="bi bi-download"></i>
-                                        </button>
-                                    </td>
-                                </tr>
-                                <tr>
-                                    <td><strong>增量备份-20251029</strong></td>
-                                    <td><span class="badge bg-secondary">增量备份</span></td>
-                                    <td><code>/home</code></td>
-                                    <td><span class="badge bg-success">成功</span></td>
-                                    <td>2025-10-29 04:00:00</td>
-                                    <td>2025-10-29 04:12:45</td>
-                                    <td>245 MB</td>
-                                    <td>
-                                        <button class="btn btn-sm btn-outline-primary">
-                                            <i class="bi bi-eye"></i>
-                                        </button>
-                                        <button class="btn btn-sm btn-outline-warning">
-                                            <i class="bi bi-download"></i>
-                                        </button>
-                                    </td>
-                                </tr>
-                                <tr>
-                                    <td><strong>测试备份</strong></td>
-                                    <td><span class="badge bg-warning">差异备份</span></td>
-                                    <td><code>/var/log</code></td>
-                                    <td><span class="badge bg-danger">失败</span></td>
-                                    <td>2025-10-28 15:30:00</td>
-                                    <td>2025-10-28 15:35:12</td>
-                                    <td>-</td>
-                                    <td>
-                                        <button class="btn btn-sm btn-outline-primary">
-                                            <i class="bi bi-eye"></i>
-                                        </button>
-                                        <button class="btn btn-sm btn-outline-danger">
-                                            <i class="bi bi-arrow-repeat"></i>
-                                        </button>
-                                    </td>
+                                    <td colspan="8" class="text-center text-muted">加载中...</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -310,118 +198,220 @@
     </div>
 </div>
 
-<!-- 创建备份任务模态框 -->
-<div class="modal fade" id="createBackupModal" tabindex="-1" data-bs-backdrop="false">
-    <div class="modal-dialog modal-lg">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">创建备份任务</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <form>
-                    <div class="row">
-                        <div class="col-md-6 mb-3">
-                            <label class="form-label">任务名称</label>
-                            <input type="text" class="form-control" placeholder="输入任务名称">
-                        </div>
-                        <div class="col-md-6 mb-3">
-                            <label class="form-label">备份类型</label>
-                            <select class="form-select" id="backupType">
-                                <option value="full">完整备份 (Full Backup)</option>
-                                <option value="incremental">增量备份 (Incremental)</option>
-                                <option value="differential">差异备份 (Differential)</option>
-                                <option value="mirror">镜像备份 (Mirror)</option>
-                                <option value="archive">归档备份 (Archive)</option>
-                                <option value="snapshot">快照备份 (Snapshot)</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">源路径</label>
-                        <div class="input-group mb-2">
-                            <input type="text" class="form-control" id="sourcePathInput" placeholder="/data,/home,/var">
-                            <button class="btn btn-outline-secondary" type="button" onclick="showSourcePathDialog()">
-                                <i class="bi bi-folder-open me-1"></i>浏览
-                            </button>
-                        </div>
-                        <div id="sourcePathsList" class="mb-2"></div>
-                        <small class="text-muted">多个路径用逗号分隔，或使用浏览按钮添加</small>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">备份目标</label>
-                        <div class="form-check mb-2">
-                            <input class="form-check-input" type="radio" name="backupTarget" id="targetDisk" value="disk" checked>
-                            <label class="form-check-label" for="targetDisk">
-                                <i class="bi bi-hdd me-1"></i>磁盘存储
-                            </label>
-                        </div>
-                        <div class="form-check mb-2">
-                            <input class="form-check-input" type="radio" name="backupTarget" id="targetTape" value="tape">
-                            <label class="form-check-label" for="targetTape">
-                                <i class="bi bi-database me-1"></i>磁带机
-                            </label>
-                        </div>
-                        <div id="targetTapeOptions" class="ms-4 mt-2" style="display:none;">
-                            <select class="form-select form-select-sm">
-                                <option>自动选择磁带</option>
-                                <option>TAP001 - LTO-8</option>
-                                <option>TAP002 - LTO-8</option>
-                                <option>TAP003 - LTO-8</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="row">
-                        <div class="col-md-6 mb-3">
-                            <label class="form-label">压缩级别</label>
-                            <select class="form-select">
-                                <option value="9">最高 (9)</option>
-                                <option value="6">标准 (6)</option>
-                                <option value="3">快速 (3)</option>
-                                <option value="0">无压缩 (0)</option>
-                            </select>
-                        </div>
-                        <div class="col-md-6 mb-3">
-                            <label class="form-label">优先级</label>
-                            <select class="form-select">
-                                <option>高</option>
-                                <option>中</option>
-                                <option>低</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">备注</label>
-                        <textarea class="form-control" rows="3" placeholder="可选的任务描述"></textarea>
-                    </div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                <button type="button" class="btn btn-primary">创建任务</button>
-            </div>
-        </div>
-    </div>
-</div>
-
 <script>
-// 源路径列表
-let sourcePaths = [];
-
-// 显示源路径选择对话框
-function showSourcePathDialog() {
-    alert('功能开发中：将打开文件选择对话框');
-    // TODO: 实现文件选择对话框
+// 加载备份统计数据
+async function loadBackupStatistics() {
+    try {
+        const response = await fetch('/api/backup/statistics');
+        const stats = await response.json();
+        
+        if (stats) {
+            document.getElementById('totalTasks').textContent = stats.total_tasks || 0;
+            document.getElementById('completedTasks').textContent = stats.completed_tasks || 0;
+            document.getElementById('runningTasks').textContent = stats.running_tasks || 0;
+            document.getElementById('failedTasks').textContent = stats.failed_tasks || 0;
+        }
+    } catch (error) {
+        console.error('加载备份统计失败:', error);
+    }
 }
 
-// 切换备份目标
+// 格式化字节大小
+function formatBytes(bytes) {
+    if (!bytes || bytes === 0) return '-';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
+}
+
+// 格式化日期时间
+function formatDateTime(dateStr) {
+    if (!dateStr) return '-';
+    const date = new Date(dateStr);
+    return date.toLocaleString('zh-CN', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+    });
+}
+
+// 格式化任务类型
+function formatTaskType(taskType) {
+    const typeMap = {
+        'full': { text: '完整备份', class: 'bg-info' },
+        'incremental': { text: '增量备份', class: 'bg-secondary' },
+        'differential': { text: '差异备份', class: 'bg-warning' },
+        'monthly_full': { text: '月度备份', class: 'bg-primary' }
+    };
+    const type = typeMap[taskType] || { text: taskType, class: 'bg-secondary' };
+    return `<span class="badge ${type.class}">${type.text}</span>`;
+}
+
+// 格式化状态
+function formatStatus(status) {
+    const statusMap = {
+        'completed': { text: '成功', class: 'bg-success' },
+        'failed': { text: '失败', class: 'bg-danger' },
+        'running': { text: '运行中', class: 'bg-primary' },
+        'pending': { text: '等待中', class: 'bg-warning' },
+        'cancelled': { text: '已取消', class: 'bg-secondary' },
+        'paused': { text: '已暂停', class: 'bg-secondary' }
+    };
+    const s = statusMap[status] || { text: status, class: 'bg-secondary' };
+    return `<span class="badge ${s.class}">${s.text}</span>`;
+}
+
+// 加载运行中的任务
+async function loadRunningTasks() {
+    try {
+        const response = await fetch('/api/backup/tasks?status=running&limit=10');
+        const tasks = await response.json();
+        
+        const container = document.getElementById('runningTasksList');
+        if (!container) return;
+        
+        container.innerHTML = '';
+        
+        if (tasks && tasks.length > 0) {
+            tasks.forEach(task => {
+                const sourcePaths = Array.isArray(task.source_paths) ? task.source_paths.join(', ') : (task.source_paths || 'N/A');
+                const progress = task.progress_percent || 0;
+                const startedTime = task.started_at ? formatDateTime(task.started_at) : '-';
+                const tapeInfo = task.tape_device || task.tape_id || '自动选择';
+                
+                const taskCard = document.createElement('div');
+                taskCard.className = 'col-md-6 col-lg-4 mb-3';
+                taskCard.innerHTML = `
+                    <div class="service-card">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-start mb-2">
+                                <h6 class="card-title mb-0">${task.task_name || '未命名任务'}</h6>
+                                <span class="badge bg-primary">运行中</span>
+                            </div>
+                            <div class="mb-2">
+                                <small class="text-muted">源路径:</small><br>
+                                <code>${sourcePaths}</code>
+                            </div>
+                            <div class="mb-2">
+                                <small class="text-muted">目标:</small><br>
+                                <code>${tapeInfo}</code>
+                            </div>
+                            <div class="mb-2">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <small class="text-muted">进度:</small>
+                                    <small class="text-muted">${progress.toFixed(1)}%</small>
+                                </div>
+                                <div class="progress" style="height: 6px;">
+                                    <div class="progress-bar bg-primary" style="width: ${progress}%"></div>
+                                </div>
+                            </div>
+                            <div class="d-flex justify-content-between">
+                                <small class="text-muted">开始时间: ${startedTime}</small>
+                                <small class="text-muted">${task.processed_files || 0}/${task.total_files || 0} 文件</small>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                container.appendChild(taskCard);
+            });
+        } else {
+            container.innerHTML = '<div class="col-12"><p class="text-muted">暂无运行中的任务</p></div>';
+        }
+    } catch (error) {
+        console.error('加载运行中的任务失败:', error);
+        const container = document.getElementById('runningTasksList');
+        if (container) {
+            container.innerHTML = '<div class="col-12"><p class="text-danger">加载失败: ' + error.message + '</p></div>';
+        }
+    }
+}
+
+// 加载已完成的任务
+async function loadCompletedTasks() {
+    try {
+        const response = await fetch('/api/backup/tasks?status=completed&limit=20');
+        const tasks = await response.json();
+        
+        const tbody = document.getElementById('completedTasksTable');
+        if (!tbody) return;
+        
+        tbody.innerHTML = '';
+        
+        if (tasks && tasks.length > 0) {
+            tasks.forEach(task => {
+                const sourcePaths = Array.isArray(task.source_paths) ? task.source_paths.join(', ') : (task.source_paths || 'N/A');
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td><strong>${task.task_name || '未命名任务'}</strong></td>
+                    <td>${formatTaskType(task.task_type || 'full')}</td>
+                    <td><code>${sourcePaths}</code></td>
+                    <td>${formatStatus(task.status || 'completed')}</td>
+                    <td>${formatDateTime(task.started_at)}</td>
+                    <td>${formatDateTime(task.completed_at)}</td>
+                    <td>${formatBytes(task.processed_bytes || 0)}</td>
+                    <td>
+                        <button class="btn btn-sm btn-outline-primary" onclick="viewTaskDetails(${task.task_id})">
+                            <i class="bi bi-eye"></i>
+                        </button>
+                        ${task.status === 'completed' ? `
+                            <button class="btn btn-sm btn-outline-warning" onclick="downloadBackup(${task.task_id})">
+                                <i class="bi bi-download"></i>
+                            </button>
+                        ` : `
+                            <button class="btn btn-sm btn-outline-danger" onclick="retryTask(${task.task_id})">
+                                <i class="bi bi-arrow-repeat"></i>
+                            </button>
+                        `}
+                    </td>
+                `;
+                tbody.appendChild(row);
+            });
+        } else {
+            tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">暂无已完成的任务</td></tr>';
+        }
+    } catch (error) {
+        console.error('加载已完成的任务失败:', error);
+        const tbody = document.getElementById('completedTasksTable');
+        if (tbody) {
+            tbody.innerHTML = '<tr><td colspan="8" class="text-center text-danger">加载失败: ' + error.message + '</td></tr>';
+        }
+    }
+}
+
+// 查看任务详情
+function viewTaskDetails(taskId) {
+    // TODO: 实现查看任务详情
+    console.log('查看任务详情:', taskId);
+}
+
+// 下载备份
+function downloadBackup(taskId) {
+    // TODO: 实现下载备份
+    console.log('下载备份:', taskId);
+}
+
+// 重试任务
+function retryTask(taskId) {
+    // TODO: 实现重试任务
+    console.log('重试任务:', taskId);
+}
+
+// 页面加载时加载数据
 document.addEventListener('DOMContentLoaded', function() {
-    document.getElementById('targetDisk').addEventListener('change', function() {
-        document.getElementById('targetTapeOptions').style.display = 'none';
-    });
-    document.getElementById('targetTape').addEventListener('change', function() {
-        document.getElementById('targetTapeOptions').style.display = 'block';
-    });
+    loadBackupStatistics();
+    loadRunningTasks();
+    loadCompletedTasks();
+    
+    // 每30秒刷新一次
+    setInterval(function() {
+        loadBackupStatistics();
+        loadRunningTasks();
+        loadCompletedTasks();
+    }, 30000);
 });
 </script>
 

@@ -1,0 +1,103 @@
+<!-- 通知设置 -->
+<div class="tab-pane fade" id="notification" role="tabpanel">
+    <div class="row">
+        <div class="col-md-8">
+            <div class="setting-card service-card mb-3">
+                <div class="card-body">
+                    <h6 class="card-title">钉钉通知配置</h6>
+                    <div class="mb-3">
+                        <label class="form-label">API地址</label>
+                        <input type="url" class="form-control" id="dingtalkApiUrl" value="http://192.168.0.20:5555">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">API密钥</label>
+                        <input type="password" class="form-control" id="dingtalkApiKey" value="sk-dingtalk-api-2024-001">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">默认手机号</label>
+                        <input type="tel" class="form-control" id="dingtalkDefaultPhone" value="13293513336">
+                    </div>
+                    <div class="mb-3">
+                        <button class="btn btn-outline-primary" id="testNotificationBtn">
+                            <i class="bi bi-send me-2"></i>发送测试通知
+                        </button>
+                        <button class="btn btn-success ms-2" id="saveNotificationConfigBtn">
+                            <i class="bi bi-save me-2"></i>保存配置
+                        </button>
+                    </div>
+                    <hr>
+                    <h6 class="card-title mt-3">通知人员</h6>
+                    <div class="mb-3">
+                        <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addNotificationUserModal">
+                            <i class="bi bi-plus me-1"></i>添加人员
+                        </button>
+                    </div>
+                    <div id="notificationUsers">
+                        <div class="alert alert-info mb-0">
+                            <small>默认手机号: <strong id="defaultPhoneDisplay">13293513336</strong></small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="setting-card service-card mb-3">
+                <div class="card-body">
+                    <h6 class="card-title">通知事件</h6>
+                    <small class="text-muted d-block mb-2">备份相关</small>
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="notifyBackupSuccess" checked>
+                        <label class="form-check-label" for="notifyBackupSuccess">备份成功</label>
+                    </div>
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="notifyBackupStarted" checked>
+                        <label class="form-check-label" for="notifyBackupStarted">备份开始</label>
+                    </div>
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="notifyBackupFailed" checked>
+                        <label class="form-check-label" for="notifyBackupFailed">备份失败</label>
+                    </div>
+                    
+                    <small class="text-muted d-block mb-2 mt-2">恢复相关</small>
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="notifyRecoverySuccess" checked>
+                        <label class="form-check-label" for="notifyRecoverySuccess">恢复成功</label>
+                    </div>
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="notifyRecoveryFailed" checked>
+                        <label class="form-check-label" for="notifyRecoveryFailed">恢复失败</label>
+                    </div>
+                    
+                    <small class="text-muted d-block mb-2 mt-2">磁带相关</small>
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="notifyTapeChange" checked>
+                        <label class="form-check-label" for="notifyTapeChange">磁带更换</label>
+                    </div>
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="notifyTapeExpired" checked>
+                        <label class="form-check-label" for="notifyTapeExpired">磁带过期</label>
+                    </div>
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="notifyTapeError" checked>
+                        <label class="form-check-label" for="notifyTapeError">磁带错误</label>
+                    </div>
+                    
+                    <small class="text-muted d-block mb-2 mt-2">系统相关</small>
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="notifyCapacityWarning" checked>
+                        <label class="form-check-label" for="notifyCapacityWarning">容量预警</label>
+                    </div>
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="notifySystemError" checked>
+                        <label class="form-check-label" for="notifySystemError">系统错误</label>
+                    </div>
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="notifySystemStarted" checked>
+                        <label class="form-check-label" for="notifySystemStarted">系统启动</label>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+

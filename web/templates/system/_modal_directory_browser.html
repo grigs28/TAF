@@ -1,0 +1,80 @@
+<!-- 目录浏览器模态框 -->
+<div class="modal fade" id="directoryBrowserModal" tabindex="-1" aria-labelledby="directoryBrowserModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-xl" style="max-width: 90%;">
+        <div class="modal-content" style="height: 80vh;">
+            <div class="modal-header">
+                <h5 class="modal-title" id="directoryBrowserModalLabel">
+                    <i class="bi bi-folder2-open me-2"></i>选择目录
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body p-0" style="display: flex; flex-direction: row; height: calc(80vh - 120px); overflow: hidden;">
+                <!-- 左侧：驱动器/目录树 -->
+                <div class="border-end" style="width: 300px; overflow-y: auto; background-color: #1a2332;">
+                    <div class="p-3">
+                        <h6 class="mb-3">
+                            <i class="bi bi-hdd-stack me-2"></i>驱动器
+                        </h6>
+                        <div id="drivesList" class="list-group">
+                            <!-- 驱动器列表 -->
+                        </div>
+                        
+                        <h6 class="mt-4 mb-3">
+                            <i class="bi bi-share me-2"></i>网络路径
+                        </h6>
+                        <div class="mb-3">
+                            <input type="text" class="form-control form-control-sm" id="networkPathInput" 
+                                   placeholder="例如: \\\\192.168.1.100\\share 或 //server/share">
+                            <button class="btn btn-sm btn-primary mt-2 w-100" type="button" id="addNetworkPathBtn">
+                                <i class="bi bi-plus-circle me-1"></i>添加网络路径
+                            </button>
+                        </div>
+                        
+                        <!-- 当前路径面包屑 -->
+                        <div class="mt-4">
+                            <h6 class="mb-2">当前路径</h6>
+                            <div id="currentPathBreadcrumb" class="small text-muted" style="word-break: break-all;">
+                                -
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 右侧：目录和文件列表 -->
+                <div style="flex: 1; overflow-y: auto;">
+                    <div class="p-3 border-bottom" style="background-color: #1a2332;">
+                        <div class="d-flex align-items-center justify-content-between">
+                            <div class="flex-grow-1">
+                                <input type="text" class="form-control form-control-sm" id="browserCurrentPath" 
+                                       placeholder="当前路径" readonly>
+                            </div>
+                            <button class="btn btn-sm btn-outline-secondary ms-2" type="button" id="refreshBrowserBtn">
+                                <i class="bi bi-arrow-clockwise"></i>刷新
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="p-3">
+                        <div id="directoryItemsList">
+                            <div class="text-center text-muted py-5">
+                                <i class="bi bi-folder-x display-4 d-block mb-3"></i>
+                                <p>请选择驱动器或输入网络路径</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div class="flex-grow-1">
+                    <input type="text" class="form-control" id="selectedPathInput" 
+                           placeholder="选中的路径或手动输入路径" style="font-family: monospace;">
+                </div>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="confirmPathBtn">
+                    <i class="bi bi-check-circle me-1"></i>确定
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+

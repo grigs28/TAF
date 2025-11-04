@@ -1,0 +1,56 @@
+<!-- 常规设置 -->
+<div class="tab-pane fade show active" id="general" role="tabpanel">
+    <div class="row">
+        <div class="col-md-6">
+            <div class="setting-card service-card mb-3">
+                <div class="card-body">
+                    <h6 class="card-title">应用信息</h6>
+                    <div class="mb-3">
+                        <label class="form-label">应用名称</label>
+                        <input type="text" class="form-control" value="{{ app_name }}">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">版本号</label>
+                        <input type="text" class="form-control" value="{{ version }}" readonly>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">运行环境</label>
+                        <select class="form-select">
+                            <option value="production" selected>生产环境</option>
+                            <option value="development">开发环境</option>
+                            <option value="testing">测试环境</option>
+                        </select>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="debugMode">
+                        <label class="form-check-label" for="debugMode">调试模式</label>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="setting-card service-card mb-3">
+                <div class="card-body">
+                    <h6 class="card-title">Web服务</h6>
+                    <div class="mb-3">
+                        <label class="form-label">监听地址</label>
+                        <input type="text" class="form-control" value="0.0.0.0">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">监听端口</label>
+                        <input type="number" class="form-control" value="8080">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">工作进程数</label>
+                        <input type="number" class="form-control" value="4" min="1" max="16">
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="enableCors" checked>
+                        <label class="form-check-label" for="enableCors">启用CORS</label>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+

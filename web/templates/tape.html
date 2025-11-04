@@ -206,30 +206,9 @@
                                     <th>备注</th>
                                 </tr>
                             </thead>
-                            <tbody>
+                            <tbody id="tapeHistoryTableBody">
                                 <tr>
-                                    <td>2025-10-30 10:30:15</td>
-                                    <td><span class="badge bg-secondary">TAP002</span></td>
-                                    <td>开始备份</td>
-                                    <td>system</td>
-                                    <td><span class="badge bg-success">成功</span></td>
-                                    <td>月度完整备份任务</td>
-                                </tr>
-                                <tr>
-                                    <td>2025-10-29 15:45:22</td>
-                                    <td><span class="badge bg-secondary">TAP003</span></td>
-                                    <td>完成备份</td>
-                                    <td>system</td>
-                                    <td><span class="badge bg-success">成功</span></td>
-                                    <td>磁带已满，自动卸载</td>
-                                </tr>
-                                <tr>
-                                    <td>2025-10-28 09:20:11</td>
-                                    <td><span class="badge bg-secondary">TAP001</span></td>
-                                    <td>加载磁带</td>
-                                    <td>admin</td>
-                                    <td><span class="badge bg-warning">警告</span></td>
-                                    <td>手动操作</td>
+                                    <td colspan="6" class="text-center text-muted">加载中...</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -391,12 +370,21 @@ function resetTapeForm() {
     
     // 恢复表单状态
     document.getElementById('tapeLabel').readOnly = false;
+    document.getElementById('tapeLabel').disabled = false;
     document.getElementById('tapeMonth').disabled = false;
     document.getElementById('scanForAddTapeBtn').style.display = '';
     document.getElementById('generateLabelBtn').style.display = '';
+    document.getElementById('generateLabelBtn').disabled = false;
     
-    // 重置模态框标题
+    // 重置模态框标题和按钮文本
     document.getElementById('addTapeModalTitle').textContent = '添加新磁带';
+    document.getElementById('confirmAddTapeBtn').textContent = '保存';
+    
+    // 重置编辑模式标记
+    const modal = document.getElementById('addTapeModal');
+    modal.dataset.editMode = 'false';
+    modal.dataset.labelFromTape = 'false';
+    delete modal.dataset.editTapeId;
     
     // 隐藏标签信息区域
     document.getElementById('tapeLabelInfo').classList.add('d-none');
@@ -424,6 +412,72 @@ async function loadTapeStatistics() {
         }
     } catch (error) {
         console.error('加载磁带统计失败:', error);
+    }
+}
+
+// 加载磁带操作历史
+async function loadTapeHistory() {
+    try {
+        const tbody = document.getElementById('tapeHistoryTableBody');
+        if (!tbody) return;
+        
+        // 显示加载中
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">加载中...</td></tr>';
+        
+        const response = await fetch('/api/tape/history?limit=50&offset=0');
+        const result = await response.json();
+        
+        if (result && result.success && result.history && result.history.length > 0) {
+            tbody.innerHTML = '';
+            
+            result.history.forEach(log => {
+                // 格式化时间
+                const time = log.time ? new Date(log.time).toLocaleString('zh-CN', {
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit'
+                }) : 'N/A';
+                
+                // 磁带ID显示
+                const tapeBadge = log.tape_id ? `<span class="badge bg-secondary">${log.tape_id}</span>` : '<span class="text-muted">-</span>';
+                
+                // 操作名称
+                const operation = log.operation || '操作';
+                
+                // 用户名
+                const username = log.username || 'system';
+                
+                // 状态徽章
+                const statusBadge = log.success 
+                    ? '<span class="badge bg-success">成功</span>' 
+                    : '<span class="badge bg-danger">失败</span>';
+                
+                // 备注信息
+                const message = log.message || '';
+                
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${time}</td>
+                    <td>${tapeBadge}</td>
+                    <td>${operation}</td>
+                    <td>${username}</td>
+                    <td>${statusBadge}</td>
+                    <td>${message}</td>
+                `;
+                tbody.appendChild(row);
+            });
+        } else {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">暂无操作历史</td></tr>';
+        }
+    } catch (error) {
+        console.error('加载磁带操作历史失败:', error);
+        const tbody = document.getElementById('tapeHistoryTableBody');
+        if (tbody) {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-danger">加载失败: ' + error.message + '</td></tr>';
+        }
     }
 }
 
@@ -643,6 +697,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // 页面加载时加载数据（先加载列表再加载统计）
     loadTapeList().then(() => {
         loadTapeStatistics();
+        loadTapeHistory();  // 加载操作历史
     });
     
     // 筛选器事件监听
@@ -726,10 +781,10 @@ document.addEventListener('DOMContentLoaded', function() {
         
         // 月份选择改变时自动刷新标签（但不刷新序列号，因为序列号可能是从扫描结果中生成的UUID）
         tapeMonthSelect.addEventListener('change', function() {
-            // 如果标签有值，自动刷新标签（但保留序列号）
-            const tapeLabel = document.getElementById('tapeLabel').value;
-            if (tapeLabel) {
-                document.getElementById('tapeLabel').value = generateTapeLabel();
+            // 如果标签不是只读（不是从磁带读取的），才自动刷新标签
+            const tapeLabelInput = document.getElementById('tapeLabel');
+            if (!tapeLabelInput.readOnly && tapeLabelInput.value) {
+                tapeLabelInput.value = generateTapeLabel();
             }
             // 注意：不自动刷新序列号，因为序列号可能是从扫描结果中生成的UUID
         });
@@ -739,7 +794,11 @@ document.addEventListener('DOMContentLoaded', function() {
     const generateLabelBtn = document.getElementById('generateLabelBtn');
     if (generateLabelBtn) {
         generateLabelBtn.addEventListener('click', function() {
-            document.getElementById('tapeLabel').value = generateTapeLabel();
+            const tapeLabelInput = document.getElementById('tapeLabel');
+            // 只有标签不是只读时才允许生成
+            if (!tapeLabelInput.readOnly) {
+                tapeLabelInput.value = generateTapeLabel();
+            }
         });
     }
     
@@ -965,11 +1024,22 @@ document.addEventListener('DOMContentLoaded', function() {
         applyScanResultBtn.addEventListener('click', function() {
             const device = window.lastScanResult;
             const tapeLabel = window.lastTapeLabel;
+            const modal = document.getElementById('addTapeModal');
             
             // 优先使用从磁带标签读取的信息
             if (tapeLabel && tapeLabel.tape_id) {
-                // 填充磁带标签
-                document.getElementById('tapeLabel').value = tapeLabel.tape_id;
+                // 填充磁带标签（从磁带读取，不可编辑）
+                const tapeLabelInput = document.getElementById('tapeLabel');
+                tapeLabelInput.value = tapeLabel.tape_id;
+                tapeLabelInput.readOnly = true;
+                tapeLabelInput.disabled = false;  // 保持可查看但不可编辑
+                
+                // 禁用月份选择和生成标签按钮（标签来自磁带，不可修改）
+                document.getElementById('tapeMonth').disabled = true;
+                document.getElementById('generateLabelBtn').disabled = true;
+                
+                // 标记标签来自磁带
+                modal.dataset.labelFromTape = 'true';
                 
                 // 优先使用生成的UUID序列号
                 if (window.generatedTapeSerial) {
@@ -979,19 +1049,25 @@ document.addEventListener('DOMContentLoaded', function() {
                 // 保存生成的序列号，供后续使用
                 const savedGeneratedSerial = window.generatedTapeSerial;
                 
-                // 如果数据库中存在此磁带，从数据库获取完整信息
+                // 检查数据库中是否存在此磁带
                 if (tapeLabel.tape_id) {
                     fetch(`/api/tape/check/${tapeLabel.tape_id}`)
                         .then(response => response.json())
                         .then(checkResult => {
                             if (checkResult.exists) {
+                                // 数据库中存在：更新模式
+                                modal.dataset.editMode = 'true';
+                                modal.dataset.editTapeId = tapeLabel.tape_id;
+                                document.getElementById('addTapeModalTitle').textContent = '更新磁带信息';
+                                document.getElementById('confirmAddTapeBtn').textContent = '更新';
+                                
                                 // 从数据库获取完整信息
                                 return fetch(`/api/tape/show/${tapeLabel.tape_id}`)
                                     .then(response => response.json())
                                     .then(detailResult => {
                                         if (detailResult.tape) {
                                             const tape = detailResult.tape;
-                                            // 填充其他字段
+                                            // 填充其他字段（其他字段可编辑）
                                             if (tape.media_type && tape.generation) {
                                                 document.getElementById('tapeType').value = `${tape.media_type}-${tape.generation}`;
                                             }
@@ -1022,13 +1098,25 @@ document.addEventListener('DOMContentLoaded', function() {
                                         cleanupScanCache();
                                     });
                             } else {
-                                // 数据库不存在，使用扫描到的信息填充
+                                // 数据库不存在：创建模式（但标签来自磁带，不可编辑）
+                                modal.dataset.editMode = 'false';
+                                delete modal.dataset.editTapeId;
+                                document.getElementById('addTapeModalTitle').textContent = '添加新磁带（标签来自磁带）';
+                                document.getElementById('confirmAddTapeBtn').textContent = '保存';
+                                
+                                // 使用扫描到的信息填充其他字段
                                 fillFormFromScan(device, tapeLabel);
                                 cleanupScanCache();
                             }
                         })
                         .catch(e => {
                             console.error('检查磁带存在性失败:', e);
+                            // 出错时也设置为创建模式，但标签不可编辑
+                            modal.dataset.editMode = 'false';
+                            delete modal.dataset.editTapeId;
+                            document.getElementById('addTapeModalTitle').textContent = '添加新磁带（标签来自磁带）';
+                            document.getElementById('confirmAddTapeBtn').textContent = '保存';
+                            fillFormFromScan(device, tapeLabel);
                             cleanupScanCache();
                         });
                 } else {
@@ -1036,7 +1124,16 @@ document.addEventListener('DOMContentLoaded', function() {
                     cleanupScanCache();
                 }
             } else if (device) {
-                // 没有磁带标签，但有设备信息，使用设备信息填充
+                // 没有磁带标签，但有设备信息，使用设备信息填充（正常添加模式）
+                modal.dataset.editMode = 'false';
+                modal.dataset.labelFromTape = 'false';
+                delete modal.dataset.editTapeId;
+                document.getElementById('tapeLabel').readOnly = false;
+                document.getElementById('tapeLabel').disabled = false;
+                document.getElementById('tapeMonth').disabled = false;
+                document.getElementById('generateLabelBtn').disabled = false;
+                document.getElementById('addTapeModalTitle').textContent = '添加新磁带';
+                document.getElementById('confirmAddTapeBtn').textContent = '保存';
                 fillFormFromScan(device, null);
                 cleanupScanCache();
             }
@@ -1126,6 +1223,71 @@ document.addEventListener('DOMContentLoaded', function() {
                 // 检查是否为编辑模式
                 const modal = document.getElementById('addTapeModal');
                 const isEditMode = modal.dataset.editMode === 'true';
+                const labelFromTape = modal.dataset.labelFromTape === 'true';
+                
+                // 如果标签来自磁带且数据库中不存在，也需要检查是否存在
+                if (labelFromTape && !isEditMode) {
+                    // 标签来自磁带，检查数据库中是否存在该标签
+                    try {
+                        const checkResponse = await fetch(`/api/tape/check/${tapeLabel}`);
+                        const checkResult = await checkResponse.json();
+                        
+                        if (checkResult.exists) {
+                            // 数据库中存在，使用更新模式
+                            btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-2"></i>更新中...';
+                            const tapeId = tapeLabel;  // tape_id就是标签
+                            
+                            // 从容量中提取并转换为GB (18TB -> 18432GB)
+                            const capacityValue = parseInt(tapeCapacity.replace('TB', ''));
+                            const capacityGB = capacityValue * 1024;  // TB转GB
+                            
+                            // 构建请求数据
+                            const requestData = {
+                                serial_number: tapeSerial,
+                                media_type: 'LTO',
+                                generation: generation,
+                                capacity_gb: capacityGB,
+                                location: tapeLocation,
+                                notes: tapeRemark
+                            };
+                            
+                            // 发送更新请求
+                            const response = await fetch(`/api/tape/update/${tapeId}`, {
+                                method: 'PUT',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify(requestData)
+                            });
+                            
+                            const result = await response.json();
+                            
+                            if (result.success) {
+                                alert('✅ ' + result.message);
+                                // 关闭模态框
+                                const modalInstance = bootstrap.Modal.getInstance(modal);
+                                modalInstance.hide();
+                                // 重置编辑模式标记
+                                modal.dataset.editMode = 'false';
+                                modal.dataset.labelFromTape = 'false';
+                                delete modal.dataset.editTapeId;
+                                // 重置表单状态
+                                resetTapeForm();
+                                // 刷新列表和统计
+                                loadTapeList().then(() => {
+                                    loadTapeStatistics();
+                                    loadTapeHistory();  // 刷新操作历史
+                                });
+                            } else {
+                                alert('❌ 更新失败：' + result.message);
+                            }
+                            btn.disabled = false;
+                            btn.innerHTML = originalHtml;
+                            return;
+                        }
+                    } catch (e) {
+                        console.error('检查磁带存在性失败:', e);
+                        // 继续执行创建流程
+                    }
+                }
                 
                 if (isEditMode) {
                     // 编辑模式：使用PUT请求更新
@@ -1168,6 +1330,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         // 刷新列表和统计
                         loadTapeList().then(() => {
                             loadTapeStatistics();
+                            loadTapeHistory();  // 刷新操作历史
                         });
                     } else {
                         alert('❌ 更新失败：' + result.message);
@@ -1219,6 +1382,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         // 刷新列表和统计
                         loadTapeList().then(() => {
                             loadTapeStatistics();
+                            loadTapeHistory();  // 刷新操作历史
                         });
                     } else {
                         alert('❌ 添加失败：' + result.message);

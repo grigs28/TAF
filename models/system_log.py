@@ -88,18 +88,75 @@ class SystemLog(BaseModel):
 
 class OperationType(enum.Enum):
     """操作类型"""
+    # 基础操作
     CREATE = "create"         # 创建
     UPDATE = "update"         # 更新
     DELETE = "delete"         # 删除
     READ = "read"            # 读取
     EXECUTE = "execute"       # 执行
-    LOGIN = "login"          # 登录
-    LOGOUT = "logout"        # 登出
-    BACKUP = "backup"        # 备份
-    RECOVERY = "recovery"    # 恢复
     CONFIG = "config"        # 配置
     EXPORT = "export"        # 导出
     IMPORT = "import"        # 导入
+    
+    # 用户认证操作
+    LOGIN = "login"          # 登录
+    LOGOUT = "logout"        # 登出
+    REGISTER = "register"    # 注册
+    PASSWORD_CHANGE = "password_change"  # 密码修改
+    PASSWORD_RESET = "password_reset"    # 密码重置
+    
+    # 磁带操作
+    TAPE_LOAD = "tape_load"          # 加载磁带
+    TAPE_UNLOAD = "tape_unload"      # 卸载磁带
+    TAPE_EJECT = "tape_eject"        # 弹出磁带
+    TAPE_SCAN = "tape_scan"          # 扫描磁带
+    TAPE_READ_LABEL = "tape_read_label"  # 读取磁带标签
+    TAPE_WRITE_LABEL = "tape_write_label"  # 写入磁带标签
+    TAPE_ERASE = "tape_erase"        # 擦除磁带
+    TAPE_FORMAT = "tape_format"      # 格式化磁带
+    TAPE_MOUNT = "tape_mount"        # 挂载磁带
+    TAPE_UNMOUNT = "tape_unmount"    # 卸载磁带
+    TAPE_VERIFY = "tape_verify"      # 验证磁带
+    TAPE_REWIND = "tape_rewind"      # 回绕磁带
+    TAPE_POSITION = "tape_position"  # 定位磁带
+    
+    # 备份操作
+    BACKUP_START = "backup_start"       # 备份开始
+    BACKUP_COMPLETE = "backup_complete"  # 备份完成
+    BACKUP_FAILED = "backup_failed"     # 备份失败
+    BACKUP_CANCEL = "backup_cancel"     # 备份取消
+    BACKUP_PAUSE = "backup_pause"       # 备份暂停
+    BACKUP_RESUME = "backup_resume"     # 备份恢复
+    
+    # 恢复操作
+    RECOVERY_START = "recovery_start"       # 恢复开始
+    RECOVERY_COMPLETE = "recovery_complete"  # 恢复完成
+    RECOVERY_FAILED = "recovery_failed"     # 恢复失败
+    RECOVERY_CANCEL = "recovery_cancel"     # 恢复取消
+    RECOVERY_VERIFY = "recovery_verify"     # 恢复验证
+    
+    # 计划任务操作
+    SCHEDULER_CREATE = "scheduler_create"   # 创建计划任务
+    SCHEDULER_UPDATE = "scheduler_update"   # 更新计划任务
+    SCHEDULER_DELETE = "scheduler_delete"   # 删除计划任务
+    SCHEDULER_ENABLE = "scheduler_enable"   # 启用计划任务
+    SCHEDULER_DISABLE = "scheduler_disable"  # 禁用计划任务
+    SCHEDULER_RUN = "scheduler_run"         # 运行计划任务
+    SCHEDULER_STOP = "scheduler_stop"        # 停止计划任务
+    
+    # 系统操作
+    SYSTEM_START = "system_start"           # 系统启动
+    SYSTEM_STOP = "system_stop"            # 系统停止
+    SYSTEM_RESTART = "system_restart"      # 系统重启
+    SYSTEM_CONFIG = "system_config"         # 系统配置
+    SYSTEM_BACKUP = "system_backup"         # 系统备份
+    SYSTEM_RESTORE = "system_restore"       # 系统恢复
+    
+    # 维护操作
+    MAINTENANCE_START = "maintenance_start"  # 维护开始
+    MAINTENANCE_COMPLETE = "maintenance_complete"  # 维护完成
+    CLEANUP = "cleanup"                     # 清理
+    ARCHIVE = "archive"                     # 归档
 
 
 class OperationLog(BaseModel):
@@ -109,13 +166,18 @@ class OperationLog(BaseModel):
 
     # 关联信息
     user_id = Column(Integer, ForeignKey("users.id"), comment="用户ID")
+    username = Column(String(100), comment="用户名（冗余字段，便于查询）")
 
     # 操作信息
     operation_type = Column(Enum(OperationType), nullable=False, comment="操作类型")
-    resource_type = Column(String(100), comment="资源类型")
+    resource_type = Column(String(100), comment="资源类型（tape/backup/recovery/scheduler/user/system）")
     resource_id = Column(String(100), comment="资源ID")
+    resource_name = Column(String(200), comment="资源名称（冗余字段，便于查询）")
     operation_name = Column(String(200), comment="操作名称")
     operation_description = Column(Text, comment="操作描述")
+    
+    # 分类信息
+    category = Column(String(50), comment="操作分类（login/modify/backup/recovery/tape/maintenance）")
 
     # 时间信息
     operation_time = Column(DateTime(timezone=True), nullable=False, comment="操作时间")

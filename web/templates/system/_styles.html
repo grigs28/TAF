@@ -1,0 +1,194 @@
+{% block extra_css %}
+<style>
+.setting-card {
+    transition: all 0.3s ease;
+}
+.setting-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.nav-tabs .nav-link.active {
+    font-weight: 600;
+}
+
+.status-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 8px;
+}
+.status-online { background-color: #28a745; }
+.status-offline { background-color: #dc3545; }
+.status-warning { background-color: #ffc107; }
+
+.log-entry {
+    font-family: 'Courier New', monospace;
+    font-size: 0.85rem;
+    padding: 8px;
+    border-left: 3px solid transparent;
+    margin-bottom: 2px;
+}
+.log-entry:hover {
+    background-color: rgba(0, 170, 255, 0.1);
+}
+.log-info { border-left-color: #17a2b8; }
+.log-warning { border-left-color: #ffc107; }
+.log-error { border-left-color: #dc3545; }
+.log-debug { border-left-color: #6c757d; }
+
+/* 目录浏览器深色主题样式 */
+#directoryBrowserModal .modal-content,
+#directoryBrowserModal .modal-header,
+#directoryBrowserModal .modal-body,
+#directoryBrowserModal .modal-footer {
+    background: #0d1626 !important;
+    color: #ffffff !important;
+}
+
+#directoryBrowserModal .form-control,
+#directoryBrowserModal .form-control-sm {
+    background-color: #1a2332 !important;
+    border-color: #2d3a4f !important;
+    color: #ffffff !important;
+}
+
+#directoryBrowserModal .form-control:focus,
+#directoryBrowserModal .form-control-sm:focus {
+    background-color: #1a2332 !important;
+    border-color: #00aaff !important;
+    color: #ffffff !important;
+    box-shadow: 0 0 0 0.2rem rgba(0, 170, 255, 0.25) !important;
+}
+
+#directoryBrowserModal .form-control::placeholder,
+#directoryBrowserModal .form-control-sm::placeholder {
+    color: #6c757d !important;
+}
+
+/* 计划任务模态框 - 确保所有输入框保持深色背景 */
+#scheduledTaskModal .form-control.bg-dark,
+#scheduledTaskModal .form-select.bg-dark {
+    background-color: #212529 !important;
+    color: #ffffff !important;
+    border-color: #495057 !important;
+}
+
+#scheduledTaskModal .form-control.bg-dark:focus,
+#scheduledTaskModal .form-select.bg-dark:focus {
+    background-color: #212529 !important;
+    color: #ffffff !important;
+    border-color: #6c757d !important;
+    box-shadow: 0 0 0 0.25rem rgba(108, 117, 125, 0.25) !important;
+}
+
+#scheduledTaskModal .form-control.bg-dark::placeholder {
+    color: #6c757d !important;
+}
+
+#scheduledTaskModal textarea.bg-dark {
+    background-color: #212529 !important;
+    color: #ffffff !important;
+    border-color: #495057 !important;
+}
+
+#scheduledTaskModal textarea.bg-dark:focus {
+    background-color: #212529 !important;
+    color: #ffffff !important;
+    border-color: #6c757d !important;
+    box-shadow: 0 0 0 0.25rem rgba(108, 117, 125, 0.25) !important;
+}
+
+#directoryBrowserModal .list-group-item {
+    background-color: #1a2332 !important;
+    border-color: #2d3a4f !important;
+    color: #ffffff !important;
+}
+
+#directoryBrowserModal .list-group-item:hover,
+#directoryBrowserModal .list-group-item-action:hover {
+    background-color: #252f42 !important;
+    color: #ffffff !important;
+}
+
+#directoryBrowserModal .list-group-item.active {
+    background-color: #00aaff !important;
+    border-color: #00aaff !important;
+    color: #ffffff !important;
+}
+
+#directoryBrowserModal .bg-light {
+    background-color: #1a2332 !important;
+    color: #ffffff !important;
+}
+
+#directoryBrowserModal .text-muted {
+    color: #9ca3af !important;
+}
+
+#directoryBrowserModal .text-primary {
+    color: #00aaff !important;
+}
+
+#directoryBrowserModal .text-secondary {
+    color: #9ca3af !important;
+}
+
+#directoryBrowserModal h6 {
+    color: #ffffff !important;
+}
+
+#directoryBrowserModal .btn-outline-secondary {
+    border-color: #2d3a4f !important;
+    color: #ffffff !important;
+}
+
+#directoryBrowserModal .btn-outline-secondary:hover {
+    background-color: #2d3a4f !important;
+    border-color: #2d3a4f !important;
+    color: #ffffff !important;
+}
+
+/* 备份源路径列表深色主题样式 */
+#backupSourcePathsList .card {
+    background-color: #1a2332 !important;
+    border-color: #2d3a4f !important;
+    color: #ffffff !important;
+}
+
+#backupSourcePathsList .card-body {
+    background-color: #1a2332 !important;
+    color: #ffffff !important;
+}
+
+#backupSourcePathsList code {
+    background-color: #0d1626 !important;
+    color: #00aaff !important;
+    border: 1px solid #2d3a4f !important;
+    padding: 4px 8px !important;
+    border-radius: 4px !important;
+}
+
+#backupSourcePathsList .text-primary {
+    color: #00aaff !important;
+}
+
+#backupSourcePathsList .btn-outline-danger {
+    border-color: #dc3545 !important;
+    color: #dc3545 !important;
+}
+
+#backupSourcePathsList .btn-outline-danger:hover {
+    background-color: #dc3545 !important;
+    border-color: #dc3545 !important;
+    color: #ffffff !important;
+}
+
+#backupSourcePathsList .badge.bg-info {
+    background-color: #00aaff !important;
+    color: #ffffff !important;
+}
+</style>
+{% endblock %}
+

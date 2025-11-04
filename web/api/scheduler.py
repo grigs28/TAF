@@ -12,7 +12,9 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 
 from models.scheduled_task import ScheduledTask, ScheduledTaskLog, ScheduleType, ScheduledTaskStatus, TaskActionType
+from models.system_log import OperationType
 from utils.scheduler import TaskScheduler
+from utils.log_utils import log_operation
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -266,10 +268,31 @@ async def run_scheduled_task(task_id: int, request: Request = None):
         
         scheduler: TaskScheduler = system.scheduler
         
+        # 获取任务信息（用于日志）
+        task = await scheduler.get_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="计划任务不存在")
+        
         success = await scheduler.run_task(task_id)
         
         if not success:
             raise HTTPException(status_code=404, detail="计划任务不存在")
+        
+        # 记录操作日志
+        await log_operation(
+            operation_type=OperationType.SCHEDULER_RUN,
+            resource_type="scheduler",
+            resource_id=str(task_id),
+            resource_name=task.task_name,
+            operation_name="手动运行计划任务",
+            operation_description=f"手动运行计划任务: {task.task_name}",
+            category="scheduler",
+            success=True,
+            result_message=f"计划任务已开始执行 (ID: {task_id})",
+            request_method="POST",
+            request_url=f"/api/scheduler/tasks/{task_id}/run",
+            ip_address=request.client.host if request and request.client else None
+        )
         
         return {"success": True, "message": "计划任务已开始执行"}
         
@@ -277,6 +300,22 @@ async def run_scheduled_task(task_id: int, request: Request = None):
         raise
     except Exception as e:
         logger.error(f"运行计划任务失败: {str(e)}")
+        
+        # 记录操作日志（失败）
+        await log_operation(
+            operation_type=OperationType.SCHEDULER_RUN,
+            resource_type="scheduler",
+            resource_id=str(task_id),
+            operation_name="手动运行计划任务",
+            operation_description=f"手动运行计划任务失败 (ID: {task_id})",
+            category="scheduler",
+            success=False,
+            error_message=str(e),
+            request_method="POST",
+            request_url=f"/api/scheduler/tasks/{task_id}/run",
+            ip_address=request.client.host if request and request.client else None
+        )
+        
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -290,10 +329,31 @@ async def stop_scheduled_task(task_id: int, request: Request = None):
         
         scheduler: TaskScheduler = system.scheduler
         
+        # 获取任务信息（用于日志）
+        task = await scheduler.get_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="计划任务不存在")
+        
         success = await scheduler.stop_task(task_id)
         
         if not success:
             raise HTTPException(status_code=404, detail="计划任务不存在或未在运行")
+        
+        # 记录操作日志
+        await log_operation(
+            operation_type=OperationType.SCHEDULER_STOP,
+            resource_type="scheduler",
+            resource_id=str(task_id),
+            resource_name=task.task_name,
+            operation_name="停止计划任务",
+            operation_description=f"停止计划任务: {task.task_name}",
+            category="scheduler",
+            success=True,
+            result_message=f"计划任务已停止 (ID: {task_id})",
+            request_method="POST",
+            request_url=f"/api/scheduler/tasks/{task_id}/stop",
+            ip_address=request.client.host if request and request.client else None
+        )
         
         return {"success": True, "message": "计划任务已停止"}
         
@@ -301,6 +361,22 @@ async def stop_scheduled_task(task_id: int, request: Request = None):
         raise
     except Exception as e:
         logger.error(f"停止计划任务失败: {str(e)}")
+        
+        # 记录操作日志（失败）
+        await log_operation(
+            operation_type=OperationType.SCHEDULER_STOP,
+            resource_type="scheduler",
+            resource_id=str(task_id),
+            operation_name="停止计划任务",
+            operation_description=f"停止计划任务失败 (ID: {task_id})",
+            category="scheduler",
+            success=False,
+            error_message=str(e),
+            request_method="POST",
+            request_url=f"/api/scheduler/tasks/{task_id}/stop",
+            ip_address=request.client.host if request and request.client else None
+        )
+        
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -314,10 +390,34 @@ async def enable_scheduled_task(task_id: int, request: Request = None):
         
         scheduler: TaskScheduler = system.scheduler
         
+        # 获取任务信息（用于日志）
+        task = await scheduler.get_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="计划任务不存在")
+        
         success = await scheduler.enable_task(task_id)
         
         if not success:
             raise HTTPException(status_code=404, detail="计划任务不存在")
+        
+        # 记录操作日志
+        await log_operation(
+            operation_type=OperationType.SCHEDULER_ENABLE,
+            resource_type="scheduler",
+            resource_id=str(task_id),
+            resource_name=task.task_name,
+            operation_name="启用计划任务",
+            operation_description=f"启用计划任务: {task.task_name}",
+            category="scheduler",
+            success=True,
+            result_message=f"计划任务已启用 (ID: {task_id})",
+            old_values={"enabled": False},
+            new_values={"enabled": True},
+            changed_fields=["enabled"],
+            request_method="POST",
+            request_url=f"/api/scheduler/tasks/{task_id}/enable",
+            ip_address=request.client.host if request and request.client else None
+        )
         
         return {"success": True, "message": "计划任务已启用"}
         
@@ -325,6 +425,22 @@ async def enable_scheduled_task(task_id: int, request: Request = None):
         raise
     except Exception as e:
         logger.error(f"启用计划任务失败: {str(e)}")
+        
+        # 记录操作日志（失败）
+        await log_operation(
+            operation_type=OperationType.SCHEDULER_ENABLE,
+            resource_type="scheduler",
+            resource_id=str(task_id),
+            operation_name="启用计划任务",
+            operation_description=f"启用计划任务失败 (ID: {task_id})",
+            category="scheduler",
+            success=False,
+            error_message=str(e),
+            request_method="POST",
+            request_url=f"/api/scheduler/tasks/{task_id}/enable",
+            ip_address=request.client.host if request and request.client else None
+        )
+        
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -338,10 +454,34 @@ async def disable_scheduled_task(task_id: int, request: Request = None):
         
         scheduler: TaskScheduler = system.scheduler
         
+        # 获取任务信息（用于日志）
+        task = await scheduler.get_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="计划任务不存在")
+        
         success = await scheduler.disable_task(task_id)
         
         if not success:
             raise HTTPException(status_code=404, detail="计划任务不存在")
+        
+        # 记录操作日志
+        await log_operation(
+            operation_type=OperationType.SCHEDULER_DISABLE,
+            resource_type="scheduler",
+            resource_id=str(task_id),
+            resource_name=task.task_name,
+            operation_name="禁用计划任务",
+            operation_description=f"禁用计划任务: {task.task_name}",
+            category="scheduler",
+            success=True,
+            result_message=f"计划任务已禁用 (ID: {task_id})",
+            old_values={"enabled": True},
+            new_values={"enabled": False},
+            changed_fields=["enabled"],
+            request_method="POST",
+            request_url=f"/api/scheduler/tasks/{task_id}/disable",
+            ip_address=request.client.host if request and request.client else None
+        )
         
         return {"success": True, "message": "计划任务已禁用"}
         
@@ -349,6 +489,22 @@ async def disable_scheduled_task(task_id: int, request: Request = None):
         raise
     except Exception as e:
         logger.error(f"禁用计划任务失败: {str(e)}")
+        
+        # 记录操作日志（失败）
+        await log_operation(
+            operation_type=OperationType.SCHEDULER_DISABLE,
+            resource_type="scheduler",
+            resource_id=str(task_id),
+            operation_name="禁用计划任务",
+            operation_description=f"禁用计划任务失败 (ID: {task_id})",
+            category="scheduler",
+            success=False,
+            error_message=str(e),
+            request_method="POST",
+            request_url=f"/api/scheduler/tasks/{task_id}/disable",
+            ip_address=request.client.host if request and request.client else None
+        )
+        
         raise HTTPException(status_code=500, detail=str(e))
 
 

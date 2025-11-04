@@ -12,6 +12,7 @@ from .user import User, Role, Permission
 from .system_log import SystemLog, OperationLog, ErrorLog
 from .system_config import SystemConfig
 from .scheduled_task import ScheduledTask, ScheduledTaskLog, ScheduleType, ScheduledTaskStatus, TaskActionType
+from .notification_user import NotificationUser
 
 __all__ = [
     # 基础类
@@ -45,5 +46,8 @@ __all__ = [
     'ScheduledTaskLog',
     'ScheduleType',
     'ScheduledTaskStatus',
-    'TaskActionType'
+    'TaskActionType',
+    
+    # 通知人员
+    'NotificationUser'
 ]
