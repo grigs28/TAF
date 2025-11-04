@@ -345,10 +345,10 @@ async def get_backup_tasks(
                         # 从 action_config->task_type 里匹配（字符串包含）
                         # openGauss json 提取可后续增强，这里简化为 ILIKE 检测
                         if sched_params:
-                            sched_where.append("action_config ILIKE $2")
+                            sched_where.append("(action_config::text) ILIKE $2")
                             sched_params.append(f"%\"task_type\": \"{task_type}\"%")
                         else:
-                            sched_where.append("action_config ILIKE $1")
+                            sched_where.append("(action_config::text) ILIKE $1")
                             sched_params.append(f"%\"task_type\": \"{task_type}\"%")
                     # 未运行：计划任务自然视作未运行
                     sched_sql = f"""
