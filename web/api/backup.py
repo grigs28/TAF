@@ -329,7 +329,8 @@ async def get_backup_tasks(
                         "error_message": row["error_message"],
                         "is_template": row["is_template"] or False,
                         "tape_device": row["tape_device"],
-                        "source_paths": source_paths
+                        "source_paths": source_paths,
+                        "from_scheduler": False
                     })
                 # 追加计划任务（未运行模板）
                 # 仅当无状态过滤或过滤为pending/all时返回
@@ -352,7 +353,7 @@ async def get_backup_tasks(
                             sched_params.append(f"%\"task_type\": \"{task_type}\"%")
                     # 未运行：计划任务自然视作未运行
                     sched_sql = f"""
-                        SELECT id, task_name, status, created_at, action_config
+                        SELECT id, task_name, status, enabled, created_at, action_config
                         FROM scheduled_tasks
                         WHERE {' AND '.join(sched_where)}
                         ORDER BY created_at DESC
@@ -387,7 +388,9 @@ async def get_backup_tasks(
                             "error_message": None,
                             "is_template": True,
                             "tape_device": tdev,
-                            "source_paths": None
+                            "source_paths": None,
+                            "from_scheduler": True,
+                            "enabled": srow.get("enabled", True)
                         })
                 # 合并后排序与分页（统一为时间戳，避免aware/naive比较异常）
                 def _ts(val):

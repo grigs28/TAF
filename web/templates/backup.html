@@ -121,28 +121,29 @@
                 <div class="card-body">
                     <div class="row">
                         <div class="col-md-3">
-                            <select class="form-select">
-                                <option>所有状态</option>
-                                <option>运行中</option>
-                                <option>已完成</option>
-                                <option>失败</option>
-                                <option>等待中</option>
+                            <select class="form-select bg-dark text-light" id="statusFilter">
+                                <option value="">所有状态</option>
+                                <option value="running">运行中</option>
+                                <option value="completed">已完成</option>
+                                <option value="failed">失败</option>
+                                <option value="pending">等待中</option>
+                                <option value="not_run">未运行</option>
                             </select>
                         </div>
                         <div class="col-md-3">
-                            <select class="form-select">
-                                <option>所有类型</option>
-                                <option>完整备份</option>
-                                <option>增量备份</option>
-                                <option>差异备份</option>
-                                <option>月度备份</option>
+                            <select class="form-select bg-dark text-light" id="typeFilter">
+                                <option value="">所有类型</option>
+                                <option value="full">完整备份</option>
+                                <option value="incremental">增量备份</option>
+                                <option value="differential">差异备份</option>
+                                <option value="monthly_full">月度备份</option>
                             </select>
                         </div>
                         <div class="col-md-4">
-                            <input type="text" class="form-control" placeholder="搜索备份任务...">
+                            <input type="text" class="form-control bg-dark text-light" id="searchInput" placeholder="搜索备份任务...">
                         </div>
                         <div class="col-md-2">
-                            <button class="btn btn-outline-secondary w-100">
+                            <button class="btn btn-outline-secondary w-100" id="searchBtn">
                                 <i class="bi bi-search me-1"></i>搜索
                             </button>
                         </div>
@@ -167,9 +168,9 @@
                         </div>
                     </div>
 
-                    <!-- 已完成的任务 -->
-                    <h6 class="text-success mb-3">
-                        <i class="bi bi-check-circle-fill me-2"></i>最近完成的任务
+                    <!-- 所有任务列表（包含未运行） -->
+                    <h6 class="mb-3">
+                        <i class="bi bi-list-ul me-2"></i>所有任务
                     </h6>
                     <div class="table-responsive">
                         <table class="table table-hover">
@@ -185,7 +186,7 @@
                                     <th>操作</th>
                                 </tr>
                             </thead>
-                            <tbody id="completedTasksTable">
+                            <tbody id="allTasksTable">
                                 <tr>
                                     <td colspan="8" class="text-center text-muted">加载中...</td>
                                 </tr>
@@ -330,52 +331,93 @@ async function loadRunningTasks() {
     }
 }
 
-// 加载已完成的任务
-async function loadCompletedTasks() {
+// 加载所有任务（包含未运行的计划任务）
+async function loadAllTasks() {
     try {
-        const response = await fetch('/api/backup/tasks?status=completed&limit=20');
+        const statusFilter = document.getElementById('statusFilter')?.value || '';
+        const typeFilter = document.getElementById('typeFilter')?.value || '';
+        const searchQuery = document.getElementById('searchInput')?.value || '';
+        
+        let url = '/api/backup/tasks?limit=100&offset=0';
+        if (statusFilter) url += `&status=${encodeURIComponent(statusFilter)}`;
+        if (typeFilter) url += `&task_type=${encodeURIComponent(typeFilter)}`;
+        if (searchQuery) url += `&q=${encodeURIComponent(searchQuery)}`;
+        
+        const response = await fetch(url);
         const tasks = await response.json();
         
-        const tbody = document.getElementById('completedTasksTable');
+        const tbody = document.getElementById('allTasksTable');
         if (!tbody) return;
         
         tbody.innerHTML = '';
         
         if (tasks && tasks.length > 0) {
             tasks.forEach(task => {
-                const sourcePaths = Array.isArray(task.source_paths) ? task.source_paths.join(', ') : (task.source_paths || 'N/A');
+                const sourcePaths = Array.isArray(task.source_paths) ? task.source_paths.join(', ') : (task.source_paths || (task.is_template ? '计划任务' : 'N/A'));
                 const row = document.createElement('tr');
+                row.className = task.is_template ? 'table-warning' : '';
                 row.innerHTML = `
-                    <td><strong>${task.task_name || '未命名任务'}</strong></td>
+                    <td><strong>${task.task_name || '未命名任务'}</strong>${task.is_template ? ' <span class="badge bg-secondary">模板</span>' : ''}</td>
                     <td>${formatTaskType(task.task_type || 'full')}</td>
-                    <td><code>${sourcePaths}</code></td>
-                    <td>${formatStatus(task.status || 'completed')}</td>
+                    <td><code class="text-truncate d-inline-block" style="max-width:200px;" title="${sourcePaths}">${sourcePaths}</code></td>
+                    <td>${formatStatus(task.status || 'pending')}</td>
                     <td>${formatDateTime(task.started_at)}</td>
                     <td>${formatDateTime(task.completed_at)}</td>
                     <td>${formatBytes(task.processed_bytes || 0)}</td>
                     <td>
-                        <button class="btn btn-sm btn-outline-primary" onclick="viewTaskDetails(${task.task_id})">
-                            <i class="bi bi-eye"></i>
-                        </button>
-                        ${task.status === 'completed' ? `
-                            <button class="btn btn-sm btn-outline-warning" onclick="downloadBackup(${task.task_id})">
-                                <i class="bi bi-download"></i>
-                            </button>
-                        ` : `
-                            <button class="btn btn-sm btn-outline-danger" onclick="retryTask(${task.task_id})">
-                                <i class="bi bi-arrow-repeat"></i>
-                            </button>
-                        `}
+                        <div class="btn-group btn-group-sm">
+                            ${task.from_scheduler ? `
+                                ${task.enabled === false ? `
+                                    <button class="btn btn-outline-success" onclick="enableBackupTask(${task.task_id})" title="启用">
+                                        <i class="bi bi-play"></i>
+                                    </button>
+                                ` : `
+                                    <button class="btn btn-outline-warning" onclick="disableBackupTask(${task.task_id})" title="禁用">
+                                        <i class="bi bi-pause"></i>
+                                    </button>
+                                `}
+                                <button class="btn btn-outline-primary" onclick="editBackupTask(${task.task_id}, true)" title="编辑">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                                <button class="btn btn-outline-info" onclick="runBackupTask(${task.task_id})" title="立即运行">
+                                    <i class="bi bi-play-circle"></i>
+                                </button>
+                                <button class="btn btn-outline-danger" onclick="deleteBackupTask(${task.task_id}, true)" title="删除">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            ` : `
+                                <button class="btn btn-outline-primary" onclick="viewTaskDetails(${task.task_id})" title="查看详情">
+                                    <i class="bi bi-eye"></i>
+                                </button>
+                                ${task.status === 'completed' ? `
+                                    <button class="btn btn-outline-warning" onclick="downloadBackup(${task.task_id})" title="下载备份">
+                                        <i class="bi bi-download"></i>
+                                    </button>
+                                ` : task.status === 'failed' ? `
+                                    <button class="btn btn-outline-danger" onclick="retryTask(${task.task_id})" title="重试">
+                                        <i class="bi bi-arrow-repeat"></i>
+                                    </button>
+                                ` : ''}
+                                ${task.is_template ? `
+                                    <button class="btn btn-outline-primary" onclick="editBackupTask(${task.task_id}, false)" title="编辑">
+                                        <i class="bi bi-pencil"></i>
+                                    </button>
+                                    <button class="btn btn-outline-danger" onclick="deleteBackupTask(${task.task_id}, false)" title="删除">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                ` : ''}
+                            `}
+                        </div>
                     </td>
                 `;
                 tbody.appendChild(row);
             });
         } else {
-            tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">暂无已完成的任务</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">暂无任务</td></tr>';
         }
     } catch (error) {
-        console.error('加载已完成的任务失败:', error);
-        const tbody = document.getElementById('completedTasksTable');
+        console.error('加载所有任务失败:', error);
+        const tbody = document.getElementById('allTasksTable');
         if (tbody) {
             tbody.innerHTML = '<tr><td colspan="8" class="text-center text-danger">加载失败: ' + error.message + '</td></tr>';
         }
@@ -400,17 +442,153 @@ function retryTask(taskId) {
     console.log('重试任务:', taskId);
 }
 
+// 禁用备份任务（计划任务）
+async function disableBackupTask(taskId) {
+    if (!confirm('确定要禁用此计划任务吗？')) {
+        return;
+    }
+    try {
+        const response = await fetch(`/api/scheduler/tasks/${taskId}/disable`, {
+            method: 'POST'
+        });
+        const result = await response.json();
+        if (result.success) {
+            alert('任务已禁用');
+            loadAllTasks();
+        } else {
+            alert('禁用失败: ' + (result.message || '未知错误'));
+        }
+    } catch (error) {
+        console.error('禁用任务失败:', error);
+        alert('禁用失败: ' + error.message);
+    }
+}
+
+// 启用备份任务（计划任务）
+async function enableBackupTask(taskId) {
+    if (!confirm('确定要启用此计划任务吗？')) {
+        return;
+    }
+    try {
+        const response = await fetch(`/api/scheduler/tasks/${taskId}/enable`, {
+            method: 'POST'
+        });
+        const result = await response.json();
+        if (result.success) {
+            alert('任务已启用');
+            loadAllTasks();
+        } else {
+            alert('启用失败: ' + (result.message || '未知错误'));
+        }
+    } catch (error) {
+        console.error('启用任务失败:', error);
+        alert('启用失败: ' + error.message);
+    }
+}
+
+// 编辑备份任务
+function editBackupTask(taskId, isScheduler) {
+    if (isScheduler) {
+        // 跳转到计划任务页面并打开编辑模态框
+        window.location.href = `/system#scheduler`;
+        setTimeout(() => {
+            if (window.SchedulerManager) {
+                window.SchedulerManager.editTask(taskId);
+            } else {
+                alert('请先加载计划任务页面');
+            }
+        }, 500);
+    } else {
+        // TODO: 实现编辑备份任务模板
+        alert('编辑备份任务模板功能待实现');
+    }
+}
+
+// 运行备份任务（计划任务）
+async function runBackupTask(taskId) {
+    if (!confirm('确定要立即运行此计划任务吗？')) {
+        return;
+    }
+    try {
+        const response = await fetch(`/api/scheduler/tasks/${taskId}/run`, {
+            method: 'POST'
+        });
+        const result = await response.json();
+        if (result.success) {
+            alert('任务已启动');
+            loadAllTasks();
+            loadRunningTasks();
+        } else {
+            alert('运行失败: ' + (result.message || '未知错误'));
+        }
+    } catch (error) {
+        console.error('运行任务失败:', error);
+        alert('运行失败: ' + error.message);
+    }
+}
+
+// 删除备份任务
+async function deleteBackupTask(taskId, isScheduler) {
+    if (!confirm('确定要删除此任务吗？此操作不可恢复！')) {
+        return;
+    }
+    try {
+        if (isScheduler) {
+            // 删除计划任务
+            const response = await fetch(`/api/scheduler/tasks/${taskId}`, {
+                method: 'DELETE'
+            });
+            const result = await response.json();
+            if (result.success) {
+                alert('任务已删除');
+                loadAllTasks();
+            } else {
+                alert('删除失败: ' + (result.message || '未知错误'));
+            }
+        } else {
+            // TODO: 实现删除备份任务模板
+            alert('删除备份任务模板功能待实现');
+        }
+    } catch (error) {
+        console.error('删除任务失败:', error);
+        alert('删除失败: ' + error.message);
+    }
+}
+
 // 页面加载时加载数据
 document.addEventListener('DOMContentLoaded', function() {
     loadBackupStatistics();
     loadRunningTasks();
-    loadCompletedTasks();
+    loadAllTasks();
+    
+    // 绑定筛选和搜索事件
+    const statusFilter = document.getElementById('statusFilter');
+    const typeFilter = document.getElementById('typeFilter');
+    const searchInput = document.getElementById('searchInput');
+    const searchBtn = document.getElementById('searchBtn');
+    
+    if (statusFilter) {
+        statusFilter.addEventListener('change', loadAllTasks);
+    }
+    if (typeFilter) {
+        typeFilter.addEventListener('change', loadAllTasks);
+    }
+    if (searchInput) {
+        searchInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                loadAllTasks();
+            }
+        });
+    }
+    if (searchBtn) {
+        searchBtn.addEventListener('click', loadAllTasks);
+    }
     
     // 每30秒刷新一次
     setInterval(function() {
         loadBackupStatistics();
         loadRunningTasks();
-        loadCompletedTasks();
+        loadAllTasks();
     }, 30000);
 });
 </script>
