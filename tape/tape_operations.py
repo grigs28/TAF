@@ -409,7 +409,10 @@ class TapeOperations:
             # Windows系统且配置了LTFS盘符，尝试从文件系统读取
             if platform.system() == "Windows" and self.settings.TAPE_DRIVE_LETTER:
                 drive_letter = self.settings.TAPE_DRIVE_LETTER.upper()
-                ltfs_label_file = f"{drive_letter}:\\TAPE_LABEL.txt"
+                # 优先读取以点开头的隐藏标签文件，兼容旧文件名
+                dot_label_file = f"{drive_letter}:\\.TAPE_LABEL.txt"
+                legacy_label_file = f"{drive_letter}:\\TAPE_LABEL.txt"
+                ltfs_label_file = dot_label_file if os.path.exists(dot_label_file) else legacy_label_file
                 logger.info(f"尝试从LTFS文件系统读取标签: {ltfs_label_file}")
                 
                 try:
@@ -528,11 +531,13 @@ class TapeOperations:
             # Windows系统且配置了LTFS盘符，尝试写入文件系统
             if platform.system() == "Windows" and self.settings.TAPE_DRIVE_LETTER:
                 drive_letter = self.settings.TAPE_DRIVE_LETTER.upper()
-                ltfs_label_file = f"{drive_letter}:\\TAPE_LABEL.txt"
+                # 以点开头的新标签文件名，兼容旧文件名
+                dot_label_file = f"{drive_letter}:\\.TAPE_LABEL.txt"
+                legacy_label_file = f"{drive_letter}:\\TAPE_LABEL.txt"
                 
                 try:
                     if os.path.exists(f"{drive_letter}:\\"):
-                        logger.info(f"写入LTFS文件系统标签: {ltfs_label_file}")
+                        logger.info(f"写入LTFS文件系统标签: {dot_label_file}")
                         
                         # 准备LTFS格式的标签内容
                         tape_id = tape_info.get("tape_id", "")
@@ -546,9 +551,26 @@ class TapeOperations:
                             else:
                                 label_content += f"Created: {created_date}\n"
                         
-                        with open(ltfs_label_file, 'w', encoding='utf-8') as f:
+                        with open(dot_label_file, 'w', encoding='utf-8') as f:
                             f.write(label_content)
                         
+                        # Windows上以点开头的文件不自动隐藏，尝试设置隐藏属性
+                        try:
+                            import ctypes
+                            FILE_ATTRIBUTE_HIDDEN = 0x2
+                            ctypes.windll.kernel32.SetFileAttributesW(dot_label_file, FILE_ATTRIBUTE_HIDDEN)
+                            logger.info("已设置标签文件隐藏属性")
+                        except Exception as _:
+                            pass
+
+                        # 为向后兼容，可选地同步写入旧文件名
+                        try:
+                            with open(legacy_label_file, 'w', encoding='utf-8') as f2:
+                                f2.write(label_content)
+                            logger.info("已同步写入兼容的旧标签文件名")
+                        except Exception as _:
+                            pass
+
                         logger.info(f"LTFS标签写入成功: {tape_id}")
                         return True
                 except Exception as e:
