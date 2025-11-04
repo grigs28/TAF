@@ -386,6 +386,9 @@ async function loadAllTasks() {
                                 <button class="btn btn-outline-info btn-action-run" title="立即运行">
                                     <i class="bi bi-play-circle"></i>
                                 </button>
+                                <button class="btn btn-outline-secondary btn-action-unlock" title="解锁">
+                                    <i class="bi bi-unlock"></i>
+                                </button>
                             ` : `
                                 <button class="btn btn-outline-warning" title="禁用" disabled>
                                     <i class="bi bi-pause"></i>
@@ -715,6 +718,7 @@ document.addEventListener('DOMContentLoaded', async function() {
         if (!btn.classList.contains('btn-action-enable') && 
             !btn.classList.contains('btn-action-disable') && 
             !btn.classList.contains('btn-action-run') && 
+            !btn.classList.contains('btn-action-unlock') && 
             !btn.classList.contains('btn-action-edit') && 
             !btn.classList.contains('btn-action-delete')) {
             return;
@@ -751,6 +755,15 @@ document.addEventListener('DOMContentLoaded', async function() {
         } else if (btn.classList.contains('btn-action-run')) {
             console.log('执行运行操作，任务ID:', taskId);
             runBackupTask(taskId);
+        } else if (btn.classList.contains('btn-action-unlock')) {
+            console.log('执行解锁操作，任务ID:', taskId);
+            if (fromScheduler) {
+                fetch(`/api/scheduler/tasks/${taskId}/unlock`, { method: 'POST' })
+                    .then(() => alert('已解锁任务'))
+                    .catch(() => alert('解锁失败'));
+            } else {
+                alert('仅计划任务支持解锁');
+            }
         } else if (btn.classList.contains('btn-action-edit')) {
             console.log('执行编辑操作，任务ID:', taskId, 'from_scheduler:', fromScheduler);
             editBackupTask(taskId, fromScheduler);

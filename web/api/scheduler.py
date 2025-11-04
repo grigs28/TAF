@@ -15,6 +15,7 @@ from models.scheduled_task import ScheduledTask, ScheduledTaskLog, ScheduleType,
 from models.system_log import OperationType
 from utils.scheduler import TaskScheduler
 from utils.log_utils import log_operation
+from utils.scheduler.task_storage import release_task_locks_by_task, release_all_active_locks
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -505,6 +506,104 @@ async def disable_scheduled_task(task_id: int, request: Request = None):
             ip_address=request.client.host if request and request.client else None
         )
         
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/tasks/{task_id}/unlock")
+async def unlock_scheduled_task(task_id: int, request: Request = None):
+    """解锁指定计划任务的所有活跃锁"""
+    try:
+        system = request.app.state.system
+        if not system:
+            raise HTTPException(status_code=500, detail="系统未初始化")
+
+        scheduler: TaskScheduler = system.scheduler
+        task = await scheduler.get_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="计划任务不存在")
+
+        await release_task_locks_by_task(task_id)
+
+        await log_operation(
+            operation_type=OperationType.SCHEDULER_STOP,
+            resource_type="scheduler",
+            resource_id=str(task_id),
+            resource_name=task.task_name,
+            operation_name="解锁计划任务",
+            operation_description=f"解锁计划任务所有活跃锁: {task.task_name}",
+            category="scheduler",
+            success=True,
+            result_message=f"已解锁 (ID: {task_id})",
+            request_method="POST",
+            request_url=f"/api/scheduler/tasks/{task_id}/unlock",
+            ip_address=request.client.host if request and request.client else None
+        )
+
+        return {"success": True, "message": "已解锁该任务的所有锁"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"解锁计划任务失败: {str(e)}")
+        await log_operation(
+            operation_type=OperationType.SCHEDULER_STOP,
+            resource_type="scheduler",
+            resource_id=str(task_id),
+            operation_name="解锁计划任务",
+            operation_description=f"解锁计划任务失败 (ID: {task_id})",
+            category="scheduler",
+            success=False,
+            error_message=str(e),
+            request_method="POST",
+            request_url=f"/api/scheduler/tasks/{task_id}/unlock",
+            ip_address=request.client.host if request and request.client else None
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/tasks/unlock-all")
+async def unlock_all_tasks(request: Request = None):
+    """解锁所有活跃的任务锁（谨慎使用）"""
+    try:
+        system = request.app.state.system
+        if not system:
+            raise HTTPException(status_code=500, detail="系统未初始化")
+
+        await release_all_active_locks()
+
+        await log_operation(
+            operation_type=OperationType.SCHEDULER_STOP,
+            resource_type="scheduler",
+            resource_id="*",
+            operation_name="解锁所有任务",
+            operation_description="解锁所有活跃的任务锁",
+            category="scheduler",
+            success=True,
+            result_message="已解锁所有活跃任务锁",
+            request_method="POST",
+            request_url="/api/scheduler/tasks/unlock-all",
+            ip_address=request.client.host if request and request.client else None
+        )
+
+        return {"success": True, "message": "已解锁所有活跃任务锁"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"解锁所有任务失败: {str(e)}")
+        await log_operation(
+            operation_type=OperationType.SCHEDULER_STOP,
+            resource_type="scheduler",
+            resource_id="*",
+            operation_name="解锁所有任务",
+            operation_description="解锁所有任务失败",
+            category="scheduler",
+            success=False,
+            error_message=str(e),
+            request_method="POST",
+            request_url="/api/scheduler/tasks/unlock-all",
+            ip_address=request.client.host if request and request.client else None
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
