@@ -1157,9 +1157,19 @@ function addNotificationUserToList(phone, name, remark) {
             </div>
             <div class="modal-body">
                 <form id="scheduledTaskForm">
-                    <div class="mb-3">
-                        <label for="taskName" class="form-label">任务名称 <span class="text-danger">*</span></label>
-                        <input type="text" class="form-control" id="taskName" required>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label for="taskName" class="form-label">任务名称 <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" id="taskName" required>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label for="backupTaskType" class="form-label">备份类型</label>
+                            <select class="form-select" id="backupTaskType">
+                                <option value="full">完整备份</option>
+                                <option value="incremental">增量备份</option>
+                                <option value="differential">差异备份</option>
+                            </select>
+                        </div>
                     </div>
                     <div class="mb-3">
                         <label for="taskDescription" class="form-label">任务描述</label>
