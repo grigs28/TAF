@@ -229,6 +229,18 @@ class BackupActionHandler(ActionHandler):
                 await session.commit()
                 await session.refresh(backup_task)
             
+            # 完整备份前：擦除但保留标签文件
+            if (template_task and template_task.task_type == BackupTaskType.FULL) or (not template_task and task_type == BackupTaskType.FULL):
+                try:
+                    if self.system_instance and getattr(self.system_instance, 'tape_manager', None):
+                        tape_ops = getattr(self.system_instance.tape_manager, 'tape_operations', None)
+                        if tape_ops and hasattr(tape_ops, 'erase_preserve_label'):
+                            ok = await tape_ops.erase_preserve_label()
+                            if not ok:
+                                logger.warning("完整备份前擦除失败，将尝试继续执行备份")
+                except Exception as _:
+                    logger.warning("完整备份前擦除异常，将尝试继续执行备份")
+
             # 执行备份任务
             success = await self.system_instance.backup_engine.execute_backup_task(backup_task)
             

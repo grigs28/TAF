@@ -127,6 +127,41 @@ class TapeOperations:
             logger.error(f"擦除磁带失败: {str(e)}")
             return False
 
+    async def erase_preserve_label(self) -> bool:
+        """擦除磁带但保留标签（.TAPE_LABEL.txt 或磁带头元数据）"""
+        try:
+            if not self._initialized:
+                logger.error("磁带操作模块未初始化")
+                return False
+
+            # 读取当前标签元数据
+            metadata = await self._read_tape_label()
+            if metadata:
+                logger.info(f"备份前擦除：将保留磁带标签 {metadata.get('tape_id')}")
+            else:
+                logger.info("备份前擦除：未读取到磁带标签，将仅执行擦除")
+
+            # 执行擦除
+            if not await self.erase_tape():
+                return False
+
+            # 若有标签，写回标签文件/磁带头
+            if metadata:
+                write_ok = await self._write_tape_label({
+                    "tape_id": metadata.get("tape_id"),
+                    "label": metadata.get("label") or metadata.get("tape_id"),
+                    "serial_number": metadata.get("serial_number"),
+                    "created_date": metadata.get("created_date"),
+                    "expiry_date": metadata.get("expiry_date"),
+                })
+                if not write_ok:
+                    logger.warning("擦除后写回标签失败，但不影响后续备份")
+
+            return True
+        except Exception as e:
+            logger.error(f"擦除并保留标签失败: {str(e)}")
+            return False
+
     async def write_data(self, data: bytes, block_number: int = 0) -> bool:
         """写入数据到磁带"""
         try:
