@@ -256,13 +256,13 @@ class BackupActionHandler(ActionHandler):
                         try:
                             running_task_row = await conn.fetchrow(
                                 """
-                                SELECT id FROM backup_tasks
+                                SELECT id, started_at FROM backup_tasks
                                 WHERE template_id = $1 AND status = $2
                                 LIMIT 1
                                 """,
                                 template_id, 'running'
                             )
-                            running_task = running_task_row if running_task_row else None
+                            running_task = dict(running_task_row) if running_task_row else None
                         finally:
                             await conn.close()
                     else:
