@@ -1,4 +1,28 @@
 # 更新日志
+## [0.0.12] - 2025-11-04
+
+### 修复
+
+#### 计划任务系统修复
+- ✅ 修复时间格式解析问题
+  - 支持多种时间格式：`2025-11-04 17:05:00`、`2025/11/04 17:05:00`、`2025-11-04 17:05`、`2025/11/04 17:05`
+  - 使用链式try-except处理不同格式，提高兼容性
+  
+- ✅ 修复openGauss数据库操作问题
+  - `get_task`、`update_task`、`delete_task` 方法对openGauss使用原生SQL查询（asyncpg）
+  - 避免SQLAlchemy版本解析错误：`Could not determine version from string '(openGauss-lite 7.0.0-RC1...)'`
+  - 正确处理枚举类型（使用CAST）和JSON字段
+  - 确保整数字段（total_runs、success_runs、failure_runs）不为None
+  
+- ✅ 修复API路由匹配问题
+  - 调整路由定义顺序：更具体的路径（如`/tasks/{task_id}/disable`）必须在通用路径（如`/tasks/{task_id}`）之前定义
+  - 修复`POST /api/scheduler/tasks/{task_id}/disable`和`DELETE /api/scheduler/tasks/{task_id}`返回404的问题
+  - 确保FastAPI能够正确匹配路由
+
+- ✅ 增强错误日志
+  - 所有数据库操作错误都包含详细的堆栈跟踪信息
+  - 便于调试和排查问题
+
 ## [0.0.11] - 2025-11-04
 
 ### 改进

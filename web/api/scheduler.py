@@ -255,95 +255,7 @@ async def create_scheduled_task(task: ScheduledTaskCreate, request: Request = No
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/tasks/{task_id}", response_model=ScheduledTaskResponse)
-async def update_scheduled_task(
-    task_id: int,
-    task: ScheduledTaskUpdate,
-    request: Request = None
-):
-    """更新计划任务"""
-    try:
-        system = request.app.state.system
-        if not system:
-            raise HTTPException(status_code=500, detail="系统未初始化")
-        
-        scheduler: TaskScheduler = system.scheduler
-        
-        # 构建更新字典
-        updates = {}
-        
-        if task.task_name is not None:
-            updates['task_name'] = task.task_name
-        if task.description is not None:
-            updates['description'] = task.description
-        if task.schedule_type is not None:
-            try:
-                updates['schedule_type'] = ScheduleType(task.schedule_type)
-            except ValueError:
-                raise HTTPException(status_code=400, detail=f"无效的调度类型: {task.schedule_type}")
-        if task.schedule_config is not None:
-            updates['schedule_config'] = task.schedule_config
-        if task.action_type is not None:
-            try:
-                updates['action_type'] = TaskActionType(task.action_type)
-            except ValueError:
-                raise HTTPException(status_code=400, detail=f"无效的任务动作类型: {task.action_type}")
-        if task.action_config is not None:
-            updates['action_config'] = task.action_config
-        if task.enabled is not None:
-            updates['enabled'] = task.enabled
-            # 更新状态
-            if task.enabled:
-                updates['status'] = ScheduledTaskStatus.ACTIVE
-            else:
-                updates['status'] = ScheduledTaskStatus.INACTIVE
-        if task.tags is not None:
-            updates['tags'] = task.tags
-        if task.task_metadata is not None:
-            updates['task_metadata'] = task.task_metadata
-        
-        # 更新任务
-        success = await scheduler.update_task(task_id, updates)
-        
-        if not success:
-            raise HTTPException(status_code=404, detail="计划任务不存在")
-        
-        # 重新获取任务
-        updated_task = await scheduler.get_task(task_id)
-        
-        return ScheduledTaskResponse(**updated_task.to_dict())
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"更新计划任务失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.delete("/tasks/{task_id}")
-async def delete_scheduled_task(task_id: int, request: Request = None):
-    """删除计划任务"""
-    try:
-        system = request.app.state.system
-        if not system:
-            raise HTTPException(status_code=500, detail="系统未初始化")
-        
-        scheduler: TaskScheduler = system.scheduler
-        
-        success = await scheduler.delete_task(task_id)
-        
-        if not success:
-            raise HTTPException(status_code=404, detail="计划任务不存在")
-        
-        return {"success": True, "message": "计划任务已删除"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"删除计划任务失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
+# 更具体的路径必须在通用路径之前定义，以确保路由匹配正确
 @router.post("/tasks/{task_id}/run")
 async def run_scheduled_task(task_id: int, request: Request = None):
     """立即运行计划任务"""
@@ -437,6 +349,95 @@ async def disable_scheduled_task(task_id: int, request: Request = None):
         raise
     except Exception as e:
         logger.error(f"禁用计划任务失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/tasks/{task_id}", response_model=ScheduledTaskResponse)
+async def update_scheduled_task(
+    task_id: int,
+    task: ScheduledTaskUpdate,
+    request: Request = None
+):
+    """更新计划任务"""
+    try:
+        system = request.app.state.system
+        if not system:
+            raise HTTPException(status_code=500, detail="系统未初始化")
+        
+        scheduler: TaskScheduler = system.scheduler
+        
+        # 构建更新字典
+        updates = {}
+        
+        if task.task_name is not None:
+            updates['task_name'] = task.task_name
+        if task.description is not None:
+            updates['description'] = task.description
+        if task.schedule_type is not None:
+            try:
+                updates['schedule_type'] = ScheduleType(task.schedule_type)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"无效的调度类型: {task.schedule_type}")
+        if task.schedule_config is not None:
+            updates['schedule_config'] = task.schedule_config
+        if task.action_type is not None:
+            try:
+                updates['action_type'] = TaskActionType(task.action_type)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"无效的任务动作类型: {task.action_type}")
+        if task.action_config is not None:
+            updates['action_config'] = task.action_config
+        if task.enabled is not None:
+            updates['enabled'] = task.enabled
+            # 更新状态
+            if task.enabled:
+                updates['status'] = ScheduledTaskStatus.ACTIVE
+            else:
+                updates['status'] = ScheduledTaskStatus.INACTIVE
+        if task.tags is not None:
+            updates['tags'] = task.tags
+        if task.task_metadata is not None:
+            updates['task_metadata'] = task.task_metadata
+        
+        # 更新任务
+        success = await scheduler.update_task(task_id, updates)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="计划任务不存在")
+        
+        # 重新获取任务
+        updated_task = await scheduler.get_task(task_id)
+        
+        return ScheduledTaskResponse(**updated_task.to_dict())
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新计划任务失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/tasks/{task_id}")
+async def delete_scheduled_task(task_id: int, request: Request = None):
+    """删除计划任务"""
+    try:
+        system = request.app.state.system
+        if not system:
+            raise HTTPException(status_code=500, detail="系统未初始化")
+        
+        scheduler: TaskScheduler = system.scheduler
+        
+        success = await scheduler.delete_task(task_id)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="计划任务不存在")
+        
+        return {"success": True, "message": "计划任务已删除"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除计划任务失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
