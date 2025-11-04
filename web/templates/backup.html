@@ -430,26 +430,61 @@ async function editBackupTask(taskId, isScheduler) {
         // 直接调用计划任务的编辑功能
         window.SchedulerManager.editTask(taskId);
     } else {
-        // 备份任务模板：需要先查询对应的计划任务ID
-        // 备份任务模板可能关联到计划任务，或者需要转换为计划任务格式
-        // 这里先尝试通过任务名称查找对应的计划任务
+        // 备份任务模板：转换为计划任务格式并填充表单
         try {
             const response = await fetch(`/api/backup/tasks/${taskId}`);
-            const task = await response.json();
+            const backupTask = await response.json();
             
             // 尝试通过任务名称查找计划任务
-            const schedResponse = await fetch(`/api/scheduler/tasks`);
-            const schedTasks = await schedResponse.json();
-            const matchingTask = schedTasks.find(t => t.task_name === task.task_name);
-            
-            if (matchingTask) {
-                // 找到对应的计划任务，直接编辑
-                window.SchedulerManager.editTask(matchingTask.id);
-            } else {
-                // 没有对应的计划任务，提示用户
-                alert('此备份任务模板没有对应的计划任务。\n' +
-                      '请先在计划任务模块中创建对应的计划任务。');
+            try {
+                const schedResponse = await fetch(`/api/scheduler/tasks`);
+                const schedTasks = await schedResponse.json();
+                const matchingTask = schedTasks.find(t => t.task_name === backupTask.task_name);
+                
+                if (matchingTask) {
+                    // 找到对应的计划任务，直接编辑
+                    window.SchedulerManager.editTask(matchingTask.id);
+                    return;
+                }
+            } catch (error) {
+                console.log('查找计划任务失败，将使用备份任务模板数据:', error);
             }
+            
+            // 没有对应的计划任务，将备份任务模板转换为计划任务格式
+            const sourcePaths = backupTask.source_paths || [];
+            const excludePatterns = Array.isArray(backupTask.exclude_patterns) 
+                ? backupTask.exclude_patterns 
+                : (backupTask.exclude_patterns ? backupTask.exclude_patterns.split('\n') : []);
+            
+            // 构建计划任务格式的数据
+            const schedulerTaskData = {
+                id: null, // 新建任务
+                task_name: backupTask.task_name || '',
+                description: backupTask.description || '',
+                schedule_type: 'once', // 默认一次性任务
+                schedule_config: {
+                    datetime: new Date().toISOString().replace('T', ' ').substring(0, 19)
+                },
+                action_type: 'backup',
+                action_config: {
+                    source_paths: sourcePaths,
+                    task_type: backupTask.task_type || 'full',
+                    tape_device: backupTask.tape_device || null,
+                    target_type: backupTask.tape_device ? 'tape' : 'storage',
+                    tape_devices: backupTask.tape_device ? [backupTask.tape_device] : [],
+                    compression_enabled: backupTask.compression_enabled !== false,
+                    encryption_enabled: backupTask.encryption_enabled === true,
+                    exclude_patterns: excludePatterns
+                },
+                enabled: true
+            };
+            
+            // 填充表单并打开模态框
+            window.SchedulerManager.fillForm(schedulerTaskData);
+            window.SchedulerManager.currentTask = null; // 标记为新建任务
+            
+            const modal = new bootstrap.Modal(document.getElementById('scheduledTaskModal'));
+            modal.show();
         } catch (error) {
             console.error('编辑备份任务失败:', error);
             alert('编辑失败: ' + error.message);
