@@ -162,7 +162,7 @@ class TapeManager:
             
             # 查找可用磁带
             for tape in self.tape_cartridges.values():
-                if tape.status == TapeStatus.AVAILABLE and not tape.is_expired():
+                if tape.status == TapeStatus.AVAILABLE and not tape.is_expired:
                     return tape
 
             # 如果没有可用磁带，尝试从数据库重新加载
@@ -170,7 +170,7 @@ class TapeManager:
             
             # 再次查找可用磁带
             for tape in self.tape_cartridges.values():
-                if tape.status == TapeStatus.AVAILABLE and not tape.is_expired():
+                if tape.status == TapeStatus.AVAILABLE and not tape.is_expired:
                     return tape
 
             # 如果没有可用磁带，尝试清理过期磁带
@@ -179,7 +179,7 @@ class TapeManager:
 
                 # 再次查找可用磁带
                 for tape in self.tape_cartridges.values():
-                    if tape.status == TapeStatus.AVAILABLE and not tape.is_expired():
+                    if tape.status == TapeStatus.AVAILABLE and not tape.is_expired:
                         return tape
 
             logger.warning("没有可用的磁带")
@@ -199,7 +199,7 @@ class TapeManager:
             tape = self.tape_cartridges[tape_id]
 
             # 检查磁带状态
-            if tape.is_expired():
+            if tape.is_expired:
                 logger.warning(f"磁带 {tape_id} 已过期，将进行擦除")
                 await self.erase_tape(tape_id)
 
@@ -396,7 +396,7 @@ class TapeManager:
         try:
             expired_tapes = []
             for tape in self.tape_cartridges.values():
-                if tape.is_expired() and tape.status != TapeStatus.EXPIRED:
+                if tape.is_expired and tape.status != TapeStatus.EXPIRED:
                     expired_tapes.append(tape)
 
             if expired_tapes:
@@ -542,7 +542,7 @@ class TapeManager:
             total_tapes = len(self.tape_cartridges)
             available_tapes = len([t for t in self.tape_cartridges.values() if t.status == TapeStatus.AVAILABLE])
             in_use_tapes = len([t for t in self.tape_cartridges.values() if t.status == TapeStatus.IN_USE])
-            expired_tapes = len([t for t in self.tape_cartridges.values() if t.is_expired()])
+            expired_tapes = len([t for t in self.tape_cartridges.values() if t.is_expired])
 
             total_capacity = sum(t.capacity_bytes for t in self.tape_cartridges.values())
             used_capacity = sum(t.used_bytes for t in self.tape_cartridges.values())

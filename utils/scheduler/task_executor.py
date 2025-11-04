@@ -29,6 +29,7 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
     async def executor():
         execution_id = str(uuid.uuid4())
         start_time = datetime.now()
+        lock_acquired = False
         
         try:
             # 获取任务并发锁（openGauss原生），获取失败则跳过
@@ -44,6 +45,8 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
                     details={"execution_id": execution_id}
                 )
                 return
+            
+            lock_acquired = True
 
             # 记录任务执行开始日志
             await log_operation(
@@ -200,12 +203,6 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
                     session.add(scheduled_task)
                     await session.commit()
 
-            # 释放任务锁
-            try:
-                await release_task_lock(scheduled_task.id, execution_id)
-            except Exception:
-                pass
-            
             logger.info(f"任务执行成功: {scheduled_task.task_name} (执行ID: {execution_id})")
             
             # 记录任务执行成功日志
@@ -243,18 +240,13 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
             
         except KeyboardInterrupt:
             # 处理 Ctrl+C 中断
+            # 注意：finally 块会在 raise 之前执行，确保锁被释放
             end_time = datetime.now()
             duration = int((end_time - start_time).total_seconds() * 1000)
             error_msg = "任务被用户中断（Ctrl+C）"
             logger.warning(f"任务执行被中断: {scheduled_task.task_name}")
             
-            # 释放任务锁
-            try:
-                await release_task_lock(scheduled_task.id, execution_id)
-            except Exception:
-                pass
-            
-            # 更新任务状态为错误
+            # 更新任务状态为错误（使用 try-except 确保即使失败也不影响 finally 执行）
             try:
                 if is_opengauss():
                     conn = await get_opengauss_connection()
@@ -270,10 +262,11 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
                         )
                     finally:
                         await conn.close()
-            except Exception:
-                pass
+            except Exception as update_error:
+                logger.error(f"更新任务状态失败（忽略继续）: {str(update_error)}")
             
             # 重新抛出异常，让上层处理
+            # finally 块会在 raise 之前执行
             raise
             
         except Exception as e:
@@ -352,12 +345,6 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
                 except Exception as db_error:
                     logger.error(f"更新任务日志失败: {str(db_error)}")
 
-            # 释放任务锁
-            try:
-                await release_task_lock(scheduled_task.id, execution_id)
-            except Exception:
-                pass
-            
             # 记录任务执行失败日志
             await log_operation(
                 operation_type=OperationType.SCHEDULER_RUN,
@@ -392,6 +379,18 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
                 stack_trace=stack_trace,
                 duration_ms=duration
             )
+        
+        finally:
+            # 确保无论成功还是失败，都释放任务锁
+            # 这个 finally 块会在所有退出路径（return、raise、正常结束）之前执行
+            if lock_acquired:
+                try:
+                    await release_task_lock(scheduled_task.id, execution_id)
+                    logger.debug(f"任务锁已释放: {scheduled_task.task_name} (执行ID: {execution_id})")
+                except Exception as lock_error:
+                    # 即使释放锁失败，也要记录错误，但不影响其他流程
+                    logger.error(f"释放任务锁失败: {scheduled_task.task_name} (执行ID: {execution_id}), 错误: {str(lock_error)}")
+                    # 注意：即使释放锁失败，我们也不应该重新抛出异常，因为这会掩盖原始错误
     
     return executor
 
