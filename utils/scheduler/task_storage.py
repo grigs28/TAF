@@ -87,6 +87,73 @@ async def load_tasks_from_db(enabled_only: bool = True) -> List[ScheduledTask]:
         return []
 
 
+# ===== 运行记录（openGauss原生）=====
+async def record_run_start(task_id: int, execution_id: str, started_at: datetime) -> None:
+    """记录任务开始运行（openGauss 原生）"""
+    try:
+        if is_opengauss():
+            conn = await get_opengauss_connection()
+            try:
+                # 确保表存在
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS task_runs (
+                        id SERIAL PRIMARY KEY,
+                        task_id INTEGER NOT NULL,
+                        execution_id VARCHAR(64) UNIQUE NOT NULL,
+                        started_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                        completed_at TIMESTAMP WITH TIME ZONE,
+                        status VARCHAR(16) DEFAULT 'running',
+                        result JSONB,
+                        error_message TEXT
+                    )
+                    """
+                )
+                # 插入记录
+                await conn.execute(
+                    """
+                    INSERT INTO task_runs (task_id, execution_id, started_at, status)
+                    VALUES ($1, $2, $3, 'running')
+                    """,
+                    task_id, execution_id, started_at
+                )
+            finally:
+                await conn.close()
+        else:
+            # 非 openGauss 暂不实现（保留 SQLAlchemy 版本可选）
+            pass
+    except Exception as e:
+        logger.warning(f"记录任务开始失败（忽略继续）: {str(e)}")
+
+
+async def record_run_end(execution_id: str, completed_at: datetime, status: str,
+                         result: Optional[Dict[str, Any]] = None,
+                         error_message: Optional[str] = None) -> None:
+    """记录任务结束（openGauss 原生）"""
+    try:
+        if is_opengauss():
+            conn = await get_opengauss_connection()
+            try:
+                await conn.execute(
+                    """
+                    UPDATE task_runs
+                    SET completed_at = $1,
+                        status = $2,
+                        result = $3,
+                        error_message = $4
+                    WHERE execution_id = $5
+                    """,
+                    completed_at, status, json.dumps(result) if result is not None else None,
+                    error_message, execution_id
+                )
+            finally:
+                await conn.close()
+        else:
+            pass
+    except Exception as e:
+        logger.warning(f"记录任务结束失败（忽略继续）: {str(e)}")
+
+
 async def get_task_by_id(task_id: int) -> Optional[ScheduledTask]:
     """根据ID获取计划任务"""
     try:

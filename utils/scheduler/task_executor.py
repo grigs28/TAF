@@ -18,6 +18,7 @@ from sqlalchemy import select
 from .action_handlers import get_action_handler
 from .schedule_calculator import calculate_next_run_time
 from utils.log_utils import log_operation, log_system
+from .task_storage import record_run_start, record_run_end
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,12 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
             async with db_manager.AsyncSessionLocal() as session:
                 session.add(task_log)
                 await session.commit()
+
+            # openGauss 原生记录运行开始
+            try:
+                await record_run_start(scheduled_task.id, execution_id, start_time)
+            except Exception:
+                pass
             
             # 执行任务动作
             action_type = scheduled_task.action_type
@@ -114,6 +121,12 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
                 
                 session.add(scheduled_task)
                 await session.commit()
+
+            # openGauss 原生记录结束（成功）
+            try:
+                await record_run_end(execution_id, end_time, 'success', result=result)
+            except Exception:
+                pass
             
             logger.info(f"任务执行成功: {scheduled_task.task_name} (执行ID: {execution_id})")
             
@@ -182,6 +195,12 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
                     await session.commit()
             except Exception as db_error:
                 logger.error(f"更新任务日志失败: {str(db_error)}")
+
+            # openGauss 原生记录结束（失败）
+            try:
+                await record_run_end(execution_id, end_time, 'failed', result=None, error_message=error_msg)
+            except Exception:
+                pass
             
             # 记录任务执行失败日志
             await log_operation(

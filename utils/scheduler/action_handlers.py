@@ -182,7 +182,7 @@ class BackupActionHandler(ActionHandler):
                                         f"(任务ID: {running_task.id})"
                                     )
             
-            # 从模板或配置中获取备份参数
+            # 从模板或配置中获取备份参数（若缺省则从系统实例配置补齐）
             if template_task:
                 source_paths = template_task.source_paths or []
                 task_type = template_task.task_type
@@ -211,6 +211,22 @@ class BackupActionHandler(ActionHandler):
                 description = config.get('description', '')
                 tape_device = config.get('tape_device')
                 task_name = config.get('task_name', f"计划备份-{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+
+            # 补齐缺省参数：从 system_instance 的策略/配置合并
+            try:
+                sysi = self.system_instance
+                # 备份策略里可能有默认排除规则/压缩加密开关
+                if hasattr(sysi, 'settings'):
+                    settings = sysi.settings
+                    if not exclude_patterns and getattr(settings, 'DEFAULT_EXCLUDE_PATTERNS', None):
+                        exclude_patterns = settings.DEFAULT_EXCLUDE_PATTERNS
+                # tapedrive 配置：默认磁带设备等
+                if not tape_device and hasattr(sysi, 'tape_manager'):
+                    tm = sysi.tape_manager
+                    if hasattr(tm, 'settings') and getattr(tm.settings, 'TAPE_DEVICE_PATH', None):
+                        tape_device = tm.settings.TAPE_DEVICE_PATH
+            except Exception:
+                pass
             
             if not source_paths:
                 raise ValueError("备份源路径不能为空")
