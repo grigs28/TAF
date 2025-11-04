@@ -17,7 +17,7 @@
 .backup-set-differential { border-left-color: #ffc107; }
 
 .file-tree {
-    max-height: 300px;
+    max-height: 520px;
     overflow-y: auto;
     border: 1px solid #dee2e6;
     border-radius: 4px;
@@ -53,10 +53,18 @@
         <div class="col-lg-4">
             <div class="service-card">
                 <div class="card-body">
-                    <h6 class="mb-3">
+                    <h6 class="mb-2">
                         <i class="bi bi-calendar-event me-2"></i>
                         备份集时间轴
                     </h6>
+                    <!-- 当前备份集信息（移动到时间轴区域） -->
+                    <div class="alert alert-info py-2 mb-3">
+                        <strong>当前备份集:</strong>
+                        <span id="currentBackupName">完整备份 (2025-10-01 02:00)</span>
+                        <button class="btn btn-sm btn-outline-secondary float-end" id="changeBackupBtn">
+                            <i class="bi bi-arrow-left-right me-1"></i>切换
+                        </button>
+                    </div>
                     <!-- 月份选择 -->
                     <div class="mb-3">
                         <select class="form-select" id="monthSelect">
@@ -160,14 +168,7 @@
                         <i class="bi bi-folder-open me-2"></i>
                         文件浏览器
                     </h6>
-                    <!-- 当前备份集信息 -->
-                    <div class="alert alert-info mb-3">
-                        <strong>当前备份集:</strong>
-                        <span id="currentBackupName">完整备份 (2025-10-01 02:00)</span>
-                        <button class="btn btn-sm btn-outline-secondary float-end" id="changeBackupBtn">
-                            <i class="bi bi-arrow-left-right me-1"></i>切换
-                        </button>
-                    </div>
+                    <!-- 当前备份集信息已移动到左侧时间轴区域 -->
 
                     <!-- 搜索和筛选 -->
                     <div class="row mb-3">
@@ -286,9 +287,8 @@
                     </h6>
                     <div class="row">
                         <div class="col-md-6">
-                            <label class="form-label">恢复目标路径</label>
+                            <label class="form-label">恢复目标路径 <small class="text-muted ms-2">文件将恢复到此目录</small></label>
                             <input type="text" class="form-control" value="/tmp/recovery" id="recoveryPath">
-                            <small class="text-muted">文件将恢复到此目录</small>
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">覆盖选项</label>
@@ -300,26 +300,22 @@
                         </div>
                     </div>
                     <div class="row mt-3">
-                        <div class="col-md-6">
+                        <div class="col-md-4">
                             <div class="form-check">
                                 <input class="form-check-input" type="checkbox" id="preservePerms" checked>
-                                <label class="form-check-label" for="preservePerms">
-                                    保留文件权限
-                                </label>
-                            </div>
-                            <div class="form-check">
-                                <input class="form-check-input" type="checkbox" id="verifyIntegrity" checked>
-                                <label class="form-check-label" for="verifyIntegrity">
-                                    验证文件完整性
-                                </label>
+                                <label class="form-check-label" for="preservePerms">保留文件权限</label>
                             </div>
                         </div>
-                        <div class="col-md-6">
+                        <div class="col-md-4">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="verifyIntegrity" checked>
+                                <label class="form-check-label" for="verifyIntegrity">验证文件完整性</label>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
                             <div class="form-check">
                                 <input class="form-check-input" type="checkbox" id="sendNotification" checked>
-                                <label class="form-check-label" for="sendNotification">
-                                    发送完成通知
-                                </label>
+                                <label class="form-check-label" for="sendNotification">发送完成通知</label>
                             </div>
                         </div>
                     </div>
