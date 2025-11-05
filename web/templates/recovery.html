@@ -4,6 +4,7 @@
 
 {% block extra_css %}
 <style>
+:root { --recoveryPaneHeight: 720px; }
 .backup-set-card {
     transition: all 0.3s ease;
     border-left: 4px solid transparent;
@@ -17,7 +18,7 @@
 .backup-set-differential { border-left-color: #ffc107; }
 
 .file-tree {
-    max-height: 680px;
+    max-height: var(--recoveryPaneHeight);
     overflow-y: auto;
     border: 1px solid #dee2e6;
     border-radius: 4px;
@@ -279,7 +280,7 @@
                         </div>
                         <!-- 选中文件列表 -->
                         <div class="mt-3">
-                            <div class="list-group" id="selectedFilesList" style="max-height: 220px; overflow-y: auto;"></div>
+                            <div class="list-group" id="selectedFilesList" style="max-height: var(--recoveryPaneHeight); overflow-y: auto;"></div>
                         </div>
                     </div>
 
@@ -338,6 +339,7 @@
 .backup-timeline {
     flex: 1;
     overflow-y: auto;
+    max-height: var(--recoveryPaneHeight);
     margin-left: -25px;
     margin-right: -25px;
     padding-left: 25px;
@@ -380,6 +382,10 @@
     const listEl = document.getElementById('selectedFilesList');
     const selectAllBtn = document.getElementById('selectAllBtn');
     const clearSelectionBtn = document.getElementById('clearSelectionBtn');
+    const monthSelect = document.getElementById('monthSelect');
+    const changeBackupBtn = document.getElementById('changeBackupBtn');
+    const timeline = document.querySelector('.backup-timeline');
+    const currentBackupNameEl = document.getElementById('currentBackupName');
 
     let autoId = 1;
     const fileIndex = new Map(); // id -> {el,type,sizeBytes,children:[],name}
@@ -436,6 +442,37 @@
     }
 
     assignIdsAndBuildIndex(treeRoot.parentElement || treeRoot);
+
+    // 备份集选择联动：点击时间轴卡片选中并更新“当前备份集”
+    function bindTimelineSelection(){
+        timeline.querySelectorAll('.backup-set-card').forEach(card => {
+            card.addEventListener('click', function(){
+                timeline.querySelectorAll('.backup-set-card.selected').forEach(c=>c.classList.remove('selected'));
+                this.classList.add('selected');
+                const title = this.querySelector('h6')?.textContent?.trim() || '';
+                const time = this.querySelector('small.text-muted')?.textContent?.trim() || '';
+                if (currentBackupNameEl){ currentBackupNameEl.textContent = title + (time? ' ('+time+')':'' ); }
+            });
+        });
+    }
+    if (timeline) bindTimelineSelection();
+
+    // 切换按钮：滚动到时间轴并高亮当前选中项
+    if (changeBackupBtn && timeline){
+        changeBackupBtn.addEventListener('click', function(){
+            timeline.scrollIntoView({behavior:'smooth', block:'start'});
+            const sel = timeline.querySelector('.backup-set-card.selected') || timeline.querySelector('.backup-set-card');
+            if (sel){ sel.classList.add('selected'); sel.style.outline='2px solid #2196f3'; setTimeout(()=> sel.style.outline='', 1200); }
+        });
+    }
+
+    // 月份下拉：简单演示联动—自动选中第一个备份集
+    if (monthSelect && timeline){
+        monthSelect.addEventListener('change', function(){
+            const first = timeline.querySelector('.backup-set-card');
+            if (first){ first.click(); }
+        });
+    }
 
     function selectFile(id, on){
         const meta = fileIndex.get(id); if (!meta) return;

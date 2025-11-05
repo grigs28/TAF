@@ -16,7 +16,7 @@ router = APIRouter()
 # 注册所有子模块的路由
 router.include_router(crud.router, tags=["磁带CRUD"])
 router.include_router(label.router, tags=["磁带标签"])
-router.include_router(operations.router, tags=["磁带操作"])
+router.include_router(operations.router, prefix="/operations", tags=["磁带操作"])
 router.include_router(device.router, tags=["磁带设备"])
 router.include_router(ibm.router, tags=["IBM磁带机"])
 router.include_router(utils.router, tags=["磁带工具"])

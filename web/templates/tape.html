@@ -867,10 +867,10 @@ document.addEventListener('DOMContentLoaded', function() {
                     html += '<div class="alert alert-info mb-2"><i class="bi bi-info-circle me-2"></i><strong>设备信息</strong></div>';
                     
                     // 关键信息显示在标题下方
-                    if (device.vendor) {
+                    if (device.vendor && device.vendor !== 'Unknown') {
                         html += `<div class="mb-2"><strong>厂商:</strong> ${device.vendor}</div>`;
                     }
-                    if (device.model) {
+                    if (device.model && device.model !== 'Tape Drive') {
                         html += `<div class="mb-2"><strong>型号:</strong> ${device.model}</div>`;
                     }
                     if (device.product) {
@@ -883,19 +883,45 @@ document.addEventListener('DOMContentLoaded', function() {
                     
                     if (device.serial && device.serial !== 'Unknown') html += `<tr><th style="width: 30%;">设备序列号:</th><td>${device.serial}</td></tr>`;
                     
+                    // 磁带类型和容量信息（优先显示）
+                    let ltoGen = null;
                     if (device.is_ibm_lto && device.lto_generation) {
-                        html += `<tr><th>设备类型:</th><td><span class="badge bg-info">IBM LTO-${device.lto_generation}</span></td></tr>`;
-                        const capacityMap = {9: '18TB', 8: '12TB', 7: '6TB', 6: '2.5TB', 5: '1.5TB'};
-                        if (capacityMap[device.lto_generation]) {
-                            html += `<tr><th>建议容量:</th><td>${capacityMap[device.lto_generation]}</td></tr>`;
+                        ltoGen = device.lto_generation;
+                        html += `<tr><th>磁带类型:</th><td><span class="badge bg-info">LTO-${ltoGen}</span></td></tr>`;
+                    } else if (device.model) {
+                        // 尝试从型号中提取LTO代数
+                        const modelUpper = device.model.toUpperCase();
+                        const ltoMatch = modelUpper.match(/LTO[-_]?(\d+)|HH(\d+)|ULTRIUM[-_]?HH(\d+)/);
+                        if (ltoMatch) {
+                            ltoGen = parseInt(ltoMatch[1] || ltoMatch[2] || ltoMatch[3]);
+                            if (ltoGen >= 5 && ltoGen <= 9) {
+                                html += `<tr><th>磁带类型:</th><td><span class="badge bg-info">LTO-${ltoGen}</span></td></tr>`;
+                            }
                         }
-                    } else if (device.model && device.model.includes('ULT3580')) {
-                        html += `<tr><th>设备信息:</th><td><span class="badge bg-warning">IBM磁带设备（待识别代数）</span></td></tr>`;
                     }
                     
+                    // 容量信息
                     if (device.native_capacity) {
                         const tb = (device.native_capacity / (1024 ** 4)).toFixed(1);
-                        html += `<tr><th>原生容量:</th><td>${tb} TB</td></tr>`;
+                        html += `<tr><th>容量:</th><td><strong>${tb} TB</strong></td></tr>`;
+                    } else if (ltoGen) {
+                        // 如果没有原生容量，但知道LTO代数，显示建议容量
+                        const capacityMap = {9: '18TB', 8: '12TB', 7: '6TB', 6: '2.5TB', 5: '1.5TB'};
+                        if (capacityMap[ltoGen]) {
+                            html += `<tr><th>容量:</th><td><strong>${capacityMap[ltoGen]}</strong> (建议)</td></tr>`;
+                        }
+                    } else if (device.is_ibm_lto && device.lto_generation) {
+                        // 如果有LTO信息但没有原生容量，显示建议容量
+                        const capacityMap = {9: '18TB', 8: '12TB', 7: '6TB', 6: '2.5TB', 5: '1.5TB'};
+                        if (capacityMap[device.lto_generation]) {
+                            html += `<tr><th>容量:</th><td><strong>${capacityMap[device.lto_generation]}</strong> (建议)</td></tr>`;
+                        }
+                    }
+                    
+                    if (device.is_ibm_lto && device.lto_generation) {
+                        html += `<tr><th>设备类型:</th><td><span class="badge bg-info">IBM LTO-${device.lto_generation}</span></td></tr>`;
+                    } else if (device.model && device.model.includes('ULT3580')) {
+                        html += `<tr><th>设备信息:</th><td><span class="badge bg-warning">IBM磁带设备（待识别代数）</span></td></tr>`;
                     }
                     
                     if (device.path) html += `<tr><th>设备路径:</th><td><code class="bg-dark text-light px-2 py-1 rounded" style="font-size: 0.875em;">${device.path}</code></td></tr>`;
@@ -1154,21 +1180,75 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // 从扫描结果填充表单的辅助函数
     function fillFormFromScan(device, tapeLabel) {
-        // 如果有LTO信息，自动选择类型和容量
-        if (device && device.is_ibm_lto && device.lto_generation) {
-            const ltoGen = device.lto_generation;
-            const tapeTypeValue = `LTO-${ltoGen}`;
-            const tapeTypeSelect = document.getElementById('tapeType');
-            if (tapeTypeSelect) {
-                tapeTypeSelect.value = tapeTypeValue;
+        // 尝试从设备信息中提取LTO类型和容量
+        if (device) {
+            let ltoGen = null;
+            
+            // 方法1：如果设备有明确的LTO信息
+            if (device.is_ibm_lto && device.lto_generation) {
+                ltoGen = device.lto_generation;
+            }
+            // 方法2：从model中提取LTO信息
+            else if (device.model) {
+                const modelUpper = device.model.toUpperCase();
+                // 尝试提取LTO代数
+                const ltoMatch = modelUpper.match(/LTO[-_]?(\d+)|HH(\d+)|ULTRIUM[-_]?HH(\d+)/);
+                if (ltoMatch) {
+                    ltoGen = parseInt(ltoMatch[1] || ltoMatch[2] || ltoMatch[3]);
+                }
             }
             
-            // 根据LTO代数设置容量
-            const capacityMap = {9: '18TB', 8: '12TB', 7: '6TB', 6: '2.5TB', 5: '1.5TB'};
-            if (capacityMap[ltoGen]) {
+            // 如果找到了LTO代数，填充类型和容量
+            if (ltoGen && ltoGen >= 5 && ltoGen <= 9) {
+                const tapeTypeValue = `LTO-${ltoGen}`;
+                const tapeTypeSelect = document.getElementById('tapeType');
+                if (tapeTypeSelect) {
+                    tapeTypeSelect.value = tapeTypeValue;
+                }
+                
+                // 根据LTO代数设置容量
+                const capacityMap = {9: '18TB', 8: '12TB', 7: '6TB', 6: '2.5TB', 5: '1.5TB'};
+                if (capacityMap[ltoGen]) {
+                    const tapeCapacitySelect = document.getElementById('tapeCapacity');
+                    if (tapeCapacitySelect) {
+                        tapeCapacitySelect.value = capacityMap[ltoGen];
+                    }
+                }
+            }
+            // 如果设备有原生容量信息，也尝试填充
+            else if (device.native_capacity) {
+                // 将字节转换为TB
+                const capacityTB = Math.round((device.native_capacity / (1024 ** 4)) * 10) / 10;
                 const tapeCapacitySelect = document.getElementById('tapeCapacity');
-                if (tapeCapacitySelect) {
-                    tapeCapacitySelect.value = capacityMap[ltoGen];
+                if (tapeCapacitySelect && capacityTB > 0) {
+                    // 尝试匹配最接近的容量选项
+                    const capacityOptions = ['1.5TB', '2.5TB', '6TB', '12TB', '18TB'];
+                    let closestOption = capacityOptions[0];
+                    let minDiff = Math.abs(capacityTB - parseFloat(closestOption.replace('TB', '')));
+                    for (const option of capacityOptions) {
+                        const optionValue = parseFloat(option.replace('TB', ''));
+                        const diff = Math.abs(capacityTB - optionValue);
+                        if (diff < minDiff) {
+                            minDiff = diff;
+                            closestOption = option;
+                        }
+                    }
+                    tapeCapacitySelect.value = closestOption;
+                    
+                    // 如果找到了匹配的容量，尝试推断LTO代数
+                    if (closestOption === '18TB') ltoGen = 9;
+                    else if (closestOption === '12TB') ltoGen = 8;
+                    else if (closestOption === '6TB') ltoGen = 7;
+                    else if (closestOption === '2.5TB') ltoGen = 6;
+                    else if (closestOption === '1.5TB') ltoGen = 5;
+                    
+                    if (ltoGen) {
+                        const tapeTypeValue = `LTO-${ltoGen}`;
+                        const tapeTypeSelect = document.getElementById('tapeType');
+                        if (tapeTypeSelect) {
+                            tapeTypeSelect.value = tapeTypeValue;
+                        }
+                    }
                 }
             }
         }
@@ -1201,6 +1281,47 @@ document.addEventListener('DOMContentLoaded', function() {
     const confirmAddTapeBtn = document.getElementById('confirmAddTapeBtn');
     if (confirmAddTapeBtn) {
         confirmAddTapeBtn.addEventListener('click', async function() {
+            // 检查磁带是否已格式化
+            try {
+                const formatCheckResp = await fetch('/api/tape/operations/check-format');
+                const formatCheckData = await formatCheckResp.json();
+                
+                // 只有明确知道未格式化时才提示格式化
+                // formatted === false 表示未格式化
+                // formatted === true 表示已格式化，不提示
+                // formatted === null/undefined 表示无法确定，不提示（安全起见）
+                if (formatCheckData && formatCheckData.success && formatCheckData.formatted === false) {
+                    // 磁带明确未格式化，弹窗提示
+                    const shouldFormat = confirm('磁带未格式化，是否现在格式化？\n\n格式化完成后将发送钉钉通知。');
+                    if (shouldFormat) {
+                        // 执行格式化
+                        const formatResp = await fetch('/api/tape/operations/format', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({force: false})
+                        });
+                        const formatResult = await formatResp.json();
+                        
+                        if (formatResult.success) {
+                            alert('磁带格式化成功！已发送钉钉通知。');
+                        } else {
+                            alert(`格式化失败: ${formatResult.message || '未知错误'}`);
+                            return; // 格式化失败，不继续创建
+                        }
+                    } else {
+                        // 用户选择不格式化，继续创建（但会返回needs_format提示）
+                    }
+                } else if (formatCheckData && formatCheckData.formatted === true) {
+                    // 磁带已格式化，不提示
+                    console.log('磁带已格式化，无需格式化');
+                } else if (formatCheckData && formatCheckData.formatted === null) {
+                    // 无法确定格式化状态，不提示（安全起见）
+                    console.warn('无法确定磁带格式化状态，跳过格式化检查:', formatCheckData.message);
+                }
+            } catch (formatError) {
+                console.warn('检查磁带格式化状态失败:', formatError);
+                // 检查失败不影响创建流程，继续
+            }
             const btn = this;
             const originalHtml = btn.innerHTML;
             btn.disabled = true;
@@ -1378,7 +1499,12 @@ document.addEventListener('DOMContentLoaded', function() {
                     const result = await response.json();
                     
                     if (result.success) {
-                        alert('✅ ' + result.message);
+                        // 检查是否需要格式化
+                        if (result.needs_format) {
+                            alert(`✅ 磁带创建成功！\n\n${result.format_message || '磁带未格式化，请先格式化磁带。'}`);
+                        } else {
+                            alert('✅ ' + result.message);
+                        }
                         // 关闭模态框
                         const modalInstance = bootstrap.Modal.getInstance(modal);
                         modalInstance.hide();

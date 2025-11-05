@@ -10,6 +10,7 @@ import asyncio
 import logging
 from typing import Optional, Dict, Any
 from datetime import datetime
+from utils.datetime_utils import now, format_datetime
 from pathlib import Path
 import aiohttp
 
@@ -171,7 +172,7 @@ class DingTalkNotifier:
 
 **备份名称**: {backup_name}
 **状态**: 成功完成
-**完成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**完成时间**: {format_datetime(now())}
 
 """
             if details:
@@ -186,7 +187,7 @@ class DingTalkNotifier:
 
 **备份名称**: {backup_name}
 **状态**: 执行失败
-**失败时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**失败时间**: {format_datetime(now())}
 
 """
             if details:
@@ -198,7 +199,7 @@ class DingTalkNotifier:
 
 **备份名称**: {backup_name}
 **状态**: 正在执行
-**开始时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**开始时间**: {format_datetime(now())}
 
 """
 
@@ -221,7 +222,7 @@ class DingTalkNotifier:
 
 **恢复名称**: {recovery_name}
 **状态**: 成功完成
-**完成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**完成时间**: {format_datetime(now())}
 
 """
             if details:
@@ -235,7 +236,7 @@ class DingTalkNotifier:
 
 **恢复名称**: {recovery_name}
 **状态**: 执行失败
-**失败时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**失败时间**: {format_datetime(now())}
 
 """
             if details:
@@ -263,7 +264,7 @@ class DingTalkNotifier:
 
 **磁带ID**: {tape_id}
 **操作**: 需要更换磁带
-**时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**时间**: {format_datetime(now())}
 
 请及时更换磁带以继续备份任务。
 
@@ -275,7 +276,7 @@ class DingTalkNotifier:
 
 **磁带ID**: {tape_id}
 **状态**: 数据保留期已满
-**时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**时间**: {format_datetime(now())}
 
 磁带将被自动擦除并重新投入使用。
 
@@ -287,7 +288,7 @@ class DingTalkNotifier:
 
 **磁带ID**: {tape_id}
 **状态**: 操作异常
-**时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**时间**: {format_datetime(now())}
 
 """
             if details:
@@ -306,9 +307,39 @@ class DingTalkNotifier:
 
 {content}
 
-**时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**时间**: {format_datetime(now())}
 """
         await self.send_message(self.default_phone, title, formatted_content)
+
+    async def send_tape_format_notification(self, tape_id: str, status: str):
+        """发送磁带格式化通知"""
+        try:
+            if status == "success":
+                title = "✅ 磁带格式化完成"
+                content = f"""## 磁带格式化完成通知
+
+**磁带ID**: {tape_id}
+**状态**: 格式化成功
+**完成时间**: {format_datetime(now())}
+
+磁带已成功格式化，可以正常使用。
+"""
+            elif status == "failed":
+                title = "❌ 磁带格式化失败"
+                content = f"""## 磁带格式化失败通知
+
+**磁带ID**: {tape_id}
+**状态**: 格式化失败
+**失败时间**: {format_datetime(now())}
+
+请检查设备状态和磁带是否正确加载。
+"""
+            else:
+                return
+            
+            await self.send_message(self.default_phone, title, content)
+        except Exception as e:
+            logger.error(f"发送磁带格式化通知失败: {str(e)}")
 
     async def send_capacity_warning(self, used_percent: float, details: Optional[Dict] = None):
         """发送容量预警通知"""
@@ -321,7 +352,7 @@ class DingTalkNotifier:
         content = f"""## 存储容量预警
 
 **当前使用率**: {used_percent:.1f}%
-**时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**时间**: {format_datetime(now())}
 
 """
         if details:

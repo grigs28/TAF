@@ -23,6 +23,7 @@ Enterprise Tape Backup System
 - openGauss数据库
 - SCSI磁带驱动器
 - 7-Zip SDK
+- IBM Tape Diagnostic Tool (ITDT) - 可选，用于磁带操作（推荐）
 
 ## 快速开始
 
@@ -171,6 +172,49 @@ DB_MAX_OVERFLOW=20
 - `TAPE_DRIVE_LETTER`: 磁带驱动器盘符（Windows）
 - `DEFAULT_BLOCK_SIZE`: 默认块大小（256KB）
 - `MAX_VOLUME_SIZE`: 最大卷大小（300GB）
+- `TAPE_INTERFACE_TYPE`: 磁带操作接口类型（"itdt" 或 "scsi"），默认使用ITDT
+- `ITDT_PATH`: ITDT可执行文件路径（Windows: `c:\itdt\itdt.exe`，Linux: `/usr/local/itdt/itdt`）
+
+### ITDT配置
+
+系统支持使用IBM Tape Diagnostic Tool (ITDT)进行磁带操作，这是推荐的方式，提供更稳定和标准的磁带操作。
+
+#### ITDT安装
+
+**Windows:**
+1. 下载ITDT安装包
+2. 安装到 `c:\itdt\` 目录
+3. 确保 `itdt.exe` 可执行
+
+**Linux:**
+1. 下载ITDT安装包
+2. 安装到 `/usr/local/itdt/` 目录（或自定义路径）
+3. 确保 `itdt` 可执行
+
+#### ITDT配置
+
+在 `.env` 文件中配置ITDT路径：
+
+```ini
+# 使用ITDT接口（推荐）
+TAPE_INTERFACE_TYPE=itdt
+ITDT_PATH=c:\itdt\itdt.exe  # Windows路径
+# ITDT_PATH=/usr/local/itdt/itdt  # Linux路径
+ITDT_LOG_LEVEL=Information  # Errors|Warnings|Information|Debug
+ITDT_LOG_PATH=output  # 日志路径
+ITDT_RESULT_PATH=output  # 结果文件路径
+```
+
+#### 接口选择
+
+系统支持两种磁带操作接口：
+
+1. **ITDT接口**（推荐）- 使用IBM官方ITDT工具，提供更稳定和标准的操作
+2. **SCSI接口** - 直接使用SCSI命令，提供更底层控制
+
+在 `.env` 文件中设置 `TAPE_INTERFACE_TYPE` 来选择接口类型。
+
+详细说明请参考：[ITDT集成方案](docs/ITDT集成方案.md)
 
 ### 压缩配置
 
@@ -261,8 +305,16 @@ pytest --cov=.
 
 ## 版本历史
 
+- v0.1.0 - ITDT集成版本
+  - 集成IBM Tape Diagnostic Tool (ITDT)支持
+  - 支持ITDT和SCSI接口切换
+  - 更稳定和标准的磁带操作
+  - 详细的ITDT集成方案文档
+
 - v0.0.1 - 初始版本
   - 基础备份恢复功能
   - Web管理界面
   - 钉钉通知集成
   - 跨平台支持
+
+完整版本历史请参考 [CHANGELOG.md](CHANGELOG.md)

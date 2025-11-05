@@ -6,13 +6,11 @@ Tape Drive Module
 """
 
 from .tape_manager import TapeManager
-from .scsi_interface import SCSIInterface
 from .tape_cartridge import TapeCartridge, TapeStatus
 from .tape_operations import TapeOperations
 
 __all__ = [
     'TapeManager',
-    'SCSIInterface',
     'TapeCartridge',
     'TapeStatus',
     'TapeOperations'

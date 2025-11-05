@@ -74,6 +74,12 @@ async def load_tape(request: Request, tape_id: str):
         duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
         error_msg = f"加载磁带失败: {str(e)}"
         logger.error(error_msg, exc_info=True)
+        
+        # 记录详细的错误信息
+        error_detail = f"{type(e).__name__}: {str(e)}"
+        logger.error(f"错误详情: {error_detail}")
+        logger.error(f"异常堆栈:\n{traceback.format_exc()}")
+        
         await log_operation(
             operation_type=OperationType.TAPE_LOAD,
             resource_type="tape",
@@ -82,7 +88,7 @@ async def load_tape(request: Request, tape_id: str):
             operation_description=f"加载磁带 {tape_id}",
             category="tape",
             success=False,
-            error_message=str(e),
+            error_message=error_detail,
             ip_address=ip_address,
             request_method=request_method,
             request_url=request_url,
@@ -98,7 +104,8 @@ async def load_tape(request: Request, tape_id: str):
             stack_trace=traceback.format_exc(),
             duration_ms=duration_ms
         )
-        raise HTTPException(status_code=500, detail=str(e))
+        # 返回更详细的错误信息
+        raise HTTPException(status_code=500, detail=f"加载磁带失败: {error_detail}")
 
 
 @router.post("/unload")
@@ -264,21 +271,31 @@ async def erase_tape(request: Request, tape_id: str):
 
 @router.get("/check-format")
 async def check_tape_format(request: Request):
-    """检查磁带是否已格式化"""
+    """检查磁带是否已格式化
+    
+    判断逻辑：
+    - 能成功读取到标签 -> 已格式化
+    - 无法读取标签（标签文件不存在或读取失败）-> 未格式化
+    - 系统错误或设备错误 -> 返回错误，不返回格式化状态
+    """
     try:
         system = request.app.state.system
         if not system:
             return {
                 "success": False,
-                "formatted": False,
+                "formatted": None,  # 无法确定
                 "message": "系统未初始化"
             }
         
-        # 检查是否有磁带设备
-        if not system.tape_manager.scsi_interface.tape_devices or len(system.tape_manager.scsi_interface.tape_devices) == 0:
+        # 检查是否有磁带设备（ITDT 扫描）
+        try:
+            devices = await system.tape_manager.itdt_interface.scan_devices()
+        except Exception:
+            devices = []
+        if not devices:
             return {
                 "success": False,
-                "formatted": False,
+                "formatted": None,  # 无法确定
                 "message": "未检测到磁带设备"
             }
         
@@ -286,18 +303,39 @@ async def check_tape_format(request: Request):
         try:
             metadata = await system.tape_manager.tape_operations._read_tape_label()
             
-            return {
-                "success": True,
-                "formatted": metadata is not None,
-                "metadata": metadata if metadata else None
-            }
-        except Exception as e:
-            # 读取失败通常意味着未格式化或磁带为空
-            logger.debug(f"读取磁带标签失败（可能未格式化）: {str(e)}")
+            # 能读取到标签，说明已格式化
+            if metadata and metadata.get('tape_id'):
+                return {
+                    "success": True,
+                    "formatted": True,
+                    "metadata": metadata,
+                    "message": f"磁带已格式化，标签: {metadata.get('tape_id')}"
+                }
+            else:
+                # 读取成功但标签为空，说明未格式化
+                return {
+                    "success": True,
+                    "formatted": False,
+                    "metadata": None,
+                    "message": "磁带未格式化"
+                }
+        except FileNotFoundError:
+            # 标签文件不存在，说明未格式化
+            logger.debug("磁带标签文件不存在，说明未格式化")
             return {
                 "success": True,
                 "formatted": False,
-                "metadata": None
+                "metadata": None,
+                "message": "磁带未格式化（标签文件不存在）"
+            }
+        except Exception as e:
+            # 读取失败，可能是未格式化或其他错误
+            # 为了安全，我们返回不确定状态，而不是假设未格式化
+            logger.warning(f"读取磁带标签失败，无法确定格式化状态: {str(e)}")
+            return {
+                "success": False,
+                "formatted": None,  # 无法确定
+                "message": f"无法确定磁带格式化状态: {str(e)}"
             }
     
     except Exception as e:
@@ -305,7 +343,7 @@ async def check_tape_format(request: Request):
         logger.error(f"检查磁带格式异常: {str(e)}")
         return {
             "success": False,
-            "formatted": False,
+            "formatted": None,  # 无法确定
             "message": str(e)
         }
 
@@ -367,37 +405,74 @@ async def format_tape(request: Request, format_request: FormatRequest = FormatRe
         # 先读取现有标签（如果有），格式化后重新写入以保持标签不变
         existing_label = None
         
-        # 检查是否已格式化
+        # 检查是否已格式化（能读到标签的不要格式化）
         try:
             existing_label = await system.tape_manager.tape_operations._read_tape_label()
-            if existing_label and not format_request.force:
-                # 已格式化且不强制，拒绝
-                await log_operation(
-                    operation_type=OperationType.TAPE_FORMAT,
-                    resource_type="tape",
-                    resource_id=existing_label.get('tape_id'),
-                    operation_name="格式化磁带",
-                    operation_description=f"格式化磁带 {existing_label.get('tape_id')}",
-                    category="tape",
-                    success=False,
-                    error_message="磁带已格式化，如需强制格式化请使用force=true参数",
-                    ip_address=ip_address,
-                    request_method=request_method,
-                    request_url=request_url,
-                    duration_ms=int((datetime.now() - start_time).total_seconds() * 1000)
-                )
-                return {
-                    "success": False,
-                    "message": "磁带已格式化，如需强制格式化请使用force=true参数"
-                }
+            if existing_label and existing_label.get('tape_id'):
+                # 能成功读取到标签，说明已格式化，拒绝格式化（除非强制）
+                if not format_request.force:
+                    tape_id = existing_label.get('tape_id')
+                    await log_operation(
+                        operation_type=OperationType.TAPE_FORMAT,
+                        resource_type="tape",
+                        resource_id=tape_id,
+                        operation_name="格式化磁带",
+                        operation_description=f"格式化磁带 {tape_id}",
+                        category="tape",
+                        success=False,
+                        error_message=f"磁带已格式化（标签: {tape_id}），如需强制格式化请使用force=true参数",
+                        ip_address=ip_address,
+                        request_method=request_method,
+                        request_url=request_url,
+                        duration_ms=int((datetime.now() - start_time).total_seconds() * 1000)
+                    )
+                    return {
+                        "success": False,
+                        "message": f"磁带已格式化（标签: {tape_id}），如需强制格式化请使用force=true参数"
+                    }
+                else:
+                    logger.info(f"强制格式化已格式化的磁带（标签: {existing_label.get('tape_id')}）")
+        except FileNotFoundError:
+            # 标签文件不存在，说明未格式化，可以格式化
+            logger.debug("磁带标签文件不存在，可以格式化")
+            existing_label = None
         except Exception as e:
-            logger.debug(f"读取磁带标签失败（继续格式化）: {str(e)}")
+            # 读取失败，无法确定是否格式化，为了安全拒绝格式化
+            logger.warning(f"读取磁带标签失败，无法确定格式化状态，拒绝格式化: {str(e)}")
+            await log_operation(
+                operation_type=OperationType.TAPE_FORMAT,
+                resource_type="tape",
+                operation_name="格式化磁带",
+                operation_description="格式化磁带",
+                category="tape",
+                success=False,
+                error_message=f"无法确定磁带格式化状态，拒绝格式化: {str(e)}",
+                ip_address=ip_address,
+                request_method=request_method,
+                request_url=request_url,
+                duration_ms=int((datetime.now() - start_time).total_seconds() * 1000)
+            )
+            return {
+                "success": False,
+                "message": f"无法确定磁带格式化状态，拒绝格式化。如需强制格式化请使用force=true参数"
+            }
         
-        # 使用SCSI接口格式化
-        success = await system.tape_manager.scsi_interface.format_tape(format_type=0)
+        # 使用 ITDT 执行擦除代替格式化（长擦除）
+        try:
+            success = await system.tape_manager.itdt_interface.erase(None, short=False)
+        except Exception as _e:
+            success = False
         duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
         
         if success:
+            # 格式化成功，发送钉钉通知
+            try:
+                await system.dingtalk_notifier.send_tape_format_notification(
+                    tape_id=existing_label.get('tape_id') if existing_label else '未知磁带',
+                    status="success"
+                )
+            except Exception as notify_error:
+                logger.warning(f"发送格式化钉钉通知失败: {str(notify_error)}")
             # 如果格式化前有标签，重新写入以保持标签不变
             if existing_label:
                 try:
@@ -529,8 +604,8 @@ async def rewind_tape(request: Request, tape_id: str = None):
         if not system:
             raise HTTPException(status_code=500, detail="系统未初始化")
 
-        # 使用SCSI接口倒带
-        success = await system.tape_manager.scsi_interface.rewind_tape()
+        # 使用 ITDT 倒带
+        success = await system.tape_manager.tape_operations._rewind()
         if success:
             return {"success": True, "message": "磁带倒带成功"}
         else:
@@ -549,12 +624,8 @@ async def space_tape_blocks(request: Request, blocks: int = 1, direction: str = 
         if not system:
             raise HTTPException(status_code=500, detail="系统未初始化")
 
-        # 使用SCSI接口定位
-        success = await system.tape_manager.scsi_interface.space_blocks(blocks=blocks, direction=direction)
-        if success:
-            return {"success": True, "message": f"磁带定位成功：{blocks} 块 (方向: {direction})"}
-        else:
-            raise HTTPException(status_code=500, detail="磁带定位失败")
+        # ITDT 尚未实现通用按块定位，返回不支持
+        raise HTTPException(status_code=501, detail="磁带按块定位暂不支持（ITDT）")
 
     except Exception as e:
         logger.error(f"磁带定位失败: {str(e)}")

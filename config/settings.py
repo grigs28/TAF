@@ -76,6 +76,13 @@ class Settings(BaseSettings):
     TAPE_DRIVE_LETTER: str = "o"  # Windows盘符
     DEFAULT_BLOCK_SIZE: int = 262144  # 256KB
     MAX_VOLUME_SIZE: int = 322122547200  # 300GB
+    # ITDT 接口配置
+    TAPE_INTERFACE_TYPE: str = "itdt"  # 仅使用 ITDT
+    ITDT_PATH: str = "c\\itdt\\itdt.exe" if os.name == "nt" else "/usr/local/itdt/itdt"
+    ITDT_LOG_LEVEL: str = "Information"  # Errors|Warnings|Information|Debug
+    ITDT_LOG_PATH: str = "output"
+    ITDT_RESULT_PATH: str = "output"
+    ITDT_DEVICE_PATH: str | None = None
 
     # 压缩配置
     COMPRESSION_LEVEL: int = 9

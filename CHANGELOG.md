@@ -1,4 +1,71 @@
 # 更新日志
+## [0.1.0] - 2025-11-04
+
+### 新增
+
+#### ITDT集成支持
+- ✅ 集成IBM Tape Diagnostic Tool (ITDT)支持
+  - 创建ITDT接口类 (`tape/itdt_interface.py`)
+  - 支持ITDT命令行模式操作
+  - 实现所有核心磁带操作（加载、卸载、倒带、擦除、格式化等）
+  - 支持设备扫描和状态查询
+  - 支持诊断测试功能
+
+#### 磁带操作接口切换
+- ✅ 支持ITDT和SCSI接口切换
+  - 添加配置项 `TAPE_INTERFACE_TYPE` 选择接口类型
+  - 修改 `TapeOperations` 类支持多接口切换
+  - 保持API接口不变，后端可切换实现
+  - ITDT接口作为推荐方式（更稳定、更标准）
+
+#### ITDT配置支持
+- ✅ 添加ITDT相关配置项
+  - `TAPE_INTERFACE_TYPE`: 接口类型选择（"itdt" 或 "scsi"）
+  - `ITDT_PATH`: ITDT可执行文件路径
+  - `ITDT_LOG_LEVEL`: 日志级别（Errors|Warnings|Information|Debug）
+  - `ITDT_LOG_PATH`: 日志文件路径
+  - `ITDT_RESULT_PATH`: 结果文件路径
+
+#### 文档更新
+- ✅ 创建ITDT集成方案文档 (`docs/ITDT集成方案.md`)
+  - 详细的ITDT命令分析
+  - 架构设计方案
+  - 实现步骤和时间表
+  - 风险评估和缓解措施
+- ✅ 更新README.md
+  - 添加ITDT安装和配置说明
+  - 添加接口选择说明
+  - 更新版本历史
+
+### 改进
+
+#### 磁带操作稳定性
+- ✅ ITDT接口提供更稳定的磁带操作
+  - 使用IBM官方工具，兼容性更好
+  - 标准化命令接口，错误处理更完善
+  - 支持更多诊断和测试功能
+
+#### 系统可扩展性
+- ✅ 接口抽象设计，便于未来扩展
+  - 统一的接口抽象
+  - 支持多接口并存
+  - 便于添加新的磁带操作接口
+
+### 技术细节
+
+#### ITDT支持的操作
+- 基本操作：load, unload, rewind, erase, format
+- 读写操作：write, read, weof (write filemark)
+- 定位操作：fsf, fsr, bsf, bsr (forward/backward space)
+- 状态查询：tur, qrypos, devinfo, logsense
+- 设备扫描：scan, qrypath
+- 诊断测试：standardtest, systemtest, rwtest
+
+#### 兼容性
+- 支持Windows和Linux平台
+- 保持与现有SCSI接口的兼容性
+- API接口保持不变，切换透明
+
 ## [0.0.14] - 2025-11-04
 
 ### 修复

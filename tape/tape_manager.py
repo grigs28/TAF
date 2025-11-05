@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from config.settings import get_settings
-from tape.scsi_interface import SCSIInterface
+from tape.itdt_interface import ITDTInterface
 from tape.tape_cartridge import TapeCartridge, TapeStatus
 from tape.tape_operations import TapeOperations
 
@@ -26,7 +26,7 @@ class TapeManager:
 
     def __init__(self):
         self.settings = get_settings()
-        self.scsi_interface = SCSIInterface()
+        self.itdt_interface = ITDTInterface()
         self.tape_operations = TapeOperations()
         self.tape_cartridges: Dict[str, TapeCartridge] = {}
         self.current_tape: Optional[TapeCartridge] = None
@@ -36,12 +36,12 @@ class TapeManager:
     async def initialize(self):
         """初始化磁带管理器"""
         try:
-            # 初始化SCSI接口
-            await self.scsi_interface.initialize()
-            logger.info("SCSI接口初始化完成")
+            # 初始化 ITDT 接口
+            await self.itdt_interface.initialize()
+            logger.info("ITDT 接口初始化完成")
 
-            # 初始化磁带操作
-            await self.tape_operations.initialize(self.scsi_interface)
+            # 初始化磁带操作（基于 ITDT）
+            await self.tape_operations.initialize()
             logger.info("磁带操作模块初始化完成")
 
             # 检测磁带设备
@@ -64,11 +64,11 @@ class TapeManager:
     async def _detect_tape_devices(self):
         """检测磁带设备"""
         try:
-            devices = await self.scsi_interface.scan_tape_devices()
+            devices = await self.itdt_interface.scan_devices()
             logger.info(f"检测到 {len(devices)} 个磁带设备")
 
             for device in devices:
-                logger.info(f"磁带设备: {device['path']} - {device['vendor']} {device['model']}")
+                logger.info(f"磁带设备: {device.get('path', 'unknown')}")
 
         except Exception as e:
             logger.error(f"检测磁带设备失败: {str(e)}")
@@ -92,24 +92,34 @@ class TapeManager:
                 try:
                     rows = await conn.fetch(
                         """
-                        SELECT tape_id, label, status, created_date, expiry_date,
-                               capacity_bytes, used_bytes, serial_number, location
+                        SELECT tape_id, label, status, first_use_date, manufactured_date, expiry_date,
+                               capacity_bytes, used_bytes, serial_number, location,
+                               media_type, generation, manufacturer, purchase_date, created_at
                         FROM tape_cartridges
-                        ORDER BY created_date DESC
+                        ORDER BY COALESCE(first_use_date, manufactured_date, created_at) DESC
                         """
                     )
                     
                     for row in rows:
+                        # 使用first_use_date、manufactured_date或created_at作为created_date（dataclass需要）
+                        created_date = (row.get('first_use_date') or 
+                                       row.get('manufactured_date') or 
+                                       row.get('created_at') or 
+                                       None)
+                        
                         tape = TapeCartridge(
                             tape_id=row['tape_id'],
                             label=row['label'],
                             status=TapeStatus(row['status']) if row['status'] else TapeStatus.AVAILABLE,
-                            created_date=row['created_date'],
-                            expiry_date=row['expiry_date'],
+                            created_date=created_date,
+                            expiry_date=row.get('expiry_date'),
                             capacity_bytes=row['capacity_bytes'] or 0,
                             used_bytes=row['used_bytes'] or 0,
-                            serial_number=row['serial_number'] or '',
-                            location=row['location'] or ''
+                            serial_number=row.get('serial_number') or '',
+                            location=row.get('location') or '',
+                            media_type=row.get('media_type') or 'LTO',
+                            generation=row.get('generation') or 8,
+                            manufacturer=row.get('manufacturer') or ''
                         )
                         self.tape_cartridges[tape.tape_id] = tape
                     
@@ -153,6 +163,66 @@ class TapeManager:
                 for tape in sample_tapes:
                     self.tape_cartridges[tape.tape_id] = tape
 
+    async def _get_tape_from_db(self, tape_id: str) -> Optional[TapeCartridge]:
+        """从数据库获取单个磁带信息"""
+        try:
+            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+            
+            if is_opengauss():
+                # 使用 openGauss 原生 SQL 查询
+                conn = await get_opengauss_connection()
+                try:
+                    # 使用 fetch 而不是 fetchrow（openGauss 使用 asyncpg）
+                    rows = await conn.fetch(
+                        """
+                        SELECT tape_id, label, status, first_use_date, manufactured_date, expiry_date,
+                               capacity_bytes, used_bytes, serial_number, location,
+                               media_type, generation, manufacturer, purchase_date, created_at
+                        FROM tape_cartridges
+                        WHERE tape_id = $1
+                        """,
+                        tape_id
+                    )
+                    
+                    if rows and len(rows) > 0:
+                        row = rows[0]
+                        # 使用first_use_date、manufactured_date或created_at作为created_date（dataclass需要）
+                        created_date = (row.get('first_use_date') or 
+                                         row.get('manufactured_date') or 
+                                         row.get('created_at') or 
+                                         None)
+                        
+                        tape = TapeCartridge(
+                            tape_id=row['tape_id'],
+                            label=row['label'],
+                            status=TapeStatus(row['status']) if row['status'] else TapeStatus.AVAILABLE,
+                            created_date=created_date,
+                            expiry_date=row.get('expiry_date'),
+                            capacity_bytes=row['capacity_bytes'] or 0,
+                            used_bytes=row['used_bytes'] or 0,
+                            serial_number=row.get('serial_number') or '',
+                            location=row.get('location') or '',
+                            media_type=row.get('media_type') or 'LTO',
+                            generation=row.get('generation') or 8,
+                            manufacturer=row.get('manufacturer') or ''
+                        )
+                        logger.info(f"从数据库成功获取磁带 {tape_id}")
+                        return tape
+                    else:
+                        logger.warning(f"数据库中未找到磁带 {tape_id}")
+                        return None
+                finally:
+                    await conn.close()
+            else:
+                # 非 openGauss 数据库，返回None
+                logger.warning("数据库不是 openGauss，无法从数据库获取磁带")
+                return None
+        except Exception as e:
+            logger.error(f"从数据库获取磁带 {tape_id} 失败: {str(e)}", exc_info=True)
+            import traceback
+            logger.error(f"异常堆栈:\n{traceback.format_exc()}")
+            return None
+
     async def get_available_tape(self) -> Optional[TapeCartridge]:
         """获取可用磁带"""
         try:
@@ -192,19 +262,49 @@ class TapeManager:
     async def load_tape(self, tape_id: str) -> bool:
         """加载磁带"""
         try:
+            logger.info(f"开始加载磁带: {tape_id}")
+            
+            # 如果磁带不在内存中，先从数据库加载
             if tape_id not in self.tape_cartridges:
-                logger.error(f"磁带 {tape_id} 不存在")
-                return False
+                logger.info(f"磁带 {tape_id} 不在内存中，尝试从数据库加载")
+                # 尝试从数据库加载该磁带
+                try:
+                    tape = await self._get_tape_from_db(tape_id)
+                    if tape:
+                        self.tape_cartridges[tape_id] = tape
+                        logger.info(f"从数据库成功加载磁带 {tape_id}")
+                    else:
+                        logger.error(f"磁带 {tape_id} 在数据库中不存在")
+                        return False
+                except Exception as db_error:
+                    logger.error(f"从数据库加载磁带 {tape_id} 时出错: {str(db_error)}", exc_info=True)
+                    import traceback
+                    logger.error(f"异常堆栈:\n{traceback.format_exc()}")
+                    return False
 
             tape = self.tape_cartridges[tape_id]
+            logger.info(f"找到磁带对象: {tape.tape_id}, 状态: {tape.status.value}")
 
             # 检查磁带状态
             if tape.is_expired:
                 logger.warning(f"磁带 {tape_id} 已过期，将进行擦除")
-                await self.erase_tape(tape_id)
+                try:
+                    await self.erase_tape(tape_id)
+                except Exception as erase_error:
+                    logger.error(f"擦除过期磁带 {tape_id} 失败: {str(erase_error)}", exc_info=True)
+                    return False
 
             # 加载磁带
-            success = await self.tape_operations.load_tape(tape)
+            logger.info(f"调用 tape_operations.load_tape 加载磁带: {tape_id}")
+            try:
+                success = await self.tape_operations.load_tape(tape)
+                logger.info(f"tape_operations.load_tape 返回: {success}")
+            except Exception as op_error:
+                logger.error(f"tape_operations.load_tape 抛出异常: {str(op_error)}", exc_info=True)
+                import traceback
+                logger.error(f"异常堆栈:\n{traceback.format_exc()}")
+                return False
+            
             if success:
                 self.current_tape = tape
                 tape.status = TapeStatus.IN_USE
@@ -213,17 +313,20 @@ class TapeManager:
                 # 更新数据库
                 try:
                     await self._update_tape_status_in_database(tape_id, 'IN_USE')
+                    logger.info(f"数据库状态更新成功: {tape_id}")
                 except Exception as db_error:
-                    logger.warning(f"更新数据库磁带状态失败: {db_error}")
+                    logger.warning(f"更新数据库磁带状态失败: {db_error}", exc_info=True)
                 
                 logger.info(f"磁带 {tape_id} 加载成功")
                 return True
             else:
-                logger.error(f"磁带 {tape_id} 加载失败")
+                logger.error(f"磁带 {tape_id} 加载失败（tape_operations.load_tape 返回 False）")
                 return False
 
         except Exception as e:
-            logger.error(f"加载磁带 {tape_id} 失败: {str(e)}")
+            logger.error(f"加载磁带 {tape_id} 失败: {str(e)}", exc_info=True)
+            import traceback
+            logger.error(f"异常堆栈:\n{traceback.format_exc()}")
             return False
 
     async def unload_tape(self) -> bool:
@@ -260,9 +363,17 @@ class TapeManager:
     async def erase_tape(self, tape_id: str) -> bool:
         """擦除磁带"""
         try:
+            # 如果磁带不在内存中，先从数据库加载
             if tape_id not in self.tape_cartridges:
-                logger.error(f"磁带 {tape_id} 不存在")
-                return False
+                logger.info(f"磁带 {tape_id} 不在内存中，尝试从数据库加载")
+                # 尝试从数据库加载该磁带
+                tape = await self._get_tape_from_db(tape_id)
+                if tape:
+                    self.tape_cartridges[tape_id] = tape
+                    logger.info(f"从数据库成功加载磁带 {tape_id}")
+                else:
+                    logger.error(f"磁带 {tape_id} 在数据库中不存在")
+                    return False
 
             tape = self.tape_cartridges[tape_id]
 
@@ -371,7 +482,7 @@ class TapeManager:
             return None
 
         try:
-            scsi_info = await self.scsi_interface.get_tape_info()
+            scsi_info = None
             tape_info = {
                 'tape_id': self.current_tape.tape_id,
                 'label': self.current_tape.label,
@@ -450,8 +561,12 @@ class TapeManager:
     async def health_check(self) -> bool:
         """健康检查"""
         try:
-            # 检查SCSI接口
-            if not await self.scsi_interface.health_check():
+            # 检查 ITDT 接口
+            try:
+                ok = await self.itdt_interface.test_unit_ready(None)
+                if not ok:
+                    return False
+            except Exception:
                 return False
 
             # 检查当前磁带状态
@@ -679,7 +794,7 @@ class TapeManager:
                 await self.unload_tape()
 
             # 关闭SCSI接口
-            await self.scsi_interface.close()
+            # 无需关闭 ITDT 接口
 
             logger.info("磁带管理器已关闭")
 

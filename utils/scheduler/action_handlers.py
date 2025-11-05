@@ -7,6 +7,7 @@ Task Action Handlers
 
 import logging
 from datetime import datetime, timezone
+from utils.datetime_utils import now, format_datetime
 from typing import Dict, Any, Optional
 
 from models.scheduled_task import ScheduledTask, TaskActionType
@@ -26,8 +27,14 @@ class ActionHandler:
     def __init__(self, system_instance):
         self.system_instance = system_instance
     
-    async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None) -> Dict[str, Any]:
-        """执行动作（子类实现）"""
+    async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None, manual_run: bool = False) -> Dict[str, Any]:
+        """执行动作（子类实现）
+        
+        参数:
+            config: 动作配置
+            scheduled_task: 计划任务对象（可选）
+            manual_run: 是否为手动运行（Web界面点击运行），默认为False
+        """
         raise NotImplementedError
 
 
@@ -35,37 +42,39 @@ class BackupActionHandler(ActionHandler):
     """备份动作处理器"""
     
     async def execute(self, config: Dict, backup_task_id: Optional[int] = None, 
-                     scheduled_task: Optional[ScheduledTask] = None) -> Dict[str, Any]:
+                     scheduled_task: Optional[ScheduledTask] = None, manual_run: bool = False) -> Dict[str, Any]:
         """执行备份动作
         
         参数:
             config: 动作配置
             backup_task_id: 备份任务模板ID（如果提供，从模板加载配置）
             scheduled_task: 计划任务对象（用于检查重复执行）
+            manual_run: 是否为手动运行（Web界面点击运行），默认为False
         """
         if not self.system_instance or not self.system_instance.backup_engine:
             raise ValueError("备份引擎未初始化")
         
         try:
             # 执行前判定：周期内是否已成功执行、是否正在执行、磁带标签是否当月
-            now = datetime.now(timezone.utc)
-            if scheduled_task:
+            current_time = now()
+            if scheduled_task and not manual_run:
                 # 1) 周期检查（按任务的 schedule_type 推断周期：日/周/月/年）
+                # 注意：手动运行时跳过周期检查
                 cycle_ok = True
                 last_success = scheduled_task.last_success_time
                 schedule_type = getattr(scheduled_task, 'schedule_type', None)
                 if last_success:
                     if schedule_type and getattr(schedule_type, 'value', '').lower() in ('daily', 'day'):
-                        cycle_ok = (last_success.date() != now.date())
+                        cycle_ok = (last_success.date() != current_time.date())
                     elif schedule_type and getattr(schedule_type, 'value', '').lower() in ('weekly', 'week'):
-                        cycle_ok = (last_success.isocalendar().week != now.isocalendar().week or last_success.year != now.year)
+                        cycle_ok = (last_success.isocalendar().week != current_time.isocalendar().week or last_success.year != current_time.year)
                     elif schedule_type and getattr(schedule_type, 'value', '').lower() in ('monthly', 'month'):
-                        cycle_ok = (last_success.year != now.year or last_success.month != now.month)
+                        cycle_ok = (last_success.year != current_time.year or last_success.month != current_time.month)
                     elif schedule_type and getattr(schedule_type, 'value', '').lower() in ('yearly', 'year'):
-                        cycle_ok = (last_success.year != now.year)
+                        cycle_ok = (last_success.year != current_time.year)
                     else:
                         # 未明确类型，默认按日
-                        cycle_ok = (last_success.date() != now.date())
+                        cycle_ok = (last_success.date() != current_time.date())
                 # 如果周期内已执行过，则跳过
                 if not cycle_ok:
                     logger.info("当前周期内已成功执行，跳过本次备份")
@@ -92,36 +101,40 @@ class BackupActionHandler(ActionHandler):
                     except Exception:
                         pass
                     return {"status": "skipped", "message": "当前周期已执行"}
+            elif manual_run:
+                logger.info("手动运行模式，跳过周期检查")
+            
+            # 2) 运行中检查（根据任务状态）- 手动运行和自动运行都检查
+            if scheduled_task and getattr(scheduled_task, 'status', None) and str(scheduled_task.status).upper().endswith('RUNNING'):
+                logger.info("任务仍在执行中，跳过本次备份")
+                try:
+                    await log_operation(
+                        operation_type=OperationType.SCHEDULER_RUN,
+                        resource_type="scheduler",
+                        resource_id=str(getattr(scheduled_task, 'id', '')),
+                        resource_name=getattr(scheduled_task, 'task_name', ''),
+                        operation_name="执行计划任务",
+                        operation_description="跳过：任务正在执行中",
+                        category="scheduler",
+                        success=True,
+                        result_message="跳过执行（任务正在执行中）"
+                    )
+                    await log_system(
+                        level=LogLevel.INFO,
+                        category=LogCategory.SCHEDULER,
+                        message="计划任务跳过：任务正在执行中",
+                        module="utils.scheduler.action_handlers",
+                        function="BackupActionHandler.execute",
+                        task_id=getattr(scheduled_task, 'id', None)
+                    )
+                except Exception:
+                    pass
+                return {"status": "skipped", "message": "任务正在执行中"}
 
-                # 2) 运行中检查（根据任务状态）
-                if getattr(scheduled_task, 'status', None) and str(scheduled_task.status).upper().endswith('RUNNING'):
-                    logger.info("任务仍在执行中，跳过本次备份")
-                    try:
-                        await log_operation(
-                            operation_type=OperationType.SCHEDULER_RUN,
-                            resource_type="scheduler",
-                            resource_id=str(getattr(scheduled_task, 'id', '')),
-                            resource_name=getattr(scheduled_task, 'task_name', ''),
-                            operation_name="执行计划任务",
-                            operation_description="跳过：任务正在执行中",
-                            category="scheduler",
-                            success=True,
-                            result_message="跳过执行（任务正在执行中）"
-                        )
-                        await log_system(
-                            level=LogLevel.INFO,
-                            category=LogCategory.SCHEDULER,
-                            message="计划任务跳过：任务正在执行中",
-                            module="utils.scheduler.action_handlers",
-                            function="BackupActionHandler.execute",
-                            task_id=getattr(scheduled_task, 'id', None)
-                        )
-                    except Exception:
-                        pass
-                    return {"status": "skipped", "message": "任务正在执行中"}
-
-                # 3) 磁带标签是否当月（从 LTFS 标签或磁带头读取）
-                # 仅当备份目标为磁带时要求当月
+            # 3) 磁带标签是否当月（从 LTFS 标签或磁带头读取）
+            # 仅当备份目标为磁带时要求当月
+            # 注意：手动运行和自动运行都检查磁带标签
+            if scheduled_task:
                 target_is_tape = False
                 try:
                     # 从 scheduled_task.action_config 读取备份目标
@@ -144,7 +157,7 @@ class BackupActionHandler(ActionHandler):
                                     except Exception:
                                         created_dt = None
                                 if created_dt:
-                                    if not (created_dt.year == now.year and created_dt.month == now.month):
+                                    if not (created_dt.year == current_time.year and created_dt.month == current_time.month):
                                         raise ValueError("当前磁带非当月，请更换磁带后重试")
                                 else:
                                     # 备用：从 tape_id 推断（如 TAPyymmddxxx）
@@ -153,7 +166,7 @@ class BackupActionHandler(ActionHandler):
                                         yy = int(tape_id[3:5])
                                         mm = int(tape_id[5:7])
                                         year = 2000 + yy
-                                        if not (year == now.year and mm == now.month):
+                                        if not (year == current_time.year and mm == current_time.month):
                                             raise ValueError("当前磁带标签非当月，请更换磁带后重试")
                             except ValueError as ve:
                                 # 记录并抛出以触发通知与日志
@@ -279,10 +292,10 @@ class BackupActionHandler(ActionHandler):
                     
                     if running_task:
                         # 检查任务是否在同一时间执行（同一天同一个调度任务）
-                        now = datetime.now()
+                        current_time_check = now()
                         if scheduled_task and scheduled_task.last_run_time:
                             last_run_date = scheduled_task.last_run_time.date()
-                            today = now.date()
+                            today = current_time_check.date()
                             
                             # 如果上次执行在今天，且任务还在运行，跳过本次执行
                             if last_run_date == today:
@@ -304,13 +317,13 @@ class BackupActionHandler(ActionHandler):
                                     started_at = running_task.get('started_at')
                                     if isinstance(started_at, str):
                                         started_at = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
-                                    running_duration = (now - started_at).total_seconds()
+                                    running_duration = (current_time_check - started_at).total_seconds()
                                     if running_duration > 86400:  # 超过24小时
                                         logger.warning(f"模板 {template_id} 的任务已运行超过24小时，继续执行新任务")
                             else:
                                 # SQLAlchemy 对象
                                 if hasattr(running_task, 'started_at') and running_task.started_at:
-                                    running_duration = (now - running_task.started_at).total_seconds()
+                                    running_duration = (current_time_check - running_task.started_at).total_seconds()
                                     if running_duration > 86400:  # 超过24小时
                                         logger.warning(
                                             f"警告：模板 {template_id} 的任务已运行超过24小时 "
@@ -327,7 +340,7 @@ class BackupActionHandler(ActionHandler):
                 retention_days = template_task.retention_days
                 description = template_task.description or ''
                 tape_device = template_task.tape_device
-                task_name = f"{template_task.task_name}-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                task_name = f"{template_task.task_name}-{format_datetime(now(), '%Y%m%d_%H%M%S')}"
             else:
                 # 从config获取参数（兼容旧逻辑）
                 source_paths = config.get('source_paths', [])
@@ -345,7 +358,7 @@ class BackupActionHandler(ActionHandler):
                 retention_days = config.get('retention_days', 180)
                 description = config.get('description', '')
                 tape_device = config.get('tape_device')
-                task_name = config.get('task_name', f"计划备份-{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+                task_name = config.get('task_name', f"计划备份-{format_datetime(now(), '%Y%m%d_%H%M%S')}")
 
             # 补齐缺省参数：从 system_instance 的策略/配置合并
             try:
@@ -408,7 +421,7 @@ class BackupActionHandler(ActionHandler):
                         'pending',
                         template_task.id if template_task else None,
                         'scheduled_task',
-                        datetime.now()
+                        now()
                     )
                     
                     # 创建一个简化的 BackupTask 对象用于后续使用
@@ -495,7 +508,10 @@ class BackupActionHandler(ActionHandler):
                 function="BackupActionHandler.execute",
                 details={"backup_task_id": getattr(backup_task, 'id', None), "task_name": task_name}
             )
-            success = await self.system_instance.backup_engine.execute_backup_task(backup_task)
+            # 执行备份任务（传入 scheduled_task 和 manual_run 以便进行执行前检查）
+            logger.info(f"调用备份引擎执行备份任务... (手动运行: {manual_run})")
+            success = await self.system_instance.backup_engine.execute_backup_task(backup_task, scheduled_task=scheduled_task, manual_run=manual_run)
+            logger.info(f"备份任务执行完成，结果: {'成功' if success else '失败'}")
             await log_system(
                 level=LogLevel.INFO if success else LogLevel.ERROR,
                 category=LogCategory.BACKUP,
@@ -555,7 +571,7 @@ class BackupActionHandler(ActionHandler):
 class RecoveryActionHandler(ActionHandler):
     """恢复动作处理器"""
     
-    async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None) -> Dict[str, Any]:
+    async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None, manual_run: bool = False) -> Dict[str, Any]:
         """执行恢复动作"""
         return {"status": "success", "message": "恢复任务已执行"}
 
@@ -563,7 +579,7 @@ class RecoveryActionHandler(ActionHandler):
 class CleanupActionHandler(ActionHandler):
     """清理动作处理器"""
     
-    async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None) -> Dict[str, Any]:
+    async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None, manual_run: bool = False) -> Dict[str, Any]:
         """执行清理动作"""
         return {"status": "success", "message": "清理任务已执行"}
 
@@ -571,7 +587,7 @@ class CleanupActionHandler(ActionHandler):
 class HealthCheckActionHandler(ActionHandler):
     """健康检查动作处理器"""
     
-    async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None) -> Dict[str, Any]:
+    async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None, manual_run: bool = False) -> Dict[str, Any]:
         """执行健康检查动作"""
         return {"status": "success", "message": "健康检查已完成"}
 
@@ -579,7 +595,7 @@ class HealthCheckActionHandler(ActionHandler):
 class RetentionCheckActionHandler(ActionHandler):
     """保留期检查动作处理器"""
     
-    async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None) -> Dict[str, Any]:
+    async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None, manual_run: bool = False) -> Dict[str, Any]:
         """执行保留期检查动作"""
         return {"status": "success", "message": "保留期检查已完成"}
 
@@ -587,7 +603,7 @@ class RetentionCheckActionHandler(ActionHandler):
 class CustomActionHandler(ActionHandler):
     """自定义动作处理器"""
     
-    async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None) -> Dict[str, Any]:
+    async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None, manual_run: bool = False) -> Dict[str, Any]:
         """执行自定义动作"""
         return {"status": "success", "message": "自定义任务已执行"}
 

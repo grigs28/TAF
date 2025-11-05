@@ -114,12 +114,16 @@
         </div>
     </div>
 
-    <!-- 筛选和搜索 -->
+    <!-- 筛选条件和运行中的任务 -->
     <div class="row mb-4">
-        <div class="col">
+        <div class="col-12">
             <div class="service-card">
                 <div class="card-body">
-                    <div class="row">
+                    <!-- 筛选条件 -->
+                    <h6 class="mb-3">
+                        <i class="bi bi-funnel me-2"></i>筛选条件
+                    </h6>
+                    <div class="row mb-4">
                         <div class="col-md-3">
                             <select class="form-select bg-dark text-light" id="statusFilter">
                                 <option value="">所有状态</option>
@@ -148,27 +152,26 @@
                             </button>
                         </div>
                     </div>
+
+                    <!-- 运行中的任务 -->
+                    <h6 class="mb-3">
+                        <i class="bi bi-hourglass-split me-2"></i>运行中的任务
+                    </h6>
+                    <div class="row" id="runningTasksList">
+                        <div class="col-12">
+                            <p class="text-muted">加载中...</p>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- 备份任务列表 -->
+    <!-- 所有任务列表 -->
     <div class="row">
         <div class="col-12">
             <div class="service-card">
                 <div class="card-body">
-                    <!-- 运行中的任务 -->
-                    <h6 class="mb-3">
-                        <i class="bi bi-hourglass-split me-2"></i>运行中的任务
-                    </h6>
-                    <div class="row mb-4" id="runningTasksList">
-                        <div class="col-12">
-                            <p class="text-muted">加载中...</p>
-                        </div>
-                    </div>
-
-                    <!-- 所有任务列表（包含未运行） -->
                     <h6 class="mb-3">
                         <i class="bi bi-list-ul me-2"></i>所有任务
                     </h6>
@@ -270,7 +273,11 @@ function formatStatus(status) {
     return `<span class="badge ${s.class}">${s.text}</span>`;
 }
 
-// 加载运行中的任务
+// 运行中任务的轮询间隔
+let runningTasksPollInterval = null;
+let runningTaskCards = new Map(); // 存储运行中任务卡片的DOM元素和任务ID映射
+
+// 加载运行中的任务（带实时验证和更新）
 async function loadRunningTasks() {
     try {
         const response = await fetch('/api/backup/tasks?status=running&limit=10');
@@ -279,23 +286,103 @@ async function loadRunningTasks() {
         const container = document.getElementById('runningTasksList');
         if (!container) return;
         
-        container.innerHTML = '';
+        // 获取当前显示的任务ID
+        const currentTaskIds = new Set();
         
-        if (tasks && tasks.length > 0) {
-            tasks.forEach(task => {
-                const sourcePaths = Array.isArray(task.source_paths) ? task.source_paths.join(', ') : (task.source_paths || 'N/A');
-                const progress = task.progress_percent || 0;
-                const startedTime = task.started_at ? formatDateTime(task.started_at) : '-';
-                const tapeInfo = task.tape_device || task.tape_id || '自动选择';
+        // 验证每个任务是否真的还在运行
+        const validTasks = [];
+        for (const task of (tasks || [])) {
+            try {
+                // 验证任务状态
+                const statusResponse = await fetch(`/api/backup/tasks/${task.task_id || task.id}/status`);
+                if (statusResponse.ok) {
+                    const status = await statusResponse.json();
+                    // 只显示真正运行中的任务
+                    if (status && status.status === 'running') {
+                        validTasks.push({
+                            ...task,
+                            status: status.status,
+                            progress_percent: status.progress_percent || task.progress_percent || 0,
+                            processed_files: status.processed_files || task.processed_files || 0,
+                            total_files: status.total_files || task.total_files || 0
+                        });
+                        currentTaskIds.add(task.task_id || task.id);
+                    }
+                }
+            } catch (statusError) {
+                console.warn(`验证任务 ${task.task_id || task.id} 状态失败:`, statusError);
+                // 如果无法验证，仍然显示（可能只是网络问题）
+                if (task.status === 'running') {
+                    validTasks.push(task);
+                    currentTaskIds.add(task.task_id || task.id);
+                }
+            }
+        }
+        
+        // 移除已不在运行中的任务卡片
+        const cardsToRemove = [];
+        runningTaskCards.forEach((cardElement, taskId) => {
+            if (!currentTaskIds.has(taskId)) {
+                cardsToRemove.push(cardElement);
+                runningTaskCards.delete(taskId);
+            }
+        });
+        cardsToRemove.forEach(card => card.remove());
+        
+        // 更新或添加任务卡片
+        validTasks.forEach(task => {
+            const taskId = task.task_id || task.id;
+            const sourcePaths = Array.isArray(task.source_paths) ? task.source_paths.join(', ') : (task.source_paths || 'N/A');
+            const progress = Math.max(0, Math.min(100, task.progress_percent || 0));
+            const startedTime = task.started_at ? formatDateTime(task.started_at) : '-';
+            const tapeInfo = task.tape_device || task.tape_id || '自动选择';
+            
+            // 检查是否已有该任务的卡片
+            let taskCard = runningTaskCards.get(taskId);
+            if (taskCard) {
+                // 更新现有卡片
+                const progressBar = taskCard.querySelector('.progress-bar');
+                // 更精确地选择百分比文本：找到包含进度条的mb-2容器，然后找到其中的百分比文本
+                const mb2Elements = taskCard.querySelectorAll('.mb-2');
+                let progressText = null;
+                for (const mb2 of mb2Elements) {
+                    if (mb2.querySelector('.progress-bar')) {
+                        progressText = mb2.querySelector('.d-flex.justify-content-between .text-muted:last-child');
+                        break;
+                    }
+                }
+                // 选择文件数文本：最后一个d-flex中的最后一个text-muted
+                const filesInfo = taskCard.querySelector('.d-flex.justify-content-between:last-of-type .text-muted:last-child');
                 
-                const taskCard = document.createElement('div');
+                if (progressBar) {
+                    progressBar.style.width = progress + '%';
+                    progressBar.setAttribute('aria-valuenow', progress);
+                }
+                if (progressText) {
+                    progressText.textContent = progress.toFixed(1) + '%';
+                }
+                if (filesInfo) {
+                    filesInfo.textContent = `${task.processed_files || 0}/${task.total_files || 0} 文件`;
+                }
+            } else {
+                // 创建新卡片
+                taskCard = document.createElement('div');
                 taskCard.className = 'col-md-6 col-lg-4 mb-3';
+                taskCard.setAttribute('data-task-id', taskId);
                 taskCard.innerHTML = `
                     <div class="service-card">
                         <div class="card-body">
                             <div class="d-flex justify-content-between align-items-start mb-2">
                                 <h6 class="card-title mb-0">${task.task_name || '未命名任务'}</h6>
-                                <span class="badge bg-primary">运行中</span>
+                                <div class="d-flex align-items-center gap-2">
+                                    <span class="badge bg-primary">运行中</span>
+                                    <button class="btn btn-sm btn-outline-danger btn-delete-task" 
+                                            data-task-id="${taskId}" 
+                                            title="删除任务记录"
+                                            style="padding: 0.125rem 0.375rem; line-height: 1;">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </div>
                             </div>
                             <div class="mb-2">
                                 <small class="text-muted">源路径:</small><br>
@@ -311,7 +398,12 @@ async function loadRunningTasks() {
                                     <small class="text-muted">${progress.toFixed(1)}%</small>
                                 </div>
                                 <div class="progress" style="height: 6px;">
-                                    <div class="progress-bar bg-primary" style="width: ${progress}%"></div>
+                                    <div class="progress-bar bg-primary" 
+                                         role="progressbar" 
+                                         style="width: ${progress}%" 
+                                         aria-valuenow="${progress}" 
+                                         aria-valuemin="0" 
+                                         aria-valuemax="100"></div>
                                 </div>
                             </div>
                             <div class="d-flex justify-content-between">
@@ -321,17 +413,56 @@ async function loadRunningTasks() {
                         </div>
                     </div>
                 `;
+                
+                // 绑定删除按钮事件
+                const deleteBtn = taskCard.querySelector('.btn-delete-task');
+                if (deleteBtn) {
+                    deleteBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        const taskIdToDelete = parseInt(deleteBtn.getAttribute('data-task-id'));
+                        deleteTaskRecord(taskIdToDelete);
+                    });
+                }
                 container.appendChild(taskCard);
-            });
-        } else {
+                runningTaskCards.set(taskId, taskCard);
+            }
+        });
+        
+        // 如果没有运行中的任务，显示提示
+        if (validTasks.length === 0 && runningTaskCards.size === 0) {
             container.innerHTML = '<div class="col-12"><p class="text-muted">暂无运行中的任务</p></div>';
         }
+        
+        // 更新统计数字
+        document.getElementById('runningTasks').textContent = validTasks.length;
+        
     } catch (error) {
         console.error('加载运行中的任务失败:', error);
         const container = document.getElementById('runningTasksList');
         if (container) {
             container.innerHTML = '<div class="col-12"><p class="text-danger">加载失败: ' + error.message + '</p></div>';
         }
+    }
+}
+
+// 开始轮询运行中的任务（更频繁的更新）
+function startRunningTasksPolling() {
+    // 清除之前的轮询
+    if (runningTasksPollInterval) {
+        clearInterval(runningTasksPollInterval);
+    }
+    
+    // 每5秒更新一次运行中的任务
+    runningTasksPollInterval = setInterval(() => {
+        loadRunningTasks();
+    }, 5000);
+}
+
+// 停止轮询运行中的任务
+function stopRunningTasksPolling() {
+    if (runningTasksPollInterval) {
+        clearInterval(runningTasksPollInterval);
+        runningTasksPollInterval = null;
     }
 }
 
@@ -484,24 +615,164 @@ async function enableBackupTask(taskId) {
 }
 
 // 运行备份任务（计划任务）
+// 扫描进度条相关变量
+let scanProgressInterval = null;
+let currentScanTaskId = null;
+
+// 显示扫描进度条
+function showScanProgressModal(taskId) {
+    currentScanTaskId = taskId;
+    const modal = document.getElementById('scanProgressModal');
+    if (!modal) {
+        // 创建进度条模态框
+        const modalHtml = `
+            <div class="modal fade" id="scanProgressModal" tabindex="-1" aria-labelledby="scanProgressModalLabel" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+                <div class="modal-dialog modal-dialog-centered">
+                    <div class="modal-content bg-dark text-light">
+                        <div class="modal-header border-secondary">
+                            <h5 class="modal-title" id="scanProgressModalLabel">
+                                <i class="bi bi-hourglass-split me-2"></i>正在扫描文件...
+                            </h5>
+                        </div>
+                        <div class="modal-body">
+                            <div class="mb-3">
+                                <div class="d-flex justify-content-between mb-2">
+                                    <span id="scanProgressText">扫描中...</span>
+                                    <span id="scanProgressPercent">0%</span>
+                                </div>
+                                <div class="progress" style="height: 25px;">
+                                    <div class="progress-bar progress-bar-striped progress-bar-animated bg-primary" 
+                                         role="progressbar" 
+                                         id="scanProgressBar" 
+                                         style="width: 0%"
+                                         aria-valuenow="0" 
+                                         aria-valuemin="0" 
+                                         aria-valuemax="100">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="text-muted small">
+                                <div id="scanProgressDetails">
+                                    <div>已扫描: <span id="scanScannedCount">0</span> 个文件</div>
+                                    <div>有效文件: <span id="scanValidCount">0</span> 个</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="modal-footer border-secondary">
+                            <button type="button" class="btn btn-secondary" id="scanProgressCancelBtn" onclick="hideScanProgressModal()">取消</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+    }
+    
+    // 重置进度条
+    document.getElementById('scanProgressBar').style.width = '0%';
+    document.getElementById('scanProgressBar').setAttribute('aria-valuenow', '0');
+    document.getElementById('scanProgressPercent').textContent = '0%';
+    document.getElementById('scanScannedCount').textContent = '0';
+    document.getElementById('scanValidCount').textContent = '0';
+    document.getElementById('scanProgressText').textContent = '正在扫描源文件...';
+    
+    // 显示模态框
+    const bsModal = new bootstrap.Modal(document.getElementById('scanProgressModal'));
+    bsModal.show();
+    
+    // 开始轮询进度
+    startScanProgressPolling(taskId);
+}
+
+// 隐藏扫描进度条
+function hideScanProgressModal() {
+    stopScanProgressPolling();
+    const modal = document.getElementById('scanProgressModal');
+    if (modal) {
+        const bsModal = bootstrap.Modal.getInstance(modal);
+        if (bsModal) {
+            bsModal.hide();
+        }
+    }
+    currentScanTaskId = null;
+}
+
+// 开始轮询扫描进度
+function startScanProgressPolling(taskId) {
+    // 清除之前的轮询
+    stopScanProgressPolling();
+    
+    // 每500ms轮询一次
+    scanProgressInterval = setInterval(async () => {
+        try {
+            const response = await fetch(`/api/backup/tasks/${taskId}/status`);
+            if (!response.ok) {
+                throw new Error('获取任务状态失败');
+            }
+            const status = await response.json();
+            
+            // 更新进度条
+            const progress = status.progress_percent || 0;
+            document.getElementById('scanProgressBar').style.width = progress + '%';
+            document.getElementById('scanProgressBar').setAttribute('aria-valuenow', progress);
+            document.getElementById('scanProgressPercent').textContent = progress.toFixed(1) + '%';
+            document.getElementById('scanScannedCount').textContent = status.processed_files || 0;
+            document.getElementById('scanValidCount').textContent = status.total_files || 0;
+            
+            // 如果任务状态不是运行中，停止轮询
+            if (status.status !== 'running') {
+                if (status.status === 'completed') {
+                    document.getElementById('scanProgressText').textContent = '扫描完成！';
+                    setTimeout(() => {
+                        hideScanProgressModal();
+                    }, 1000);
+                } else if (status.status === 'failed') {
+                    document.getElementById('scanProgressText').textContent = '扫描失败: ' + (status.error_message || '未知错误');
+                    setTimeout(() => {
+                        hideScanProgressModal();
+                    }, 3000);
+                } else {
+                    hideScanProgressModal();
+                }
+            }
+        } catch (error) {
+            console.error('获取扫描进度失败:', error);
+            // 不中断轮询，继续尝试
+        }
+    }, 500);
+}
+
+// 停止轮询扫描进度
+function stopScanProgressPolling() {
+    if (scanProgressInterval) {
+        clearInterval(scanProgressInterval);
+        scanProgressInterval = null;
+    }
+}
+
 async function runBackupTask(taskId) {
     if (!confirm('确定要立即运行此计划任务吗？')) {
         return;
     }
     try {
+        // 显示扫描进度条
+        showScanProgressModal(taskId);
+        
         const response = await fetch(`/api/scheduler/tasks/${taskId}/run`, {
             method: 'POST'
         });
         const result = await response.json();
         if (result.success) {
-            alert('任务已启动');
+            // 不立即关闭进度条，等待轮询检测任务完成
             loadAllTasks();
             loadRunningTasks();
         } else {
+            hideScanProgressModal();
             alert('运行失败: ' + (result.message || '未知错误'));
         }
     } catch (error) {
         console.error('运行任务失败:', error);
+        hideScanProgressModal();
         alert('运行失败: ' + error.message);
     }
 }
@@ -630,14 +901,15 @@ async function deleteBackupTask(taskId, isScheduler) {
                 alert('删除失败: ' + (result.message || '未知错误'));
             }
         } else {
-            // 删除备份任务模板
+            // 删除备份任务模板或执行记录
             const response = await fetch(`/api/backup/tasks/${taskId}`, {
                 method: 'DELETE'
             });
             const result = await response.json();
             if (result.success) {
-                alert('备份任务模板已删除');
+                alert(result.message || '任务已删除');
                 loadAllTasks();
+                loadRunningTasks(); // 刷新运行中的任务列表
             } else {
                 alert('删除失败: ' + (result.message || '未知错误'));
             }
@@ -645,6 +917,50 @@ async function deleteBackupTask(taskId, isScheduler) {
     } catch (error) {
         console.error('删除任务失败:', error);
         alert('删除失败: ' + error.message);
+    }
+}
+
+// 删除任务记录（用于运行中的任务卡片）
+async function deleteTaskRecord(taskId) {
+    if (!confirm('确定要删除此任务记录吗？此操作不可恢复！\n注意：如果任务正在运行，删除操作不会停止任务执行。')) {
+        return;
+    }
+    try {
+        const response = await fetch(`/api/backup/tasks/${taskId}`, {
+            method: 'DELETE'
+        });
+        
+        // 检查HTTP状态码
+        if (!response.ok) {
+            let errorMessage = '删除失败';
+            try {
+                const errorData = await response.json();
+                errorMessage = errorData.detail || errorData.message || errorMessage;
+            } catch {
+                errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+            }
+            alert(errorMessage);
+            return;
+        }
+        
+        const result = await response.json();
+        if (result.success || result.message) {
+            // 从运行中的任务卡片中移除
+            const taskCard = runningTaskCards.get(taskId);
+            if (taskCard) {
+                taskCard.remove();
+                runningTaskCards.delete(taskId);
+            }
+            // 刷新列表
+            loadAllTasks();
+            loadRunningTasks();
+            // 不显示alert，静默删除
+        } else {
+            alert('删除失败: ' + (result.message || '未知错误'));
+        }
+    } catch (error) {
+        console.error('删除任务记录失败:', error);
+        alert('删除失败: ' + (error.message || '网络错误'));
     }
 }
 
@@ -672,6 +988,9 @@ document.addEventListener('DOMContentLoaded', async function() {
     loadBackupStatistics();
     loadRunningTasks();
     loadAllTasks();
+    
+    // 开始轮询运行中的任务（更频繁的更新）
+    startRunningTasksPolling();
     
     // 绑定筛选和搜索事件
     const statusFilter = document.getElementById('statusFilter');
@@ -783,12 +1102,17 @@ document.addEventListener('DOMContentLoaded', async function() {
         }
     });
     
-    // 每30秒刷新一次
+    // 每30秒刷新一次统计和所有任务列表（运行中的任务由单独的轮询处理）
     setInterval(function() {
         loadBackupStatistics();
-        loadRunningTasks();
         loadAllTasks();
+        // 注意：loadRunningTasks() 由 startRunningTasksPolling() 每5秒调用一次
     }, 30000);
+    
+    // 页面卸载时停止轮询
+    window.addEventListener('beforeunload', function() {
+        stopRunningTasksPolling();
+    });
 });
 </script>
 

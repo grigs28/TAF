@@ -24,8 +24,14 @@ from .db_utils import is_opengauss, get_opengauss_connection
 logger = logging.getLogger(__name__)
 
 
-def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Callable:
-    """创建任务执行函数"""
+def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_run: bool = False) -> Callable:
+    """创建任务执行函数
+    
+    Args:
+        scheduled_task: 计划任务对象
+        system_instance: 系统实例
+        manual_run: 是否为手动运行（Web界面点击运行），默认为False
+    """
     async def executor():
         execution_id = str(uuid.uuid4())
         start_time = datetime.now()
@@ -104,20 +110,37 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
             action_type = scheduled_task.action_type
             action_config = scheduled_task.action_config or {}
             
+            # 检查action_type是否有效
+            if not action_type:
+                raise ValueError(f"任务动作类型为空: {scheduled_task.task_name}")
+            
+            # 如果action_type是字符串，尝试转换为枚举
+            if isinstance(action_type, str):
+                try:
+                    action_type = TaskActionType(action_type)
+                except ValueError:
+                    raise ValueError(f"无效的任务动作类型: {action_type} (任务: {scheduled_task.task_name})")
+            
+            logger.info(f"执行任务动作: {action_type.value if hasattr(action_type, 'value') else action_type} (任务: {scheduled_task.task_name})")
+            
             # 从task_metadata中获取backup_task_id
             backup_task_id = None
             if scheduled_task.task_metadata and isinstance(scheduled_task.task_metadata, dict):
                 backup_task_id = scheduled_task.task_metadata.get('backup_task_id')
             
             # 获取动作处理器
-            handler = get_action_handler(action_type, system_instance)
+            try:
+                handler = get_action_handler(action_type, system_instance)
+            except Exception as e:
+                logger.error(f"获取动作处理器失败: {str(e)}, action_type: {action_type}, type: {type(action_type)}")
+                raise
             
             # 根据动作类型执行
             if action_type == TaskActionType.BACKUP:
-                # 备份动作需要传递backup_task_id参数
-                result = await handler.execute(action_config, backup_task_id=backup_task_id, scheduled_task=scheduled_task)
+                # 备份动作需要传递backup_task_id参数和manual_run参数
+                result = await handler.execute(action_config, backup_task_id=backup_task_id, scheduled_task=scheduled_task, manual_run=manual_run)
             else:
-                result = await handler.execute(action_config, scheduled_task=scheduled_task)
+                result = await handler.execute(action_config, scheduled_task=scheduled_task, manual_run=manual_run)
             
             end_time = datetime.now()
             duration = int((end_time - start_time).total_seconds() * 1000)  # 转换为毫秒
@@ -276,7 +299,10 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance) -> Call
             import traceback
             stack_trace = traceback.format_exc()
             
+            # 记录详细的错误信息，包括堆栈跟踪
             logger.error(f"任务执行失败 {scheduled_task.task_name}: {error_msg}")
+            logger.error(f"异常类型: {type(e).__name__}")
+            logger.error(f"异常堆栈:\n{stack_trace}")
             
             # 更新执行日志和任务统计（openGauss使用原生SQL，其他使用SQLAlchemy）
             if is_opengauss():

@@ -11,6 +11,7 @@ from typing import Optional
 from croniter import croniter
 
 from models.scheduled_task import ScheduledTask, ScheduleType
+from utils.datetime_utils import parse_datetime, now
 
 logger = logging.getLogger(__name__)
 
@@ -20,31 +21,17 @@ def calculate_next_run_time(scheduled_task: ScheduledTask) -> Optional[datetime]
     try:
         config = scheduled_task.schedule_config or {}
         schedule_type = scheduled_task.schedule_type
-        current_time = datetime.now()
+        current_time = now()  # 使用统一的日期时间工具
         
         if schedule_type == ScheduleType.ONCE:
             # 一次性任务：某月某日某时
             datetime_str = config.get('datetime')
             if datetime_str:
-                # 支持多种时间格式
-                try:
-                    # 尝试标准格式：2025-11-04 17:05:00
-                    next_time = datetime.strptime(datetime_str, '%Y-%m-%d %H:%M:%S')
-                except ValueError:
-                    try:
-                        # 尝试带斜杠格式：2025/11/04 17:05:00
-                        next_time = datetime.strptime(datetime_str, '%Y/%m/%d %H:%M:%S')
-                    except ValueError:
-                        try:
-                            # 尝试不带秒：2025-11-04 17:05
-                            next_time = datetime.strptime(datetime_str, '%Y-%m-%d %H:%M')
-                        except ValueError:
-                            try:
-                                # 尝试斜杠不带秒：2025/11/04 17:05
-                                next_time = datetime.strptime(datetime_str, '%Y/%m/%d %H:%M')
-                            except ValueError as e:
-                                logger.error(f"无法解析时间格式: {datetime_str}, 错误: {str(e)}")
-                                return None
+                # 使用统一的日期时间解析工具
+                next_time = parse_datetime(datetime_str)
+                if next_time is None:
+                    logger.error(f"无法解析时间格式: {datetime_str}")
+                    return None
                 # 如果已经过了执行时间，返回None（不再执行）
                 if next_time <= current_time:
                     return None

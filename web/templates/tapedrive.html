@@ -172,6 +172,15 @@
                                     <p class="mb-0">加载中...</p>
                                 </div>
                             </div>
+                            <hr>
+                            <div class="d-flex gap-2 justify-content-center">
+                                <button class="btn btn-primary btn-sm" id="loadTapeBtn" style="display: none;">
+                                    <i class="bi bi-upload me-1"></i>加载磁带
+                                </button>
+                                <button class="btn btn-warning btn-sm" id="unloadTapeBtn" style="display: none;">
+                                    <i class="bi bi-eject me-1"></i>弹出磁带
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -677,6 +686,19 @@ async function loadCurrentTape() {
                 `;
             }
         }
+        
+        // 更新加载和弹出按钮的显示状态
+        const loadBtn = document.getElementById('loadTapeBtn');
+        const unloadBtn = document.getElementById('unloadTapeBtn');
+        if (result && result.tape_id) {
+            // 有磁带，显示弹出按钮
+            if (unloadBtn) unloadBtn.style.display = 'inline-block';
+            if (loadBtn) loadBtn.style.display = 'none';
+        } else {
+            // 没有磁带，显示加载按钮
+            if (loadBtn) loadBtn.style.display = 'inline-block';
+            if (unloadBtn) unloadBtn.style.display = 'none';
+        }
     } catch (error) {
         console.error('加载当前磁带信息失败:', error);
         const card = document.getElementById('currentTapeCard');
@@ -690,6 +712,82 @@ async function loadCurrentTape() {
         }
     }
 }
+
+// 加载磁带按钮事件
+document.getElementById('loadTapeBtn')?.addEventListener('click', async function() {
+    const btn = this;
+    const originalHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-1"></i>加载中...';
+    
+    try {
+        // 先获取可用磁带列表，让用户选择
+        const tapesResp = await fetch('/api/tape/list');
+        const tapesData = await tapesResp.json();
+        
+        if (!tapesData || !tapesData.success || !tapesData.tapes || tapesData.tapes.length === 0) {
+            alert('没有可用的磁带');
+            btn.disabled = false;
+            btn.innerHTML = originalHtml;
+            return;
+        }
+        
+        // 简化：自动选择第一个可用磁带
+        const availableTape = tapesData.tapes.find(t => t.status === 'AVAILABLE' || t.status === 'available') || tapesData.tapes[0];
+        
+        const response = await fetch(`/api/tape/operations/load?tape_id=${encodeURIComponent(availableTape.tape_id)}`, {
+            method: 'POST'
+        });
+        const result = await response.json();
+        
+        if (result.success) {
+            alert(`磁带 ${availableTape.tape_id} 加载成功`);
+            loadCurrentTape();
+            loadTapeDriveHistory();
+        } else {
+            alert(`加载失败: ${result.message || '未知错误'}`);
+        }
+    } catch (error) {
+        console.error('加载磁带失败:', error);
+        alert(`加载失败: ${error.message}`);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = originalHtml;
+    }
+});
+
+// 弹出磁带按钮事件
+document.getElementById('unloadTapeBtn')?.addEventListener('click', async function() {
+    if (!confirm('确定要弹出当前磁带吗？')) {
+        return;
+    }
+    
+    const btn = this;
+    const originalHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-1"></i>弹出中...';
+    
+    try {
+        const response = await fetch('/api/tape/operations/unload', {
+            method: 'POST'
+        });
+        const result = await response.json();
+        
+        if (result.success) {
+            alert('磁带弹出成功');
+            loadCurrentTape();
+            loadTapeDriveHistory();
+        } else {
+            alert(`弹出失败: ${result.message || '未知错误'}`);
+        }
+    } catch (error) {
+        console.error('弹出磁带失败:', error);
+        alert(`弹出失败: ${error.message}`);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = originalHtml;
+    }
+});
 </script>
 {% endblock %}
 

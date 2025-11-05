@@ -171,6 +171,37 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
         
         # 尝试写入物理磁带标签（如果磁带机中有磁带）
         try:
+            # 检查磁带是否已格式化
+            existing_label = await system.tape_manager.tape_operations._read_tape_label()
+            is_formatted = existing_label is not None
+            
+            if not is_formatted:
+                # 磁带未格式化，返回需要格式化的提示
+                logger.info(f"磁带 {request.tape_id} 未格式化，需要格式化")
+                await log_operation(
+                    operation_type=OperationType.CREATE,
+                    resource_type="tape",
+                    resource_id=request.tape_id,
+                    resource_name=request.label,
+                    operation_name="创建磁带",
+                    operation_description=f"创建磁带 {request.tape_id}（需要格式化）",
+                    category="tape",
+                    success=True,
+                    result_message=f"磁带 {request.tape_id} 创建成功，但需要格式化",
+                    new_values=new_values,
+                    ip_address=ip_address,
+                    request_method=request_method,
+                    request_url=request_url,
+                    duration_ms=duration_ms
+                )
+                return {
+                    "success": True,
+                    "message": f"磁带 {request.tape_id} 创建成功",
+                    "tape_id": request.tape_id,
+                    "needs_format": True,
+                    "format_message": "磁带未格式化，请先格式化磁带"
+                }
+            
             # 准备标签数据
             tape_info = {
                 "tape_id": request.tape_id,

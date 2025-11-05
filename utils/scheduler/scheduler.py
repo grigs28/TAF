@@ -444,8 +444,8 @@ class TaskScheduler:
             if task_id not in self.tasks:
                 await self._load_task(task)
             
-            # 创建执行函数并执行
-            execute_func = create_task_executor(task, self.system_instance)
+            # 创建执行函数并执行（手动运行标记为True，因为是从Web界面点击运行的）
+            execute_func = create_task_executor(task, self.system_instance, manual_run=True)
             
             # 在后台执行（不阻塞）
             execution_task = asyncio.create_task(execute_func())

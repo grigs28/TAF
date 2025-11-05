@@ -813,24 +813,26 @@ async def update_backup_task(
 
 @router.delete("/tasks/{task_id}")
 async def delete_backup_task(task_id: int, http_request: Request):
-    """删除备份任务模板"""
+    """删除备份任务（模板或执行记录）"""
     start_time = datetime.now()
     
     try:
-        # 验证：只能删除模板
+        # 获取任务信息
         task_name = None
+        is_template = None
+        task_status = None
         if is_opengauss():
             conn = await get_opengauss_connection()
             try:
                 row = await conn.fetchrow(
-                    "SELECT task_name, is_template FROM backup_tasks WHERE id = $1",
+                    "SELECT task_name, is_template, status FROM backup_tasks WHERE id = $1",
                     task_id
                 )
                 if not row:
                     raise HTTPException(status_code=404, detail="备份任务不存在")
-                if not row["is_template"]:
-                    raise HTTPException(status_code=400, detail="只能删除备份任务模板，不能删除执行记录")
                 task_name = row["task_name"]
+                is_template = row["is_template"]
+                task_status = row["status"].value if hasattr(row["status"], "value") else str(row["status"])
             finally:
                 await conn.close()
         else:
@@ -842,39 +844,160 @@ async def delete_backup_task(task_id: int, http_request: Request):
                 task = result.scalar_one_or_none()
                 if not task:
                     raise HTTPException(status_code=404, detail="备份任务不存在")
-                if not task.is_template:
-                    raise HTTPException(status_code=400, detail="只能删除备份任务模板，不能删除执行记录")
                 task_name = task.task_name
+                is_template = task.is_template
+                task_status = task.status.value
         
         if is_opengauss():
             # 使用原生SQL删除
             conn = await get_opengauss_connection()
             try:
-                await conn.execute(
-                    "DELETE FROM backup_tasks WHERE id = $1",
+                # 先检查是否有外键约束（backup_sets表可能引用此任务）
+                # 删除顺序：backup_files -> backup_sets -> backup_tasks
+                backup_sets_count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM backup_sets WHERE backup_task_id = $1",
                     task_id
                 )
+                
+                if backup_sets_count and backup_sets_count > 0:
+                    # 获取所有关联的备份集ID
+                    backup_sets_rows = await conn.fetch(
+                        "SELECT id FROM backup_sets WHERE backup_task_id = $1",
+                        task_id
+                    )
+                    
+                    backup_set_ids = [row['id'] for row in backup_sets_rows] if backup_sets_rows else []
+                    
+                    # 先删除关联的备份文件（backup_files表引用backup_sets）
+                    if backup_set_ids:
+                        total_files_deleted = 0
+                        for backup_set_id in backup_set_ids:
+                            files_count = await conn.fetchval(
+                                "SELECT COUNT(*) FROM backup_files WHERE backup_set_id = $1",
+                                backup_set_id
+                            )
+                            if files_count and files_count > 0:
+                                await conn.execute(
+                                    "DELETE FROM backup_files WHERE backup_set_id = $1",
+                                    backup_set_id
+                                )
+                                total_files_deleted += files_count
+                                logger.debug(f"已删除备份集 {backup_set_id} 的 {files_count} 个文件记录")
+                        if total_files_deleted > 0:
+                            logger.info(f"已删除 {total_files_deleted} 个备份文件记录")
+                    
+                    # 再删除备份集
+                    await conn.execute(
+                        "DELETE FROM backup_sets WHERE backup_task_id = $1",
+                        task_id
+                    )
+                    logger.info(f"已删除 {backup_sets_count} 个关联的备份集")
+                
+                # 检查是否有执行记录引用此模板（template_id外键）
+                if is_template:
+                    child_tasks_count = await conn.fetchval(
+                        "SELECT COUNT(*) FROM backup_tasks WHERE template_id = $1",
+                        task_id
+                    )
+                    if child_tasks_count and child_tasks_count > 0:
+                        # 如果有执行记录引用此模板，先删除执行记录（递归处理）
+                        logger.info(f"发现 {child_tasks_count} 个执行记录引用此模板，将一并删除")
+                        child_tasks_rows = await conn.fetch(
+                            "SELECT id FROM backup_tasks WHERE template_id = $1",
+                            task_id
+                        )
+                        child_task_ids = [row['id'] for row in child_tasks_rows] if child_tasks_rows else []
+                        for child_task_id in child_task_ids:
+                            # 获取子任务的备份集
+                            backup_sets_for_child = await conn.fetch(
+                                "SELECT id FROM backup_sets WHERE backup_task_id = $1",
+                                child_task_id
+                            )
+                            # 先删除备份文件（通过备份集）
+                            if backup_sets_for_child:
+                                for bs_row in backup_sets_for_child:
+                                    await conn.execute(
+                                        "DELETE FROM backup_files WHERE backup_set_id = $1",
+                                        bs_row['id']
+                                    )
+                                # 再删除备份集
+                                await conn.execute(
+                                    "DELETE FROM backup_sets WHERE backup_task_id = $1",
+                                    child_task_id
+                                )
+                            # 最后删除执行记录
+                            await conn.execute(
+                                "DELETE FROM backup_tasks WHERE id = $1",
+                                child_task_id
+                            )
+                        logger.info(f"已删除 {child_tasks_count} 个关联的执行记录")
+                
+                # 执行删除操作
+                # asyncpg的execute返回字符串格式，如 "DELETE 1" 或 "DELETE 0"
+                try:
+                    result = await conn.execute(
+                        "DELETE FROM backup_tasks WHERE id = $1",
+                        task_id
+                    )
+                    
+                    # 解析删除结果
+                    deleted_count = 0
+                    if isinstance(result, str):
+                        if result.startswith("DELETE"):
+                            try:
+                                deleted_count = int(result.split()[-1]) if len(result.split()) > 1 else 0
+                            except:
+                                deleted_count = 0
+                        else:
+                            # 可能返回其他格式，尝试解析
+                            logger.warning(f"删除操作返回未知格式: {result}")
+                    else:
+                        # 如果不是字符串，尝试其他方式
+                        logger.warning(f"删除操作返回非字符串类型: {type(result)}")
+                    
+                    # 检查是否真的删除了记录
+                    if deleted_count == 0:
+                        # 再次查询确认任务是否存在
+                        check_row = await conn.fetchrow(
+                            "SELECT id FROM backup_tasks WHERE id = $1",
+                            task_id
+                        )
+                        if check_row:
+                            raise HTTPException(status_code=400, detail="删除失败：可能存在外键约束或其他限制")
+                        else:
+                            raise HTTPException(status_code=404, detail="备份任务不存在或已被删除")
+                except HTTPException:
+                    raise
+                except Exception as db_error:
+                    error_msg = str(db_error)
+                    logger.error(f"删除备份任务时数据库错误: {error_msg}")
+                    # 检查是否是外键约束错误
+                    if "foreign key" in error_msg.lower() or "constraint" in error_msg.lower():
+                        raise HTTPException(status_code=400, detail=f"删除失败：任务存在关联数据，请先删除关联的备份集")
+                    else:
+                        raise HTTPException(status_code=400, detail=f"删除失败：{error_msg}")
                 
                 # 记录操作日志
                 client_ip = http_request.client.host if http_request.client else None
                 duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                resource_type_name = "备份任务模板" if is_template else "备份任务执行记录"
                 await log_operation(
                     operation_type=OperationType.DELETE,
                     resource_type="backup",
                     resource_id=str(task_id),
-                    resource_name=f"备份任务模板: {task_name}",
-                    operation_name="删除备份任务模板",
-                    operation_description=f"删除备份任务模板: {task_name}",
+                    resource_name=f"{resource_type_name}: {task_name}",
+                    operation_name=f"删除{resource_type_name}",
+                    operation_description=f"删除{resource_type_name}: {task_name} (状态: {task_status})",
                     category="backup",
                     success=True,
-                    result_message="备份任务模板已删除",
+                    result_message=f"{resource_type_name}已删除",
                     ip_address=client_ip,
                     request_method="DELETE",
                     request_url=str(http_request.url),
                     duration_ms=duration_ms
                 )
                 
-                return {"success": True, "message": "备份任务模板已删除"}
+                return {"success": True, "message": f"{resource_type_name}已删除"}
             finally:
                 await conn.close()
         else:
@@ -894,23 +1017,24 @@ async def delete_backup_task(task_id: int, http_request: Request):
                 # 记录操作日志
                 client_ip = http_request.client.host if http_request.client else None
                 duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                resource_type_name = "备份任务模板" if task.is_template else "备份任务执行记录"
                 await log_operation(
                     operation_type=OperationType.DELETE,
                     resource_type="backup",
                     resource_id=str(task_id),
-                    resource_name=f"备份任务模板: {task.task_name}",
-                    operation_name="删除备份任务模板",
-                    operation_description=f"删除备份任务模板: {task.task_name}",
+                    resource_name=f"{resource_type_name}: {task.task_name}",
+                    operation_name=f"删除{resource_type_name}",
+                    operation_description=f"删除{resource_type_name}: {task.task_name} (状态: {task.status.value})",
                     category="backup",
                     success=True,
-                    result_message="备份任务模板已删除",
+                    result_message=f"{resource_type_name}已删除",
                     ip_address=client_ip,
                     request_method="DELETE",
                     request_url=str(http_request.url),
                     duration_ms=duration_ms
                 )
                 
-                return {"success": True, "message": "备份任务模板已删除"}
+                return {"success": True, "message": f"{resource_type_name}已删除"}
     
     except HTTPException:
         raise
@@ -924,8 +1048,8 @@ async def delete_backup_task(task_id: int, http_request: Request):
             operation_type=OperationType.DELETE,
             resource_type="backup",
             resource_id=str(task_id),
-            operation_name="删除备份任务模板",
-            operation_description=f"删除备份任务模板失败: {error_msg}",
+            operation_name="删除备份任务",
+            operation_description=f"删除备份任务失败: {error_msg}",
             category="backup",
             success=False,
             error_message=error_msg,
@@ -935,7 +1059,7 @@ async def delete_backup_task(task_id: int, http_request: Request):
             duration_ms=duration_ms
         )
         
-        logger.error(f"删除备份任务模板失败: {error_msg}", exc_info=True)
+        logger.error(f"删除备份任务失败: {error_msg}", exc_info=True)
         raise HTTPException(status_code=500, detail=error_msg)
 
 

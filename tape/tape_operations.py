@@ -12,6 +12,7 @@ from typing import Optional, Dict, Any, Tuple
 from datetime import datetime
 
 from tape.tape_cartridge import TapeCartridge
+from tape.itdt_interface import ITDTInterface
 from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -22,17 +23,18 @@ class TapeOperations:
 
     def __init__(self):
         self.settings = get_settings()
-        self.scsi_interface = None
+        self.itdt_interface: ITDTInterface | None = None
         self._initialized = False
 
-    async def initialize(self, scsi_interface):
-        """初始化磁带操作"""
+    async def initialize(self, scsi_interface=None):
+        """初始化磁带操作（ITDT）"""
         try:
-            self.scsi_interface = scsi_interface
+            self.itdt_interface = ITDTInterface()
+            await self.itdt_interface.initialize()
             self._initialized = True
-            logger.info("磁带操作模块初始化完成")
+            logger.info("磁带操作模块(ITDT)初始化完成")
         except Exception as e:
-            logger.error(f"磁带操作模块初始化失败: {str(e)}")
+            logger.error(f"磁带操作模块(ITDT)初始化失败: {str(e)}")
             raise
 
     async def load_tape(self, tape_cartridge: TapeCartridge) -> bool:
@@ -55,13 +57,13 @@ class TapeOperations:
                 logger.error("磁带设备未就绪，可能原因：设备未连接、磁带未加载、设备忙或故障")
                 # 尝试获取更详细的设备状态信息
                 try:
-                    devices = await self.scsi_interface.scan_tape_devices()
+                    devices = await self.itdt_interface.scan_devices() if self.itdt_interface else []
                     if not devices:
                         logger.error("未检测到任何磁带设备")
                     else:
                         logger.info(f"检测到 {len(devices)} 个磁带设备")
                         for device in devices:
-                            logger.info(f"设备: {device.get('path', 'N/A')} - {device.get('vendor', 'N/A')} {device.get('model', 'N/A')}")
+                            logger.info(f"设备: {device.get('path', 'N/A')}")
                 except Exception as dev_error:
                     logger.warning(f"获取设备信息失败: {str(dev_error)}")
                 return False
@@ -109,8 +111,16 @@ class TapeOperations:
             logger.error(f"卸载磁带失败: {str(e)}")
             return False
 
-    async def erase_tape(self) -> bool:
-        """擦除磁带"""
+    async def erase_tape(self, backup_task=None, progress_callback=None) -> bool:
+        """擦除磁带
+        
+        Args:
+            backup_task: 备份任务对象，用于更新进度
+            progress_callback: 进度回调函数，用于更新进度到数据库
+        
+        Returns:
+            True=擦除成功，False=失败
+        """
         try:
             if not self._initialized:
                 logger.error("磁带操作模块未初始化")
@@ -123,8 +133,12 @@ class TapeOperations:
                 logger.error("倒带失败，无法擦除磁带")
                 return False
 
-            # 执行擦除命令
-            success = await self._execute_erase_command()
+            # 执行擦除命令（传递backup_task和progress_callback以更新进度）
+            success = await self._execute_erase_command(
+                long_erase=True,
+                backup_task=backup_task,
+                progress_callback=progress_callback
+            )
             if not success:
                 logger.error("擦除命令执行失败")
                 return False
@@ -139,8 +153,16 @@ class TapeOperations:
             logger.error(f"擦除磁带失败: {str(e)}")
             return False
 
-    async def erase_preserve_label(self) -> bool:
-        """擦除磁带但保留标签（.TAPE_LABEL.txt 或磁带头元数据）"""
+    async def erase_preserve_label(self, backup_task=None, progress_callback=None) -> bool:
+        """擦除磁带但保留标签（.TAPE_LABEL.txt 或磁带头元数据）
+        
+        Args:
+            backup_task: 备份任务对象，用于更新进度
+            progress_callback: 进度回调函数，用于更新进度到数据库
+        
+        Returns:
+            True=擦除成功，False=失败
+        """
         try:
             if not self._initialized:
                 logger.error("磁带操作模块未初始化")
@@ -153,8 +175,8 @@ class TapeOperations:
             else:
                 logger.info("备份前擦除：未读取到磁带标签，将仅执行擦除")
 
-            # 执行擦除
-            if not await self.erase_tape():
+            # 执行擦除（传递backup_task和progress_callback以更新进度）
+            if not await self.erase_tape(backup_task=backup_task, progress_callback=progress_callback):
                 return False
 
             # 若有标签，写回标签文件/磁带头
@@ -268,7 +290,7 @@ class TapeOperations:
             logger.debug(f"开始等待磁带就绪（超时: {timeout}秒）...")
             for attempt in range(timeout):
                 try:
-                    if await self.scsi_interface.test_unit_ready():
+                    if self.itdt_interface and await self.itdt_interface.test_unit_ready(None):
                         logger.debug(f"磁带设备已就绪（第 {attempt + 1} 次尝试）")
                         return True
                 except Exception as test_error:
@@ -287,7 +309,9 @@ class TapeOperations:
     async def _rewind(self) -> bool:
         """倒带操作"""
         try:
-            return await self.scsi_interface.rewind_tape()
+            if not self.itdt_interface:
+                return False
+            return await self.itdt_interface.rewind(None)
         except Exception as e:
             logger.error(f"倒带操作失败: {str(e)}")
             return False
@@ -352,22 +376,115 @@ class TapeOperations:
             logger.error(f"写入文件标记异常: {str(e)}")
             return False
 
-    async def _execute_erase_command(self) -> bool:
-        """执行擦除命令"""
+    async def _execute_erase_command(self, long_erase: bool = True, backup_task=None, progress_callback=None) -> bool:
+        """执行擦除命令（LONG ERASE - 整盘物理清0）
+        
+        Args:
+            long_erase: True=长擦除（整盘物理清0，耗时约3小时），False=短擦除
+            backup_task: 备份任务对象，用于更新进度（0-100%）
+            progress_callback: 进度回调函数，用于更新进度到数据库
+        
+        Returns:
+            True=擦除完成，False=失败或被取消
+        """
         try:
-            # 构造ERASE(6) SCSI命令
-            cdb = bytes([0x19, 0x00, 0x00, 0x00, 0x00, 0x00])
-
+            # ERASE(6) SCSI命令
+            # Byte 1: Erase Type (bit 0: 0=short, 1=long)
+            # 参考代码：long=bit0=1，即 0x01 表示LONG ERASE
+            erase_type = 0x01 if long_erase else 0x00
+            cdb = bytes([0x19, erase_type, 0x00, 0x00, 0x00, 0x00])
+            
+            # LONG ERASE可能需要3小时，超时时间设置为3小时（10800秒）
+            timeout_seconds = 10800 if long_erase else 600
+            
+            if long_erase:
+                logger.info("========== 开始LONG ERASE（整盘物理清0）==========")
+                logger.warning("⚠️ LONG ERASE期间请勿断电或重启驱动器！")
+                logger.info(f"预计耗时约3小时，超时时间: {timeout_seconds}秒")
+                
+                # 初始化进度为0%
+                if backup_task:
+                    backup_task.progress_percent = 0.0
+                    if progress_callback:
+                        await progress_callback(backup_task, 0, 0)
+            
+            # 1) 发送ERASE命令
             result = await self.scsi_interface.execute_scsi_command(
                 device_path=None,
                 cdb=cdb,
-                timeout=300  # 擦除可能需要较长时间
+                timeout=timeout_seconds
             )
+            
+            if not result.get('success', False):
+                logger.error("驱动器拒绝ERASE命令或命令执行失败")
+                return False
+            
+            # 2) 对于LONG ERASE，需要轮询TEST UNIT READY直到设备不再忙碌
+            if long_erase:
+                logger.info("ERASE命令已发送，开始轮询设备状态...")
+                poll_count = 0
+                poll_interval = 15  # 每15秒轮询一次
+                estimated_total_polls = 720  # 预计3小时 = 10800秒 / 15秒 = 720次轮询
+                
+                while True:
+                    await asyncio.sleep(poll_interval)
+                    poll_count += 1
+                    
+                    # 计算进度：基于轮询次数估算（最多到99%，完成时设为100%）
+                    if backup_task:
+                        # 进度计算：0% -> 99% (基于轮询次数)
+                        progress = min(99.0, (poll_count / estimated_total_polls) * 99.0)
+                        backup_task.progress_percent = progress
+                        
+                        # 更新进度到数据库
+                        if progress_callback:
+                            await progress_callback(backup_task, poll_count, estimated_total_polls)
+                    
+                    # 发送TEST UNIT READY命令检查设备状态
+                    tur_result = await self.scsi_interface.execute_scsi_command(
+                        device_path=None,
+                        cdb=bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),  # TEST UNIT READY
+                        timeout=30
+                    )
+                    
+                    if tur_result.get('success', False):
+                        # 擦除完成，设置进度为100%
+                        if backup_task:
+                            backup_task.progress_percent = 100.0
+                            if progress_callback:
+                                await progress_callback(backup_task, estimated_total_polls, estimated_total_polls)
+                        
+                        elapsed_minutes = poll_count * poll_interval // 60
+                        logger.info(f"✅ LONG ERASE完成成功！总耗时约 {elapsed_minutes} 分钟，进度: 100%")
+                        return True
+                    
+                    # 每6分钟（24次轮询）打印一次进度
+                    if poll_count % 24 == 0:
+                        elapsed_minutes = poll_count * poll_interval // 60
+                        current_progress = backup_task.progress_percent if backup_task else 0.0
+                        logger.info(f"LONG ERASE进行中... 已耗时约 {elapsed_minutes} 分钟，进度: {current_progress:.1f}%，请继续等待...")
+            
+            # 短擦除直接返回成功
+            if backup_task:
+                backup_task.progress_percent = 100.0
+                if progress_callback:
+                    await progress_callback(backup_task, 1, 1)
+            logger.info("擦除完成")
+            return True
 
-            return result['success']
-
+        except asyncio.CancelledError:
+            logger.warning("擦除操作被用户取消")
+            if backup_task:
+                backup_task.progress_percent = 0.0
+                if progress_callback:
+                    await progress_callback(backup_task, 0, 0)
+            raise
         except Exception as e:
             logger.error(f"执行擦除命令异常: {str(e)}")
+            if backup_task:
+                backup_task.progress_percent = 0.0
+                if progress_callback:
+                    await progress_callback(backup_task, 0, 0)
             return False
 
     async def _position_to_block(self, block_number: int) -> bool:

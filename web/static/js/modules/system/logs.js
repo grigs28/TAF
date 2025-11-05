@@ -58,45 +58,27 @@ document.addEventListener('DOMContentLoaded', function() {
             const levelClass = getLevelClass(log.level);
             const levelIcon = getLevelIcon(log.level);
             const barClass = getLevelBarClass(log.level);
-            const typeBadge = log.type === 'operation' ? '<span class="badge bg-info me-1">操作</span>' : '<span class="badge bg-secondary me-1">系统</span>';
+            const typeText = log.type === 'operation' ? '操作' : '系统';
             
-            let content = '';
-            if (log.type === 'operation') {
-                content = `
-                    <div class="mb-1">
-                        <strong>${log.operation_name || '未知操作'}</strong>
-                        ${log.operation_description ? `<span class="text-muted ms-2">${log.operation_description}</span>` : ''}
-                    </div>
-                    ${log.resource_name ? `<div class="text-muted small">资源: ${log.resource_name}</div>` : ''}
-                    ${log.username ? `<div class="text-muted small">用户: ${log.username}</div>` : ''}
-                    ${log.success !== undefined ? `<div class="small"><span class="badge ${log.success ? 'bg-success' : 'bg-danger'}">${log.success ? '成功' : '失败'}</span></div>` : ''}
-                `;
-            } else {
-                content = `
-                    <div class="mb-1">
-                        <strong>${log.message || '未知消息'}</strong>
-                    </div>
-                    ${log.module ? `<div class="text-muted small">模块: ${log.module}</div>` : ''}
-                    ${log.function ? `<div class="text-muted small">函数: ${log.function}</div>` : ''}
-                    ${log.file_path ? `<div class="text-muted small">文件: ${log.file_path}</div>` : ''}
-                `;
-            }
+            // 单行文本内容
+            const primaryText = log.type === 'operation'
+                ? (log.operation_name || log.operation_description || log.message || '未知操作')
+                : (log.message || '未知消息');
+            const resource = log.resource_name ? ` ${log.resource_name}` : '';
+            const userText = log.username ? ` ${log.username}` : '';
+            const successText = (log.success === true) ? ' 成功' : (log.success === false ? ' 失败' : '');
             
             return `
                 <div class="log-entry d-flex mb-2">
                     <div class="log-bar ${barClass}"></div>
                     <div class="content flex-grow-1">
-                        <div class="d-flex justify-content-between align-items-start mb-1">
-                            <div class="flex-grow-1">
-                                ${typeBadge}
-                                <span class="badge ${getCategoryBadgeClass(log.category)} me-1">${getCategoryName(log.category)}</span>
-                                <span class="badge ${levelClass} me-1">
-                                    <i class="bi ${levelIcon} me-1"></i>${getLevelName(log.level)}
-                                </span>
-                                <span class="text-muted small ms-2">${timestamp}</span>
-                            </div>
+                        <div class="content-line">
+                            <span class="text-muted small">${typeText}</span>
+                            <span class="badge ${getCategoryBadgeClass(log.category)}">${getCategoryName(log.category)}</span>
+                            <span class="badge ${levelClass}"><i class="bi ${levelIcon} me-1"></i>${getLevelName(log.level)}</span>
+                            <span class="text-muted small">${timestamp}</span>
+                            <span class="message">${primaryText}${resource}${userText}${successText}</span>
                         </div>
-                        ${content}
                     </div>
                 </div>
             `;
