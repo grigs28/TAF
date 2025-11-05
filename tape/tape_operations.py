@@ -37,6 +37,19 @@ class TapeOperations:
             logger.error(f"磁带操作模块(ITDT)初始化失败: {str(e)}")
             raise
 
+    async def _ensure_initialized(self) -> bool:
+        """懒加载初始化，确保 ITDT 可用。"""
+        if self._initialized and self.itdt_interface:
+            return True
+        try:
+            self.itdt_interface = ITDTInterface()
+            await self.itdt_interface.initialize()
+            self._initialized = True
+            return True
+        except Exception as e:
+            logger.error(f"初始化ITDT失败: {str(e)}")
+            return False
+
     async def load_tape(self, tape_cartridge: TapeCartridge) -> bool:
         """加载磁带"""
         try:
@@ -164,7 +177,7 @@ class TapeOperations:
             True=擦除成功，False=失败
         """
         try:
-            if not self._initialized:
+            if not await self._ensure_initialized():
                 logger.error("磁带操作模块未初始化")
                 return False
 
@@ -572,7 +585,7 @@ class TapeOperations:
             return None
 
     async def _read_tape_label(self) -> Optional[Dict[str, Any]]:
-        """读取磁带标签（优先从LTFS文件系统，失败则从磁带头读取元数据）"""
+        """读取磁带标签（仅LTFS文件系统 .TAPE_LABEL.txt）"""
         logger.info("========== 开始读取磁带标签 ==========")
         try:
             import json
@@ -625,68 +638,14 @@ class TapeOperations:
                             else:
                                 logger.warning(f"LTFS标签文件为空或格式不正确: {ltfs_label_file}")
                     else:
-                        logger.info(f"LTFS标签文件不存在: {ltfs_label_file}，将尝试SCSI方式读取")
+                        logger.info(f"LTFS标签文件不存在: {ltfs_label_file}")
                 except Exception as e:
                     logger.warning(f"从LTFS读取标签失败: {str(e)}", exc_info=True)
             else:
                 logger.info("未配置LTFS盘符或非Windows系统，跳过LTFS读取方式")
             
-            # 回退到SCSI方式读取磁带头
-            logger.info("尝试从SCSI方式读取磁带头...")
-            
-            if not self.scsi_interface:
-                logger.error("SCSI接口未初始化，无法读取标签")
-                return None
-            
-            logger.info("开始倒带...")
-            # 倒带到开头
-            await self.scsi_interface.rewind_tape()
-            logger.info("倒带完成，开始读取第一个数据块...")
-            
-            # 读取第一个数据块（256字节）
-            block_size = 256
-            result = await self.scsi_interface.read_tape_data(block_number=0, block_count=1, block_size=block_size)
-            
-            logger.info(f"读取数据块结果: success={result.get('success') if result else False}")
-            
-            if not result or not result.get('success'):
-                error_msg = result.get('error', '未知错误') if result else '未返回结果'
-                logger.warning(f"无法读取磁带标签: {error_msg}")
-                return None
-            
-            if 'data' not in result:
-                logger.warning("磁带标签读取结果中缺少data字段")
-                return None
-            
-            data = result['data']
-            logger.info(f"读取到数据长度: {len(data)} 字节")
-            
-            if len(data) < 16:
-                logger.warning(f"磁带标签数据太短: {len(data)} 字节（需要至少16字节）")
-                return None
-            
-            # 解析头部信息
-            header_length = int.from_bytes(data[0:4], 'big')
-            version = data[4:8].decode('ascii', errors='ignore')
-            
-            logger.info(f"解析头部: header_length={header_length}, version={version}")
-            
-            if version != 'TAF1':
-                logger.warning(f"不支持的磁带标签格式: {version} (期望: TAF1)")
-                return None
-            
-            # 提取元数据
-            if header_length > 0 and header_length < len(data) - 16:
-                metadata_bytes = data[8:8+header_length]
-                metadata_json = metadata_bytes.decode('utf-8', errors='ignore')
-                logger.info(f"解析元数据JSON: {metadata_json[:100]}...")  # 只显示前100个字符
-                metadata = json.loads(metadata_json)
-                logger.info(f"从磁带头读取磁带标签成功: {metadata.get('tape_id')}")
-                return metadata
-            else:
-                logger.warning(f"元数据长度无效: header_length={header_length}, data_length={len(data)}")
-            
-            logger.warning("磁带标签元数据为空")
+            # 未从LTFS读取到标签
+            logger.warning("未从LTFS读取到磁带标签")
             return None
             
         except Exception as e:
