@@ -43,7 +43,7 @@ async def get_tape_devices(request: Request):
         if not system:
             raise HTTPException(status_code=500, detail="系统未初始化")
 
-        devices = await system.tape_manager.scsi_interface.scan_tape_devices()
+        devices = await system.tape_manager.itdt_interface.scan_devices()
         return {"devices": devices}
 
     except Exception as e:

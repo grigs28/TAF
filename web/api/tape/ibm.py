@@ -199,8 +199,9 @@ async def get_ibm_tape_position(request: Request):
         if not system:
             raise HTTPException(status_code=500, detail="系统未初始化")
 
-        position = await system.tape_manager.scsi_interface.get_tape_position()
-        return position
+        # ITDT 无直接读取块位置命令，暂返回未支持
+        raise HTTPException(status_code=501, detail="ITDT暂不支持读取精确位置")
+        return None
 
     except Exception as e:
         logger.error(f"获取IBM磁带位置失败: {str(e)}")
@@ -215,8 +216,8 @@ async def get_ibm_sense_data(request: Request):
         if not system:
             raise HTTPException(status_code=500, detail="系统未初始化")
 
-        sense_data = await system.tape_manager.scsi_interface.request_sense()
-        return sense_data
+        # ITDT 无直接 Request Sense 输出，暂返回未支持
+        raise HTTPException(status_code=501, detail="ITDT暂不支持Request Sense")
 
     except Exception as e:
         logger.error(f"获取IBM Sense数据失败: {str(e)}")
@@ -235,12 +236,7 @@ async def send_ibm_log_sense(request: Request, page_code: int = 0x00, subpage_co
             'page_code': page_code,
             'subpage_code': subpage_code
         }
-        result = await system.tape_manager.scsi_interface.send_ibm_specific_command(
-            device_path=None,
-            command_type="log_sense",
-            parameters=parameters
-        )
-        return result
+        raise HTTPException(status_code=501, detail="ITDT暂不支持LOG SENSE直通")
 
     except Exception as e:
         logger.error(f"发送IBM LOG SENSE失败: {str(e)}")
@@ -259,12 +255,7 @@ async def send_ibm_mode_sense(request: Request, page_code: int = 0x3F, subpage_c
             'page_code': page_code,
             'subpage_code': subpage_code
         }
-        result = await system.tape_manager.scsi_interface.send_ibm_specific_command(
-            device_path=None,
-            command_type="mode_sense",
-            parameters=parameters
-        )
-        return result
+        raise HTTPException(status_code=501, detail="ITDT暂不支持MODE SENSE直通")
 
     except Exception as e:
         logger.error(f"发送IBM MODE SENSE失败: {str(e)}")
@@ -282,12 +273,7 @@ async def send_ibm_inquiry_vpd(request: Request, page_code: int = 0x00):
         parameters = {
             'page_code': page_code
         }
-        result = await system.tape_manager.scsi_interface.send_ibm_specific_command(
-            device_path=None,
-            command_type="inquiry_vpd",
-            parameters=parameters
-        )
-        return result
+        raise HTTPException(status_code=501, detail="ITDT暂不支持INQUIRY VPD直通")
 
     except Exception as e:
         logger.error(f"发送IBM INQUIRY VPD失败: {str(e)}")

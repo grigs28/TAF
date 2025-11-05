@@ -37,19 +37,17 @@ async def get_tape_config():
             "auto_tape_cleanup": settings.AUTO_TAPE_CLEANUP
         }
         
-        # 检查设备状态
+        # 检查设备状态（ITDT）
         status = {"connected": False, "device_info": "未检测"}
         try:
-            from tape.scsi_interface import SCSIInterface
-            scsi = SCSIInterface()
-            await scsi.initialize()
-            devices = await scsi.scan_tape_devices()
-            await scsi.close()
-            
-            if devices and len(devices) > 0:
+            from tape.itdt_interface import ITDTInterface
+            itdt = ITDTInterface()
+            await itdt.initialize()
+            devices = await itdt.scan_devices()
+            if devices:
                 status = {
                     "connected": True,
-                    "device_info": f"{devices[0].get('vendor', 'Unknown')} {devices[0].get('model', 'Unknown')}",
+                    "device_info": devices[0].get('path', 'Unknown'),
                     "device_path": devices[0].get('path', '')
                 }
         except Exception as e:
@@ -74,17 +72,13 @@ async def test_tape_connection(config: TapeConfig, request: Request):
         from config.settings import get_settings
         settings = get_settings()
         
-        # 使用配置的SCSI接口测试设备连接
+        # 使用 ITDT 测试设备连接
         try:
-            from tape.scsi_interface import SCSIInterface
-            scsi = SCSIInterface()
-            await scsi.initialize()
-            
-            # 使用配置的设备路径或默认路径
-            device_path = config.tape_device_path if config.tape_device_path else settings.TAPE_DEVICE_PATH
-            
+            from tape.itdt_interface import ITDTInterface
+            itdt = ITDTInterface()
+            await itdt.initialize()
             # 尝试扫描设备
-            devices = await scsi.scan_tape_devices()
+            devices = await itdt.scan_devices()
             
             duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
             
@@ -92,17 +86,14 @@ async def test_tape_connection(config: TapeConfig, request: Request):
             if devices and len(devices) > 0:
                 device = devices[0]
                 
-                # 尝试测试设备就绪状态（可能需要管理员权限）
+                # 测试设备就绪状态
                 try:
-                    ready = await scsi.test_unit_ready(device['path'])
+                    ready = await itdt.test_unit_ready(device.get('path'))
                     status_msg = "设备已就绪" if ready else "设备已检测到但未就绪"
                 except Exception as e:
                     logger.warning(f"测试设备就绪状态失败: {str(e)}")
-                    # 如果test_unit_ready失败但扫描成功，认为设备存在
                     ready = False
                     status_msg = f"设备已检测到（{str(e)}）"
-                
-                await scsi.close()
                 
                 device_info = f"{device.get('vendor', 'Unknown')} {device.get('model', 'Unknown')}"
                 
@@ -131,7 +122,6 @@ async def test_tape_connection(config: TapeConfig, request: Request):
                     "device_path": device.get('path', '')
                 }
             else:
-                await scsi.close()
                 await log_operation(
                     operation_type=OperationType.EXECUTE,
                     resource_type="tape_drive",
