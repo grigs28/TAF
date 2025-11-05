@@ -360,14 +360,11 @@ async def scan_tape_devices(request: Request):
     
     try:
         try:
-            from tape.scsi_interface import SCSIInterface
-            scsi = SCSIInterface()
-            await scsi.initialize()
-            
-            # 扫描设备
-            devices = await scsi.scan_tape_devices()
-            
-            await scsi.close()
+            from tape.itdt_interface import ITDTInterface
+            itdt = ITDTInterface()
+            await itdt.initialize()
+            # 扫描设备（ITDT 不需要 -f）
+            devices = await itdt.scan_devices()
             
             duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
             
@@ -412,9 +409,9 @@ async def scan_tape_devices(request: Request):
                     "message": "未检测到磁带设备"
                 }
                 
-        except Exception as scsi_error:
+        except Exception as itdt_error:
             duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
-            error_msg = f"扫描磁带设备失败: {str(scsi_error)}"
+            error_msg = f"扫描磁带设备失败: {str(itdt_error)}"
             logger.error(error_msg, exc_info=True)
             await log_operation(
                 operation_type=OperationType.TAPE_SCAN,
@@ -423,7 +420,7 @@ async def scan_tape_devices(request: Request):
                 operation_description="扫描磁带设备",
                 category="tape",
                 success=False,
-                error_message=str(scsi_error),
+                error_message=str(itdt_error),
                 ip_address=ip_address,
                 request_method=request_method,
                 request_url=request_url,
@@ -435,7 +432,7 @@ async def scan_tape_devices(request: Request):
                 message=error_msg,
                 module="web.api.system.tape_config",
                 function="scan_tape_devices",
-                exception_type=type(scsi_error).__name__,
+                exception_type=type(itdt_error).__name__,
                 stack_trace=traceback.format_exc(),
                 duration_ms=duration_ms
             )
@@ -443,7 +440,7 @@ async def scan_tape_devices(request: Request):
                 "success": False,
                 "devices": [],
                 "count": 0,
-                "message": f"扫描失败: {str(scsi_error)}"
+                "message": f"扫描失败: {str(itdt_error)}"
             }
         
     except Exception as e:

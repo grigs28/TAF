@@ -87,7 +87,7 @@ class ITDTInterface:
 			raise RuntimeError("ITDT 接口未初始化")
 
 		cmd = [self.itdt_path] + args
-		logger.info("[ITDT] 执行: %s", " ".join(args))
+		logger.info("[ITDT] 执行: %s", " ".join([str(a) for a in cmd]))
 
 		proc = await asyncio.create_subprocess_exec(
 			*cmd,
