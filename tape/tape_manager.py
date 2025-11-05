@@ -33,6 +33,8 @@ class TapeManager:
         self._initialized = False
         self._monitoring_task = None
         self.cached_devices: List[Dict[str, Any]] = []  # 缓存的设备列表
+        self._scanning_task = None  # 后台扫描任务
+        self._scan_in_progress = False  # 扫描进行中标志
 
     async def initialize(self):
         """初始化磁带管理器"""
@@ -45,8 +47,16 @@ class TapeManager:
             await self.tape_operations.initialize()
             logger.info("磁带操作模块初始化完成")
 
-            # 检测磁带设备
-            await self._detect_tape_devices()
+            # 尝试从配置快速加载设备（不阻塞）
+            cached_devices = self._load_cached_devices()
+            if cached_devices:
+                logger.info(f"从配置读取到 {len(cached_devices)} 个磁带设备（缓存）")
+                self.cached_devices = cached_devices
+            else:
+                logger.info("配置中无设备缓存，将在后台扫描设备")
+
+            # 在后台异步检测磁带设备（不阻塞启动）
+            self._scanning_task = asyncio.create_task(self._detect_tape_devices())
 
             # 加载磁带信息
             await self._load_tape_inventory()
@@ -56,31 +66,33 @@ class TapeManager:
                 self._monitoring_task = asyncio.create_task(self._monitoring_loop())
 
             self._initialized = True
-            logger.info("磁带管理器初始化完成")
+            logger.info("磁带管理器初始化完成（设备扫描在后台进行）")
 
         except Exception as e:
             logger.error(f"磁带管理器初始化失败: {str(e)}")
             raise
 
     async def _detect_tape_devices(self):
-        """检测磁带设备（启动时扫描一次，保存到配置，以后从配置读取）"""
+        """检测磁带设备（后台异步执行，不阻塞启动）"""
+        if self._scan_in_progress:
+            logger.debug("设备扫描已在进行中，跳过")
+            return
+        
+        self._scan_in_progress = True
         try:
-            # 先从配置读取设备信息
-            cached_devices = self._load_cached_devices()
-            if cached_devices:
-                logger.info(f"从配置读取到 {len(cached_devices)} 个磁带设备")
-                # 验证设备是否可用
-                if await self._verify_devices(cached_devices):
-                    logger.info("配置中的设备验证通过，使用缓存设备")
-                    self.cached_devices = cached_devices
+            # 如果已有缓存设备，先验证
+            if hasattr(self, 'cached_devices') and self.cached_devices:
+                logger.info(f"验证缓存设备（{len(self.cached_devices)} 个）...")
+                if await self._verify_devices(self.cached_devices):
+                    logger.info("缓存设备验证通过，无需重新扫描")
                     return
                 else:
-                    logger.warning("配置中的设备验证失败，重新扫描")
+                    logger.warning("缓存设备验证失败，重新扫描")
             
             # 配置中没有设备或验证失败，执行扫描
-            logger.info("开始扫描磁带设备...")
+            logger.info("开始后台扫描磁带设备...")
             devices = await self.itdt_interface.scan_devices()
-            logger.info(f"扫描到 {len(devices)} 个磁带设备")
+            logger.info(f"后台扫描完成，检测到 {len(devices)} 个磁带设备")
 
             for device in devices:
                 logger.info(f"磁带设备: {device.get('path', 'unknown')} - {device.get('model', 'Unknown')}")
@@ -89,12 +101,17 @@ class TapeManager:
             if devices:
                 self._save_cached_devices(devices)
                 self.cached_devices = devices
+                logger.info("设备信息已保存到配置")
             else:
                 logger.warning("未检测到任何磁带设备")
 
         except Exception as e:
-            logger.error(f"检测磁带设备失败: {str(e)}")
-            self.cached_devices = []
+            logger.error(f"后台检测磁带设备失败: {str(e)}", exc_info=True)
+            # 失败时保持现有缓存（如果有）
+            if not hasattr(self, 'cached_devices') or not self.cached_devices:
+                self.cached_devices = []
+        finally:
+            self._scan_in_progress = False
 
     def _load_cached_devices(self) -> List[Dict[str, Any]]:
         """从配置加载缓存的设备信息"""
@@ -167,10 +184,23 @@ class TapeManager:
             return False
 
     async def get_cached_devices(self) -> List[Dict[str, Any]]:
-        """获取缓存的设备列表（优先使用缓存）"""
+        """获取缓存的设备列表（优先使用缓存，如果缓存为空且扫描未进行中才触发扫描）"""
         if hasattr(self, 'cached_devices') and self.cached_devices:
             return self.cached_devices
-        # 如果没有缓存，重新扫描
+        
+        # 如果后台扫描正在进行，等待一下或返回空（避免重复扫描）
+        if self._scan_in_progress:
+            logger.debug("设备扫描正在进行中，等待完成...")
+            # 等待最多3秒
+            for _ in range(30):
+                await asyncio.sleep(0.1)
+                if hasattr(self, 'cached_devices') and self.cached_devices:
+                    return self.cached_devices
+            logger.warning("等待扫描超时，返回空列表")
+            return []
+        
+        # 如果没有缓存且扫描未进行，触发扫描（只在必要时）
+        logger.info("缓存为空，触发设备扫描...")
         try:
             devices = await self.itdt_interface.scan_devices()
             if devices:
