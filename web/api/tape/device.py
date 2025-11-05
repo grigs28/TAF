@@ -36,15 +36,24 @@ async def check_tape_health(request: Request):
 
 
 @router.get("/devices")
-async def get_tape_devices(request: Request):
-    """获取磁带设备列表"""
+async def get_tape_devices(request: Request, force_rescan: bool = False):
+    """获取磁带设备列表（默认使用缓存，force_rescan=true时强制重新扫描）"""
     try:
         system = request.app.state.system
         if not system:
             raise HTTPException(status_code=500, detail="系统未初始化")
 
-        devices = await system.tape_manager.itdt_interface.scan_devices()
-        return {"devices": devices}
+        # 优先使用缓存
+        if not force_rescan:
+            devices = await system.tape_manager.get_cached_devices()
+        else:
+            # 强制重新扫描
+            devices = await system.tape_manager.itdt_interface.scan_devices()
+            if devices:
+                system.tape_manager._save_cached_devices(devices)
+                system.tape_manager.cached_devices = devices
+        
+        return {"devices": devices, "cached": not force_rescan and len(devices) > 0}
 
     except Exception as e:
         logger.error(f"获取磁带设备列表失败: {str(e)}")

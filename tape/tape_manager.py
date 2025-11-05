@@ -32,6 +32,7 @@ class TapeManager:
         self.current_tape: Optional[TapeCartridge] = None
         self._initialized = False
         self._monitoring_task = None
+        self.cached_devices: List[Dict[str, Any]] = []  # 缓存的设备列表
 
     async def initialize(self):
         """初始化磁带管理器"""
@@ -62,16 +63,123 @@ class TapeManager:
             raise
 
     async def _detect_tape_devices(self):
-        """检测磁带设备"""
+        """检测磁带设备（启动时扫描一次，保存到配置，以后从配置读取）"""
         try:
+            # 先从配置读取设备信息
+            cached_devices = self._load_cached_devices()
+            if cached_devices:
+                logger.info(f"从配置读取到 {len(cached_devices)} 个磁带设备")
+                # 验证设备是否可用
+                if await self._verify_devices(cached_devices):
+                    logger.info("配置中的设备验证通过，使用缓存设备")
+                    self.cached_devices = cached_devices
+                    return
+                else:
+                    logger.warning("配置中的设备验证失败，重新扫描")
+            
+            # 配置中没有设备或验证失败，执行扫描
+            logger.info("开始扫描磁带设备...")
             devices = await self.itdt_interface.scan_devices()
-            logger.info(f"检测到 {len(devices)} 个磁带设备")
+            logger.info(f"扫描到 {len(devices)} 个磁带设备")
 
             for device in devices:
-                logger.info(f"磁带设备: {device.get('path', 'unknown')}")
+                logger.info(f"磁带设备: {device.get('path', 'unknown')} - {device.get('model', 'Unknown')}")
+
+            # 保存到配置
+            if devices:
+                self._save_cached_devices(devices)
+                self.cached_devices = devices
+            else:
+                logger.warning("未检测到任何磁带设备")
 
         except Exception as e:
             logger.error(f"检测磁带设备失败: {str(e)}")
+            self.cached_devices = []
+
+    def _load_cached_devices(self) -> List[Dict[str, Any]]:
+        """从配置加载缓存的设备信息"""
+        try:
+            import json
+            from pathlib import Path
+            env_file = Path(".env")
+            if not env_file.exists():
+                return []
+            
+            with open(env_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("TAPE_DEVICES_CACHE="):
+                        devices_json = line.split("=", 1)[1].strip()
+                        if devices_json:
+                            return json.loads(devices_json)
+            return []
+        except Exception as e:
+            logger.debug(f"加载缓存设备失败: {str(e)}")
+            return []
+
+    def _save_cached_devices(self, devices: List[Dict[str, Any]]):
+        """保存设备信息到配置"""
+        try:
+            import json
+            from pathlib import Path
+            env_file = Path(".env")
+            devices_json = json.dumps(devices, ensure_ascii=False)
+            
+            # 读取现有.env内容
+            lines = []
+            if env_file.exists():
+                with open(env_file, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+            
+            # 更新或添加 TAPE_DEVICES_CACHE
+            updated = False
+            for i, line in enumerate(lines):
+                if line.strip().startswith("TAPE_DEVICES_CACHE="):
+                    lines[i] = f"TAPE_DEVICES_CACHE={devices_json}\n"
+                    updated = True
+                    break
+            
+            if not updated:
+                lines.append(f"\n# 磁带设备缓存（自动生成，请勿手动修改）\n")
+                lines.append(f"TAPE_DEVICES_CACHE={devices_json}\n")
+            
+            # 写入文件
+            with open(env_file, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            
+            logger.info(f"已保存 {len(devices)} 个设备到配置")
+        except Exception as e:
+            logger.warning(f"保存设备缓存失败: {str(e)}")
+
+    async def _verify_devices(self, devices: List[Dict[str, Any]]) -> bool:
+        """验证设备是否可用（至少测试一个设备）"""
+        if not devices:
+            return False
+        try:
+            # 测试第一个设备是否可用
+            first_device = devices[0]
+            device_path = first_device.get('path')
+            if not device_path:
+                return False
+            # 尝试test_unit_ready
+            return await self.itdt_interface.test_unit_ready(device_path)
+        except Exception:
+            return False
+
+    async def get_cached_devices(self) -> List[Dict[str, Any]]:
+        """获取缓存的设备列表（优先使用缓存）"""
+        if hasattr(self, 'cached_devices') and self.cached_devices:
+            return self.cached_devices
+        # 如果没有缓存，重新扫描
+        try:
+            devices = await self.itdt_interface.scan_devices()
+            if devices:
+                self._save_cached_devices(devices)
+                self.cached_devices = devices
+            return devices
+        except Exception as e:
+            logger.error(f"获取设备列表失败: {str(e)}")
+            return []
 
     async def _load_tape_inventory(self):
         """加载磁带库存信息"""

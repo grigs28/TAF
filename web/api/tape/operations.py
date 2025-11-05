@@ -382,12 +382,8 @@ async def format_tape(request: Request, format_request: FormatRequest = FormatRe
                 "message": "系统未初始化"
             }
         
-        # 检查是否有磁带设备（ITDT 扫描）
-        devices = []
-        try:
-            devices = await system.tape_manager.itdt_interface.scan_devices()
-        except Exception:
-            devices = []
+        # 检查是否有磁带设备（优先使用缓存）
+        devices = await system.tape_manager.get_cached_devices()
         if not devices:
             await log_operation(
                 operation_type=OperationType.TAPE_FORMAT,

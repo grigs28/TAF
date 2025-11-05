@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.get("/tape/config")
-async def get_tape_config():
+async def get_tape_config(request: Request):
     """获取磁带机配置"""
     try:
         from config.settings import get_settings
@@ -37,19 +37,18 @@ async def get_tape_config():
             "auto_tape_cleanup": settings.AUTO_TAPE_CLEANUP
         }
         
-        # 检查设备状态（ITDT）
+        # 检查设备状态（优先使用缓存）
         status = {"connected": False, "device_info": "未检测"}
         try:
-            from tape.itdt_interface import ITDTInterface
-            itdt = ITDTInterface()
-            await itdt.initialize()
-            devices = await itdt.scan_devices()
-            if devices:
-                status = {
-                    "connected": True,
-                    "device_info": devices[0].get('path', 'Unknown'),
-                    "device_path": devices[0].get('path', '')
-                }
+            system = request.app.state.system
+            if system:
+                devices = await system.tape_manager.get_cached_devices()
+                if devices:
+                    status = {
+                        "connected": True,
+                        "device_info": devices[0].get('model', devices[0].get('path', 'Unknown')),
+                        "device_path": devices[0].get('path', '')
+                    }
         except Exception as e:
             logger.debug(f"检查设备状态失败: {str(e)}")
         
@@ -72,23 +71,25 @@ async def test_tape_connection(config: TapeConfig, request: Request):
         from config.settings import get_settings
         settings = get_settings()
         
-        # 使用 ITDT 测试设备连接
+        # 使用 ITDT 测试设备连接（优先使用缓存）
         try:
-            from tape.itdt_interface import ITDTInterface
-            itdt = ITDTInterface()
-            await itdt.initialize()
-            # 尝试扫描设备
-            devices = await itdt.scan_devices()
+            system = request.app.state.system
+            if not system:
+                raise HTTPException(status_code=500, detail="系统未初始化")
+            
+            # 优先使用缓存设备
+            devices = await system.tape_manager.get_cached_devices()
             
             duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
             
             # 如果找到设备，测试连接
             if devices and len(devices) > 0:
                 device = devices[0]
+                device_path = device.get('path', '')
                 
                 # 测试设备就绪状态
                 try:
-                    ready = await itdt.test_unit_ready(device.get('path'))
+                    ready = await system.tape_manager.itdt_interface.test_unit_ready(device_path)
                     status_msg = "设备已就绪" if ready else "设备已检测到但未就绪"
                 except Exception as e:
                     logger.warning(f"测试设备就绪状态失败: {str(e)}")
@@ -119,9 +120,10 @@ async def test_tape_connection(config: TapeConfig, request: Request):
                     "connected": True,
                     "device_info": device_info,
                     "status": status_msg,
-                    "device_path": device.get('path', '')
+                    "device_path": device_path
                 }
             else:
+                device_path = config.tape_device_path if config.tape_device_path else settings.TAPE_DEVICE_PATH
                 await log_operation(
                     operation_type=OperationType.EXECUTE,
                     resource_type="tape_drive",
@@ -142,10 +144,11 @@ async def test_tape_connection(config: TapeConfig, request: Request):
                     "error": "请检查设备是否连接"
                 }
                 
-        except Exception as scsi_error:
+        except Exception as itdt_error:
             duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
-            error_msg = f"SCSI接口测试失败: {str(scsi_error)}"
+            error_msg = f"ITDT接口测试失败: {str(itdt_error)}"
             logger.error(error_msg, exc_info=True)
+            device_path = config.tape_device_path if config.tape_device_path else settings.TAPE_DEVICE_PATH
             await log_operation(
                 operation_type=OperationType.EXECUTE,
                 resource_type="tape_drive",
@@ -153,7 +156,7 @@ async def test_tape_connection(config: TapeConfig, request: Request):
                 operation_description=f"测试磁带机连接失败",
                 category="tape",
                 success=False,
-                error_message=str(scsi_error),
+                error_message=str(itdt_error),
                 ip_address=ip_address,
                 request_method=request_method,
                 request_url=request_url,
@@ -165,15 +168,15 @@ async def test_tape_connection(config: TapeConfig, request: Request):
                 message=error_msg,
                 module="web.api.system.tape_config",
                 function="test_tape_connection",
-                exception_type=type(scsi_error).__name__,
+                exception_type=type(itdt_error).__name__,
                 stack_trace=traceback.format_exc(),
                 duration_ms=duration_ms
             )
             return {
                 "success": False,
-                "message": f"连接测试失败: {str(scsi_error)}",
+                "message": f"连接测试失败: {str(itdt_error)}",
                 "connected": False,
-                "error": str(scsi_error)
+                "error": str(itdt_error)
             }
         
     except Exception as e:
@@ -351,14 +354,33 @@ async def update_tape_config(config: TapeConfig, request: Request):
 
 
 @router.get("/tape/scan")
-async def scan_tape_devices(request: Request, force_generic: bool = True, show_all_paths: bool = True):
-    """扫描磁带设备"""
+async def scan_tape_devices(request: Request, force_generic: bool = True, show_all_paths: bool = True, force_rescan: bool = False):
+    """扫描磁带设备（默认使用缓存，force_rescan=true时强制重新扫描）"""
     start_time = datetime.now()
     ip_address = request.client.host if request.client else None
     request_method = "GET"
     request_url = str(request.url)
     
     try:
+        system = request.app.state.system
+        if not system:
+            raise HTTPException(status_code=500, detail="系统未初始化")
+        
+        # 如果不需要强制重新扫描，优先使用缓存
+        if not force_rescan:
+            cached_devices = await system.tape_manager.get_cached_devices()
+            if cached_devices:
+                logger.info(f"使用缓存设备列表: {len(cached_devices)} 个设备")
+                duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                return {
+                    "success": True,
+                    "devices": cached_devices,
+                    "count": len(cached_devices),
+                    "cached": True,
+                    "message": "使用缓存设备列表"
+                }
+        
+        # 强制重新扫描或缓存为空
         try:
             from tape.itdt_interface import ITDTInterface
             itdt = ITDTInterface()
@@ -374,6 +396,11 @@ async def scan_tape_devices(request: Request, force_generic: bool = True, show_a
                 pass
             # 扫描设备（ITDT 不需要 -f）
             devices = await itdt.scan_devices()
+            
+            # 更新缓存
+            if devices:
+                system.tape_manager._save_cached_devices(devices)
+                system.tape_manager.cached_devices = devices
             
             duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
             
