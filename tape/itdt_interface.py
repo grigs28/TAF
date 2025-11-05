@@ -28,10 +28,26 @@ class ITDTInterface:
 	async def initialize(self) -> None:
 		"""初始化 ITDT 路径并检查可用性。"""
 		itdt_path = getattr(self.settings, "ITDT_PATH", None)
-		if not itdt_path:
-			# 默认路径
-			itdt_path = "c:\\itdt\\itdt.exe" if self.system == "Windows" else "/usr/local/itdt/itdt"
-		self.itdt_path = itdt_path
+		candidates: List[str] = []
+		if itdt_path:
+			candidates.append(itdt_path)
+		if self.system == "Windows":
+			candidates += [
+				"C:\\itdt\\itdt.exe",
+				"C:\\Program Files\\IBM\\ITDT\\itdt.exe",
+				"C:\\Program Files (x86)\\IBM\\ITDT\\itdt.exe",
+			]
+		else:
+			candidates.append("/usr/local/itdt/itdt")
+
+		# 选择第一个存在的路径
+		for p in candidates:
+			if p and os.path.exists(p):
+				self.itdt_path = p
+				break
+		# 如果都不存在，仍然使用首个候选以便日志提示
+		if not self.itdt_path:
+			self.itdt_path = candidates[0] if candidates else None
 
 		if not await self._check_itdt_available():
 			raise FileNotFoundError(f"未找到 ITDT 可执行文件: {self.itdt_path}")
