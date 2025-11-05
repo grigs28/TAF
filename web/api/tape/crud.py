@@ -137,6 +137,73 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
                     "expiry_date": expiry_date.isoformat()
                 }
                 
+                # 先检查磁带是否已格式化并尝试写入标签，只有标签写入成功才写入数据库
+                logger.info(f"准备创建磁带 {request.tape_id}，先检查格式化状态并写入标签...")
+                
+                # 检查磁带是否已格式化（使用ITDT命令）
+                is_formatted = await system.tape_manager.tape_operations._is_tape_formatted()
+                if not is_formatted:
+                    # 磁带未格式化，不写入数据库
+                    logger.warning(f"磁带 {request.tape_id} 未格式化，不添加到数据库")
+                    await log_operation(
+                        operation_type=OperationType.CREATE,
+                        resource_type="tape",
+                        resource_id=request.tape_id,
+                        resource_name=request.label,
+                        operation_name="创建磁带",
+                        operation_description=f"创建磁带 {request.tape_id}（未格式化，已拒绝）",
+                        category="tape",
+                        success=False,
+                        error_message="磁带未格式化，请先格式化磁带",
+                        ip_address=ip_address,
+                        request_method=request_method,
+                        request_url=request_url,
+                        duration_ms=int((datetime.now() - start_time).total_seconds() * 1000)
+                    )
+                    return {
+                        "success": False,
+                        "message": f"磁带 {request.tape_id} 未格式化，无法创建",
+                        "error": "磁带未格式化，请先格式化磁带后再添加"
+                    }
+                
+                # 准备标签数据
+                tape_info = {
+                    "tape_id": request.tape_id,
+                    "label": request.label,
+                    "serial_number": request.serial_number,
+                    "created_date": created_date,
+                    "expiry_date": expiry_date
+                }
+                
+                # 写入物理磁带标签（必须先写入标签成功才能添加到数据库）
+                write_result = await system.tape_manager.tape_operations._write_tape_label(tape_info)
+                if not write_result:
+                    # 标签写入失败，不写入数据库
+                    logger.warning(f"磁带 {request.tape_id} 标签写入失败，不添加到数据库")
+                    await log_operation(
+                        operation_type=OperationType.CREATE,
+                        resource_type="tape",
+                        resource_id=request.tape_id,
+                        resource_name=request.label,
+                        operation_name="创建磁带",
+                        operation_description=f"创建磁带 {request.tape_id}（标签写入失败，已拒绝）",
+                        category="tape",
+                        success=False,
+                        error_message="标签写入失败，请确保磁带机中已装入磁带且磁带已格式化",
+                        ip_address=ip_address,
+                        request_method=request_method,
+                        request_url=request_url,
+                        duration_ms=int((datetime.now() - start_time).total_seconds() * 1000)
+                    )
+                    return {
+                        "success": False,
+                        "message": f"磁带 {request.tape_id} 标签写入失败，无法创建",
+                        "error": "标签写入失败，请确保磁带机中已装入磁带且磁带已格式化"
+                    }
+                
+                # 标签写入成功，现在可以写入数据库
+                logger.info(f"磁带 {request.tape_id} 标签写入成功，开始写入数据库...")
+                
                 # 插入新磁带
                 cur.execute("""
                     INSERT INTO tape_cartridges 
@@ -162,127 +229,36 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
                 ))
                 
                 conn.commit()
-                logger.info(f"创建磁带记录: {request.tape_id}")
+                logger.info(f"磁带 {request.tape_id} 记录已创建并写入数据库")
         
         finally:
             conn.close()
         
         duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
         
-        # 尝试写入物理磁带标签（如果磁带机中有磁带）
-        try:
-            # 检查磁带是否已格式化（使用ITDT命令）
-            is_formatted = await system.tape_manager.tape_operations._is_tape_formatted()
-            existing_label = await system.tape_manager.tape_operations._read_tape_label()
-            
-            if not is_formatted:
-                # 磁带未格式化，返回需要格式化的提示
-                logger.info(f"磁带 {request.tape_id} 未格式化，需要格式化")
-                await log_operation(
-                    operation_type=OperationType.CREATE,
-                    resource_type="tape",
-                    resource_id=request.tape_id,
-                    resource_name=request.label,
-                    operation_name="创建磁带",
-                    operation_description=f"创建磁带 {request.tape_id}（需要格式化）",
-                    category="tape",
-                    success=True,
-                    result_message=f"磁带 {request.tape_id} 创建成功，但需要格式化",
-                    new_values=new_values,
-                    ip_address=ip_address,
-                    request_method=request_method,
-                    request_url=request_url,
-                    duration_ms=duration_ms
-                )
-                return {
-                    "success": True,
-                    "message": f"磁带 {request.tape_id} 创建成功",
-                    "tape_id": request.tape_id,
-                    "needs_format": True,
-                    "format_message": "磁带未格式化，请先格式化磁带"
-                }
-            
-            # 准备标签数据
-            tape_info = {
-                "tape_id": request.tape_id,
-                "label": request.label,
-                "serial_number": request.serial_number,
-                "created_date": created_date,
-                "expiry_date": expiry_date
-            }
-            
-            # 写入物理磁带标签
-            write_result = await system.tape_manager.tape_operations._write_tape_label(tape_info)
-            if write_result:
-                logger.info(f"磁带标签已写入物理磁带: {request.tape_id}")
-                await log_operation(
-                    operation_type=OperationType.CREATE,
-                    resource_type="tape",
-                    resource_id=request.tape_id,
-                    resource_name=request.label,
-                    operation_name="创建磁带",
-                    operation_description=f"创建磁带 {request.tape_id}，标签已写入",
-                    category="tape",
-                    success=True,
-                    result_message=f"磁带 {request.tape_id} 创建成功，标签已写入",
-                    new_values=new_values,
-                    ip_address=ip_address,
-                    request_method=request_method,
-                    request_url=request_url,
-                    duration_ms=duration_ms
-                )
-                return {
-                    "success": True,
-                    "message": f"磁带 {request.tape_id} 创建成功，标签已写入",
-                    "tape_id": request.tape_id
-                }
-            else:
-                logger.warning(f"磁带记录创建成功，但物理标签写入失败（可能磁带机中无磁带）")
-                await log_operation(
-                    operation_type=OperationType.CREATE,
-                    resource_type="tape",
-                    resource_id=request.tape_id,
-                    resource_name=request.label,
-                    operation_name="创建磁带",
-                    operation_description=f"创建磁带 {request.tape_id}（但未写入物理磁带）",
-                    category="tape",
-                    success=True,
-                    result_message=f"磁带 {request.tape_id} 创建成功（但未写入物理磁带）",
-                    new_values=new_values,
-                    ip_address=ip_address,
-                    request_method=request_method,
-                    request_url=request_url,
-                    duration_ms=duration_ms
-                )
-                return {
-                    "success": True,
-                    "message": f"磁带 {request.tape_id} 创建成功（但未写入物理磁带，请确保磁带机中已装入磁带）",
-                    "tape_id": request.tape_id
-                }
-        except Exception as e:
-            logger.warning(f"写入物理磁带标签时出错: {str(e)}")
-            await log_operation(
-                operation_type=OperationType.CREATE,
-                resource_type="tape",
-                resource_id=request.tape_id,
-                resource_name=request.label,
-                operation_name="创建磁带",
-                operation_description=f"创建磁带 {request.tape_id}（标签写入失败）",
-                category="tape",
-                success=True,
-                result_message=f"磁带 {request.tape_id} 创建成功（但未写入物理磁带）",
-                error_message=f"标签写入失败: {str(e)}",
-                new_values=new_values,
-                ip_address=ip_address,
-                request_method=request_method,
-                request_url=request_url,
-                duration_ms=duration_ms
-            )
-            return {
-                "success": True,
-                "message": f"磁带 {request.tape_id} 创建成功（但未写入物理磁带，请确保磁带机中已装入磁带）",
-                "tape_id": request.tape_id
-            }
+        # 记录成功日志
+        await log_operation(
+            operation_type=OperationType.CREATE,
+            resource_type="tape",
+            resource_id=request.tape_id,
+            resource_name=request.label,
+            operation_name="创建磁带",
+            operation_description=f"创建磁带 {request.tape_id}，标签已写入",
+            category="tape",
+            success=True,
+            result_message=f"磁带 {request.tape_id} 创建成功，标签已写入",
+            new_values=new_values,
+            ip_address=ip_address,
+            request_method=request_method,
+            request_url=request_url,
+            duration_ms=duration_ms
+        )
+        
+        return {
+            "success": True,
+            "message": f"磁带 {request.tape_id} 创建成功，标签已写入",
+            "tape_id": request.tape_id
+        }
         
     except HTTPException:
         raise

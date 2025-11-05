@@ -184,20 +184,39 @@ class ITDTInterface:
 		res = await self._run_itdt(args)
 		return res["success"]
 
-	async def check_ltfs_readiness(self, device_path: Optional[str] = None) -> bool:
-		"""检查磁带是否支持LTFS并已格式化（使用checkltfsreadiness命令）"""
+	async def check_ltfs_readiness(self, device_path: Optional[str] = None, force_data_overwrite: bool = False) -> bool:
+		"""检查磁带是否支持LTFS并已格式化（使用checkltfsreadiness命令）
+		
+		Args:
+			device_path: 设备路径，如果为None则使用默认设备
+			force_data_overwrite: 是否添加-forcedataoverwrite参数
+		
+		Returns:
+			True表示磁带已格式化且支持LTFS，False表示未格式化或不支持LTFS
+		"""
 		dev = self._resolve_device(device_path)
-		res = await self._run_itdt(["-f", dev, "checkltfsreadiness"])
-		# 检查输出中是否包含成功信息
+		args = ["-f", dev, "checkltfsreadiness"]
+		if force_data_overwrite:
+			args.append("-forcedataoverwrite")
+		res = await self._run_itdt(args)
+		
+		# 检查退出码和输出
 		if res["success"]:
 			stdout_lower = res["stdout"].lower()
-			# 如果输出包含"ready"、"formatted"、"ltfs ready"等关键词，认为已格式化
+			# 如果输出包含"ready"、"formatted"、"ltfs ready"、"ltfs is ready"等关键词，认为已格式化
 			# 排除"not ready"、"not formatted"等否定词
 			if ("not ready" not in stdout_lower and "not formatted" not in stdout_lower and 
-				("ready" in stdout_lower or "formatted" in stdout_lower or "ltfs ready" in stdout_lower)):
+				("ready" in stdout_lower or "formatted" in stdout_lower or "ltfs ready" in stdout_lower or 
+				 "ltfs is ready" in stdout_lower or "ltfs support" in stdout_lower)):
 				return True
 			# 如果明确包含"not ready"或"not formatted"，返回False
-			if "not ready" in stdout_lower or "not formatted" in stdout_lower:
+			if "not ready" in stdout_lower or "not formatted" in stdout_lower or "not supported" in stdout_lower:
+				return False
+		# 如果命令失败，检查stderr中是否有错误信息
+		if not res["success"]:
+			err_lower = res["stderr"].lower() if res.get("stderr") else ""
+			# 如果错误信息明确表示未格式化，返回False
+			if "not formatted" in err_lower or "not ready" in err_lower or "not supported" in err_lower:
 				return False
 		return False
 

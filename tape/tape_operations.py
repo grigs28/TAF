@@ -590,14 +590,25 @@ class TapeOperations:
             if not self.itdt_interface or not self.itdt_interface._initialized:
                 await self._ensure_initialized()
             
-            # 使用ITDT检查LTFS就绪状态
-            is_formatted = await self.itdt_interface.check_ltfs_readiness()
+            # 使用ITDT检查LTFS就绪状态（尝试使用-forcedataoverwrite参数）
+            is_formatted = await self.itdt_interface.check_ltfs_readiness(force_data_overwrite=True)
             logger.info(f"ITDT格式化检测结果: {is_formatted}")
+            
+            # 如果第一次检测失败，尝试不使用-forcedataoverwrite参数
+            if not is_formatted:
+                logger.debug("第一次检测失败，尝试不使用-forcedataoverwrite参数")
+                is_formatted = await self.itdt_interface.check_ltfs_readiness(force_data_overwrite=False)
+                logger.info(f"ITDT格式化检测结果（第二次尝试）: {is_formatted}")
+            
             return is_formatted
         except Exception as e:
-            logger.warning(f"使用ITDT检测格式化状态失败: {str(e)}")
-            # 回退到检查标签文件
-            return await self._read_tape_label() is not None
+            logger.warning(f"使用ITDT检测格式化状态失败: {str(e)}", exc_info=True)
+            # 回退到检查标签文件（如果标签文件存在，认为已格式化）
+            label = await self._read_tape_label()
+            if label:
+                logger.info("ITDT检测失败，但标签文件存在，认为已格式化")
+                return True
+            return False
 
     async def _read_tape_label(self) -> Optional[Dict[str, Any]]:
         """读取磁带标签（仅LTFS文件系统 .TAPE_LABEL.txt）"""
