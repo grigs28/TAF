@@ -585,29 +585,28 @@ class TapeOperations:
             return None
 
     async def _is_tape_formatted(self) -> bool:
-        """检查磁带是否已格式化（使用ITDT checkltfsreadiness命令）"""
+        """检查磁带是否已格式化（使用ITDT qrypart命令）
+        
+        逻辑：
+        - 命令执行成功 + 有分区信息 = 已格式化
+        - 其他所有情况 = 未格式化
+        """
         try:
             if not self.itdt_interface or not self.itdt_interface._initialized:
                 await self._ensure_initialized()
             
-            # 使用ITDT检查LTFS就绪状态（尝试使用-forcedataoverwrite参数）
-            is_formatted = await self.itdt_interface.check_ltfs_readiness(force_data_overwrite=True)
-            logger.info(f"ITDT格式化检测结果: {is_formatted}")
+            # 使用ITDT查询分区信息
+            partition_info = await self.itdt_interface.query_partition()
             
-            # 如果第一次检测失败，尝试不使用-forcedataoverwrite参数
-            if not is_formatted:
-                logger.debug("第一次检测失败，尝试不使用-forcedataoverwrite参数")
-                is_formatted = await self.itdt_interface.check_ltfs_readiness(force_data_overwrite=False)
-                logger.info(f"ITDT格式化检测结果（第二次尝试）: {is_formatted}")
+            # 命令执行成功 + 有分区 = 已格式化
+            is_formatted = partition_info.get("has_partitions", False)
+            
+            logger.info(f"ITDT格式化检测结果（qrypart）: {is_formatted}")
             
             return is_formatted
         except Exception as e:
             logger.warning(f"使用ITDT检测格式化状态失败: {str(e)}", exc_info=True)
-            # 回退到检查标签文件（如果标签文件存在，认为已格式化）
-            label = await self._read_tape_label()
-            if label:
-                logger.info("ITDT检测失败，但标签文件存在，认为已格式化")
-                return True
+            # 任何异常都认为未格式化
             return False
 
     async def _read_tape_label(self) -> Optional[Dict[str, Any]]:

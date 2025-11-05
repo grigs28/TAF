@@ -191,15 +191,25 @@ class ITDTInterface:
 		res = await self._run_itdt(args)
 		return res["success"]
 
-	async def check_ltfs_readiness(self, device_path: Optional[str] = None, force_data_overwrite: bool = False) -> bool:
-		"""检查磁带是否支持LTFS并已格式化（使用checkltfsreadiness命令）
+	async def query_partition(self, device_path: Optional[str] = None) -> Dict[str, Any]:
+		"""查询磁带分区信息（使用qrypart命令）
 		
 		Args:
 			device_path: 设备路径，如果为None则使用默认设备
-			force_data_overwrite: 是否添加-forcedataoverwrite参数
 		
 		Returns:
-			True表示磁带已格式化且支持LTFS，False表示未格式化或不支持LTFS
+			包含分区信息的字典，例如：
+			{
+				"active_partition": 0,
+				"max_additional_partitions": 3,
+				"additional_partitions_defined": 1,
+				"partitioning_type": "wrap-wise partitioning",
+				"partitions": [
+					{"index": 0, "size_meg": 128000},
+					{"index": 1, "size_meg": 17614000}
+				],
+				"has_partitions": True  # 是否有分区信息
+			}
 		"""
 		dev = self._resolve_device(device_path)
 		# 清理设备路径（移除可能的冒号）
@@ -207,47 +217,73 @@ class ITDTInterface:
 			dev = dev[:-1]
 		# Windows下优先使用\\.\Tape0格式
 		if self.system == "Windows" and dev.startswith("\\\\.\\scsi"):
-			# 尝试使用\\.\Tape0格式
 			dev = "\\\\.\\Tape0"
 		
-		args = ["-f", dev, "checkltfsreadiness"]
-		if force_data_overwrite:
-			args.append("-forcedataoverwrite")
+		logger.info(f"[ITDT分区查询] 使用设备路径: {dev}")
+		res = await self._run_itdt(["-f", dev, "qrypart"])
 		
-		logger.info(f"[ITDT格式化检测] 使用设备路径: {dev}")
-		res = await self._run_itdt(args)
+		partition_data = {
+			"active_partition": None,
+			"max_additional_partitions": None,
+			"additional_partitions_defined": None,
+			"partitioning_type": None,
+			"partitions": [],
+			"has_partitions": False
+		}
 		
-		# 检查退出码和输出
-		logger.info(f"[ITDT格式化检测] 退出码: {res['returncode']}, 成功: {res['success']}")
-		logger.info(f"[ITDT格式化检测] 标准输出: {res['stdout'][:500]}")  # 只输出前500字符
-		if res.get('stderr'):
-			logger.info(f"[ITDT格式化检测] 标准错误: {res['stderr'][:500]}")
-		
-		if res["success"]:
-			stdout_lower = res["stdout"].lower()
-			# 如果输出包含"ready"、"formatted"、"ltfs ready"、"ltfs is ready"等关键词，认为已格式化
-			# 排除"not ready"、"not formatted"等否定词
-			if ("not ready" not in stdout_lower and "not formatted" not in stdout_lower and 
-				("ready" in stdout_lower or "formatted" in stdout_lower or "ltfs ready" in stdout_lower or 
-				 "ltfs is ready" in stdout_lower or "ltfs support" in stdout_lower)):
-				logger.info("[ITDT格式化检测] 结果: 已格式化")
-				return True
-			# 如果明确包含"not ready"或"not formatted"，返回False
-			if "not ready" in stdout_lower or "not formatted" in stdout_lower or "not supported" in stdout_lower:
-				logger.info("[ITDT格式化检测] 结果: 未格式化（明确标识）")
-				return False
-			# 如果输出为空或没有明确标识，可能需要根据退出码判断
-			logger.info("[ITDT格式化检测] 结果: 无法确定（输出无明确标识）")
-		# 如果命令失败，检查stderr中是否有错误信息
 		if not res["success"]:
-			err_lower = res["stderr"].lower() if res.get("stderr") else ""
-			# 如果错误信息明确表示未格式化，返回False
-			if "not formatted" in err_lower or "not ready" in err_lower or "not supported" in err_lower:
-				logger.info("[ITDT格式化检测] 结果: 未格式化（错误信息）")
-				return False
-			logger.warning(f"[ITDT格式化检测] 命令失败，退出码: {res['returncode']}")
-		logger.info("[ITDT格式化检测] 结果: 未格式化（默认）")
-		return False
+			logger.warning(f"[ITDT分区查询] 命令执行失败，退出码: {res['returncode']}")
+			return partition_data
+		
+		# 解析输出
+		stdout = res["stdout"]
+		logger.info(f"[ITDT分区查询] 输出: {stdout[:500]}")
+		
+		import re
+		lines = stdout.split('\n')
+		for line in lines:
+			line = line.strip()
+			if not line:
+				continue
+			
+			# 匹配分区信息
+			patterns = {
+				r"Active Partition\s+(\d+)": ("active_partition", int),
+				r"Max\. Additional Partitions\s+(\d+)": ("max_additional_partitions", int),
+				r"Additional Partitions defined\s+(\d+)": ("additional_partitions_defined", int),
+				r"Partitioning Type is\s+(.+)": ("partitioning_type", str),
+			}
+			
+			for pattern, (key, type_func) in patterns.items():
+				match = re.search(pattern, line, re.IGNORECASE)
+				if match:
+					value = match.group(1).strip()
+					if type_func == int:
+						partition_data[key] = int(value)
+					else:
+						partition_data[key] = value
+					break
+			
+			# 匹配分区大小信息 (Partition 0 Size (Meg) ...... 128000)
+			partition_match = re.search(r"Partition\s+(\d+)\s+Size\s+\(Meg\)\s+(\d+)", line, re.IGNORECASE)
+			if partition_match:
+				partition_index = int(partition_match.group(1))
+				partition_size = int(partition_match.group(2))
+				partition_data["partitions"].append({
+					"index": partition_index,
+					"size_meg": partition_size
+				})
+		
+		# 判断是否有分区信息（已格式化的磁带必然有分区）
+		partition_data["has_partitions"] = (
+			partition_data["active_partition"] is not None or
+			len(partition_data["partitions"]) > 0 or
+			partition_data["max_additional_partitions"] is not None
+		)
+		
+		logger.info(f"[ITDT分区查询] 解析结果: 有分区={partition_data['has_partitions']}, 活动分区={partition_data['active_partition']}")
+		
+		return partition_data
 
 	async def tape_usage(self, device_path: Optional[str] = None) -> Dict[str, Any]:
 		"""获取磁带使用统计信息（使用tapeusage命令）
@@ -303,19 +339,18 @@ class ITDTInterface:
 			"is_formatted": None  # 格式化状态：True=已格式化, False=未格式化, None=无法确定
 		}
 		
-		# 如果命令失败，可能磁带未格式化
 		if not res["success"]:
 			logger.warning(f"[ITDT磁带使用统计] 命令执行失败，退出码: {res['returncode']}")
-			# 检查错误信息中是否包含格式化相关提示
-			err_lower = (res.get("stderr", "") + res.get("stdout", "")).lower()
-			if "not formatted" in err_lower or "not ready" in err_lower or "mount" in err_lower:
-				usage_data["is_formatted"] = False
-			else:
-				usage_data["is_formatted"] = None  # 无法确定
+			usage_data["is_formatted"] = False
 			return usage_data
 		
-		# 命令成功执行，说明磁带已格式化且可用
-		usage_data["is_formatted"] = True
+		# 使用qrypart命令判断格式化状态
+		try:
+			partition_info = await self.query_partition(device_path)
+			usage_data["is_formatted"] = partition_info.get("has_partitions", False)
+		except Exception as e:
+			logger.warning(f"[ITDT磁带使用统计] 查询分区信息失败: {str(e)}")
+			usage_data["is_formatted"] = False
 		
 		# 解析输出
 		stdout = res["stdout"]
@@ -382,13 +417,6 @@ class ITDTInterface:
 		
 		# 确保分数在0-100范围内
 		usage_data["health_score"] = max(0, min(100, health_score))
-		
-		# 如果命令成功执行且Result为PASSED，说明磁带已格式化
-		if usage_data.get("result") == "PASSED" and usage_data.get("code") == "OK":
-			usage_data["is_formatted"] = True
-		elif usage_data.get("result") != "UNKNOWN":
-			# 如果结果不是UNKNOWN，也认为已格式化（因为能获取到统计信息）
-			usage_data["is_formatted"] = True
 		
 		logger.info(f"[ITDT磁带使用统计] 解析结果: 健康分数={usage_data['health_score']}, 结果={usage_data['result']}, 格式化={usage_data['is_formatted']}")
 		
