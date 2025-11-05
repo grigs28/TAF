@@ -239,53 +239,72 @@ class ITDTInterface:
 		stdout = res["stdout"]
 		logger.info(f"[ITDT分区查询] 输出: {stdout[:500]}")
 		
-		import re
-		lines = stdout.split('\n')
-		for line in lines:
-			line = line.strip()
-			if not line:
-				continue
-			
-			# 匹配分区信息（注意输出中有多个点号分隔）
-			# 示例: "Active Partition ............ 0"
-			patterns = {
-				r"Active Partition[.\s]+(\d+)": ("active_partition", int),
-				r"Max\. Additional Partitions[.\s]+(\d+)": ("max_additional_partitions", int),
-				r"Additional Partitions defined[.\s]+(\d+)": ("additional_partitions_defined", int),
-				r"Partitioning Type is[.\s]+(.+)": ("partitioning_type", str),
-			}
-			
-			for pattern, (key, type_func) in patterns.items():
-				match = re.search(pattern, line, re.IGNORECASE)
-				if match:
-					value = match.group(1).strip()
-					if type_func == int:
-						partition_data[key] = int(value)
-					else:
-						partition_data[key] = value.strip()
-					logger.debug(f"[ITDT分区查询] 解析到 {key}={partition_data[key]}")
-					break
-			
-			# 匹配分区大小信息 (Partition 0 Size (Meg) ...... 128000)
-			# 注意输出中有多个点号分隔
-			partition_match = re.search(r"Partition\s+(\d+)\s+Size\s+\(Meg\)[.\s]+(\d+)", line, re.IGNORECASE)
-			if partition_match:
-				partition_index = int(partition_match.group(1))
-				partition_size = int(partition_match.group(2))
-				partition_data["partitions"].append({
-					"index": partition_index,
-					"size_meg": partition_size
-				})
-				logger.debug(f"[ITDT分区查询] 解析到分区 {partition_index}, 大小={partition_size}MB")
+		# 简化的判断逻辑：检查输出中是否包含分区相关信息
+		stdout_lower = stdout.lower()
 		
-		# 判断是否有分区信息（已格式化的磁带必然有分区）
-		partition_data["has_partitions"] = (
-			partition_data["active_partition"] is not None or
-			len(partition_data["partitions"]) > 0 or
-			partition_data["max_additional_partitions"] is not None
-		)
+		# 关键判断：只要包含partition相关信息就是已格式化
+		has_partition_keywords = any(keyword in stdout_lower for keyword in [
+			"partition 0", "partition 1", "partition 2", "partition 3",
+			"active partition", "partitions defined", "partitioning type"
+		])
 		
-		logger.info(f"[ITDT分区查询] 解析结果: 有分区={partition_data['has_partitions']}, 活动分区={partition_data['active_partition']}")
+		if has_partition_keywords:
+			# 有分区信息，解析详细内容
+			import re
+			lines = stdout.split('\n')
+			for line in lines:
+				line = line.strip()
+				if not line:
+					continue
+				
+				# 匹配分区信息（注意输出中有多个点号分隔）
+				# 示例: "Active Partition ............ 0"
+				patterns = {
+					r"Active Partition[.\s]+(\d+)": ("active_partition", int),
+					r"Max\. Additional Partitions[.\s]+(\d+)": ("max_additional_partitions", int),
+					r"Additional Partitions defined[.\s]+(\d+)": ("additional_partitions_defined", int),
+					r"Partitioning Type is[.\s]+(.+)": ("partitioning_type", str),
+				}
+				
+				for pattern, (key, type_func) in patterns.items():
+					match = re.search(pattern, line, re.IGNORECASE)
+					if match:
+						value = match.group(1).strip()
+						if type_func == int:
+							partition_data[key] = int(value)
+						else:
+							partition_data[key] = value.strip()
+						logger.debug(f"[ITDT分区查询] 解析到 {key}={partition_data[key]}")
+						break
+				
+				# 匹配分区大小信息 (Partition 0 Size (Meg) ...... 128000)
+				# 注意输出中有多个点号分隔
+				partition_match = re.search(r"Partition\s+(\d+)\s+Size\s+\(Meg\)[.\s]+(\d+)", line, re.IGNORECASE)
+				if partition_match:
+					partition_index = int(partition_match.group(1))
+					partition_size = int(partition_match.group(2))
+					partition_data["partitions"].append({
+						"index": partition_index,
+						"size_meg": partition_size
+					})
+					logger.debug(f"[ITDT分区查询] 解析到分区 {partition_index}, 大小={partition_size}MB")
+			
+			# 判断是否有分区信息（已格式化的磁带必然有分区）
+			# 关键：Additional Partitions defined > 0 或 有分区大小信息
+			additional_partitions = partition_data.get("additional_partitions_defined", 0) or 0
+			has_partitions = (
+				additional_partitions > 0 or  # 附加分区 > 0
+				len(partition_data["partitions"]) > 0 or  # 有分区大小信息
+				partition_data.get("active_partition") is not None  # 有活动分区信息
+			)
+			partition_data["has_partitions"] = has_partitions
+			partition_data["partition_count"] = len(partition_data["partitions"]) + (1 if partition_data.get("active_partition") is not None else 0)
+		else:
+			# 没有分区信息，未格式化
+			partition_data["has_partitions"] = False
+			partition_data["partition_count"] = 0
+		
+		logger.info(f"[ITDT分区查询] 解析结果: 有分区={partition_data['has_partitions']}, 活动分区={partition_data['active_partition']}, 附加分区={partition_data.get('additional_partitions_defined')}, 分区数量={partition_data.get('partition_count', 0)}")
 		
 		return partition_data
 
