@@ -136,6 +136,13 @@ class ITDTInterface:
 	# 基础操作封装
 	async def test_unit_ready(self, device_path: Optional[str] = None) -> bool:
 		dev = self._resolve_device(device_path)
+		# 清理设备路径（移除可能的冒号）
+		if dev.endswith(':'):
+			dev = dev[:-1]
+		# Windows下优先使用\\.\Tape0格式
+		if self.system == "Windows" and dev.startswith("\\\\.\\scsi"):
+			# 尝试使用\\.\Tape0格式
+			dev = "\\\\.\\Tape0"
 		res = await self._run_itdt(["-f", dev, "tur"])
 		return res["success"]
 
@@ -195,12 +202,27 @@ class ITDTInterface:
 			True表示磁带已格式化且支持LTFS，False表示未格式化或不支持LTFS
 		"""
 		dev = self._resolve_device(device_path)
+		# 清理设备路径（移除可能的冒号）
+		if dev.endswith(':'):
+			dev = dev[:-1]
+		# Windows下优先使用\\.\Tape0格式
+		if self.system == "Windows" and dev.startswith("\\\\.\\scsi"):
+			# 尝试使用\\.\Tape0格式
+			dev = "\\\\.\\Tape0"
+		
 		args = ["-f", dev, "checkltfsreadiness"]
 		if force_data_overwrite:
 			args.append("-forcedataoverwrite")
+		
+		logger.info(f"[ITDT格式化检测] 使用设备路径: {dev}")
 		res = await self._run_itdt(args)
 		
 		# 检查退出码和输出
+		logger.info(f"[ITDT格式化检测] 退出码: {res['returncode']}, 成功: {res['success']}")
+		logger.info(f"[ITDT格式化检测] 标准输出: {res['stdout'][:500]}")  # 只输出前500字符
+		if res.get('stderr'):
+			logger.info(f"[ITDT格式化检测] 标准错误: {res['stderr'][:500]}")
+		
 		if res["success"]:
 			stdout_lower = res["stdout"].lower()
 			# 如果输出包含"ready"、"formatted"、"ltfs ready"、"ltfs is ready"等关键词，认为已格式化
@@ -208,16 +230,23 @@ class ITDTInterface:
 			if ("not ready" not in stdout_lower and "not formatted" not in stdout_lower and 
 				("ready" in stdout_lower or "formatted" in stdout_lower or "ltfs ready" in stdout_lower or 
 				 "ltfs is ready" in stdout_lower or "ltfs support" in stdout_lower)):
+				logger.info("[ITDT格式化检测] 结果: 已格式化")
 				return True
 			# 如果明确包含"not ready"或"not formatted"，返回False
 			if "not ready" in stdout_lower or "not formatted" in stdout_lower or "not supported" in stdout_lower:
+				logger.info("[ITDT格式化检测] 结果: 未格式化（明确标识）")
 				return False
+			# 如果输出为空或没有明确标识，可能需要根据退出码判断
+			logger.info("[ITDT格式化检测] 结果: 无法确定（输出无明确标识）")
 		# 如果命令失败，检查stderr中是否有错误信息
 		if not res["success"]:
 			err_lower = res["stderr"].lower() if res.get("stderr") else ""
 			# 如果错误信息明确表示未格式化，返回False
 			if "not formatted" in err_lower or "not ready" in err_lower or "not supported" in err_lower:
+				logger.info("[ITDT格式化检测] 结果: 未格式化（错误信息）")
 				return False
+			logger.warning(f"[ITDT格式化检测] 命令失败，退出码: {res['returncode']}")
+		logger.info("[ITDT格式化检测] 结果: 未格式化（默认）")
 		return False
 
 	async def scan_devices(self) -> List[Dict[str, Any]]:
