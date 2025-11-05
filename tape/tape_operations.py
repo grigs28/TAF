@@ -630,8 +630,27 @@ class TapeOperations:
                     
                     if file_exists:
                         logger.info(f"从LTFS文件系统读取标签: {ltfs_label_file}")
-                        with open(ltfs_label_file, 'r', encoding='utf-8') as f:
-                            content = f.read().strip()
+                        # 尝试读取文件，如果失败则重试（最多3次）
+                        content = None
+                        for retry in range(3):
+                            try:
+                                # 使用二进制模式打开，然后解码，避免编码问题
+                                with open(ltfs_label_file, 'rb') as f:
+                                    raw_content = f.read()
+                                    content = raw_content.decode('utf-8', errors='ignore').strip()
+                                break  # 成功读取，退出重试循环
+                            except PermissionError as pe:
+                                if retry < 2:
+                                    logger.debug(f"读取标签文件权限错误（重试 {retry + 1}/3）: {str(pe)}")
+                                    await asyncio.sleep(0.5)  # 等待0.5秒后重试
+                                else:
+                                    logger.warning(f"读取标签文件权限错误（重试失败）: {str(pe)}")
+                                    raise
+                            except Exception as e:
+                                logger.warning(f"读取标签文件失败: {str(e)}")
+                                raise
+                        
+                        if content:
                             lines = content.split('\n')
                             
                             logger.info(f"读取到 {len(lines)} 行内容")
@@ -711,8 +730,27 @@ class TapeOperations:
                             else:
                                 label_content += f"Created: {created_date}\n"
                         
-                        with open(dot_label_file, 'w', encoding='utf-8') as f:
-                            f.write(label_content)
+                        # 尝试写入文件，如果失败则重试（最多3次）
+                        write_success = False
+                        for retry in range(3):
+                            try:
+                                with open(dot_label_file, 'w', encoding='utf-8') as f:
+                                    f.write(label_content)
+                                write_success = True
+                                break  # 成功写入，退出重试循环
+                            except PermissionError as pe:
+                                if retry < 2:
+                                    logger.debug(f"写入标签文件权限错误（重试 {retry + 1}/3）: {str(pe)}")
+                                    await asyncio.sleep(0.5)  # 等待0.5秒后重试
+                                else:
+                                    logger.warning(f"写入标签文件权限错误（重试失败）: {str(pe)}")
+                                    raise
+                            except Exception as e:
+                                logger.warning(f"写入标签文件失败: {str(e)}")
+                                raise
+                        
+                        if not write_success:
+                            raise Exception("写入标签文件失败（重试后仍失败）")
                         
                         # Windows上以点开头的文件不自动隐藏，尝试设置隐藏属性
                         try:
