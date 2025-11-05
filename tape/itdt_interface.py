@@ -246,12 +246,13 @@ class ITDTInterface:
 			if not line:
 				continue
 			
-			# 匹配分区信息
+			# 匹配分区信息（注意输出中有多个点号分隔）
+			# 示例: "Active Partition ............ 0"
 			patterns = {
-				r"Active Partition\s+(\d+)": ("active_partition", int),
-				r"Max\. Additional Partitions\s+(\d+)": ("max_additional_partitions", int),
-				r"Additional Partitions defined\s+(\d+)": ("additional_partitions_defined", int),
-				r"Partitioning Type is\s+(.+)": ("partitioning_type", str),
+				r"Active Partition[.\s]+(\d+)": ("active_partition", int),
+				r"Max\. Additional Partitions[.\s]+(\d+)": ("max_additional_partitions", int),
+				r"Additional Partitions defined[.\s]+(\d+)": ("additional_partitions_defined", int),
+				r"Partitioning Type is[.\s]+(.+)": ("partitioning_type", str),
 			}
 			
 			for pattern, (key, type_func) in patterns.items():
@@ -261,11 +262,13 @@ class ITDTInterface:
 					if type_func == int:
 						partition_data[key] = int(value)
 					else:
-						partition_data[key] = value
+						partition_data[key] = value.strip()
+					logger.debug(f"[ITDT分区查询] 解析到 {key}={partition_data[key]}")
 					break
 			
 			# 匹配分区大小信息 (Partition 0 Size (Meg) ...... 128000)
-			partition_match = re.search(r"Partition\s+(\d+)\s+Size\s+\(Meg\)\s+(\d+)", line, re.IGNORECASE)
+			# 注意输出中有多个点号分隔
+			partition_match = re.search(r"Partition\s+(\d+)\s+Size\s+\(Meg\)[.\s]+(\d+)", line, re.IGNORECASE)
 			if partition_match:
 				partition_index = int(partition_match.group(1))
 				partition_size = int(partition_match.group(2))
@@ -273,6 +276,7 @@ class ITDTInterface:
 					"index": partition_index,
 					"size_meg": partition_size
 				})
+				logger.debug(f"[ITDT分区查询] 解析到分区 {partition_index}, 大小={partition_size}MB")
 		
 		# 判断是否有分区信息（已格式化的磁带必然有分区）
 		partition_data["has_partitions"] = (
