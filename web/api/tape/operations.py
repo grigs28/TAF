@@ -299,16 +299,16 @@ async def check_tape_format(request: Request):
                 "message": "未检测到磁带设备"
             }
         
-        # 使用ITDT检查格式化状态（优先使用ITDT命令）
+        # 使用ITDT qrypart命令检查格式化状态
         try:
-            # 先使用ITDT检查格式化状态
+            # 使用ITDT qrypart命令检查格式化状态
             is_formatted = await system.tape_manager.tape_operations._is_tape_formatted()
             
             # 尝试读取磁带标签（用于获取标签信息）
             metadata = await system.tape_manager.tape_operations._read_tape_label()
             
             if is_formatted:
-                # ITDT确认已格式化
+                # ITDT确认已格式化（有分区信息）
                 if metadata and metadata.get('tape_id'):
                     return {
                         "success": True,
@@ -325,46 +325,20 @@ async def check_tape_format(request: Request):
                         "message": "磁带已格式化（但无标签文件）"
                     }
             else:
-                # ITDT确认未格式化
+                # ITDT确认未格式化（无分区信息）
                 return {
                     "success": True,
                     "formatted": False,
                     "metadata": None,
-                    "message": "磁带未格式化"
-                }
-        except FileNotFoundError:
-            # 标签文件不存在，但可能已格式化（使用ITDT验证）
-            try:
-                is_formatted = await system.tape_manager.tape_operations._is_tape_formatted()
-                if is_formatted:
-                    return {
-                        "success": True,
-                        "formatted": True,
-                        "metadata": None,
-                        "message": "磁带已格式化（但无标签文件）"
-                    }
-                else:
-                    return {
-                        "success": True,
-                        "formatted": False,
-                        "metadata": None,
-                        "message": "磁带未格式化"
-                    }
-            except Exception as e2:
-                logger.warning(f"ITDT格式化检测失败: {str(e2)}")
-                return {
-                    "success": True,
-                    "formatted": False,
-                    "metadata": None,
-                    "message": "磁带未格式化（标签文件不存在）"
+                    "message": "磁带未格式化（无分区信息）"
                 }
         except Exception as e:
-            # 读取失败，可能是未格式化或其他错误
+            # 检测失败，认为未格式化
             logger.warning(f"检测磁带格式化状态失败: {str(e)}")
             return {
                 "success": False,
-                "formatted": None,  # 无法确定
-                "message": f"无法确定磁带格式化状态: {str(e)}"
+                "formatted": False,  # 检测失败也认为未格式化
+                "message": f"检测失败: {str(e)}"
             }
     
     except Exception as e:
