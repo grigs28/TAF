@@ -351,7 +351,7 @@ async def update_tape_config(config: TapeConfig, request: Request):
 
 
 @router.get("/tape/scan")
-async def scan_tape_devices(request: Request):
+async def scan_tape_devices(request: Request, force_generic: bool = True, show_all_paths: bool = True):
     """扫描磁带设备"""
     start_time = datetime.now()
     ip_address = request.client.host if request.client else None
@@ -363,6 +363,15 @@ async def scan_tape_devices(request: Request):
             from tape.itdt_interface import ITDTInterface
             itdt = ITDTInterface()
             await itdt.initialize()
+            # 根据参数临时调整扫描行为
+            settings = None
+            try:
+                from config.settings import get_settings
+                settings = get_settings()
+                settings.ITDT_FORCE_GENERIC_DD = bool(force_generic)
+                settings.ITDT_SCAN_SHOW_ALL_PATHS = bool(show_all_paths)
+            except Exception:
+                pass
             # 扫描设备（ITDT 不需要 -f）
             devices = await itdt.scan_devices()
             

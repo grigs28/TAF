@@ -83,6 +83,8 @@ class Settings(BaseSettings):
     ITDT_LOG_PATH: str = "output"
     ITDT_RESULT_PATH: str = "output"
     ITDT_DEVICE_PATH: str | None = None
+    ITDT_FORCE_GENERIC_DD: bool = True  # 允许在无专用驱动时强制使用通用驱动
+    ITDT_SCAN_SHOW_ALL_PATHS: bool = True  # 扫描时显示所有路径
 
     # 压缩配置
     COMPRESSION_LEVEL: int = 9

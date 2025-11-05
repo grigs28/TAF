@@ -91,7 +91,11 @@ class ITDTInterface:
 		if not self._initialized:
 			raise RuntimeError("ITDT 接口未初始化")
 
-		cmd = [self.itdt_path] + args
+		# 全局标志
+		global_flags: List[str] = []
+		if getattr(self.settings, "ITDT_FORCE_GENERIC_DD", False):
+			global_flags.append("-force-generic-dd")
+		cmd = [self.itdt_path] + global_flags + args
 		logger.info("[ITDT] 执行: %s", " ".join([str(a) for a in cmd]))
 
 		proc = await asyncio.create_subprocess_exec(
@@ -171,7 +175,10 @@ class ITDTInterface:
 		return res["success"]
 
 	async def scan_devices(self) -> List[Dict[str, Any]]:
-		res = await self._run_itdt(["scan"])  # 无需 -f
+		scan_args: List[str] = ["scan"]
+		if getattr(self.settings, "ITDT_SCAN_SHOW_ALL_PATHS", False):
+			scan_args.append("-showallpaths")
+		res = await self._run_itdt(scan_args)  # 无需 -f
 		devices: List[Dict[str, Any]] = []
 		if not res["success"]:
 			return devices
