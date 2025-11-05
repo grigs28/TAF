@@ -759,8 +759,18 @@ document.addEventListener('DOMContentLoaded', async function() {
             console.log('执行解锁操作，任务ID:', taskId);
             if (fromScheduler) {
                 fetch(`/api/scheduler/tasks/${taskId}/unlock`, { method: 'POST' })
-                    .then(() => alert('已解锁任务'))
-                    .catch(() => alert('解锁失败'));
+                    .then(async (response) => {
+                        const result = await response.json();
+                        if (result.success) {
+                            alert('解锁成功：' + (result.message || '任务已解锁'));
+                        } else {
+                            alert('解锁失败：' + (result.message || '未知错误'));
+                        }
+                    })
+                    .catch((error) => {
+                        console.error('解锁失败:', error);
+                        alert('解锁失败：' + (error.message || '网络错误'));
+                    });
             } else {
                 alert('仅计划任务支持解锁');
             }

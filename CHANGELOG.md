@@ -1,4 +1,22 @@
 # 更新日志
+## [0.0.14] - 2025-11-04
+
+### 修复
+
+#### 计划任务系统JavaScript错误修复
+- ✅ 修复`getActionConfig`方法中的null检查问题
+  - 修复`Cannot read properties of null (reading 'value')`错误
+  - 增强元素查找函数，支持全局和面板内查找
+  - 添加安全的值获取函数`val()`，处理元素不存在的情况
+  - 添加安全的选中状态获取函数`checked()`，使用可选链操作符
+  - 添加元素可见性检查函数`isElementVisibleAndExists()`
+  - 在所有DOM元素访问前添加存在性检查，避免null引用错误
+
+#### 模态框aria-hidden警告修复
+- ✅ 修复目录浏览器模态框的aria-hidden警告
+  - 优化模态框显示逻辑，确保焦点管理正确
+  - 改善无障碍访问体验
+
 ## [0.0.13] - 2025-11-04
 
 ### 改进

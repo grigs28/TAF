@@ -526,7 +526,7 @@ async def unlock_scheduled_task(task_id: int, request: Request = None):
         # 记录解锁操作日志
         await log_system(
             level=LogLevel.INFO,
-            category=LogCategory.SCHEDULER,
+            category=LogCategory.SYSTEM,
             message=f"开始解锁计划任务: {task.task_name} (ID: {task_id})",
             module="web.api.scheduler",
             function="unlock_scheduled_task",
@@ -554,7 +554,7 @@ async def unlock_scheduled_task(task_id: int, request: Request = None):
         # 记录系统日志（成功）
         await log_system(
             level=LogLevel.INFO,
-            category=LogCategory.SCHEDULER,
+            category=LogCategory.SYSTEM,
             message=f"解锁计划任务成功: {task.task_name} (ID: {task_id})",
             module="web.api.scheduler",
             function="unlock_scheduled_task",
@@ -588,7 +588,7 @@ async def unlock_scheduled_task(task_id: int, request: Request = None):
         import traceback
         await log_system(
             level=LogLevel.ERROR,
-            category=LogCategory.SCHEDULER,
+            category=LogCategory.SYSTEM,
             message=f"解锁计划任务失败: {str(e)}",
             module="web.api.scheduler",
             function="unlock_scheduled_task",
@@ -612,7 +612,7 @@ async def unlock_all_tasks(request: Request = None):
         # 记录解锁操作日志
         await log_system(
             level=LogLevel.WARNING,
-            category=LogCategory.SCHEDULER,
+            category=LogCategory.SYSTEM,
             message="开始解锁所有活跃任务锁（谨慎操作）",
             module="web.api.scheduler",
             function="unlock_all_tasks",
@@ -638,7 +638,7 @@ async def unlock_all_tasks(request: Request = None):
         # 记录系统日志（成功）
         await log_system(
             level=LogLevel.WARNING,
-            category=LogCategory.SCHEDULER,
+            category=LogCategory.SYSTEM,
             message="解锁所有活跃任务锁完成",
             module="web.api.scheduler",
             function="unlock_all_tasks",
@@ -671,7 +671,7 @@ async def unlock_all_tasks(request: Request = None):
         import traceback
         await log_system(
             level=LogLevel.ERROR,
-            category=LogCategory.SCHEDULER,
+            category=LogCategory.SYSTEM,
             message=f"解锁所有任务失败: {str(e)}",
             module="web.api.scheduler",
             function="unlock_all_tasks",
