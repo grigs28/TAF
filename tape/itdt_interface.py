@@ -299,12 +299,23 @@ class ITDTInterface:
 			"fatal_suspended_writes": 0,
 			"health_score": 100,
 			"result": "UNKNOWN",
-			"code": "UNKNOWN"
+			"code": "UNKNOWN",
+			"is_formatted": None  # 格式化状态：True=已格式化, False=未格式化, None=无法确定
 		}
 		
+		# 如果命令失败，可能磁带未格式化
 		if not res["success"]:
 			logger.warning(f"[ITDT磁带使用统计] 命令执行失败，退出码: {res['returncode']}")
+			# 检查错误信息中是否包含格式化相关提示
+			err_lower = (res.get("stderr", "") + res.get("stdout", "")).lower()
+			if "not formatted" in err_lower or "not ready" in err_lower or "mount" in err_lower:
+				usage_data["is_formatted"] = False
+			else:
+				usage_data["is_formatted"] = None  # 无法确定
 			return usage_data
+		
+		# 命令成功执行，说明磁带已格式化且可用
+		usage_data["is_formatted"] = True
 		
 		# 解析输出
 		stdout = res["stdout"]
@@ -372,7 +383,14 @@ class ITDTInterface:
 		# 确保分数在0-100范围内
 		usage_data["health_score"] = max(0, min(100, health_score))
 		
-		logger.info(f"[ITDT磁带使用统计] 解析结果: 健康分数={usage_data['health_score']}, 结果={usage_data['result']}")
+		# 如果命令成功执行且Result为PASSED，说明磁带已格式化
+		if usage_data.get("result") == "PASSED" and usage_data.get("code") == "OK":
+			usage_data["is_formatted"] = True
+		elif usage_data.get("result") != "UNKNOWN":
+			# 如果结果不是UNKNOWN，也认为已格式化（因为能获取到统计信息）
+			usage_data["is_formatted"] = True
+		
+		logger.info(f"[ITDT磁带使用统计] 解析结果: 健康分数={usage_data['health_score']}, 结果={usage_data['result']}, 格式化={usage_data['is_formatted']}")
 		
 		return usage_data
 
