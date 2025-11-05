@@ -175,8 +175,32 @@ class ITDTInterface:
 		devices: List[Dict[str, Any]] = []
 		if not res["success"]:
 			return devices
-		for line in res["stdout"].splitlines():
-			# 简单解析：提取 Windows 设备名，例如 \\.\tape0
-			if "\\\\.\\tape" in line.lower():
-				devices.append({"path": line.strip()})
+		import re
+		for raw in res["stdout"].splitlines():
+			line = raw.strip()
+			if not line:
+				continue
+			# 典型输出: "#0 \\.\\scsi0: - [ULT3580-HH9]-[R3G1] S/N:10WT036260 H0-B0-T24-L0  (Generic-Device)"
+			m = re.search(r"#\d+\s+([^\s]+):\s+-\s+\[([^\]]+)\](?:-\[([^\]]+)\])?\s+S/N:([^\s]+)", line, re.IGNORECASE)
+			if m:
+				dev_node = m.group(1)  # \\.\scsi0:
+				model = m.group(2)     # ULT3580-HH9
+				gen = (m.group(3) or "").strip()  # R3G1 等
+				serial = m.group(4)
+				devices.append({
+					"path": dev_node.rstrip(':'),
+					"vendor": "IBM" if "ULT3580" in model.upper() else "Unknown",
+					"model": model,
+					"generation": gen,
+					"serial": serial,
+					"status": "online",
+					"is_ibm_lto": "ULT3580" in model.upper(),
+				})
+				continue
+			# 回退：匹配 \\.\\tapeX 或 \\.\\scsiY
+			if "\\\\.\\" in line.lower():
+				# 取第一个形如 \\.\xxxx 片段
+				mm = re.search(r"(\\\\\\.\\\\[A-Za-z0-9_-]+)[:]?", line)
+				if mm:
+					devices.append({"path": mm.group(1), "status": "online"})
 		return devices
