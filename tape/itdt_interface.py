@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import platform
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from config.settings import get_settings
@@ -37,6 +38,10 @@ class ITDTInterface:
 				"C:\\Program Files\\IBM\\ITDT\\itdt.exe",
 				"C:\\Program Files (x86)\\IBM\\ITDT\\itdt.exe",
 			]
+			# 项目内路径（当前工作目录 / 脚本目录上级）
+			cwd_candidate = str(Path(os.getcwd()) / "ITDT" / "itdt.exe")
+			pkg_candidate = str((Path(__file__).resolve().parents[1] / "ITDT" / "itdt.exe"))
+			candidates = [cwd_candidate, pkg_candidate] + candidates
 		else:
 			candidates.append("/usr/local/itdt/itdt")
 

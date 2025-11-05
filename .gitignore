@@ -101,3 +101,9 @@ web/static/js/*
 *.tar.gz
 *.rar
 
+# ITDT binaries and tools (do not commit)
+ITDT/
+ITDT/**
+*.exe
+*.dll
+
