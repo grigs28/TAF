@@ -171,9 +171,9 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
         
         # 尝试写入物理磁带标签（如果磁带机中有磁带）
         try:
-            # 检查磁带是否已格式化
+            # 检查磁带是否已格式化（使用ITDT命令）
+            is_formatted = await system.tape_manager.tape_operations._is_tape_formatted()
             existing_label = await system.tape_manager.tape_operations._read_tape_label()
-            is_formatted = existing_label is not None
             
             if not is_formatted:
                 # 磁带未格式化，返回需要格式化的提示

@@ -299,20 +299,33 @@ async def check_tape_format(request: Request):
                 "message": "未检测到磁带设备"
             }
         
-        # 尝试读取磁带标签，如果成功则认为已格式化
+        # 使用ITDT检查格式化状态（优先使用ITDT命令）
         try:
+            # 先使用ITDT检查格式化状态
+            is_formatted = await system.tape_manager.tape_operations._is_tape_formatted()
+            
+            # 尝试读取磁带标签（用于获取标签信息）
             metadata = await system.tape_manager.tape_operations._read_tape_label()
             
-            # 能读取到标签，说明已格式化
-            if metadata and metadata.get('tape_id'):
-                return {
-                    "success": True,
-                    "formatted": True,
-                    "metadata": metadata,
-                    "message": f"磁带已格式化，标签: {metadata.get('tape_id')}"
-                }
+            if is_formatted:
+                # ITDT确认已格式化
+                if metadata and metadata.get('tape_id'):
+                    return {
+                        "success": True,
+                        "formatted": True,
+                        "metadata": metadata,
+                        "message": f"磁带已格式化，标签: {metadata.get('tape_id')}"
+                    }
+                else:
+                    # 已格式化但没有标签文件
+                    return {
+                        "success": True,
+                        "formatted": True,
+                        "metadata": None,
+                        "message": "磁带已格式化（但无标签文件）"
+                    }
             else:
-                # 读取成功但标签为空，说明未格式化
+                # ITDT确认未格式化
                 return {
                     "success": True,
                     "formatted": False,
@@ -320,18 +333,34 @@ async def check_tape_format(request: Request):
                     "message": "磁带未格式化"
                 }
         except FileNotFoundError:
-            # 标签文件不存在，说明未格式化
-            logger.debug("磁带标签文件不存在，说明未格式化")
-            return {
-                "success": True,
-                "formatted": False,
-                "metadata": None,
-                "message": "磁带未格式化（标签文件不存在）"
-            }
+            # 标签文件不存在，但可能已格式化（使用ITDT验证）
+            try:
+                is_formatted = await system.tape_manager.tape_operations._is_tape_formatted()
+                if is_formatted:
+                    return {
+                        "success": True,
+                        "formatted": True,
+                        "metadata": None,
+                        "message": "磁带已格式化（但无标签文件）"
+                    }
+                else:
+                    return {
+                        "success": True,
+                        "formatted": False,
+                        "metadata": None,
+                        "message": "磁带未格式化"
+                    }
+            except Exception as e2:
+                logger.warning(f"ITDT格式化检测失败: {str(e2)}")
+                return {
+                    "success": True,
+                    "formatted": False,
+                    "metadata": None,
+                    "message": "磁带未格式化（标签文件不存在）"
+                }
         except Exception as e:
             # 读取失败，可能是未格式化或其他错误
-            # 为了安全，我们返回不确定状态，而不是假设未格式化
-            logger.warning(f"读取磁带标签失败，无法确定格式化状态: {str(e)}")
+            logger.warning(f"检测磁带格式化状态失败: {str(e)}")
             return {
                 "success": False,
                 "formatted": None,  # 无法确定

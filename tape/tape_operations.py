@@ -584,6 +584,21 @@ class TapeOperations:
             logger.error(f"获取磁带容量异常: {str(e)}")
             return None
 
+    async def _is_tape_formatted(self) -> bool:
+        """检查磁带是否已格式化（使用ITDT checkltfsreadiness命令）"""
+        try:
+            if not self.itdt_interface or not self.itdt_interface._initialized:
+                await self._ensure_initialized()
+            
+            # 使用ITDT检查LTFS就绪状态
+            is_formatted = await self.itdt_interface.check_ltfs_readiness()
+            logger.info(f"ITDT格式化检测结果: {is_formatted}")
+            return is_formatted
+        except Exception as e:
+            logger.warning(f"使用ITDT检测格式化状态失败: {str(e)}")
+            # 回退到检查标签文件
+            return await self._read_tape_label() is not None
+
     async def _read_tape_label(self) -> Optional[Dict[str, Any]]:
         """读取磁带标签（仅LTFS文件系统 .TAPE_LABEL.txt）"""
         logger.info("========== 开始读取磁带标签 ==========")
@@ -630,6 +645,12 @@ class TapeOperations:
                                         try:
                                             metadata['capacity'] = line.split(':', 1)[1].strip()
                                             logger.info(f"解析到容量: {metadata['capacity']}")
+                                        except:
+                                            pass
+                                    elif line.startswith('Serial:'):
+                                        try:
+                                            metadata['serial_number'] = line.split(':', 1)[1].strip()
+                                            logger.info(f"解析到序列号: {metadata['serial_number']}")
                                         except:
                                             pass
                                 

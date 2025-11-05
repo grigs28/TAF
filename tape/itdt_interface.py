@@ -184,6 +184,23 @@ class ITDTInterface:
 		res = await self._run_itdt(args)
 		return res["success"]
 
+	async def check_ltfs_readiness(self, device_path: Optional[str] = None) -> bool:
+		"""检查磁带是否支持LTFS并已格式化（使用checkltfsreadiness命令）"""
+		dev = self._resolve_device(device_path)
+		res = await self._run_itdt(["-f", dev, "checkltfsreadiness"])
+		# 检查输出中是否包含成功信息
+		if res["success"]:
+			stdout_lower = res["stdout"].lower()
+			# 如果输出包含"ready"、"formatted"、"ltfs ready"等关键词，认为已格式化
+			# 排除"not ready"、"not formatted"等否定词
+			if ("not ready" not in stdout_lower and "not formatted" not in stdout_lower and 
+				("ready" in stdout_lower or "formatted" in stdout_lower or "ltfs ready" in stdout_lower)):
+				return True
+			# 如果明确包含"not ready"或"not formatted"，返回False
+			if "not ready" in stdout_lower or "not formatted" in stdout_lower:
+				return False
+		return False
+
 	async def scan_devices(self) -> List[Dict[str, Any]]:
 		scan_args: List[str] = ["scan"]
 		if getattr(self.settings, "ITDT_SCAN_SHOW_ALL_PATHS", False):
