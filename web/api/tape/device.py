@@ -21,17 +21,51 @@ router = APIRouter()
 
 @router.get("/health")
 async def check_tape_health(request: Request):
-    """检查磁带健康状态"""
+    """检查磁带健康状态（使用ITDT tapeusage命令）"""
     try:
         system = request.app.state.system
         if not system:
             raise HTTPException(status_code=500, detail="系统未初始化")
 
-        health = await system.tape_manager.health_check()
-        return {"healthy": health}
+        # 使用ITDT tapeusage命令获取详细的健康统计
+        usage_data = await system.tape_manager.itdt_interface.tape_usage()
+        
+        # 判断是否健康（健康分数>=60认为健康，PASSED且CODE为OK认为健康）
+        is_healthy = (
+            usage_data.get("health_score", 0) >= 60 and
+            usage_data.get("result") == "PASSED" and
+            usage_data.get("code") == "OK"
+        )
+        
+        return {
+            "healthy": is_healthy,
+            "health_score": usage_data.get("health_score", 0),
+            "usage_stats": usage_data
+        }
 
     except Exception as e:
         logger.error(f"检查磁带健康状态失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/usage")
+async def get_tape_usage_stats(request: Request):
+    """获取磁带使用统计信息（使用ITDT tapeusage命令）"""
+    try:
+        system = request.app.state.system
+        if not system:
+            raise HTTPException(status_code=500, detail="系统未初始化")
+
+        # 使用ITDT tapeusage命令获取详细统计
+        usage_data = await system.tape_manager.itdt_interface.tape_usage()
+        
+        return {
+            "success": True,
+            "usage_stats": usage_data
+        }
+
+    except Exception as e:
+        logger.error(f"获取磁带使用统计失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -249,6 +249,133 @@ class ITDTInterface:
 		logger.info("[ITDT格式化检测] 结果: 未格式化（默认）")
 		return False
 
+	async def tape_usage(self, device_path: Optional[str] = None) -> Dict[str, Any]:
+		"""获取磁带使用统计信息（使用tapeusage命令）
+		
+		Args:
+			device_path: 设备路径，如果为None则使用默认设备（\\.\tape0）
+		
+		Returns:
+			包含磁带使用统计信息的字典，例如：
+			{
+				"thread_count": 7,
+				"data_sets_read": 294,
+				"data_sets_written": 218,
+				"read_retries": 0,
+				"write_retries": 4,
+				"unrecovered_read_errors": 0,
+				"unrecovered_write_errors": 0,
+				"suspended_reads": 0,
+				"suspended_writes": 4,
+				"fatal_suspend_reads": 0,
+				"fatal_suspended_writes": 0,
+				"health_score": 100,  # 根据错误计算
+				"result": "PASSED",
+				"code": "OK"
+			}
+		"""
+		dev = self._resolve_device(device_path)
+		# 清理设备路径（移除可能的冒号）
+		if dev.endswith(':'):
+			dev = dev[:-1]
+		# Windows下优先使用\\.\Tape0格式
+		if self.system == "Windows" and dev.startswith("\\\\.\\scsi"):
+			dev = "\\\\.\\Tape0"
+		
+		logger.info(f"[ITDT磁带使用统计] 使用设备路径: {dev}")
+		res = await self._run_itdt(["-f", dev, "tapeusage"])
+		
+		usage_data = {
+			"thread_count": 0,
+			"data_sets_read": 0,
+			"data_sets_written": 0,
+			"read_retries": 0,
+			"write_retries": 0,
+			"unrecovered_read_errors": 0,
+			"unrecovered_write_errors": 0,
+			"suspended_reads": 0,
+			"suspended_writes": 0,
+			"fatal_suspend_reads": 0,
+			"fatal_suspended_writes": 0,
+			"health_score": 100,
+			"result": "UNKNOWN",
+			"code": "UNKNOWN"
+		}
+		
+		if not res["success"]:
+			logger.warning(f"[ITDT磁带使用统计] 命令执行失败，退出码: {res['returncode']}")
+			return usage_data
+		
+		# 解析输出
+		stdout = res["stdout"]
+		logger.info(f"[ITDT磁带使用统计] 输出: {stdout[:500]}")
+		
+		# 解析各个字段
+		import re
+		lines = stdout.split('\n')
+		for line in lines:
+			line = line.strip()
+			if not line:
+				continue
+			
+			# 匹配数值字段
+			patterns = {
+				r"Thread Count\s+(\d+)": "thread_count",
+				r"Data Sets Read\s+(\d+)": "data_sets_read",
+				r"Data Sets Written\s+(\d+)": "data_sets_written",
+				r"Read Retries\s+(\d+)": "read_retries",
+				r"Write Retries\s+(\d+)": "write_retries",
+				r"Unrecovered Read Err\.\s+(\d+)": "unrecovered_read_errors",
+				r"Unrecovered Write Err\.\s+(\d+)": "unrecovered_write_errors",
+				r"Suspended Reads\s+(\d+)": "suspended_reads",
+				r"Suspended Writes\s+(\d+)": "suspended_writes",
+				r"Fatal Suspend Reads\s+(\d+)": "fatal_suspend_reads",
+				r"Fatal Suspended Writes\s+(\d+)": "fatal_suspended_writes",
+			}
+			
+			for pattern, key in patterns.items():
+				match = re.search(pattern, line, re.IGNORECASE)
+				if match:
+					usage_data[key] = int(match.group(1))
+					break
+			
+			# 匹配结果
+			if "Result:" in line:
+				match = re.search(r"Result:\s*(\w+)", line, re.IGNORECASE)
+				if match:
+					usage_data["result"] = match.group(1).upper()
+			
+			if "Code:" in line:
+				match = re.search(r"Code:\s*(\w+)", line, re.IGNORECASE)
+				if match:
+					usage_data["code"] = match.group(1).upper()
+		
+		# 计算健康分数（基于错误统计）
+		# 基础分数100，根据错误情况扣分
+		health_score = 100
+		
+		# 致命错误扣分最多
+		health_score -= usage_data["fatal_suspend_reads"] * 10
+		health_score -= usage_data["fatal_suspended_writes"] * 10
+		
+		# 未恢复错误扣分
+		health_score -= usage_data["unrecovered_read_errors"] * 5
+		health_score -= usage_data["unrecovered_write_errors"] * 5
+		
+		# 暂停操作扣分
+		health_score -= usage_data["suspended_reads"] * 2
+		health_score -= usage_data["suspended_writes"] * 2
+		
+		# 重试次数扣分（较少）
+		health_score -= min(usage_data["read_retries"] + usage_data["write_retries"], 10)
+		
+		# 确保分数在0-100范围内
+		usage_data["health_score"] = max(0, min(100, health_score))
+		
+		logger.info(f"[ITDT磁带使用统计] 解析结果: 健康分数={usage_data['health_score']}, 结果={usage_data['result']}")
+		
+		return usage_data
+
 	async def scan_devices(self) -> List[Dict[str, Any]]:
 		scan_args: List[str] = ["scan"]
 		if getattr(self.settings, "ITDT_SCAN_SHOW_ALL_PATHS", False):
