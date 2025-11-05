@@ -1281,6 +1281,13 @@ document.addEventListener('DOMContentLoaded', function() {
     const confirmAddTapeBtn = document.getElementById('confirmAddTapeBtn');
     if (confirmAddTapeBtn) {
         confirmAddTapeBtn.addEventListener('click', async function() {
+            const btn = this;
+            const originalHtml = btn.innerHTML;
+            
+            // 立即禁用按钮并显示检测提示
+            btn.disabled = true;
+            btn.innerHTML = '<i class="bi bi-hourglass-split spinner me-2"></i>正在检测是否格式化...';
+            
             // 检查磁带是否已格式化
             try {
                 const formatCheckResp = await fetch('/api/tape/operations/check-format');
@@ -1291,9 +1298,17 @@ document.addEventListener('DOMContentLoaded', function() {
                 // formatted === true 表示已格式化，不提示
                 // formatted === null/undefined 表示无法确定，不提示（安全起见）
                 if (formatCheckData && formatCheckData.success && formatCheckData.formatted === false) {
+                    // 检测完成，恢复按钮状态以显示确认对话框
+                    btn.disabled = false;
+                    btn.innerHTML = originalHtml;
+                    
                     // 磁带明确未格式化，弹窗提示
                     const shouldFormat = confirm('磁带未格式化，是否现在格式化？\n\n格式化完成后将发送钉钉通知。');
                     if (shouldFormat) {
+                        // 再次禁用按钮并显示格式化提示
+                        btn.disabled = true;
+                        btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-2"></i>正在格式化...';
+                        
                         // 执行格式化
                         const formatResp = await fetch('/api/tape/operations/format', {
                             method: 'POST',
@@ -1304,27 +1319,35 @@ document.addEventListener('DOMContentLoaded', function() {
                         
                         if (formatResult.success) {
                             alert('磁带格式化成功！已发送钉钉通知。');
+                            // 格式化成功后继续创建流程
+                            btn.innerHTML = '<i class="bi bi-hourglass-split spinner me-2"></i>正在保存...';
                         } else {
                             alert(`格式化失败: ${formatResult.message || '未知错误'}`);
+                            btn.disabled = false;
+                            btn.innerHTML = originalHtml;
                             return; // 格式化失败，不继续创建
                         }
                     } else {
                         // 用户选择不格式化，继续创建（但会返回needs_format提示）
+                        btn.innerHTML = '<i class="bi bi-hourglass-split spinner me-2"></i>正在保存...';
                     }
                 } else if (formatCheckData && formatCheckData.formatted === true) {
-                    // 磁带已格式化，不提示
+                    // 磁带已格式化，不提示，继续创建流程
                     console.log('磁带已格式化，无需格式化');
+                    btn.innerHTML = '<i class="bi bi-hourglass-split spinner me-2"></i>正在保存...';
                 } else if (formatCheckData && formatCheckData.formatted === null) {
-                    // 无法确定格式化状态，不提示（安全起见）
+                    // 无法确定格式化状态，不提示（安全起见），继续创建流程
                     console.warn('无法确定磁带格式化状态，跳过格式化检查:', formatCheckData.message);
+                    btn.innerHTML = '<i class="bi bi-hourglass-split spinner me-2"></i>正在保存...';
+                } else {
+                    // 检测失败或其他情况，继续创建流程
+                    btn.innerHTML = '<i class="bi bi-hourglass-split spinner me-2"></i>正在保存...';
                 }
             } catch (formatError) {
                 console.warn('检查磁带格式化状态失败:', formatError);
                 // 检查失败不影响创建流程，继续
+                btn.innerHTML = '<i class="bi bi-hourglass-split spinner me-2"></i>正在保存...';
             }
-            const btn = this;
-            const originalHtml = btn.innerHTML;
-            btn.disabled = true;
             
             try {
                 // 获取表单数据
@@ -1463,7 +1486,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     }
                 } else {
                     // 添加模式：使用POST请求创建
-                    btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-2"></i>添加中...';
+                    // 按钮文本已经在格式化检测后更新为"正在保存..."，这里不需要再修改
+                    // 如果还没更新，则更新为"添加中..."
+                    if (!btn.innerHTML.includes('正在保存')) {
+                        btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-2"></i>添加中...';
+                    }
                     
                     // 从容量中提取并转换为GB (18TB -> 18432GB)
                     const capacityValue = parseInt(tapeCapacity.replace('TB', ''));
