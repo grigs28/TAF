@@ -8,22 +8,64 @@ Tape Management API - crud
 import logging
 import traceback
 import json
+import re
+import asyncio
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi import APIRouter, HTTPException, Request, Depends, BackgroundTasks
 from pydantic import BaseModel
 
 from .models import CreateTapeRequest, UpdateTapeRequest
 from models.system_log import OperationType, LogCategory, LogLevel
 from utils.log_utils import log_operation, log_system
 from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+from utils.tape_tools import tape_tools_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+
+def _normalize_tape_label(label: Optional[str], year: int, month: int) -> str:
+    target_year = f"{year:04d}"
+    target_month = f"{month:02d}"
+    default_seq = "01"
+    default_label = f"TP{target_year}{target_month}{default_seq}"
+
+    if not label:
+        return default_label
+
+    clean_label = label.strip().upper()
+
+    def build_label(seq: str, suffix: str = "") -> str:
+        seq = (seq if seq and seq.isdigit() else default_seq).zfill(2)[:2]
+        return f"TP{target_year}{target_month}{seq}{suffix}"
+
+    match = re.match(r'^TP(\d{4})(\d{2})(\d{2})(.*)$', clean_label)
+    if match:
+        return build_label(match.group(3), match.group(4))
+
+    match = re.match(r'^TP(\d{4})(\d{2})(\d+)(.*)$', clean_label)
+    if match:
+        return build_label(match.group(3), match.group(4))
+
+    match = re.match(r'^TAPE(\d{4})(\d{2})(\d{2})(.*)$', clean_label)
+    if match:
+        return build_label(match.group(3), match.group(4))
+
+    match = re.match(r'^TAPE(\d{4})(\d{2})(\d+)(.*)$', clean_label)
+    if match:
+        return build_label(match.group(3), match.group(4))
+
+    match = re.search(r'(\d{4})(\d{2})(\d{2})', clean_label)
+    if match:
+        return build_label(match.group(3))
+
+    return default_label
+
+
 @router.post("/create")
-async def create_tape(request: CreateTapeRequest, http_request: Request):
-    """创建新磁带记录"""
+async def create_tape(request: CreateTapeRequest, http_request: Request, background_tasks: BackgroundTasks):
+    """创建或更新磁带记录，并使用LtfsCmdFormat.exe格式化磁带"""
     start_time = datetime.now()
     ip_address = http_request.client.host if http_request.client else None
     request_method = "POST"
@@ -38,7 +80,6 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
         import psycopg2
         import psycopg2.extras
         from config.settings import get_settings
-        from datetime import timedelta
         
         settings = get_settings()
         database_url = settings.DATABASE_URL
@@ -46,8 +87,6 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
         # 解析URL
         if database_url.startswith("opengauss://"):
             database_url = database_url.replace("opengauss://", "postgresql://", 1)
-        
-        import re
         pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
         match = re.match(pattern, database_url)
         
@@ -55,198 +94,222 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
             raise ValueError("无法解析数据库连接URL")
         
         username, password, host, port, database = match.groups()
+        db_connect_kwargs = {
+            "host": host,
+            "port": port,
+            "user": username,
+            "password": password,
+            "database": database
+        }
         
-        # 连接数据库
-        conn = psycopg2.connect(
-            host=host,
-            port=port,
-            user=username,
-            password=password,
-            database=database
-        )
+        # 统一生成卷标与盘符
+        current_datetime = datetime.now()
+        target_year = request.create_year or current_datetime.year
+        target_month = request.create_month or current_datetime.month
+        target_month = max(1, min(12, target_month))
+        final_label = _normalize_tape_label(request.label or request.tape_id, target_year, target_month)
+        tape_id_value = final_label
+        drive_letter = (settings.TAPE_DRIVE_LETTER or "O").strip().upper()
+        if drive_letter.endswith(":"):
+            drive_letter = drive_letter[:-1]
+        if not drive_letter:
+            drive_letter = "O"
         
+        serial_param = None
+        if request.serial_number:
+            candidate = request.serial_number.strip().upper()
+            if len(candidate) == 6 and candidate.isalnum():
+                serial_param = candidate
+        
+        # 检查磁带是否已存在
+        tape_exists = False
+        conn = psycopg2.connect(**db_connect_kwargs)
         try:
             with conn.cursor() as cur:
-                # 检查磁带ID是否已存在
-                cur.execute("SELECT tape_id FROM tape_cartridges WHERE tape_id = %s", (request.tape_id,))
-                existing = cur.fetchone()
-                
-                if existing:
-                    await log_operation(
-                        operation_type=OperationType.CREATE,
-                        resource_type="tape",
-                        resource_id=request.tape_id,
-                        resource_name=request.label,
-                        operation_name="创建磁带",
-                        operation_description=f"创建磁带 {request.tape_id}",
-                        category="tape",
-                        success=False,
-                        error_message=f"磁带 {request.tape_id} 已存在",
-                        ip_address=ip_address,
-                        request_method=request_method,
-                        request_url=request_url,
-                        duration_ms=int((datetime.now() - start_time).total_seconds() * 1000)
-                    )
-                    return {
-                        "success": False,
-                        "message": f"磁带 {request.tape_id} 已存在"
-                    }
-                
-                # 计算容量
-                # 前端发送的是 capacity_gb，单位是GB（二进制：1TB=1024GB）
-                # 例如：18TB = 18 * 1024 = 18432 GB
-                # capacity_bytes = capacity_gb * (1024 ** 3)
-                if request.capacity_gb:
-                    capacity_bytes = request.capacity_gb * (1024 ** 3)
-                else:
-                    capacity_bytes = 18 * 1024 * (1024 ** 3)  # 默认18TB = 18432GB
-                
-                # 计算创建日期和过期日期（仅年月）
-                if request.create_year and request.create_month:
-                    # 使用指定的年月，日期设为1号
-                    created_date = datetime(request.create_year, request.create_month, 1)
-                else:
-                    # 默认使用当前年月
-                    now = datetime.now()
-                    created_date = datetime(now.year, now.month, 1)
-                
-                # 计算过期日期：创建日期 + retention_months个月
-                expiry_year = created_date.year
-                expiry_month = created_date.month + request.retention_months
-                
-                # 处理跨年
-                while expiry_month > 12:
-                    expiry_year += 1
-                    expiry_month -= 12
-                
-                expiry_date = datetime(expiry_year, expiry_month, 1)
-                
-                # 准备新值
-                new_values = {
-                    "tape_id": request.tape_id,
-                    "label": request.label,
-                    "status": "AVAILABLE",
-                    "media_type": request.media_type,
-                    "generation": request.generation,
-                    "serial_number": request.serial_number,
-                    "location": request.location,
-                    "capacity_bytes": capacity_bytes,
-                    "retention_months": request.retention_months,
-                    "notes": request.notes,
-                    "manufactured_date": created_date.isoformat(),
-                    "expiry_date": expiry_date.isoformat()
-                }
-                
-                # 先检查磁带是否已格式化并尝试写入标签，只有标签写入成功才写入数据库
-                logger.info(f"准备创建磁带 {request.tape_id}，先检查格式化状态并写入标签...")
-                
-                # 检查磁带是否已格式化（使用ITDT命令）
-                is_formatted = await system.tape_manager.tape_operations._is_tape_formatted()
-                if not is_formatted:
-                    # 磁带未格式化，不写入数据库
-                    logger.warning(f"磁带 {request.tape_id} 未格式化，不添加到数据库")
-                    await log_operation(
-                        operation_type=OperationType.CREATE,
-                        resource_type="tape",
-                        resource_id=request.tape_id,
-                        resource_name=request.label,
-                        operation_name="创建磁带",
-                        operation_description=f"创建磁带 {request.tape_id}（未格式化，已拒绝）",
-                        category="tape",
-                        success=False,
-                        error_message="磁带未格式化，请先格式化磁带",
-                        ip_address=ip_address,
-                        request_method=request_method,
-                        request_url=request_url,
-                        duration_ms=int((datetime.now() - start_time).total_seconds() * 1000)
-                    )
-                    return {
-                        "success": False,
-                        "message": f"磁带 {request.tape_id} 未格式化，无法创建",
-                        "error": "磁带未格式化，请先格式化磁带后再添加"
-                    }
-                
-                # 准备标签数据
-                tape_info = {
-                    "tape_id": request.tape_id,
-                    "label": request.label,
-                    "serial_number": request.serial_number,
-                    "created_date": created_date,
-                    "expiry_date": expiry_date
-                }
-                
-                # 写入物理磁带标签（必须先写入标签成功才能添加到数据库）
-                write_result = await system.tape_manager.tape_operations._write_tape_label(tape_info)
-                if not write_result:
-                    # 标签写入失败，不写入数据库
-                    logger.warning(f"磁带 {request.tape_id} 标签写入失败，不添加到数据库")
-                    await log_operation(
-                        operation_type=OperationType.CREATE,
-                        resource_type="tape",
-                        resource_id=request.tape_id,
-                        resource_name=request.label,
-                        operation_name="创建磁带",
-                        operation_description=f"创建磁带 {request.tape_id}（标签写入失败，已拒绝）",
-                        category="tape",
-                        success=False,
-                        error_message="标签写入失败，请确保磁带机中已装入磁带且磁带已格式化",
-                        ip_address=ip_address,
-                        request_method=request_method,
-                        request_url=request_url,
-                        duration_ms=int((datetime.now() - start_time).total_seconds() * 1000)
-                    )
-                    return {
-                        "success": False,
-                        "message": f"磁带 {request.tape_id} 标签写入失败，无法创建",
-                        "error": "标签写入失败，请确保磁带机中已装入磁带且磁带已格式化"
-                    }
-                
-                # 标签写入成功，现在可以写入数据库
-                logger.info(f"磁带 {request.tape_id} 标签写入成功，开始写入数据库...")
-                
-                # 插入新磁带
-                cur.execute("""
-                    INSERT INTO tape_cartridges 
-                    (tape_id, label, status, media_type, generation, serial_number, location,
-                     capacity_bytes, used_bytes, retention_months, notes, manufactured_date, expiry_date, auto_erase, health_score)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, (
-                    request.tape_id,
-                    request.label,
-                    'AVAILABLE',  # 使用'AVAILABLE'状态（全大写）
-                    request.media_type,
-                    request.generation,
-                    request.serial_number,
-                    request.location,
-                    capacity_bytes,
-                    0,
-                    request.retention_months,
-                    request.notes,
-                    created_date,  # 使用计算出的创建日期（仅年月）
-                    expiry_date,
-                    True,
-                    100  # 默认健康分数100
-                ))
-                
-                conn.commit()
-                logger.info(f"磁带 {request.tape_id} 记录已创建并写入数据库")
+                cur.execute("SELECT 1 FROM tape_cartridges WHERE tape_id = %s", (tape_id_value,))
+                tape_exists = cur.fetchone() is not None
+        finally:
+            conn.close()
         
+        # 根据format_tape参数决定是否格式化
+        format_tape = getattr(request, 'format_tape', True)  # 默认为True保持向后兼容
+        
+        # 先更新数据库，格式化在后台执行（避免阻塞前端）
+        if format_tape:
+            operation_desc = "更新已有记录并" if tape_exists else "创建新记录并"
+            logger.info(
+                "%s使用 LtfsCmdFormat.exe 格式化磁带（后台执行）: tape_id=%s, drive=%s, label=%s", 
+                operation_desc, tape_id_value, drive_letter, final_label
+            )
+            
+            # 在后台执行格式化任务，不阻塞API响应
+            async def format_tape_background():
+                """后台格式化任务"""
+                try:
+                    format_result = await tape_tools_manager.format_tape_ltfs(
+                        drive_letter=drive_letter,
+                        volume_label=final_label,
+                        serial=serial_param,
+                        eject_after=False
+                    )
+                    
+                    if format_result.get("success"):
+                        logger.info("LtfsCmdFormat 格式化成功: tape_id=%s, label=%s", tape_id_value, final_label)
+                        await log_operation(
+                            operation_type=OperationType.UPDATE if tape_exists else OperationType.CREATE,
+                            resource_type="tape",
+                            resource_id=tape_id_value,
+                            resource_name=final_label,
+                            operation_name="磁带格式化",
+                            operation_description=f"LtfsCmdFormat 格式化磁带 {tape_id_value} 成功（后台执行）",
+                            category="tape",
+                            success=True,
+                            ip_address=ip_address,
+                            request_method=request_method,
+                            request_url=request_url
+                        )
+                    else:
+                        error_detail = format_result.get("stderr") or format_result.get("stdout") or "LtfsCmdFormat执行失败"
+                        logger.error("LtfsCmdFormat 格式化磁带失败（后台执行）: %s", error_detail)
+                        await log_operation(
+                            operation_type=OperationType.UPDATE if tape_exists else OperationType.CREATE,
+                            resource_type="tape",
+                            resource_id=tape_id_value,
+                            resource_name=final_label,
+                            operation_name="磁带格式化",
+                            operation_description=f"LtfsCmdFormat 格式化磁带 {tape_id_value} 失败（后台执行）",
+                            category="tape",
+                            success=False,
+                            error_message=error_detail,
+                            ip_address=ip_address,
+                            request_method=request_method,
+                            request_url=request_url
+                        )
+                except Exception as e:
+                    logger.error(f"后台格式化任务异常: {str(e)}", exc_info=True)
+            
+            # 启动后台任务，不等待完成
+            background_tasks.add_task(format_tape_background)
+            
+            logger.info("格式化任务已在后台启动，API立即返回")
+        else:
+            # 用户选择不格式化，只更新数据库
+            if tape_exists:
+                logger.info("磁带 %s 已存在，用户选择不格式化，仅更新数据库记录", tape_id_value)
+            else:
+                logger.info("创建新磁带记录，用户选择不格式化，仅写入数据库")
+        
+        # 计算容量与有效期
+        capacity_bytes = request.capacity_gb * (1024 ** 3) if request.capacity_gb else 18 * 1024 * (1024 ** 3)
+        created_date = datetime(target_year, target_month, 1)
+        
+        expiry_year = created_date.year
+        expiry_month = created_date.month + request.retention_months
+        while expiry_month > 12:
+            expiry_year += 1
+            expiry_month -= 12
+        expiry_date = datetime(expiry_year, expiry_month, 1)
+        
+        new_values = {
+            "tape_id": tape_id_value,
+            "label": final_label,
+            "status": "AVAILABLE",
+            "media_type": request.media_type,
+            "generation": request.generation,
+            "serial_number": request.serial_number,
+            "location": request.location,
+            "capacity_bytes": capacity_bytes,
+            "retention_months": request.retention_months,
+            "notes": request.notes,
+            "manufactured_date": created_date.isoformat(),
+            "expiry_date": expiry_date.isoformat()
+        }
+        
+        # 写入或更新数据库
+        conn = psycopg2.connect(**db_connect_kwargs)
+        try:
+            with conn.cursor() as cur:
+                if tape_exists:
+                    logger.info("磁带 %s 已存在，%s更新数据库记录", 
+                              tape_id_value, "后台格式化任务已启动，" if format_tape else "跳过格式化，直接")
+                    cur.execute(
+                        """
+                        UPDATE tape_cartridges
+                        SET label = %s,
+                            status = %s,
+                            media_type = %s,
+                            generation = %s,
+                            serial_number = %s,
+                            location = %s,
+                            capacity_bytes = %s,
+                            retention_months = %s,
+                            notes = %s,
+                            manufactured_date = %s,
+                            expiry_date = %s
+                        WHERE tape_id = %s
+                        """,
+                        (
+                            final_label,
+                            'AVAILABLE',
+                            request.media_type,
+                            request.generation,
+                            request.serial_number,
+                            request.location,
+                            capacity_bytes,
+                            request.retention_months,
+                            request.notes,
+                            created_date,
+                            expiry_date,
+                            tape_id_value
+                        )
+                    )
+                else:
+                    logger.info("磁带 %s 不存在，创建新数据库记录", tape_id_value)
+                    cur.execute(
+                        """
+                        INSERT INTO tape_cartridges 
+                        (tape_id, label, status, media_type, generation, serial_number, location,
+                         capacity_bytes, used_bytes, retention_months, notes, manufactured_date, expiry_date, auto_erase, health_score)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            tape_id_value,
+                            final_label,
+                            'AVAILABLE',
+                            request.media_type,
+                            request.generation,
+                            request.serial_number,
+                            request.location,
+                            capacity_bytes,
+                            0,
+                            request.retention_months,
+                            request.notes,
+                            created_date,
+                            expiry_date,
+                            True,
+                            100
+                        )
+                    )
+            conn.commit()
         finally:
             conn.close()
         
         duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        operation_type = OperationType.UPDATE if tape_exists else OperationType.CREATE
+        operation_name = "更新磁带" if tape_exists else "创建磁带"
+        operation_description = f"磁带 {tape_id_value} {'更新' if tape_exists else '创建'}成功，{'格式化任务已在后台启动' if format_tape else '未格式化（用户选择跳过）'}"
+        result_message = f"磁带 {tape_id_value} {'更新' if tape_exists else '创建'}成功，卷标 {final_label}" + ("（格式化任务已在后台执行）" if format_tape else "")
         
-        # 记录成功日志
         await log_operation(
-            operation_type=OperationType.CREATE,
+            operation_type=operation_type,
             resource_type="tape",
-            resource_id=request.tape_id,
-            resource_name=request.label,
-            operation_name="创建磁带",
-            operation_description=f"创建磁带 {request.tape_id}，标签已写入",
+            resource_id=tape_id_value,
+            resource_name=final_label,
+            operation_name=operation_name,
+            operation_description=operation_description,
             category="tape",
             success=True,
-            result_message=f"磁带 {request.tape_id} 创建成功，标签已写入",
+            result_message=result_message,
             new_values=new_values,
             ip_address=ip_address,
             request_method=request_method,
@@ -256,23 +319,26 @@ async def create_tape(request: CreateTapeRequest, http_request: Request):
         
         return {
             "success": True,
-            "message": f"磁带 {request.tape_id} 创建成功，标签已写入",
-            "tape_id": request.tape_id
+            "message": result_message,
+            "tape_id": tape_id_value,
+            "label": final_label,
+            "formatted": format_tape,
+            "updated": tape_exists
         }
         
     except HTTPException:
         raise
     except Exception as e:
         duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
-        error_msg = f"创建磁带记录失败: {str(e)}"
+        error_msg = f"创建/更新磁带失败: {str(e)}"
         logger.error(error_msg, exc_info=True)
         await log_operation(
-            operation_type=OperationType.CREATE,
+            operation_type=OperationType.UPDATE,
             resource_type="tape",
-            resource_id=getattr(request, 'tape_id', None),
-            resource_name=getattr(request, 'label', None),
-            operation_name="创建磁带",
-            operation_description=f"创建磁带失败",
+            resource_id=tape_id_value if 'tape_id_value' in locals() else getattr(request, 'tape_id', None),
+            resource_name=final_label if 'final_label' in locals() else getattr(request, 'label', None),
+            operation_name="创建/更新磁带",
+            operation_description="磁带创建/更新失败",
             category="tape",
             success=False,
             error_message=str(e),
@@ -1046,8 +1112,8 @@ async def get_tape_history(request: Request, limit: int = 50, offset: int = 0):
                         "tape_unload": "卸载磁带",
                         "tape_erase": "擦除磁带",
                         "tape_format": "格式化磁带",
-                        "tape_read_label": "读取标签",
-                        "tape_write_label": "写入标签",
+                        "tape_read_label": "读取卷标",
+                        "tape_write_label": "写入卷标",
                         "tape_rewind": "倒带",
                         "tape_position": "定位磁带",
                         "create": "创建磁带",
