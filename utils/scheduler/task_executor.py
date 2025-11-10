@@ -226,7 +226,77 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_
                     session.add(scheduled_task)
                     await session.commit()
 
-            logger.info(f"任务执行成功: {scheduled_task.task_name} (执行ID: {execution_id})")
+            # 详细的任务执行成功日志输出
+            duration_seconds = duration / 1000.0
+            logger.info("=" * 80)
+            logger.info(f"✅ 计划任务执行成功")
+            logger.info(f"   任务名称: {scheduled_task.task_name}")
+            logger.info(f"   任务ID: {scheduled_task.id}")
+            logger.info(f"   执行ID: {execution_id}")
+            logger.info(f"   动作类型: {scheduled_task.action_type.value if scheduled_task.action_type else 'N/A'}")
+            logger.info(f"   开始时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info(f"   结束时间: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info(f"   执行耗时: {duration_seconds:.2f}秒 ({duration}毫秒)")
+            
+            # 输出执行结果详情
+            if result:
+                logger.info(f"   执行结果:")
+                if isinstance(result, dict):
+                    for key, value in result.items():
+                        if key == 'status':
+                            logger.info(f"     状态: {value}")
+                        elif key == 'message':
+                            logger.info(f"     消息: {value}")
+                        elif key == 'backup_task_id':
+                            logger.info(f"     备份任务ID: {value}")
+                        elif key == 'backup_set_id':
+                            logger.info(f"     备份集ID: {value}")
+                        elif key == 'tape_id':
+                            logger.info(f"     磁带ID: {value}")
+                        elif key == 'total_files':
+                            logger.info(f"     总文件数: {value}")
+                        elif key == 'total_bytes':
+                            logger.info(f"     总字节数: {value:,} ({value / (1024**3):.2f} GB)" if value else "     总字节数: N/A")
+                        elif key == 'processed_files':
+                            logger.info(f"     已处理文件数: {value}")
+                        else:
+                            logger.info(f"     {key}: {value}")
+                else:
+                    logger.info(f"     {result}")
+            
+            # 输出任务统计信息
+            if is_opengauss():
+                conn = await get_opengauss_connection()
+                try:
+                    current_task = await conn.fetchrow(
+                        """
+                        SELECT total_runs, success_runs, failure_runs, average_duration
+                        FROM scheduled_tasks
+                        WHERE id = $1
+                        """,
+                        scheduled_task.id
+                    )
+                    if current_task:
+                        logger.info(f"   任务统计:")
+                        logger.info(f"     总执行次数: {current_task['total_runs'] or 0}")
+                        logger.info(f"     成功次数: {current_task['success_runs'] or 0}")
+                        logger.info(f"     失败次数: {current_task['failure_runs'] or 0}")
+                        if current_task['average_duration']:
+                            logger.info(f"     平均执行时长: {current_task['average_duration']}秒")
+                finally:
+                    await conn.close()
+            else:
+                logger.info(f"   任务统计:")
+                logger.info(f"     总执行次数: {scheduled_task.total_runs or 0}")
+                logger.info(f"     成功次数: {scheduled_task.success_runs or 0}")
+                logger.info(f"     失败次数: {scheduled_task.failure_runs or 0}")
+                if scheduled_task.average_duration:
+                    logger.info(f"     平均执行时长: {scheduled_task.average_duration}秒")
+            
+            # 输出下次执行时间
+            next_run = calculate_next_run_time(scheduled_task)
+            logger.info(f"   下次执行时间: {next_run.strftime('%Y-%m-%d %H:%M:%S') if next_run else 'N/A'}")
+            logger.info("=" * 80)
             
             # 记录任务执行成功日志
             await log_operation(
@@ -299,10 +369,23 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_
             import traceback
             stack_trace = traceback.format_exc()
             
-            # 记录详细的错误信息，包括堆栈跟踪
-            logger.error(f"任务执行失败 {scheduled_task.task_name}: {error_msg}")
-            logger.error(f"异常类型: {type(e).__name__}")
-            logger.error(f"异常堆栈:\n{stack_trace}")
+            # 详细的任务执行失败日志输出
+            duration_seconds = duration / 1000.0
+            logger.error("=" * 80)
+            logger.error(f"❌ 计划任务执行失败")
+            logger.error(f"   任务名称: {scheduled_task.task_name}")
+            logger.error(f"   任务ID: {scheduled_task.id}")
+            logger.error(f"   执行ID: {execution_id}")
+            logger.error(f"   动作类型: {scheduled_task.action_type.value if scheduled_task.action_type else 'N/A'}")
+            logger.error(f"   开始时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.error(f"   结束时间: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.error(f"   执行耗时: {duration_seconds:.2f}秒 ({duration}毫秒)")
+            logger.error(f"   错误类型: {type(e).__name__}")
+            logger.error(f"   错误消息: {error_msg}")
+            logger.error(f"   异常堆栈:")
+            for line in stack_trace.split('\n'):
+                if line.strip():
+                    logger.error(f"     {line}")
             
             # 更新执行日志和任务统计（openGauss使用原生SQL，其他使用SQLAlchemy）
             if is_opengauss():
@@ -370,6 +453,40 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_
                         await session.commit()
                 except Exception as db_error:
                     logger.error(f"更新任务日志失败: {str(db_error)}")
+            
+            # 输出任务统计信息（失败后）
+            if is_opengauss():
+                conn = await get_opengauss_connection()
+                try:
+                    current_task = await conn.fetchrow(
+                        """
+                        SELECT total_runs, success_runs, failure_runs, average_duration
+                        FROM scheduled_tasks
+                        WHERE id = $1
+                        """,
+                        scheduled_task.id
+                    )
+                    if current_task:
+                        logger.error(f"   任务统计:")
+                        logger.error(f"     总执行次数: {current_task['total_runs'] or 0}")
+                        logger.error(f"     成功次数: {current_task['success_runs'] or 0}")
+                        logger.error(f"     失败次数: {current_task['failure_runs'] or 0}")
+                        if current_task['average_duration']:
+                            logger.error(f"     平均执行时长: {current_task['average_duration']}秒")
+                finally:
+                    await conn.close()
+            else:
+                logger.error(f"   任务统计:")
+                logger.error(f"     总执行次数: {scheduled_task.total_runs or 0}")
+                logger.error(f"     成功次数: {scheduled_task.success_runs or 0}")
+                logger.error(f"     失败次数: {scheduled_task.failure_runs or 0}")
+                if scheduled_task.average_duration:
+                    logger.error(f"     平均执行时长: {scheduled_task.average_duration}秒")
+            
+            # 输出下次执行时间
+            next_run = calculate_next_run_time(scheduled_task)
+            logger.error(f"   下次执行时间: {next_run.strftime('%Y-%m-%d %H:%M:%S') if next_run else 'N/A'}")
+            logger.error("=" * 80)
 
             # 记录任务执行失败日志
             await log_operation(
