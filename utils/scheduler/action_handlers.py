@@ -466,35 +466,36 @@ class BackupActionHandler(ActionHandler):
                     await session.commit()
                     await session.refresh(backup_task)
             
-            # 完整备份前：擦除但保留标签文件
+            # 完整备份前：格式化磁带（计划任务使用当前年月生成卷标）
             if (template_task and template_task.task_type == BackupTaskType.FULL) or (not template_task and task_type == BackupTaskType.FULL):
                 try:
                     await log_system(
                         level=LogLevel.INFO,
                         category=LogCategory.BACKUP,
-                        message="开始完整备份前擦除（保留标签）",
+                        message="开始完整备份前格式化（使用当前年月）",
                         module="utils.scheduler.action_handlers",
                         function="BackupActionHandler.execute",
                     )
                     if self.system_instance and getattr(self.system_instance, 'tape_manager', None):
                         tape_ops = getattr(self.system_instance.tape_manager, 'tape_operations', None)
                         if tape_ops and hasattr(tape_ops, 'erase_preserve_label'):
-                            ok = await tape_ops.erase_preserve_label()
+                            # 计划任务格式化时使用当前年月生成卷标
+                            ok = await tape_ops.erase_preserve_label(use_current_year_month=True)
                             if not ok:
-                                logger.warning("完整备份前擦除失败，将尝试继续执行备份")
+                                logger.warning("完整备份前格式化失败，将尝试继续执行备份")
                                 await log_system(
                                     level=LogLevel.WARNING,
                                     category=LogCategory.BACKUP,
-                                    message="完整备份前擦除失败，继续执行",
+                                    message="完整备份前格式化失败，继续执行",
                                     module="utils.scheduler.action_handlers",
                                     function="BackupActionHandler.execute",
                                 )
                 except Exception as _:
-                    logger.warning("完整备份前擦除异常，将尝试继续执行备份")
+                    logger.warning("完整备份前格式化异常，将尝试继续执行备份")
                     await log_system(
                         level=LogLevel.WARNING,
                         category=LogCategory.BACKUP,
-                        message="完整备份前擦除异常，继续执行",
+                        message="完整备份前格式化异常，继续执行",
                         module="utils.scheduler.action_handlers",
                         function="BackupActionHandler.execute",
                     )

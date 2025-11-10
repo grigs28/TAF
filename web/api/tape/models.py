@@ -28,6 +28,7 @@ class CreateTapeRequest(BaseModel):
     retention_months: int = 6
     create_year: Optional[int] = None  # 创建年份
     create_month: Optional[int] = None  # 创建月份
+    format_tape: bool = True  # 是否格式化磁带（默认True，保持向后兼容）
 
 
 class UpdateTapeRequest(BaseModel):
@@ -38,6 +39,8 @@ class UpdateTapeRequest(BaseModel):
     capacity_gb: Optional[int] = None
     location: Optional[str] = None
     notes: Optional[str] = None
+    format_tape: bool = False  # 是否格式化磁带（默认False，需要显式指定）
+    label: Optional[str] = None  # 格式化时的新卷标（如果提供，将更新卷标）
 
 
 class WriteTapeLabelRequest(BaseModel):

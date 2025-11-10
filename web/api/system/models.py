@@ -42,6 +42,10 @@ class TapeConfig(BaseModel):
     tape_pool_size: int = Field(12, description="磁带池大小")
     tape_check_interval: int = Field(3600, description="状态检查间隔(秒)")
     auto_tape_cleanup: bool = Field(True, description="自动清理过期磁带")
+    # 新增：工具路径配置
+    itdt_path: Optional[str] = Field(None, description="ITDT可执行文件路径")
+    ltfs_tools_dir: Optional[str] = Field(None, description="LTFS工具目录")
+    default_device_address: Optional[str] = Field(None, description="默认驱动器地址(SCSI格式)")
 
 
 class DingTalkConfig(BaseModel):

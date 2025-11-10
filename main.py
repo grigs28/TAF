@@ -30,6 +30,13 @@ from recovery.recovery_engine import RecoveryEngine
 from utils.dingtalk_notifier import DingTalkNotifier
 
 
+def safe_print(message: str):
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        print(message.encode('ascii', 'ignore').decode('ascii'))
+
+
 class TapeBackupSystem:
     """磁带备份系统主类"""
 
@@ -45,54 +52,102 @@ class TapeBackupSystem:
 
     async def initialize(self):
         """初始化系统组件"""
+        import time
+        start_time = time.perf_counter()
+        
         try:
             # 设置日志
             setup_logging()
             logger = logging.getLogger(__name__)
+            
+            print("\n" + "=" * 80)
+            safe_print("= 系统启动 = 企业级磁带备份系统启动中...")
+            safe_print(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print("=" * 80 + "\n")
+            
             logger.info("=" * 60)
             logger.info("企业级磁带备份系统启动中...")
             logger.info(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             logger.info("=" * 60)
 
             # 初始化数据库
+            safe_print("[1/7] 初始化数据库...")
+            step_start = time.time()
             try:
                 # 先检查并创建数据库
                 from config.database_init import DatabaseInitializer
                 db_init = DatabaseInitializer()
+                print("   ├─ 检查数据库是否存在...")
                 await db_init.ensure_database_exists()
                 
+                print("   ├─ 初始化数据库连接池...")
                 await self.db_manager.initialize()
+                step_time = time.time() - step_start
+                safe_print(f"   └─ 数据库初始化完成 (耗时: {step_time:.2f}秒)\n")
                 logger.info("数据库连接初始化完成")
             except Exception as db_error:
+                step_time = time.time() - step_start
+                print(f"   └─ 警告: 数据库初始化失败 (耗时: {step_time:.2f}秒)")
+                print(f"      错误: {str(db_error)}\n")
                 logger.warning(f"数据库初始化失败，将在Web界面中提示用户: {str(db_error)}")
                 logger.info("系统将继续启动，以便用户在Web界面中配置数据库")
 
             # 初始化磁带管理器
+            safe_print("[2/7] 初始化磁带管理器...")
+            step_start = time.time()
             try:
+                print("   ├─ 初始化SCSI接口...")
+                print("   ├─ 扫描磁带设备...")
                 await self.tape_manager.initialize()
+                step_time = time.time() - step_start
+                safe_print(f"   └─ 磁带管理器初始化完成 (耗时: {step_time:.2f}秒)\n")
                 logger.info("磁带管理器初始化完成")
             except Exception as tape_error:
+                step_time = time.time() - step_start
+                print(f"   └─ 警告: 磁带管理器初始化失败 (耗时: {step_time:.2f}秒)")
+                print(f"      错误: {str(tape_error)}\n")
                 logger.warning(f"磁带管理器初始化失败: {str(tape_error)}")
 
             # 初始化备份引擎
+            safe_print("[3/7] 初始化备份引擎...")
+            step_start = time.time()
             try:
                 await self.backup_engine.initialize()
+                step_time = time.time() - step_start
+                safe_print(f"   └─ 备份引擎初始化完成 (耗时: {step_time:.2f}秒)\n")
                 logger.info("备份引擎初始化完成")
             except Exception as backup_error:
+                step_time = time.time() - step_start
+                print(f"   └─ 警告: 备份引擎初始化失败 (耗时: {step_time:.2f}秒)")
+                print(f"      错误: {str(backup_error)}\n")
                 logger.warning(f"备份引擎初始化失败: {str(backup_error)}")
 
             # 初始化恢复引擎
+            safe_print("[4/7] 初始化恢复引擎...")
+            step_start = time.time()
             try:
                 await self.recovery_engine.initialize()
+                step_time = time.time() - step_start
+                safe_print(f"   └─ 恢复引擎初始化完成 (耗时: {step_time:.2f}秒)\n")
                 logger.info("恢复引擎初始化完成")
             except Exception as recovery_error:
+                step_time = time.time() - step_start
+                print(f"   └─ 警告: 恢复引擎初始化失败 (耗时: {step_time:.2f}秒)")
+                print(f"      错误: {str(recovery_error)}\n")
                 logger.warning(f"恢复引擎初始化失败: {str(recovery_error)}")
 
             # 初始化通知系统
+            safe_print("[5/7] 初始化通知系统...")
+            step_start = time.time()
             try:
                 await self.dingtalk_notifier.initialize()
+                step_time = time.time() - step_start
+                safe_print(f"   └─ 通知系统初始化完成 (耗时: {step_time:.2f}秒)\n")
                 logger.info("通知系统初始化完成")
             except Exception as dingtalk_error:
+                step_time = time.time() - step_start
+                print(f"   └─ 警告: 通知系统初始化失败 (耗时: {step_time:.2f}秒)")
+                print(f"      错误: {str(dingtalk_error)}\n")
                 logger.warning(f"通知系统初始化失败: {str(dingtalk_error)}")
 
             # 绑定依赖（备份引擎需要磁带管理器与通知器）
@@ -104,16 +159,32 @@ class TapeBackupSystem:
                 logger.warning(f"绑定备份引擎依赖失败: {str(dep_error)}")
 
             # 初始化Web应用
+            safe_print("[6/7] 初始化Web应用...")
+            step_start = time.time()
             self.web_app = create_app(self)
+            step_time = time.time() - step_start
+            safe_print(f"   └─ Web应用初始化完成 (耗时: {step_time:.2f}秒)\n")
             logger.info("Web应用初始化完成")
 
             # 初始化计划任务
+            safe_print("[7/7] 初始化计划任务调度器...")
+            step_start = time.time()
             try:
+                print("   ├─ 从数据库加载计划任务...")
                 await self.scheduler.initialize(self)
+                step_time = time.time() - step_start
+                safe_print(f"   └─ 计划任务调度器初始化完成 (耗时: {step_time:.2f}秒)\n")
                 logger.info("计划任务调度器初始化完成")
             except Exception as scheduler_error:
+                step_time = time.time() - step_start
+                print(f"   └─ 警告: 计划任务调度器初始化失败 (耗时: {step_time:.2f}秒)")
+                print(f"      错误: {str(scheduler_error)}\n")
                 logger.warning(f"计划任务调度器初始化失败: {str(scheduler_error)}")
 
+            total_time = time.perf_counter() - start_time
+            print("=" * 80)
+            safe_print(f"系统初始化完成，总耗时: {total_time:.2f}秒")
+            print("=" * 80 + "\n")
             logger.info("系统初始化完成！（部分组件可能未正确初始化，请在Web界面中检查配置）")
 
             # 发送启动通知（如果通知系统可用）
@@ -128,21 +199,33 @@ class TapeBackupSystem:
         except Exception as e:
             logger = logging.getLogger(__name__)
             logger.error(f"系统初始化过程中发生未预期的错误: {str(e)}")
+            safe_print(f"\n系统初始化失败: {str(e)}\n")
             logger.info("系统将继续启动，以便用户在Web界面中检查和配置")
 
     async def start(self, shutdown_event=None):
         """启动系统服务"""
+        import time
         try:
             logger = logging.getLogger(__name__)
             logger.info("启动系统服务...")
+            
+            safe_print("启动系统服务...")
+            start_time = time.time()
 
             # 启动计划任务调度器
+            safe_print("   ├─ 启动计划任务调度器...")
+            step_start = time.time()
             try:
                 await self.scheduler.start()
+                step_time = time.time() - step_start
+                safe_print(f"   ├─ 计划任务调度器已启动 (耗时: {step_time:.2f}秒)")
             except Exception as scheduler_error:
-                logger.warning(f"计划任务调度器启动失败: {str(scheduler_error)}")
+                step_time = time.time() - step_start
+                safe_print(f"   ├─ 警告: 计划任务调度器启动失败 (耗时: {step_time:.2f}秒)")
+                safe_print(f"      错误: {str(scheduler_error)}")
 
             # 启动Web服务
+            safe_print("   └─ 启动Web服务器...\n")
             from hypercorn.config import Config
             from hypercorn.asyncio import serve
 
@@ -150,6 +233,14 @@ class TapeBackupSystem:
             config.bind = [f"0.0.0.0:{self.settings.WEB_PORT}"]
             config.worker_class = "asyncio"
 
+            service_time = time.time() - start_time
+            print("=" * 80)
+            safe_print(f"Web服务已启动 (服务启动耗时: {service_time:.2f}秒)")
+            safe_print(f"访问地址: http://localhost:{self.settings.WEB_PORT}")
+            safe_print(f"局域网访问: http://192.168.0.28:{self.settings.WEB_PORT}")
+            print("=" * 80)
+            safe_print("提示: 按 Ctrl+C 停止服务\n")
+            
             logger.info(f"Web服务启动在端口 {self.settings.WEB_PORT}")
             logger.info(f"访问地址: http://localhost:{self.settings.WEB_PORT}")
 
@@ -269,8 +360,12 @@ async def main():
 if __name__ == "__main__":
     # 检查Python版本
     if sys.version_info < (3, 8):
-        print("错误: 需要Python 3.8或更高版本")
+        safe_print("\n错误: 需要Python 3.8或更高版本")
+        safe_print(f"   当前版本: Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\n")
         sys.exit(1)
 
+    safe_print("\nPython 版本: " + sys.version.split()[0])
+    safe_print("工作目录: " + os.getcwd())
+    
     # 运行主程序
     asyncio.run(main())

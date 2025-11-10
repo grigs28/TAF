@@ -34,7 +34,11 @@ async def get_tape_config(request: Request):
             "max_volume_size": settings.MAX_VOLUME_SIZE,
             "tape_pool_size": settings.TAPE_POOL_SIZE,
             "tape_check_interval": settings.TAPE_CHECK_INTERVAL,
-            "auto_tape_cleanup": settings.AUTO_TAPE_CLEANUP
+            "auto_tape_cleanup": settings.AUTO_TAPE_CLEANUP,
+            # 新增：工具路径配置
+            "itdt_path": getattr(settings, 'ITDT_PATH', ''),
+            "ltfs_tools_dir": getattr(settings, 'LTFS_TOOLS_DIR', ''),
+            "default_device_address": "0.0.24.0"  # 固定默认值
         }
         
         # 检查设备状态（优先使用缓存）

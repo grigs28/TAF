@@ -203,6 +203,10 @@ class DatabaseManager:
                     'backupfiletype': [e.value for e in BackupFileType],  # ['file', 'directory', 'symlink']
                 }
                 
+                # 初始化统计列表
+                created_enums = []
+                existing_enums = []
+                
                 for enum_name, enum_values in enum_definitions.items():
                     # 检查枚举类型是否已存在
                     cur.execute("""
@@ -215,25 +219,15 @@ class DatabaseManager:
                         quoted_values = ', '.join([f"'{v}'" for v in enum_values])
                         enum_sql = f'CREATE TYPE {enum_name} AS ENUM ({quoted_values})'
                         cur.execute(enum_sql)
-                        logger.info(f"创建枚举类型: {enum_name} with values: {enum_values}")
+                        created_enums.append(enum_name)
                     else:
-                        # 如果已存在，检查其值
-                        cur.execute("""
-                            SELECT enumlabel FROM pg_enum WHERE enumtypid = 
-                            (SELECT oid FROM pg_type WHERE typname = %s)
-                            ORDER BY enumsortorder
-                        """, (enum_name,))
-                        existing_values = [row[0] for row in cur.fetchall()]
-                        logger.info(f"枚举类型 {enum_name} 已存在，包含值: {existing_values}")
-                        
-                        # 检查值是否匹配
-                        if set(existing_values) != set(enum_values):
-                            logger.warning(f"枚举类型 {enum_name} 的值不匹配！")
-                            logger.warning(f"  数据库中的值: {existing_values}")
-                            logger.warning(f"  期望的值: {enum_values}")
-                            logger.warning(f"  缺失的值: {set(enum_values) - set(existing_values)}")
-                            logger.warning(f"  多余的值: {set(existing_values) - set(enum_values)}")
-                            logger.warning(f"  建议：删除并重新创建枚举类型 {enum_name}，或手动修复")
+                        existing_enums.append(enum_name)
+                
+                # 汇总输出，减少日志刷屏
+                if created_enums:
+                    logger.info(f"创建了 {len(created_enums)} 个新枚举类型")
+                if existing_enums:
+                    logger.debug(f"跳过 {len(existing_enums)} 个已存在的枚举类型")
                 
                 # 也处理其他表中的枚举类型（从SQLAlchemy元数据获取）
                 for table in Base.metadata.tables.values():
@@ -258,17 +252,14 @@ class DatabaseManager:
                                 quoted_values = ', '.join([f"'{v}'" for v in enum_values])
                                 enum_sql = f"CREATE TYPE {enum_name} AS ENUM ({quoted_values})"
                                 cur.execute(enum_sql)
-                                logger.info(f"创建枚举类型: {enum_name} with values: {enum_values}")
+                                created_enums.append(enum_name)
                             else:
-                                cur.execute("""
-                                    SELECT enumlabel FROM pg_enum WHERE enumtypid = 
-                                    (SELECT oid FROM pg_type WHERE typname = %s)
-                                    ORDER BY enumsortorder
-                                """, (enum_name,))
-                                existing_values = [row[0] for row in cur.fetchall()]
-                                logger.info(f"枚举类型 {enum_name} 已存在，包含值: {existing_values}")
+                                existing_enums.append(enum_name)
                 
                 # 创建表
+                created_tables = []
+                existing_tables = []
+                
                 for table in Base.metadata.sorted_tables:
                     # 检查表是否已存在
                     cur.execute("""
@@ -277,7 +268,15 @@ class DatabaseManager:
                     if not cur.fetchone():
                         create_sql = str(CreateTable(table).compile(compile_kwargs={"literal_binds": True}, dialect=temp_engine.dialect))
                         cur.execute(create_sql)
-                        logger.info(f"创建表: {table.name}")
+                        created_tables.append(table.name)
+                    else:
+                        existing_tables.append(table.name)
+                
+                # 汇总输出，减少日志刷屏
+                if created_tables:
+                    logger.info(f"创建了 {len(created_tables)} 个新表: {', '.join(created_tables[:5])}{'...' if len(created_tables) > 5 else ''}")
+                if existing_tables:
+                    logger.debug(f"跳过 {len(existing_tables)} 个已存在的表")
             
             conn.commit()
             logger.info("使用psycopg2成功创建数据库表")

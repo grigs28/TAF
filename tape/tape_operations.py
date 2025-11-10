@@ -14,6 +14,7 @@ from datetime import datetime
 from tape.tape_cartridge import TapeCartridge
 from tape.itdt_interface import ITDTInterface
 from config.settings import get_settings
+from utils.tape_tools import tape_tools_manager
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +27,25 @@ class TapeOperations:
         self.itdt_interface: ITDTInterface | None = None
         self._initialized = False
 
-    async def initialize(self, scsi_interface=None):
-        """初始化磁带操作（ITDT）"""
+    async def initialize(self, scsi_interface=None, itdt_interface=None):
+        """初始化磁带操作（ITDT）
+        
+        Args:
+            scsi_interface: 已废弃，保留以兼容旧代码
+            itdt_interface: 共享的ITDT接口实例（如果提供，则不再创建新实例）
+        """
         try:
-            self.itdt_interface = ITDTInterface()
-            await self.itdt_interface.initialize()
+            # 如果提供了 ITDT 接口，直接使用（避免重复初始化）
+            if itdt_interface:
+                self.itdt_interface = itdt_interface
+                logger.info("磁带操作模块(ITDT)使用共享接口，跳过重复初始化")
+            else:
+                # 向后兼容：如果没有提供，则创建新实例
+                self.itdt_interface = ITDTInterface()
+                await self.itdt_interface.initialize()
+                logger.info("磁带操作模块(ITDT)初始化完成")
+            
             self._initialized = True
-            logger.info("磁带操作模块(ITDT)初始化完成")
         except Exception as e:
             logger.error(f"磁带操作模块(ITDT)初始化失败: {str(e)}")
             raise
@@ -42,8 +55,10 @@ class TapeOperations:
         if self._initialized and self.itdt_interface:
             return True
         try:
-            self.itdt_interface = ITDTInterface()
-            await self.itdt_interface.initialize()
+            # 如果还没有实例，创建新的（向后兼容）
+            if not self.itdt_interface:
+                self.itdt_interface = ITDTInterface()
+                await self.itdt_interface.initialize()
             self._initialized = True
             return True
         except Exception as e:
@@ -86,10 +101,10 @@ class TapeOperations:
                 logger.error("磁带倒带失败")
                 return False
 
-            # 读取磁带标签（如果有）
+            # 读取磁带卷标（如果有）
             tape_label = await self._read_tape_label()
             if tape_label:
-                logger.info(f"读取到磁带标签: {tape_label}")
+                logger.info(f"读取到磁带卷标: {tape_label}")
 
             logger.info(f"磁带 {tape_cartridge.tape_id} 加载成功")
             return True
@@ -166,48 +181,208 @@ class TapeOperations:
             logger.error(f"擦除磁带失败: {str(e)}")
             return False
 
-    async def erase_preserve_label(self, backup_task=None, progress_callback=None) -> bool:
-        """擦除磁带但保留标签（.TAPE_LABEL.txt 或磁带头元数据）
+    async def erase_preserve_label(self, backup_task=None, progress_callback=None, use_current_year_month: bool = False) -> bool:
+        """格式化磁带并保留卷标信息（使用LtfsCmdFormat.exe格式化，格式化本身会清空磁带）
         
         Args:
-            backup_task: 备份任务对象，用于更新进度
-            progress_callback: 进度回调函数，用于更新进度到数据库
-        
-        Returns:
-            True=擦除成功，False=失败
+            backup_task: 备份任务对象（可选）
+            progress_callback: 进度回调函数（可选）
+            use_current_year_month: 是否使用当前年月生成卷标（计划任务使用），默认为False（保留原卷标）
         """
         try:
             if not await self._ensure_initialized():
                 logger.error("磁带操作模块未初始化")
                 return False
 
-            # 读取当前标签元数据
+            # 读取当前卷标元数据（格式化前记录原卷标）
             metadata = await self._read_tape_label()
+            original_tape_id = None
+            original_label = None
+            
             if metadata:
-                logger.info(f"备份前擦除：将保留磁带标签 {metadata.get('tape_id')}")
+                original_tape_id = metadata.get("tape_id")
+                original_label = metadata.get("label") or original_tape_id
+                logger.info(f"格式化前记录原卷标: tape_id={original_tape_id}, label={original_label}")
             else:
-                logger.info("备份前擦除：未读取到磁带标签，将仅执行擦除")
-
-            # 执行擦除（传递backup_task和progress_callback以更新进度）
-            if not await self.erase_tape(backup_task=backup_task, progress_callback=progress_callback):
+                logger.info("格式化前未读取到卷标，将使用新卷标格式化")
+            
+            # 获取盘符（不带冒号）
+            drive_letter = (self.settings.TAPE_DRIVE_LETTER or "O").strip().upper()
+            if drive_letter.endswith(":"):
+                drive_letter = drive_letter[:-1]
+            
+            # 准备卷标和序列号
+            from datetime import datetime
+            now = datetime.now()
+            current_year = now.year
+            current_month = now.month
+            
+            if use_current_year_month:
+                # 计划任务：使用当前年月生成卷标
+                # 格式：TP{YYYY}{MM}01（例如：TP20251101）
+                label = f"TP{current_year:04d}{current_month:02d}01"
+                serial_number = None
+                logger.info(f"计划任务格式化：使用当前年月生成卷标 {label}")
+            elif metadata:
+                # 保留原卷标（备份引擎调用）
+                tape_id = metadata.get("tape_id")
+                label = metadata.get("label") or tape_id
+                serial_number = metadata.get("serial_number")
+                logger.info(f"完整备份前格式化：将保留磁带卷标 {label}")
+            else:
+                # 如果没有元数据，使用当前年月日格式（兼容旧逻辑）
+                label = f"TP{now.strftime('%Y%m%d')}"
+                serial_number = None
+                logger.info("完整备份前格式化：未读取到磁带卷标，将使用默认卷标格式化")
+            
+            logger.info(f"使用LtfsCmdFormat.exe格式化并设置卷标: {label}")
+            
+            # 初始化进度为0%
+            if backup_task:
+                backup_task.progress_percent = 0.0
+                if progress_callback:
+                    await progress_callback(backup_task, 0, 0)
+            
+            # 使用tape_tools_manager.format_tape_ltfs格式化并设置卷标
+            # LtfsCmdFormat格式化本身会清空磁带，不需要先执行擦除
+            format_result = await tape_tools_manager.format_tape_ltfs(
+                drive_letter=drive_letter,
+                volume_label=label,
+                serial=serial_number if serial_number and len(serial_number) == 6 and serial_number.isalnum() and serial_number.isupper() else None,
+                eject_after=False
+            )
+            
+            # 格式化完成后，更新进度为100%
+            if backup_task:
+                backup_task.progress_percent = 100.0
+                if progress_callback:
+                    await progress_callback(backup_task, 1, 1)
+            
+            if format_result.get("success"):
+                logger.info(f"LtfsCmdFormat格式化成功，卷标已设置为: {label}")
+                
+                # 格式化成功后，尝试更新数据库中的磁带记录
+                # 读取格式化后的新卷标（从磁带读取）
+                try:
+                    new_metadata = await self._read_tape_label()
+                    if new_metadata:
+                        new_label = new_metadata.get("label") or new_metadata.get("tape_id") or label
+                        new_tape_id = new_metadata.get("tape_id") or label
+                        
+                        # 使用原卷标查找数据库记录，更新为新卷标
+                        await self._update_tape_label_in_database(
+                            original_tape_id=original_tape_id,
+                            original_label=original_label,
+                            new_tape_id=new_tape_id,
+                            new_label=new_label,
+                            use_current_year_month=use_current_year_month
+                        )
+                        logger.info(f"数据库中的磁带记录已更新: 原卷标={original_label} -> 新卷标={new_label}")
+                except Exception as db_error:
+                    logger.warning(f"更新数据库磁带记录失败（格式化成功，但数据库未更新）: {str(db_error)}")
+                    # 不因为数据库更新失败而返回False，格式化本身是成功的
+                
+                return True
+            else:
+                error_detail = format_result.get("stderr") or format_result.get("stdout") or "LtfsCmdFormat执行失败"
+                logger.error(f"LtfsCmdFormat格式化失败: {error_detail}")
                 return False
 
-            # 若有标签，写回标签文件/磁带头
-            if metadata:
-                write_ok = await self._write_tape_label({
-                    "tape_id": metadata.get("tape_id"),
-                    "label": metadata.get("label") or metadata.get("tape_id"),
-                    "serial_number": metadata.get("serial_number"),
-                    "created_date": metadata.get("created_date"),
-                    "expiry_date": metadata.get("expiry_date"),
-                })
-                if not write_ok:
-                    logger.warning("擦除后写回标签失败，但不影响后续备份")
-
-            return True
         except Exception as e:
-            logger.error(f"擦除并保留标签失败: {str(e)}")
+            logger.error(f"格式化并保留卷标失败: {str(e)}")
             return False
+    
+    async def _update_tape_label_in_database(self, original_tape_id: Optional[str], original_label: Optional[str],
+                                            new_tape_id: str, new_label: str, use_current_year_month: bool = False):
+        """更新数据库中的磁带卷标（使用原卷标查找记录，更新为新卷标）
+        
+        Args:
+            original_tape_id: 格式化前的磁带ID（用于查找数据库记录）
+            original_label: 格式化前的卷标（用于查找数据库记录）
+            new_tape_id: 格式化后的新磁带ID
+            new_label: 格式化后的新卷标
+            use_current_year_month: 是否使用当前年月（计划任务格式化）
+        """
+        try:
+            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+            
+            if not is_opengauss():
+                logger.debug("非openGauss数据库，跳过数据库更新")
+                return
+            
+            # 如果没有原卷标信息，无法更新数据库
+            if not original_tape_id and not original_label:
+                logger.warning("格式化前未记录原卷标，无法更新数据库记录")
+                return
+            
+            conn = await get_opengauss_connection()
+            try:
+                # 使用原卷标查找数据库记录
+                # 优先使用tape_id查找，如果没有则使用label查找
+                old_tape = None
+                
+                if original_tape_id:
+                    old_tape = await conn.fetchrow(
+                        "SELECT tape_id, label FROM tape_cartridges WHERE tape_id = $1",
+                        original_tape_id
+                    )
+                
+                if not old_tape and original_label:
+                    old_tape = await conn.fetchrow(
+                        "SELECT tape_id, label FROM tape_cartridges WHERE label = $1 LIMIT 1",
+                        original_label
+                    )
+                
+                if old_tape:
+                    old_tape_id = old_tape['tape_id']
+                    
+                    # 检查新tape_id是否已存在（避免主键冲突）
+                    existing = await conn.fetchrow(
+                        "SELECT tape_id FROM tape_cartridges WHERE tape_id = $1",
+                        new_tape_id
+                    )
+                    
+                    if existing and existing['tape_id'] != old_tape_id:
+                        # 新tape_id已存在且不是当前记录，只更新label
+                        logger.warning(f"新tape_id {new_tape_id} 已存在，只更新label字段")
+                        await conn.execute(
+                            "UPDATE tape_cartridges SET label = $1 WHERE tape_id = $2",
+                            new_label, old_tape_id
+                        )
+                        logger.info(f"更新数据库：tape_id={old_tape_id}（保持不变）, label={new_label}")
+                    else:
+                        # 更新tape_id和label
+                        await conn.execute(
+                            "UPDATE tape_cartridges SET tape_id = $1, label = $2 WHERE tape_id = $3",
+                            new_tape_id, new_label, old_tape_id
+                        )
+                        logger.info(f"更新数据库：tape_id {old_tape_id} -> {new_tape_id}, label={new_label}")
+                else:
+                    # 找不到原记录，尝试创建新记录（如果使用当前年月）
+                    if use_current_year_month:
+                        logger.info(f"未找到原卷标记录，尝试创建新记录: tape_id={new_tape_id}, label={new_label}")
+                        try:
+                            await conn.execute(
+                                """
+                                INSERT INTO tape_cartridges (tape_id, label, status, capacity_bytes, used_bytes, created_at, updated_at)
+                                VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+                                ON CONFLICT (tape_id) DO UPDATE SET label = $2, updated_at = NOW()
+                                """,
+                                new_tape_id, new_label, 'available', 0, 0
+                            )
+                            logger.info(f"创建/更新数据库记录：tape_id={new_tape_id}, label={new_label}")
+                        except Exception as insert_error:
+                            logger.warning(f"创建新记录失败: {str(insert_error)}")
+                    else:
+                        logger.warning(f"未找到原卷标记录（tape_id={original_tape_id}, label={original_label}），无法更新数据库")
+                
+                await conn.commit()
+            finally:
+                await conn.close()
+                
+        except Exception as e:
+            logger.error(f"更新数据库磁带卷标失败: {str(e)}")
+            # 不抛出异常，避免影响格式化流程
 
     async def write_data(self, data: bytes, block_number: int = 0) -> bool:
         """写入数据到磁带"""
@@ -610,227 +785,148 @@ class TapeOperations:
             return False
 
     async def _read_tape_label(self) -> Optional[Dict[str, Any]]:
-        """读取磁带标签（仅LTFS文件系统 .TAPE_LABEL.txt）"""
-        logger.info("========== 开始读取磁带标签 ==========")
+        """读取磁带卷标（使用fsutil获取Windows卷标）"""
+        logger.info("========== 开始读取磁带卷标 ==========")
         try:
-            import json
             import platform
             
             logger.info(f"操作系统: {platform.system()}, LTFS盘符配置: {getattr(self.settings, 'TAPE_DRIVE_LETTER', None)}")
             
-            # Windows系统且配置了LTFS盘符，尝试从文件系统读取（仅 .TAPE_LABEL.txt）
+            # Windows系统且配置了LTFS盘符，使用fsutil读取卷标
             if platform.system() == "Windows" and self.settings.TAPE_DRIVE_LETTER:
                 drive_letter = self.settings.TAPE_DRIVE_LETTER.upper()
-                ltfs_label_file = f"{drive_letter}:\\.TAPE_LABEL.txt"
-                logger.info(f"尝试从LTFS文件系统读取标签: {ltfs_label_file}")
+                drive_with_colon = f"{drive_letter}:" if not drive_letter.endswith(':') else drive_letter
+                logger.info(f"使用fsutil读取磁带卷标: {drive_with_colon}")
                 
                 try:
-                    file_exists = os.path.exists(ltfs_label_file)
-                    logger.info(f"LTFS标签文件是否存在: {file_exists}")
+                    # 检查驱动器是否存在
+                    if not os.path.exists(drive_with_colon):
+                        logger.warning(f"驱动器 {drive_with_colon} 不存在或未挂载")
+                        return None
                     
-                    if file_exists:
-                        logger.info(f"从LTFS文件系统读取标签: {ltfs_label_file}")
-                        # 尝试读取文件，如果失败则重试（最多3次）
-                        content = None
-                        for retry in range(3):
-                            try:
-                                # 使用二进制模式打开，然后解码，避免编码问题
-                                with open(ltfs_label_file, 'rb') as f:
-                                    raw_content = f.read()
-                                    content = raw_content.decode('utf-8', errors='ignore').strip()
-                                break  # 成功读取，退出重试循环
-                            except PermissionError as pe:
-                                if retry < 2:
-                                    logger.debug(f"读取标签文件权限错误（重试 {retry + 1}/3）: {str(pe)}")
-                                    await asyncio.sleep(0.5)  # 等待0.5秒后重试
-                                else:
-                                    logger.warning(f"读取标签文件权限错误（重试失败）: {str(pe)}")
-                                    raise
-                            except Exception as e:
-                                logger.warning(f"读取标签文件失败: {str(e)}")
-                                raise
+                    # 使用fsutil获取卷信息
+                    proc = await asyncio.create_subprocess_shell(
+                        f"fsutil fsinfo volumeinfo {drive_with_colon}",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    
+                    # 添加超时处理，避免阻塞
+                    try:
+                        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"fsutil命令执行超时，尝试终止进程...")
+                        if proc.returncode is None:
+                            proc.kill()
+                            await proc.wait()
+                        stdout = b""
+                        stderr = b""
+                        logger.error("fsutil命令执行超时")
+                        return None
+                    
+                    stdout_str = stdout.decode('gbk', errors='ignore') if stdout else ""
+                    
+                    if proc.returncode == 0:
+                        # 解析fsutil输出
+                        volume_info = {}
+                        for line in stdout_str.split('\n'):
+                            line = line.strip()
+                            if ':' in line:
+                                key, value = line.split(':', 1)
+                                volume_info[key.strip()] = value.strip()
                         
-                        if content:
-                            lines = content.split('\n')
-                            
-                            logger.info(f"读取到 {len(lines)} 行内容")
-                            
-                            # 读取第一行作为tape_id（支持TAPE_或TAP开头，或者任何非空第一行）
-                            if lines and lines[0].strip():
-                                # 解析LTFS格式的标签文件
-                                tape_id = lines[0].strip()
-                                metadata = {'tape_id': tape_id, 'label': tape_id}
-                                
-                                # 解析其他字段
-                                for line in lines[1:]:
-                                    line = line.strip()
-                                    if line.startswith('Created:'):
-                                        try:
-                                            metadata['created_date'] = line.split(':', 1)[1].strip()
-                                            logger.info(f"解析到创建日期: {metadata['created_date']}")
-                                        except:
-                                            pass
-                                    elif line.startswith('Capacity:'):
-                                        try:
-                                            metadata['capacity'] = line.split(':', 1)[1].strip()
-                                            logger.info(f"解析到容量: {metadata['capacity']}")
-                                        except:
-                                            pass
-                                    elif line.startswith('Serial:'):
-                                        try:
-                                            metadata['serial_number'] = line.split(':', 1)[1].strip()
-                                            logger.info(f"解析到序列号: {metadata['serial_number']}")
-                                        except:
-                                            pass
-                                
-                                logger.info(f"从LTFS读取磁带标签成功: {tape_id}")
-                                return metadata
-                            else:
-                                logger.warning(f"LTFS标签文件为空或格式不正确: {ltfs_label_file}")
+                        # 提取卷标
+                        volume_name = volume_info.get('卷名', volume_info.get('Volume Name', ''))
+                        serial_number = volume_info.get('卷序列号', volume_info.get('Volume Serial Number', ''))
+                        
+                        if volume_name:
+                            metadata = {
+                                'tape_id': volume_name,
+                                'label': volume_name,
+                                'serial_number': serial_number,
+                                'file_system': volume_info.get('文件系统名', volume_info.get('File System Name', ''))
+                            }
+                            logger.info(f"从fsutil读取磁带卷标成功: {volume_name}, 序列号: {serial_number}")
+                            return metadata
+                        else:
+                            logger.warning("fsutil未返回卷标信息")
+                            return None
                     else:
-                        logger.info(f"LTFS标签文件不存在: {ltfs_label_file}")
+                        logger.warning(f"fsutil执行失败，返回码: {proc.returncode}")
+                        return None
+                        
                 except Exception as e:
-                    logger.warning(f"从LTFS读取标签失败: {str(e)}", exc_info=True)
+                    logger.warning(f"使用fsutil读取卷标失败: {str(e)}", exc_info=True)
+                    return None
             else:
-                logger.info("未配置LTFS盘符或非Windows系统，跳过LTFS读取方式")
-            
-            # 未从LTFS读取到标签
-            logger.warning("未从LTFS读取到磁带标签")
-            return None
+                logger.info("未配置LTFS盘符或非Windows系统")
+                return None
             
         except Exception as e:
-            logger.error(f"读取磁带标签异常: {str(e)}", exc_info=True)
+            logger.error(f"读取磁带卷标异常: {str(e)}", exc_info=True)
             return None
 
     async def _write_tape_label(self, tape_info: Dict[str, Any]) -> bool:
-        """写入磁带标签（优先写入LTFS文件系统，失败则写入磁带头）"""
+        """写入磁带卷标（使用Windows label命令设置卷标）"""
         try:
-            import json
             import platform
             
-            # Windows系统且配置了LTFS盘符，尝试写入文件系统
+            # Windows系统且配置了LTFS盘符，使用label命令设置卷标
             if platform.system() == "Windows" and self.settings.TAPE_DRIVE_LETTER:
                 drive_letter = self.settings.TAPE_DRIVE_LETTER.upper()
-                # 以点开头的新标签文件名（只写该文件）
-                dot_label_file = f"{drive_letter}:\\.TAPE_LABEL.txt"
+                drive_with_colon = f"{drive_letter}:" if not drive_letter.endswith(':') else drive_letter
                 
                 try:
-                    if os.path.exists(f"{drive_letter}:\\"):
-                        logger.info(f"写入LTFS文件系统标签: {dot_label_file}")
-                        
-                        # 准备LTFS格式的标签内容
-                        tape_id = tape_info.get("tape_id", "")
-                        created_date = tape_info.get("created_date", "")
-                        
-                        label_content = f"{tape_id}\n"
-                        if created_date:
-                            # 格式化日期时间
-                            if isinstance(created_date, datetime):
-                                label_content += f"Created: {created_date.isoformat()}\n"
-                            else:
-                                label_content += f"Created: {created_date}\n"
-                        
-                        # 尝试写入文件，如果失败则重试（最多3次）
-                        write_success = False
-                        for retry in range(3):
-                            try:
-                                with open(dot_label_file, 'w', encoding='utf-8') as f:
-                                    f.write(label_content)
-                                write_success = True
-                                break  # 成功写入，退出重试循环
-                            except PermissionError as pe:
-                                if retry < 2:
-                                    logger.debug(f"写入标签文件权限错误（重试 {retry + 1}/3）: {str(pe)}")
-                                    await asyncio.sleep(0.5)  # 等待0.5秒后重试
-                                else:
-                                    logger.warning(f"写入标签文件权限错误（重试失败）: {str(pe)}")
-                                    raise
-                            except Exception as e:
-                                logger.warning(f"写入标签文件失败: {str(e)}")
-                                raise
-                        
-                        if not write_success:
-                            raise Exception("写入标签文件失败（重试后仍失败）")
-                        
-                        # Windows上以点开头的文件不自动隐藏，尝试设置隐藏属性
-                        try:
-                            import ctypes
-                            FILE_ATTRIBUTE_HIDDEN = 0x2
-                            ctypes.windll.kernel32.SetFileAttributesW(dot_label_file, FILE_ATTRIBUTE_HIDDEN)
-                            logger.info("已设置标签文件隐藏属性")
-                        except Exception as _:
-                            pass
-
-                        logger.info(f"LTFS标签写入成功: {tape_id}")
+                    # 检查驱动器是否存在
+                    if not os.path.exists(drive_with_colon):
+                        logger.warning(f"驱动器 {drive_with_colon} 不存在或未挂载")
+                        return False
+                    
+                    # 获取卷标
+                    tape_id = tape_info.get('tape_id', '')
+                    label = tape_info.get('label', tape_id)
+                    
+                    logger.info(f"使用label命令设置卷标: {label} 到驱动器 {drive_with_colon}")
+                    
+                    # 使用label命令设置卷标
+                    # 格式: echo label_name | label drive:
+                    proc = await asyncio.create_subprocess_shell(
+                        f'echo {label}| label {drive_with_colon}',
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    
+                    # 添加超时处理，避免阻塞
+                    try:
+                        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"label命令执行超时，尝试终止进程...")
+                        if proc.returncode is None:
+                            proc.kill()
+                            await proc.wait()
+                        logger.error("label命令执行超时")
+                        return False
+                    stdout_str = stdout.decode('gbk', errors='ignore') if stdout else ""
+                    stderr_str = stderr.decode('gbk', errors='ignore') if stderr else ""
+                    
+                    if proc.returncode == 0:
+                        logger.info(f"卷标设置成功: {label}")
                         return True
+                    else:
+                        logger.warning(f"label命令执行失败，返回码: {proc.returncode}")
+                        if stderr_str:
+                            logger.warning(f"错误信息: {stderr_str}")
+                        return False
+                        
                 except Exception as e:
-                    logger.debug(f"从LTFS写入标签失败: {str(e)}")
-            
-            # 回退到SCSI方式写入磁带头
-            if not self.scsi_interface:
-                logger.error("SCSI接口未初始化")
-                return False
-            
-            # 先尝试读取磁带标签，如果读不到才格式化
-            logger.info("检查磁带是否已格式化...")
-            existing_label = await self._read_tape_label()
-            if not existing_label:
-                # 磁带未格式化或为空，尝试格式化
-                logger.info("磁带未格式化，准备格式化...")
-                format_result = await self.scsi_interface.format_tape()
-                if not format_result:
-                    logger.warning("磁带格式化失败，尝试继续写入标签")
+                    logger.warning(f"使用label命令设置卷标失败: {str(e)}")
+                    return False
             else:
-                logger.info(f"磁带已格式化，现有标签: {existing_label.get('tape_id')}")
-            
-            # 准备磁带元数据
-            metadata = {
-                "tape_id": tape_info.get("tape_id"),
-                "label": tape_info.get("label"),
-                "serial_number": tape_info.get("serial_number"),
-                "created_date": tape_info.get("created_date"),
-                "expiry_date": tape_info.get("expiry_date"),
-                "system_version": "TAF_0.0.6"
-            }
-            
-            # 将元数据序列化为JSON
-            metadata_json = json.dumps(metadata, default=str)
-            metadata_bytes = metadata_json.encode('utf-8')
-            
-            # 磁带标签应该写入磁带头部（第一个数据块）
-            # 这里使用最小的块大小确保写入成功
-            block_size = 256  # 256字节
-            
-            # 确保元数据不超过块大小
-            if len(metadata_bytes) > block_size - 16:  # 保留16字节用于头部
-                metadata_bytes = metadata_bytes[:block_size-16]
-            
-            # 添加头部信息（4字节长度 + 4字节版本 + 8字节预留）
-            header = len(metadata_bytes).to_bytes(4, 'big')
-            version = b'TAF1'  # TAF格式版本1
-            
-            # 填充到块大小
-            label_data = header + version + metadata_bytes
-            padding = block_size - len(label_data)
-            if padding > 0:
-                label_data += b'\x00' * padding
-            
-            # 倒带到开头
-            await self.scsi_interface.rewind_tape()
-            
-            # 写入标签数据
-            result = await self.scsi_interface.write_tape_data(data=label_data, block_number=0, block_size=block_size)
-            
-            if result.get('success'):
-                logger.info(f"磁带标签写入成功: {tape_info.get('tape_id')}")
-                return True
-            else:
-                error_msg = result.get('error', '未知错误')
-                logger.error(f"磁带标签写入失败: {error_msg}")
+                logger.error("无法写入磁带卷标：未配置LTFS盘符或非Windows系统")
                 return False
                 
         except Exception as e:
-            logger.error(f"写入磁带标签异常: {str(e)}")
+            logger.error(f"写入磁带卷标异常: {str(e)}")
             return False
 
     # IBM LTO特定功能

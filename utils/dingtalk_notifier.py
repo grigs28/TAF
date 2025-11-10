@@ -311,8 +311,16 @@ class DingTalkNotifier:
 """
         await self.send_message(self.default_phone, title, formatted_content)
 
-    async def send_tape_format_notification(self, tape_id: str, status: str):
+    async def send_tape_format_notification(self, tape_id: str, status: str, 
+                                           error_detail: Optional[str] = None,
+                                           volume_label: Optional[str] = None,
+                                           serial_number: Optional[str] = None):
         """发送磁带格式化通知"""
+        # 检查是否应该发送通知
+        if status == "failed" and not self._should_send_notification("notify_tape_error"):
+            logger.debug("磁带格式化失败通知已禁用")
+            return
+        
         try:
             if status == "success":
                 title = "✅ 磁带格式化完成"
@@ -321,9 +329,12 @@ class DingTalkNotifier:
 **磁带ID**: {tape_id}
 **状态**: 格式化成功
 **完成时间**: {format_datetime(now())}
-
-磁带已成功格式化，可以正常使用。
 """
+                if volume_label:
+                    content += f"**卷标**: {volume_label}\n"
+                if serial_number:
+                    content += f"**序列号**: {serial_number}\n"
+                content += "\n磁带已成功格式化，可以正常使用。"
             elif status == "failed":
                 title = "❌ 磁带格式化失败"
                 content = f"""## 磁带格式化失败通知
@@ -331,9 +342,14 @@ class DingTalkNotifier:
 **磁带ID**: {tape_id}
 **状态**: 格式化失败
 **失败时间**: {format_datetime(now())}
-
-请检查设备状态和磁带是否正确加载。
 """
+                if volume_label:
+                    content += f"**卷标**: {volume_label}\n"
+                if serial_number:
+                    content += f"**序列号**: {serial_number}\n"
+                if error_detail:
+                    content += f"\n**错误详情**:\n```\n{error_detail}\n```\n"
+                content += "\n请检查设备状态和磁带是否正确加载。"
             else:
                 return
             

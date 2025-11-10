@@ -43,8 +43,8 @@ class TapeManager:
             await self.itdt_interface.initialize()
             logger.info("ITDT 接口初始化完成")
 
-            # 初始化磁带操作（基于 ITDT）
-            await self.tape_operations.initialize()
+            # 初始化磁带操作（共享 ITDT 接口，避免重复初始化）
+            await self.tape_operations.initialize(itdt_interface=self.itdt_interface)
             logger.info("磁带操作模块初始化完成")
 
             # 尝试从配置快速加载设备（不阻塞）
@@ -547,14 +547,7 @@ class TapeManager:
                     logger.warning(f"更新数据库磁带信息失败: {db_error}")
                 
                 # 擦除后重新写入磁带标签以保持标签不变
-                try:
-                    write_success = await self.tape_operations._write_tape_label(tape_info)
-                    if write_success:
-                        logger.info(f"擦除后重新写入磁带标签: {tape.tape_id}")
-                    else:
-                        logger.warning(f"擦除成功，但重新写入标签失败: {tape.tape_id}")
-                except Exception as e:
-                    logger.warning(f"重新写入标签时出错: {str(e)}")
+                logger.info("擦除完成，如需更新卷标请通过 LtfsCmdFormat.exe 重新格式化磁带")
 
                 logger.info(f"磁带 {tape_id} 擦除成功")
 

@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 
 from config.settings import get_settings
 from utils.logger import get_logger
-from web.api import backup, recovery, tape, system, user, scheduler
+from web.api import backup, recovery, tape, system, user, scheduler, tools
 # system和tape现在已经是模块包，直接导入router
 from web.middleware.auth_middleware import AuthMiddleware
 from web.middleware.logging_middleware import LoggingMiddleware
@@ -85,6 +85,7 @@ def create_app(system_instance=None) -> FastAPI:
     app.include_router(system.router, prefix="/api/system", tags=["系统管理"])
     app.include_router(user.router, prefix="/api/user", tags=["用户管理"])
     app.include_router(scheduler.router, prefix="/api/scheduler", tags=["计划任务管理"])
+    app.include_router(tools.router, tags=["工具管理"])
 
     # 存储系统实例引用
     app.state.system = system_instance
@@ -138,6 +139,15 @@ def create_app(system_instance=None) -> FastAPI:
     async def tapedrive_page(request: Request):
         """磁带机配置页面"""
         return templates.TemplateResponse("tapedrive.html", {
+            "request": request,
+            "app_name": settings.APP_NAME,
+            "version": app_version
+        })
+
+    @app.get("/tools", response_class=HTMLResponse)
+    async def tools_page(request: Request):
+        """工具管理页面"""
+        return templates.TemplateResponse("tools.html", {
             "request": request,
             "app_name": settings.APP_NAME,
             "version": app_version

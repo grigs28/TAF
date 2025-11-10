@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
 
     # 磁带配置
-    TAPE_DRIVE_LETTER: str = "o"  # Windows盘符
+    TAPE_DRIVE_LETTER: str = "O"  # Windows盘符（大写，不带冒号，LTFS命令使用）
     DEFAULT_BLOCK_SIZE: int = 262144  # 256KB
     MAX_VOLUME_SIZE: int = 322122547200  # 300GB
     # ITDT 接口配置
@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     ITDT_PATH: str = "C:\\itdt\\itdt.exe" if os.name == "nt" else "/usr/local/itdt/itdt"
     ITDT_LOG_LEVEL: str = "Information"  # Errors|Warnings|Information|Debug
     ITDT_LOG_PATH: str = "output"
+    
+    # LTFS 工具目录配置（必须在LTFS程序目录下执行命令）
+    LTFS_TOOLS_DIR: str = "D:\\APP\\TAF\\ITDT" if os.name == "nt" else "/usr/local/ltfs"
     ITDT_RESULT_PATH: str = "output"
     ITDT_DEVICE_PATH: str | None = None
     ITDT_FORCE_GENERIC_DD: bool = True  # 允许在无专用驱动时强制使用通用驱动
