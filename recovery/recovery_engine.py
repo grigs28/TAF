@@ -15,11 +15,15 @@ from typing import List, Dict, Any, Optional, Callable
 import py7zr
 
 from config.settings import get_settings
-from config.database import get_db
-from models.backup import BackupSet, BackupFile, BackupSetStatus
+from config.database import get_db, db_manager
+from models.backup import BackupSet, BackupFile, BackupSetStatus, BackupTaskType, BackupFileType
 from models.system_log import OperationLog, OperationType
 from tape.tape_manager import TapeManager
 from utils.dingtalk_notifier import DingTalkNotifier
+from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+from sqlalchemy import select, and_, or_, func
+from datetime import datetime, timedelta
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -58,116 +62,223 @@ class RecoveryEngine:
         self._progress_callbacks.append(callback)
 
     async def search_backup_sets(self, filters: Dict[str, Any] = None) -> List[Dict]:
-        """搜索备份集"""
+        """搜索备份集（从数据库查询真实数据）"""
         try:
             backup_sets = []
+            filters = filters or {}
 
-            # 这里应该从数据库查询备份集
-            # 暂时返回示例数据
-            sample_backup_sets = [
-                {
-                    'set_id': '2024-01_000001',
-                    'set_name': '月度备份_2024-01_000001',
-                    'backup_group': '2024-01',
-                    'backup_type': 'monthly_full',
-                    'backup_time': datetime.now().isoformat(),
-                    'total_files': 1500,
-                    'total_bytes': 10737418240,  # 10GB
-                    'tape_id': 'TAPE001',
-                    'status': 'active'
-                },
-                {
-                    'set_id': '2024-02_000001',
-                    'set_name': '月度备份_2024-02_000001',
-                    'backup_group': '2024-02',
-                    'backup_type': 'monthly_full',
-                    'backup_time': datetime.now().isoformat(),
-                    'total_files': 1600,
-                    'total_bytes': 12884901888,  # 12GB
-                    'tape_id': 'TAPE002',
-                    'status': 'active'
-                }
-            ]
+            if is_opengauss():
+                # openGauss 原生SQL查询
+                conn = await get_opengauss_connection()
+                try:
+                    # 构建WHERE子句
+                    where_clauses = []
+                    params = []
+                    param_index = 1
 
-            # 应用过滤条件
-            if filters:
-                filtered_sets = []
-                for backup_set in sample_backup_sets:
-                    match = True
+                    # 只查询活跃状态的备份集
+                    where_clauses.append("LOWER(status::text) = LOWER('ACTIVE')")
 
-                    if 'backup_group' in filters:
-                        if backup_set['backup_group'] != filters['backup_group']:
-                            match = False
+                    # 应用过滤条件
+                    if 'backup_group' in filters and filters['backup_group']:
+                        where_clauses.append(f"backup_group = ${param_index}")
+                        params.append(filters['backup_group'])
+                        param_index += 1
 
-                    if 'tape_id' in filters:
-                        if backup_set['tape_id'] != filters['tape_id']:
-                            match = False
+                    if 'tape_id' in filters and filters['tape_id']:
+                        where_clauses.append(f"tape_id = ${param_index}")
+                        params.append(filters['tape_id'])
+                        param_index += 1
 
-                    if 'date_from' in filters:
-                        backup_time = datetime.fromisoformat(backup_set['backup_time'])
-                        if backup_time < filters['date_from']:
-                            match = False
+                    if 'date_from' in filters and filters['date_from']:
+                        where_clauses.append(f"backup_time >= ${param_index}")
+                        params.append(filters['date_from'])
+                        param_index += 1
 
-                    if 'date_to' in filters:
-                        backup_time = datetime.fromisoformat(backup_set['backup_time'])
-                        if backup_time > filters['date_to']:
-                            match = False
+                    if 'date_to' in filters and filters['date_to']:
+                        where_clauses.append(f"backup_time <= ${param_index}")
+                        params.append(filters['date_to'])
+                        param_index += 1
 
-                    if match:
-                        filtered_sets.append(backup_set)
+                    where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
 
-                backup_sets = filtered_sets
+                    # 查询备份集
+                    sql = f"""
+                        SELECT id, set_id, set_name, backup_group, backup_type, backup_time,
+                               total_files, total_bytes, compressed_bytes, compression_ratio,
+                               tape_id, status, created_at
+                        FROM backup_sets
+                        WHERE {where_sql}
+                        ORDER BY backup_time DESC
+                        LIMIT 100
+                    """
+                    rows = await conn.fetch(sql, *params)
+
+                    # 转换为字典格式
+                    for row in rows:
+                        backup_set = {
+                            'id': row['id'],
+                            'set_id': row['set_id'],
+                            'set_name': row['set_name'],
+                            'backup_group': row['backup_group'],
+                            'backup_type': row['backup_type'].value if hasattr(row['backup_type'], 'value') else str(row['backup_type']),
+                            'backup_time': row['backup_time'].isoformat() if isinstance(row['backup_time'], datetime) else str(row['backup_time']),
+                            'total_files': row['total_files'] or 0,
+                            'total_bytes': row['total_bytes'] or 0,
+                            'compressed_bytes': row['compressed_bytes'] or 0,
+                            'compression_ratio': float(row['compression_ratio']) if row['compression_ratio'] else None,
+                            'tape_id': row['tape_id'],
+                            'status': row['status'].value if hasattr(row['status'], 'value') else str(row['status']),
+                            'created_at': row['created_at'].isoformat() if isinstance(row['created_at'], datetime) else str(row['created_at'])
+                        }
+                        backup_sets.append(backup_set)
+                finally:
+                    await conn.close()
             else:
-                backup_sets = sample_backup_sets
+                # 使用SQLAlchemy查询
+                async with db_manager.AsyncSessionLocal() as session:
+                    stmt = select(BackupSet).where(BackupSet.status == BackupSetStatus.ACTIVE)
 
+                    # 应用过滤条件
+                    if 'backup_group' in filters and filters['backup_group']:
+                        stmt = stmt.where(BackupSet.backup_group == filters['backup_group'])
+
+                    if 'tape_id' in filters and filters['tape_id']:
+                        stmt = stmt.where(BackupSet.tape_id == filters['tape_id'])
+
+                    if 'date_from' in filters and filters['date_from']:
+                        stmt = stmt.where(BackupSet.backup_time >= filters['date_from'])
+
+                    if 'date_to' in filters and filters['date_to']:
+                        stmt = stmt.where(BackupSet.backup_time <= filters['date_to'])
+
+                    stmt = stmt.order_by(BackupSet.backup_time.desc()).limit(100)
+                    result = await session.execute(stmt)
+                    sets = result.scalars().all()
+
+                    # 转换为字典格式
+                    for backup_set in sets:
+                        backup_sets.append({
+                            'id': backup_set.id,
+                            'set_id': backup_set.set_id,
+                            'set_name': backup_set.set_name,
+                            'backup_group': backup_set.backup_group,
+                            'backup_type': backup_set.backup_type.value if hasattr(backup_set.backup_type, 'value') else str(backup_set.backup_type),
+                            'backup_time': backup_set.backup_time.isoformat() if backup_set.backup_time else None,
+                            'total_files': backup_set.total_files or 0,
+                            'total_bytes': backup_set.total_bytes or 0,
+                            'compressed_bytes': backup_set.compressed_bytes or 0,
+                            'compression_ratio': float(backup_set.compression_ratio) if backup_set.compression_ratio else None,
+                            'tape_id': backup_set.tape_id,
+                            'status': backup_set.status.value if hasattr(backup_set.status, 'value') else str(backup_set.status),
+                            'created_at': backup_set.created_at.isoformat() if backup_set.created_at else None
+                        })
+
+            logger.info(f"查询到 {len(backup_sets)} 个备份集")
             return backup_sets
 
         except Exception as e:
             logger.error(f"搜索备份集失败: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return []
 
     async def get_backup_set_files(self, backup_set_id: str) -> List[Dict]:
-        """获取备份集文件列表"""
+        """获取备份集文件列表（从数据库查询真实数据）"""
         try:
-            # 这里应该从数据库查询文件列表
-            # 暂时返回示例数据
-            sample_files = [
-                {
-                    'id': 1,
-                    'file_path': '/data/documents/report.pdf',
-                    'file_name': 'report.pdf',
-                    'file_type': 'file',
-                    'file_size': 1048576,  # 1MB
-                    'compressed_size': 524288,  # 512KB
-                    'backup_time': datetime.now().isoformat(),
-                    'checksum': 'abc123def456'
-                },
-                {
-                    'id': 2,
-                    'file_path': '/data/images/photo.jpg',
-                    'file_name': 'photo.jpg',
-                    'file_type': 'file',
-                    'file_size': 2097152,  # 2MB
-                    'compressed_size': 1572864,  # 1.5MB
-                    'backup_time': datetime.now().isoformat(),
-                    'checksum': 'def456abc123'
-                },
-                {
-                    'id': 3,
-                    'file_path': '/data/projects/',
-                    'file_name': 'projects',
-                    'file_type': 'directory',
-                    'file_size': 0,
-                    'compressed_size': 0,
-                    'backup_time': datetime.now().isoformat(),
-                    'checksum': None
-                }
-            ]
+            files = []
 
-            return sample_files
+            if is_opengauss():
+                # openGauss 原生SQL查询
+                conn = await get_opengauss_connection()
+                try:
+                    # 首先根据 set_id 查找备份集的 id
+                    backup_set_row = await conn.fetchrow(
+                        "SELECT id FROM backup_sets WHERE set_id = $1",
+                        backup_set_id
+                    )
+                    
+                    if not backup_set_row:
+                        logger.warning(f"备份集不存在: {backup_set_id}")
+                        return []
+
+                    backup_set_db_id = backup_set_row['id']
+
+                    # 查询该备份集的所有文件
+                    sql = """
+                        SELECT id, file_path, file_name, file_type, file_size, compressed_size,
+                               file_permissions, created_time, modified_time, accessed_time,
+                               compressed, checksum, backup_time, chunk_number
+                        FROM backup_files
+                        WHERE backup_set_id = $1
+                        ORDER BY file_path ASC
+                    """
+                    rows = await conn.fetch(sql, backup_set_db_id)
+
+                    # 转换为字典格式
+                    for row in rows:
+                        file_info = {
+                            'id': row['id'],
+                            'file_path': row['file_path'],
+                            'file_name': row['file_name'],
+                            'file_type': row['file_type'].value if hasattr(row['file_type'], 'value') else str(row['file_type']),
+                            'file_size': row['file_size'] or 0,
+                            'compressed_size': row['compressed_size'] or 0,
+                            'file_permissions': row['file_permissions'],
+                            'created_time': row['created_time'].isoformat() if row['created_time'] and isinstance(row['created_time'], datetime) else (str(row['created_time']) if row['created_time'] else None),
+                            'modified_time': row['modified_time'].isoformat() if row['modified_time'] and isinstance(row['modified_time'], datetime) else (str(row['modified_time']) if row['modified_time'] else None),
+                            'accessed_time': row['accessed_time'].isoformat() if row['accessed_time'] and isinstance(row['accessed_time'], datetime) else (str(row['accessed_time']) if row['accessed_time'] else None),
+                            'compressed': row['compressed'] or False,
+                            'checksum': row['checksum'],
+                            'backup_time': row['backup_time'].isoformat() if row['backup_time'] and isinstance(row['backup_time'], datetime) else str(row['backup_time']),
+                            'chunk_number': row['chunk_number']
+                        }
+                        files.append(file_info)
+                finally:
+                    await conn.close()
+            else:
+                # 使用SQLAlchemy查询
+                async with db_manager.AsyncSessionLocal() as session:
+                    # 首先查找备份集
+                    stmt = select(BackupSet).where(BackupSet.set_id == backup_set_id)
+                    result = await session.execute(stmt)
+                    backup_set = result.scalar_one_or_none()
+
+                    if not backup_set:
+                        logger.warning(f"备份集不存在: {backup_set_id}")
+                        return []
+
+                    # 查询该备份集的所有文件
+                    stmt = select(BackupFile).where(BackupFile.backup_set_id == backup_set.id).order_by(BackupFile.file_path)
+                    result = await session.execute(stmt)
+                    backup_files = result.scalars().all()
+
+                    # 转换为字典格式
+                    for file in backup_files:
+                        files.append({
+                            'id': file.id,
+                            'file_path': file.file_path,
+                            'file_name': file.file_name,
+                            'file_type': file.file_type.value if hasattr(file.file_type, 'value') else str(file.file_type),
+                            'file_size': file.file_size or 0,
+                            'compressed_size': file.compressed_size or 0,
+                            'file_permissions': file.file_permissions,
+                            'created_time': file.created_time.isoformat() if file.created_time else None,
+                            'modified_time': file.modified_time.isoformat() if file.modified_time else None,
+                            'accessed_time': file.accessed_time.isoformat() if file.accessed_time else None,
+                            'compressed': file.compressed or False,
+                            'checksum': file.checksum,
+                            'backup_time': file.backup_time.isoformat() if file.backup_time else None,
+                            'chunk_number': file.chunk_number
+                        })
+
+            logger.info(f"查询到 {len(files)} 个文件 (备份集: {backup_set_id})")
+            return files
 
         except Exception as e:
             logger.error(f"获取备份集文件列表失败: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return []
 
     async def search_files(self, backup_set_id: str, search_term: str,
@@ -373,17 +484,67 @@ class RecoveryEngine:
             return False
 
     async def _get_backup_set_info(self, backup_set_id: str) -> Optional[Dict]:
-        """获取备份集信息"""
+        """获取备份集信息（从数据库查询真实数据）"""
         try:
-            # 这里应该从数据库查询
-            # 暂时返回示例信息
-            return {
-                'set_id': backup_set_id,
-                'tape_id': 'TAPE001',
-                'backup_time': datetime.now().isoformat()
-            }
+            if is_opengauss():
+                # openGauss 原生SQL查询
+                conn = await get_opengauss_connection()
+                try:
+                    row = await conn.fetchrow(
+                        """
+                        SELECT id, set_id, set_name, backup_group, backup_type, backup_time,
+                               total_files, total_bytes, compressed_bytes, tape_id, status
+                        FROM backup_sets
+                        WHERE set_id = $1
+                        """,
+                        backup_set_id
+                    )
+                    
+                    if not row:
+                        return None
+                    
+                    return {
+                        'id': row['id'],
+                        'set_id': row['set_id'],
+                        'set_name': row['set_name'],
+                        'backup_group': row['backup_group'],
+                        'backup_type': row['backup_type'].value if hasattr(row['backup_type'], 'value') else str(row['backup_type']),
+                        'backup_time': row['backup_time'].isoformat() if isinstance(row['backup_time'], datetime) else str(row['backup_time']),
+                        'total_files': row['total_files'] or 0,
+                        'total_bytes': row['total_bytes'] or 0,
+                        'compressed_bytes': row['compressed_bytes'] or 0,
+                        'tape_id': row['tape_id'],
+                        'status': row['status'].value if hasattr(row['status'], 'value') else str(row['status'])
+                    }
+                finally:
+                    await conn.close()
+            else:
+                # 使用SQLAlchemy查询
+                async with db_manager.AsyncSessionLocal() as session:
+                    stmt = select(BackupSet).where(BackupSet.set_id == backup_set_id)
+                    result = await session.execute(stmt)
+                    backup_set = result.scalar_one_or_none()
+                    
+                    if not backup_set:
+                        return None
+                    
+                    return {
+                        'id': backup_set.id,
+                        'set_id': backup_set.set_id,
+                        'set_name': backup_set.set_name,
+                        'backup_group': backup_set.backup_group,
+                        'backup_type': backup_set.backup_type.value if hasattr(backup_set.backup_type, 'value') else str(backup_set.backup_type),
+                        'backup_time': backup_set.backup_time.isoformat() if backup_set.backup_time else None,
+                        'total_files': backup_set.total_files or 0,
+                        'total_bytes': backup_set.total_bytes or 0,
+                        'compressed_bytes': backup_set.compressed_bytes or 0,
+                        'tape_id': backup_set.tape_id,
+                        'status': backup_set.status.value if hasattr(backup_set.status, 'value') else str(backup_set.status)
+                    }
         except Exception as e:
             logger.error(f"获取备份集信息失败: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
 
     async def _read_file_from_tape(self, file_info: Dict) -> Optional[bytes]:
@@ -488,20 +649,56 @@ class RecoveryEngine:
             return False
 
     async def get_backup_groups(self) -> List[str]:
-        """获取备份组列表"""
+        """获取备份组列表（从数据库查询真实数据）"""
         try:
-            # 这里应该从数据库查询
-            # 暂时返回示例数据
-            current_date = datetime.now()
             groups = []
 
-            for i in range(6):  # 最近6个月
+            if is_opengauss():
+                # openGauss 原生SQL查询
+                conn = await get_opengauss_connection()
+                try:
+                    # 查询所有不重复的备份组，按时间倒序
+                    sql = """
+                        SELECT DISTINCT backup_group
+                        FROM backup_sets
+                        WHERE LOWER(status::text) = LOWER('ACTIVE')
+                        ORDER BY backup_group DESC
+                        LIMIT 12
+                    """
+                    rows = await conn.fetch(sql)
+                    groups = [row['backup_group'] for row in rows]
+                finally:
+                    await conn.close()
+            else:
+                # 使用SQLAlchemy查询
+                async with db_manager.AsyncSessionLocal() as session:
+                    stmt = select(BackupSet.backup_group).where(
+                        BackupSet.status == BackupSetStatus.ACTIVE
+                    ).distinct().order_by(BackupSet.backup_group.desc()).limit(12)
+                    result = await session.execute(stmt)
+                    groups = [row[0] for row in result.all()]
+
+            # 如果没有查询到数据，返回最近6个月的默认组
+            if not groups:
+                current_date = datetime.now()
+                for i in range(6):
+                    date = current_date.replace(month=((current_date.month - i - 1) % 12) + 1,
+                                               year=current_date.year - ((current_date.month - i - 1) // 12))
+                    group_name = date.strftime('%Y-%m')
+                    groups.append(group_name)
+
+            logger.info(f"查询到 {len(groups)} 个备份组")
+            return groups
+        except Exception as e:
+            logger.error(f"获取备份组列表失败: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            # 返回默认的最近6个月
+            current_date = datetime.now()
+            groups = []
+            for i in range(6):
                 date = current_date.replace(month=((current_date.month - i - 1) % 12) + 1,
                                            year=current_date.year - ((current_date.month - i - 1) // 12))
                 group_name = date.strftime('%Y-%m')
                 groups.append(group_name)
-
             return groups
-        except Exception as e:
-            logger.error(f"获取备份组列表失败: {str(e)}")
-            return []

@@ -1005,20 +1005,14 @@ class BackupEngine:
             self._current_task = None
 
     async def _perform_backup(self, backup_task: BackupTask) -> bool:
-        """执行备份流程"""
+        """执行备份流程（流式处理：扫描和压缩循环执行）"""
         try:
-            # 1. 扫描源文件
-            logger.info("扫描源文件...")
             # 初始化扫描进度
             if backup_task:
                 backup_task.progress_percent = 0.0
                 await self._update_scan_progress(backup_task, 0, 0)
             
-            file_list = await self._scan_source_files(backup_task.source_paths, backup_task.exclude_patterns, backup_task)
-            backup_task.total_files = len(file_list)
-            backup_task.total_bytes = sum(f['size'] for f in file_list)
-
-            # 2. 检查磁带盘符是否可用（简单检查）
+            # 1. 检查磁带盘符是否可用（简单检查）
             logger.info("检查磁带盘符...")
             tape_drive = self.settings.TAPE_DRIVE_LETTER.upper() + ":\\"
             if not os.path.exists(tape_drive):
@@ -1026,7 +1020,7 @@ class BackupEngine:
             
             logger.info(f"磁带盘符可用: {tape_drive}")
             
-            # 3. 获取或创建磁带信息（简化处理）
+            # 2. 获取或创建磁带信息（简化处理）
             tape_id = "TAPE001"  # 默认磁带ID，可以从数据库获取或自动生成
             if self.tape_manager:
                 try:
@@ -1076,7 +1070,7 @@ class BackupEngine:
             
             backup_task.tape_id = tape_id
 
-            # 4. 创建备份集（简化磁带对象）
+            # 3. 创建备份集（简化磁带对象）
             from tape.tape_cartridge import TapeCartridge, TapeStatus
             tape_obj = TapeCartridge(
                 tape_id=tape_id,
@@ -1087,58 +1081,143 @@ class BackupEngine:
             )
             backup_set = await self._create_backup_set(backup_task, tape_obj)
 
-            # 5. 分组压缩文件
-            logger.info("分组压缩文件...")
-            file_groups = await self._group_files_for_compression(file_list)
-
-            # 6. 处理每个文件组
+            # 4. 流式处理：扫描和压缩循环执行
+            logger.info("开始流式处理：扫描和压缩循环执行...")
+            logger.info(f"批次配置：文件数阈值={self.settings.SCAN_BATCH_SIZE}, 字节数阈值={self._format_bytes(self.settings.SCAN_BATCH_SIZE_BYTES)}")
+            
             processed_files = 0
             total_size = 0
-
-            for group_idx, file_group in enumerate(file_groups):
-                logger.info(f"处理文件组 {group_idx + 1}/{len(file_groups)}")
-
-                # 压缩文件组（根据备份任务的压缩设置，带进度跟踪）
-                compressed_file = await self._compress_file_group(
-                    file_group, 
-                    backup_set, 
-                    backup_task, 
-                    base_processed_files=processed_files,
-                    total_files=backup_task.total_files
+            group_idx = 0
+            current_batch = []  # 当前批次文件列表
+            current_batch_size = 0  # 当前批次大小（字节）
+            
+            # 获取批次大小配置
+            batch_size_files = self.settings.SCAN_BATCH_SIZE
+            batch_size_bytes = self.settings.SCAN_BATCH_SIZE_BYTES
+            
+            # 流式扫描文件（异步生成器）
+            async for file_batch in self._scan_source_files_streaming(
+                backup_task.source_paths, 
+                backup_task.exclude_patterns, 
+                backup_task
+            ):
+                # 将扫描到的文件添加到当前批次
+                current_batch.extend(file_batch)
+                current_batch_size += sum(f['size'] for f in file_batch)
+                
+                # 更新总文件数和总字节数（动态更新）
+                backup_task.total_files = len(current_batch) + processed_files
+                backup_task.total_bytes = current_batch_size + total_size
+                
+                # 检查是否达到批次阈值（文件数或字节数）
+                should_compress = (
+                    len(current_batch) >= batch_size_files or 
+                    current_batch_size >= batch_size_bytes
                 )
-                if not compressed_file:
-                    continue
+                
+                if should_compress and current_batch:
+                    logger.info(f"达到批次阈值，开始压缩：文件数={len(current_batch)}, 大小={self._format_bytes(current_batch_size)}")
+                    
+                    # 对当前批次进行分组（按MAX_FILE_SIZE）
+                    file_groups = await self._group_files_for_compression(current_batch)
+                    
+                    # 处理每个文件组
+                    for file_group in file_groups:
+                        logger.info(f"处理文件组 {group_idx + 1} (批次内文件组)")
+                        
+                        # 压缩文件组（使用7z压缩）
+                        compressed_file = await self._compress_file_group(
+                            file_group, 
+                            backup_set, 
+                            backup_task, 
+                            base_processed_files=processed_files,
+                            total_files=backup_task.total_files
+                        )
+                        if not compressed_file:
+                            continue
 
-                # tar文件已直接写入磁带盘符，获取路径用于数据库记录
-                tape_file_path = await self._write_to_tape_drive(compressed_file['path'], backup_set, group_idx)
-                if not tape_file_path:
-                    logger.warning(f"无法获取tar文件路径: {compressed_file['path']}")
-                    # 继续执行，因为文件已经写入磁带
+                        # tar文件已直接写入磁带盘符，获取路径用于数据库记录
+                        tape_file_path = await self._write_to_tape_drive(compressed_file['path'], backup_set, group_idx)
+                        if not tape_file_path:
+                            logger.warning(f"无法获取压缩文件路径: {compressed_file['path']}")
+                            # 继续执行，因为文件已经写入磁带
 
-                # 保存文件信息到数据库（便于恢复）
-                await self._save_backup_files_to_db(
-                    file_group, 
-                    backup_set, 
-                    compressed_file, 
-                    tape_file_path or compressed_file['path'], 
-                    group_idx
-                )
+                        # 保存文件信息到数据库（便于恢复）
+                        await self._save_backup_files_to_db(
+                            file_group, 
+                            backup_set, 
+                            compressed_file, 
+                            tape_file_path or compressed_file['path'], 
+                            group_idx
+                        )
 
-                # 更新进度（基于文件数量和tar文件大小）
-                processed_files += len(file_group)
-                total_size += compressed_file['compressed_size']
-                backup_task.processed_files = processed_files
-                backup_task.processed_bytes = total_size
-                backup_task.compressed_bytes = total_size
-                backup_task.progress_percent = (processed_files / backup_task.total_files) * 100
+                        # 更新进度
+                        processed_files += len(file_group)
+                        total_size += compressed_file['compressed_size']
+                        backup_task.processed_files = processed_files
+                        backup_task.processed_bytes = total_size
+                        backup_task.compressed_bytes = total_size
+                        
+                        # 更新进度百分比（扫描占10%，压缩占90%）
+                        if backup_task.total_files > 0:
+                            backup_task.progress_percent = min(100.0, 10.0 + (processed_files / backup_task.total_files) * 90.0)
+                        
+                        # 通知进度更新
+                        await self._notify_progress(backup_task)
+                        
+                        group_idx += 1
+                    
+                    # 清空当前批次，准备下一批次
+                    current_batch = []
+                    current_batch_size = 0
+                    logger.info(f"批次压缩完成，已处理 {processed_files} 个文件，总大小 {self._format_bytes(total_size)}")
+            
+            # 处理剩余的未压缩文件（最后一批）
+            if current_batch:
+                logger.info(f"处理最后一批文件：文件数={len(current_batch)}, 大小={self._format_bytes(current_batch_size)}")
+                file_groups = await self._group_files_for_compression(current_batch)
+                
+                for file_group in file_groups:
+                    logger.info(f"处理文件组 {group_idx + 1} (最后一批)")
+                    
+                    compressed_file = await self._compress_file_group(
+                        file_group, 
+                        backup_set, 
+                        backup_task, 
+                        base_processed_files=processed_files,
+                        total_files=backup_task.total_files
+                    )
+                    if not compressed_file:
+                        continue
 
-                # 通知进度更新
-                await self._notify_progress(backup_task)
+                    tape_file_path = await self._write_to_tape_drive(compressed_file['path'], backup_set, group_idx)
+                    if not tape_file_path:
+                        logger.warning(f"无法获取压缩文件路径: {compressed_file['path']}")
 
-            # 7. 完成备份集
+                    await self._save_backup_files_to_db(
+                        file_group, 
+                        backup_set, 
+                        compressed_file, 
+                        tape_file_path or compressed_file['path'], 
+                        group_idx
+                    )
+
+                    processed_files += len(file_group)
+                    total_size += compressed_file['compressed_size']
+                    backup_task.processed_files = processed_files
+                    backup_task.processed_bytes = total_size
+                    backup_task.compressed_bytes = total_size
+                    
+                    if backup_task.total_files > 0:
+                        backup_task.progress_percent = min(100.0, 10.0 + (processed_files / backup_task.total_files) * 90.0)
+                    
+                    await self._notify_progress(backup_task)
+                    group_idx += 1
+
+            # 5. 完成备份集
             await self._finalize_backup_set(backup_set, processed_files, total_size)
 
-            logger.info("备份完成")
+            logger.info(f"备份完成，共处理 {processed_files} 个文件，总大小 {self._format_bytes(total_size)}")
             return True
 
         except Exception as e:
@@ -1146,9 +1225,136 @@ class BackupEngine:
             backup_task.error_message = str(e)
             return False
 
+    async def _scan_source_files_streaming(self, source_paths: List[str], exclude_patterns: List[str], 
+                                           backup_task: Optional[BackupTask] = None):
+        """流式扫描源文件（异步生成器，分批返回文件）
+        
+        Yields:
+            List[Dict]: 每批文件列表
+        """
+        if not source_paths:
+            logger.warning("源路径列表为空")
+            return
+        
+        # 估算总文件数（用于进度计算）
+        estimated_total = 0
+        if backup_task:
+            try:
+                for source_path_str in source_paths:
+                    source_path = Path(source_path_str)
+                    if source_path.is_dir():
+                        try:
+                            file_count = 0
+                            for _ in source_path.rglob('*'):
+                                if _.is_file():
+                                    file_count += 1
+                                    if file_count >= 1000:
+                                        estimated_total += max(1000, file_count * 2)
+                                        break
+                            if file_count < 1000:
+                                estimated_total += file_count
+                        except Exception:
+                            estimated_total += 5000
+                    elif source_path.is_file():
+                        estimated_total += 1
+            except Exception:
+                estimated_total = 5000
+        
+        if estimated_total < 100:
+            estimated_total = 1000
+
+        total_scanned = 0
+        current_batch = []
+        batch_size = 100  # 每次yield的文件数（小批次，便于及时压缩）
+        
+        for idx, source_path_str in enumerate(source_paths):
+            logger.info(f"扫描源路径 {idx + 1}/{len(source_paths)}: {source_path_str}")
+            source_path = Path(source_path_str)
+            
+            if not source_path.exists():
+                logger.warning(f"源路径不存在，跳过: {source_path_str}")
+                continue
+            
+            try:
+                if source_path.is_file():
+                    logger.debug(f"扫描文件: {source_path_str}")
+                    file_info = await self._get_file_info(source_path)
+                    if file_info and not self._should_exclude_file(file_info['path'], exclude_patterns):
+                        current_batch.append(file_info)
+                        total_scanned += 1
+                        
+                        # 更新扫描进度
+                        if backup_task and estimated_total > 0:
+                            scan_progress = min(10.0, (total_scanned / estimated_total) * 10.0)
+                            backup_task.progress_percent = scan_progress
+                            await self._update_scan_progress(backup_task, total_scanned, len(current_batch))
+                        
+                        # 达到批次大小，yield当前批次
+                        if len(current_batch) >= batch_size:
+                            yield current_batch
+                            current_batch = []
+                            
+                elif source_path.is_dir():
+                    logger.info(f"扫描目录: {source_path_str}")
+                    scanned_count = 0
+                    excluded_count = 0
+                    
+                    try:
+                        for file_path in source_path.rglob('*'):
+                            if file_path.is_file():
+                                scanned_count += 1
+                                total_scanned += 1
+                                
+                                # 每扫描100个文件输出一次进度
+                                if scanned_count % 100 == 0:
+                                    logger.info(f"已扫描 {scanned_count} 个文件，找到 {len(current_batch)} 个有效文件...")
+                                
+                                # 每扫描50个文件更新一次进度
+                                if total_scanned % 50 == 0 and backup_task:
+                                    if total_scanned > estimated_total:
+                                        estimated_total = total_scanned * 2
+                                    
+                                    if estimated_total > 0:
+                                        scan_progress = min(10.0, (total_scanned / estimated_total) * 10.0)
+                                        backup_task.progress_percent = scan_progress
+                                        await self._update_scan_progress(backup_task, total_scanned, len(current_batch))
+                                
+                                file_info = await self._get_file_info(file_path)
+                                if file_info:
+                                    if not self._should_exclude_file(file_info['path'], exclude_patterns):
+                                        current_batch.append(file_info)
+                                        
+                                        # 达到批次大小，yield当前批次
+                                        if len(current_batch) >= batch_size:
+                                            yield current_batch
+                                            current_batch = []
+                                    else:
+                                        excluded_count += 1
+                    except Exception as e:
+                        logger.error(f"扫描目录时发生错误 {source_path_str}: {str(e)}")
+                        continue
+                    
+                    logger.info(f"目录扫描完成: {source_path_str}, 扫描 {scanned_count} 个文件, 有效 {len(current_batch)} 个, 排除 {excluded_count} 个")
+                else:
+                    logger.warning(f"源路径既不是文件也不是目录: {source_path_str}")
+            except Exception as e:
+                logger.error(f"处理源路径失败 {source_path_str}: {str(e)}")
+                continue
+        
+        # 返回最后一批文件
+        if current_batch:
+            yield current_batch
+        
+        # 扫描完成，更新进度
+        if backup_task:
+            backup_task.progress_percent = 10.0
+            await self._update_scan_progress(backup_task, total_scanned, total_scanned)
+        
+        logger.info(f"扫描完成，共扫描 {total_scanned} 个文件")
+
     async def _scan_source_files(self, source_paths: List[str], exclude_patterns: List[str], 
                                   backup_task: Optional[BackupTask] = None) -> List[Dict]:
-        """扫描源文件"""
+        """扫描源文件（兼容旧接口，收集所有文件后返回）"""
         file_list = []
         
         if not source_paths:
@@ -1428,17 +1634,17 @@ class BackupEngine:
 
     async def _compress_file_group(self, file_group: List[Dict], backup_set: BackupSet, backup_task: BackupTask,
                                    base_processed_files: int = 0, total_files: int = 0) -> Optional[Dict]:
-        """压缩文件组（简单的tar备份，带进度跟踪）"""
+        """压缩文件组（使用7z压缩，支持多线程，带进度跟踪）"""
         try:
-            import tarfile
             import threading
             import time
             
             # 从备份任务获取压缩设置
             compression_enabled = getattr(backup_task, 'compression_enabled', True)
             
-            # 从系统配置获取压缩级别
+            # 从系统配置获取压缩级别和线程数
             compression_level = self.settings.COMPRESSION_LEVEL
+            compression_threads = self.settings.COMPRESSION_THREADS
             
             # 创建临时文件（直接写入磁带盘符，不创建临时文件）
             timestamp = format_datetime(now(), '%Y%m%d_%H%M%S')
@@ -1447,106 +1653,129 @@ class BackupEngine:
             backup_dir.mkdir(parents=True, exist_ok=True)
             
             # 进度跟踪变量
-            tar_progress = {'bytes_written': 0, 'running': True}
+            compress_progress = {'bytes_written': 0, 'running': True, 'completed': False}
             total_original_size = sum(f['size'] for f in file_group)
             
-            # 将tar操作放到线程池中执行，避免阻塞事件循环
-            def _do_tar_compress():
-                """在线程中执行tar压缩操作，带进度跟踪"""
-                if compression_enabled:
-                    # 使用tar.gz，直接写入磁带盘符
-                    tar_file = backup_dir / f"backup_{backup_set.set_id}_{timestamp}.tar.gz"
-                    compresslevel = max(1, min(9, compression_level))
-                    
-                    with tarfile.open(tar_file, 'w:gz', compresslevel=compresslevel) as tar_archive:
-                        for file_idx, file_info in enumerate(file_group):
-                            file_path = Path(file_info['path'])
-                            if file_path.exists():
-                                # 计算相对路径（保留目录结构）
-                                try:
-                                    # 尝试从源路径计算相对路径
-                                    source_paths = backup_task.source_paths or []
-                                    if source_paths:
-                                        # 找到匹配的源路径
-                                        for src_path in source_paths:
-                                            src = Path(src_path)
-                                            try:
-                                                if file_path.is_relative_to(src):
-                                                    arcname = str(file_path.relative_to(src))
-                                                    break
-                                            except (ValueError, AttributeError):
-                                                continue
+            # 将压缩操作放到线程池中执行，避免阻塞事件循环
+            def _do_7z_compress():
+                """在线程中执行7z压缩操作，带进度跟踪"""
+                try:
+                    if compression_enabled:
+                        # 使用7z压缩，直接写入磁带盘符
+                        archive_path = backup_dir / f"backup_{backup_set.set_id}_{timestamp}.7z"
+                        
+                        # 使用py7zr进行7z压缩，启用多线程
+                        with py7zr.SevenZipFile(
+                            archive_path,
+                            mode='w',
+                            filters=[{'id': py7zr.FILTER_LZMA2, 'preset': compression_level}],
+                            threads=compression_threads  # 使用配置的线程数
+                        ) as archive:
+                            # 添加文件到压缩包
+                            for file_idx, file_info in enumerate(file_group):
+                                file_path = Path(file_info['path'])
+                                if file_path.exists():
+                                    # 计算相对路径（保留目录结构）
+                                    try:
+                                        source_paths = backup_task.source_paths or []
+                                        if source_paths:
+                                            arcname = None
+                                            for src_path in source_paths:
+                                                src = Path(src_path)
+                                                try:
+                                                    if file_path.is_relative_to(src):
+                                                        arcname = str(file_path.relative_to(src))
+                                                        break
+                                                except (ValueError, AttributeError):
+                                                    continue
+                                            if arcname is None:
+                                                arcname = file_path.name
                                         else:
                                             arcname = file_path.name
-                                    else:
+                                    except Exception:
                                         arcname = file_path.name
-                                except Exception:
-                                    arcname = file_path.name
-                                
-                                tar_archive.add(file_path, arcname=arcname)
-                                
-                                # 更新进度：基于已打包的文件数量（已打包文件数/总文件数）
-                                if total_files > 0:
-                                    current_processed = base_processed_files + file_idx + 1
-                                    # 扫描阶段占10%，tar压缩阶段占90%
-                                    # 在tar阶段，进度从10%到100%
-                                    tar_progress_value = 10.0 + (current_processed / total_files) * 90.0
-                                    tar_progress['bytes_written'] = tar_file.stat().st_size if tar_file.exists() else 0
                                     
-                                    # 更新任务进度（在后台线程中，需要异步更新）
-                                    if backup_task and backup_task.id:
-                                        # 这里不能直接更新数据库，需要在主线程中更新
-                                        # 但可以更新内存中的进度值
-                                        backup_task.progress_percent = min(100.0, tar_progress_value)
-                    
-                    tar_progress['running'] = False
-                    return tar_file, tar_file.stat().st_size
-                else:
-                    # 使用tar，不压缩，直接写入磁带盘符
-                    tar_file = backup_dir / f"backup_{backup_set.set_id}_{timestamp}.tar"
-                    
-                    with tarfile.open(tar_file, 'w') as tar_archive:
-                        for file_idx, file_info in enumerate(file_group):
-                            file_path = Path(file_info['path'])
-                            if file_path.exists():
-                                try:
-                                    source_paths = backup_task.source_paths or []
-                                    if source_paths:
-                                        for src_path in source_paths:
-                                            src = Path(src_path)
-                                            try:
-                                                if file_path.is_relative_to(src):
-                                                    arcname = str(file_path.relative_to(src))
-                                                    break
-                                            except (ValueError, AttributeError):
-                                                continue
+                                    # 添加文件到压缩包
+                                    archive.write(file_path, arcname=arcname)
+                                    
+                                    # 更新进度：基于已压缩的文件数量
+                                    if total_files > 0:
+                                        current_processed = base_processed_files + file_idx + 1
+                                        # 扫描阶段占10%，压缩阶段占90%
+                                        compress_progress_value = 10.0 + (current_processed / total_files) * 90.0
+                                        compress_progress['bytes_written'] = archive_path.stat().st_size if archive_path.exists() else 0
+                                        
+                                        # 更新任务进度（在后台线程中，需要异步更新）
+                                        if backup_task and backup_task.id:
+                                            backup_task.progress_percent = min(100.0, compress_progress_value)
+                        
+                        # 确保压缩完成：with语句退出时，archive.close()会自动调用
+                        # 但为了确保文件已完全写入，检查文件是否存在且大小稳定
+                        if archive_path.exists():
+                            # 等待文件写入完成（文件大小稳定）
+                            prev_size = 0
+                            for _ in range(10):  # 最多等待1秒
+                                current_size = archive_path.stat().st_size
+                                if current_size == prev_size:
+                                    break
+                                prev_size = current_size
+                                time.sleep(0.1)
+                        
+                        compress_progress['running'] = False
+                        compress_progress['completed'] = True
+                        return archive_path, archive_path.stat().st_size if archive_path.exists() else 0
+                    else:
+                        # 不使用压缩，使用tar打包
+                        import tarfile
+                        tar_file = backup_dir / f"backup_{backup_set.set_id}_{timestamp}.tar"
+                        
+                        with tarfile.open(tar_file, 'w') as tar_archive:
+                            for file_idx, file_info in enumerate(file_group):
+                                file_path = Path(file_info['path'])
+                                if file_path.exists():
+                                    try:
+                                        source_paths = backup_task.source_paths or []
+                                        if source_paths:
+                                            arcname = None
+                                            for src_path in source_paths:
+                                                src = Path(src_path)
+                                                try:
+                                                    if file_path.is_relative_to(src):
+                                                        arcname = str(file_path.relative_to(src))
+                                                        break
+                                                except (ValueError, AttributeError):
+                                                    continue
+                                            if arcname is None:
+                                                arcname = file_path.name
                                         else:
                                             arcname = file_path.name
-                                    else:
+                                    except Exception:
                                         arcname = file_path.name
-                                except Exception:
-                                    arcname = file_path.name
-                                
-                                tar_archive.add(file_path, arcname=arcname)
-                                
-                                # 更新进度：基于已打包的文件数量（已打包文件数/总文件数）
-                                if total_files > 0:
-                                    current_processed = base_processed_files + file_idx + 1
-                                    # 扫描阶段占10%，tar压缩阶段占90%
-                                    tar_progress_value = 10.0 + (current_processed / total_files) * 90.0
-                                    tar_progress['bytes_written'] = tar_file.stat().st_size if tar_file.exists() else 0
                                     
-                                    if backup_task:
-                                        backup_task.progress_percent = min(100.0, tar_progress_value)
-                    
-                    tar_progress['running'] = False
-                    return tar_file, tar_file.stat().st_size
+                                    tar_archive.add(file_path, arcname=arcname)
+                                    
+                                    if total_files > 0:
+                                        current_processed = base_processed_files + file_idx + 1
+                                        tar_progress_value = 10.0 + (current_processed / total_files) * 90.0
+                                        compress_progress['bytes_written'] = tar_file.stat().st_size if tar_file.exists() else 0
+                                        
+                                        if backup_task:
+                                            backup_task.progress_percent = min(100.0, tar_progress_value)
+                        
+                        compress_progress['running'] = False
+                        compress_progress['completed'] = True
+                        return tar_file, tar_file.stat().st_size if tar_file.exists() else 0
+                except Exception as e:
+                    logger.error(f"压缩操作失败: {str(e)}")
+                    compress_progress['running'] = False
+                    compress_progress['completed'] = False
+                    raise
             
             # 启动进度监控任务：定期从内存读取进度并更新到数据库
             async def _monitor_progress_update():
                 """监控并更新进度到数据库（从内存读取进度值）"""
                 try:
-                    while tar_progress['running']:
+                    while compress_progress['running']:
                         await asyncio.sleep(0.5)  # 每0.5秒更新一次数据库
                         
                         # 从内存中的 backup_task.progress_percent 读取进度
@@ -1576,20 +1805,29 @@ class BackupEngine:
             progress_monitor_task = asyncio.create_task(_monitor_progress_update())
             
             try:
-                # 在线程池中执行tar操作，避免阻塞事件循环
+                # 在线程池中执行压缩操作，避免阻塞事件循环
                 logger.info(f"开始压缩文件组: {len(file_group)} 个文件...")
                 if compression_enabled:
-                    logger.info(f"使用tar.gz压缩 (压缩级别: {max(1, min(9, compression_level))})")
+                    logger.info(f"使用7z压缩 (压缩级别: {compression_level}, 线程数: {compression_threads})")
                 else:
                     logger.info("使用tar打包（不压缩）")
                 
                 # 使用 asyncio.to_thread 或 run_in_executor 在后台线程执行
                 loop = asyncio.get_event_loop()
-                tar_file, compressed_size = await loop.run_in_executor(None, _do_tar_compress)
+                archive_file, compressed_size = await loop.run_in_executor(None, _do_7z_compress)
                 
-                logger.info(f"tar操作完成: {tar_file} (大小: {self._format_bytes(compressed_size)})")
+                # 确保压缩操作已完成
+                if not compress_progress['completed']:
+                    logger.warning("压缩操作可能未完全完成，等待中...")
+                    # 等待压缩完成标志
+                    wait_count = 0
+                    while not compress_progress['completed'] and wait_count < 20:
+                        await asyncio.sleep(0.1)
+                        wait_count += 1
                 
-                # tar操作完成后，更新数据库中的进度（确保最终进度正确）
+                logger.info(f"压缩操作完成: {archive_file} (大小: {self._format_bytes(compressed_size)})")
+                
+                # 压缩操作完成后，更新数据库中的进度（确保最终进度正确）
                 if backup_task and backup_task.id and total_files > 0:
                     final_processed = base_processed_files + len(file_group)
                     final_progress = 10.0 + (final_processed / total_files) * 90.0
@@ -1602,7 +1840,7 @@ class BackupEngine:
                     )
             finally:
                 # 停止进度监控
-                tar_progress['running'] = False
+                compress_progress['running'] = False
                 progress_monitor_task.cancel()
                 try:
                     await progress_monitor_task
@@ -1611,27 +1849,29 @@ class BackupEngine:
 
             # 计算校验和（也在线程池中执行，避免阻塞）
             def _calculate_checksum():
-                return self._calculate_file_checksum(tar_file)
+                return self._calculate_file_checksum(archive_file)
             
             loop = asyncio.get_event_loop()
             checksum = await loop.run_in_executor(None, _calculate_checksum)
 
             compressed_info = {
-                'path': str(tar_file),
+                'path': str(archive_file),
                 'original_size': sum(f['size'] for f in file_group),
                 'compressed_size': compressed_size,
                 'file_count': len(file_group),
                 'checksum': checksum,
                 'compression_enabled': compression_enabled,
-                'compression_level': compression_level if compression_enabled else None
+                'compression_level': compression_level if compression_enabled else None,
+                'compression_threads': compression_threads if compression_enabled else None
             }
 
             if compression_enabled:
                 compression_ratio = compressed_size / compressed_info['original_size'] if compressed_info['original_size'] > 0 else 0
-                logger.info(f"压缩完成: {len(file_group)} 个文件, "
+                logger.info(f"7z压缩完成: {len(file_group)} 个文件, "
                             f"原始大小: {self._format_bytes(compressed_info['original_size'])}, "
                             f"压缩后: {self._format_bytes(compressed_size)}, "
-                            f"压缩比: {compression_ratio:.2%}")
+                            f"压缩比: {compression_ratio:.2%}, "
+                            f"线程数: {compression_threads}")
             else:
                 logger.info(f"打包完成: {len(file_group)} 个文件, "
                             f"大小: {self._format_bytes(compressed_size)}")

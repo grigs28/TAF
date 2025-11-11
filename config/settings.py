@@ -116,6 +116,8 @@ class Settings(BaseSettings):
     BACKUP_TEMP_DIR: str = "temp/backup"
     RECOVERY_TEMP_DIR: str = "temp/recovery"
     COMPRESSION_THREADS: int = 4
+    SCAN_BATCH_SIZE: int = 1000  # 扫描批次大小：扫描到多少文件后开始压缩（默认1000个文件）
+    SCAN_BATCH_SIZE_BYTES: int = 1073741824  # 扫描批次大小（字节）：扫描到多少字节后开始压缩（默认1GB）
 
     # 磁带管理配置
     TAPE_POOL_SIZE: int = 12  # 磁带池大小

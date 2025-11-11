@@ -21,7 +21,7 @@
                         </div>
                         <div>
                             <h6 class="mb-1">系统状态</h6>
-                            <span class="status-indicator">运行正常</span>
+                            <span class="status-indicator" id="systemStatus">运行正常</span>
                         </div>
                     </div>
                 </div>
@@ -37,7 +37,7 @@
                         </div>
                         <div>
                             <h6 class="mb-1">数据库连接</h6>
-                            <span class="status-indicator">已连接</span>
+                            <span class="status-indicator" id="dbStatus">已连接</span>
                         </div>
                     </div>
                 </div>
@@ -69,7 +69,7 @@
                     <div class="d-flex justify-content-between align-items-center">
                         <div>
                             <h6 class="mb-2">备份任务</h6>
-                            <h3 class="mb-0">3 个活跃</h3>
+                            <h3 class="mb-0" id="backupTasksCount">加载中...</h3>
                         </div>
                         <div class="ai-icon">
                             <i class="bi bi-stack"></i>
@@ -85,15 +85,15 @@
                     <div class="d-flex justify-content-between align-items-center">
                         <div>
                             <h6 class="mb-2">总备份次数</h6>
-                            <h3 class="mb-0">1,247</h3>
+                            <h3 class="mb-0" id="totalBackupsCount">加载中...</h3>
                         </div>
                         <div class="ai-icon">
                             <i class="bi bi-archive"></i>
                         </div>
                     </div>
                     <div class="mt-3">
-                        <small class="text-success">
-                            <i class="bi bi-arrow-up me-1"></i>本月 +23
+                        <small class="text-success" id="monthBackupsChange">
+                            <i class="bi bi-arrow-up me-1"></i>本月 +0
                         </small>
                     </div>
                 </div>
@@ -106,7 +106,7 @@
                     <div class="d-flex justify-content-between align-items-center">
                         <div>
                             <h6 class="mb-2">已用存储</h6>
-                            <h3 class="mb-0">3.2 TB</h3>
+                            <h3 class="mb-0" id="usedStorage">加载中...</h3>
                         </div>
                         <div class="ai-icon">
                             <i class="bi bi-pie-chart-fill"></i>
@@ -114,9 +114,9 @@
                     </div>
                     <div class="mt-3">
                         <div class="progress">
-                            <div class="progress-bar" style="width: 72%"></div>
+                            <div class="progress-bar" id="storageProgressBar" style="width: 0%"></div>
                         </div>
-                        <small class="text-secondary">共 4.4 TB</small>
+                        <small class="text-secondary" id="totalStorage">共 0 TB</small>
                     </div>
                 </div>
             </div>
@@ -131,15 +131,15 @@
                     <div class="d-flex justify-content-between align-items-center">
                         <div>
                             <h6 class="mb-2">磁带数量</h6>
-                            <h3 class="mb-0">12</h3>
+                            <h3 class="mb-0" id="tapeTotalCount">加载中...</h3>
                         </div>
                         <div class="ai-icon">
                             <i class="bi bi-collection"></i>
                         </div>
                     </div>
                     <div class="mt-3">
-                        <small class="text-secondary">
-                            <i class="bi bi-circle-fill me-1" style="color: var(--success);"></i>8 在线
+                        <small class="text-secondary" id="tapeOnlineCount">
+                            <i class="bi bi-circle-fill me-1" style="color: var(--success);"></i>0 在线
                         </small>
                     </div>
                 </div>
@@ -152,15 +152,15 @@
                     <div class="d-flex justify-content-between align-items-center">
                         <div>
                             <h6 class="mb-2">可用磁带</h6>
-                            <h3 class="mb-0">4</h3>
+                            <h3 class="mb-0" id="tapeAvailableCount">加载中...</h3>
                         </div>
                         <div class="ai-icon">
                             <i class="bi bi-circle"></i>
                         </div>
                     </div>
                     <div class="mt-3">
-                        <small class="text-secondary">
-                            <i class="bi bi-database me-1"></i>2.4 TB 空闲
+                        <small class="text-secondary" id="tapeFreeSpace">
+                            <i class="bi bi-database me-1"></i>0 TB 空闲
                         </small>
                     </div>
                 </div>
@@ -173,15 +173,15 @@
                     <div class="d-flex justify-content-between align-items-center">
                         <div>
                             <h6 class="mb-2">成功率</h6>
-                            <h3 class="mb-0">98.5%</h3>
+                            <h3 class="mb-0" id="successRate">加载中...</h3>
                         </div>
                         <div class="ai-icon">
                             <i class="bi bi-check-circle"></i>
                         </div>
                     </div>
                     <div class="mt-3">
-                        <small class="text-success">
-                            <i class="bi bi-arrow-up me-1"></i>较上月 +1.2%
+                        <small class="text-success" id="successRateChange">
+                            <i class="bi bi-arrow-up me-1"></i>较上月 +0%
                         </small>
                     </div>
                 </div>
@@ -201,35 +201,10 @@
                         <small class="text-secondary">最近30天</small>
                     </div>
                     
-                    <!-- 模拟图表 -->
-                    <div class="d-flex align-items-end" style="height: 120px; border-bottom: 2px solid rgba(0,170,255,0.2);">
-                        <div class="flex-fill d-flex flex-column align-items-center me-1">
-                            <div class="bg-primary" style="width: 100%; height: 60%; border-radius: 4px 4px 0 0;"></div>
-                            <small class="text-secondary mt-2" style="font-size: 0.7rem;">周一</small>
-                        </div>
-                        <div class="flex-fill d-flex flex-column align-items-center me-1">
-                            <div class="bg-primary" style="width: 100%; height: 75%; border-radius: 4px 4px 0 0;"></div>
-                            <small class="text-secondary mt-2" style="font-size: 0.7rem;">周二</small>
-                        </div>
-                        <div class="flex-fill d-flex flex-column align-items-center me-1">
-                            <div class="bg-primary" style="width: 100%; height: 65%; border-radius: 4px 4px 0 0;"></div>
-                            <small class="text-secondary mt-2" style="font-size: 0.7rem;">周三</small>
-                        </div>
-                        <div class="flex-fill d-flex flex-column align-items-center me-1">
-                            <div class="bg-primary" style="width: 100%; height: 85%; border-radius: 4px 4px 0 0;"></div>
-                            <small class="text-secondary mt-2" style="font-size: 0.7rem;">周四</small>
-                        </div>
-                        <div class="flex-fill d-flex flex-column align-items-center me-1">
-                            <div class="bg-primary" style="width: 100%; height: 90%; border-radius: 4px 4px 0 0;"></div>
-                            <small class="text-secondary mt-2" style="font-size: 0.7rem;">周五</small>
-                        </div>
-                        <div class="flex-fill d-flex flex-column align-items-center me-1">
-                            <div class="bg-success" style="width: 100%; height: 100%; border-radius: 4px 4px 0 0;"></div>
-                            <small class="text-secondary mt-2" style="font-size: 0.7rem;">周六</small>
-                        </div>
-                        <div class="flex-fill d-flex flex-column align-items-center">
-                            <div class="bg-primary" style="width: 100%; height: 95%; border-radius: 4px 4px 0 0;"></div>
-                            <small class="text-secondary mt-2" style="font-size: 0.7rem;">周日</small>
+                    <!-- 存储趋势图表 -->
+                    <div class="d-flex align-items-end" id="storageTrendChart" style="height: 120px; border-bottom: 2px solid rgba(0,170,255,0.2);">
+                        <div class="text-center text-muted py-4 w-100">
+                            <i class="bi bi-hourglass-split me-2"></i>加载中...
                         </div>
                     </div>
                 </div>
@@ -245,24 +220,24 @@
                     <div class="row g-2 mb-3">
                         <div class="col-6">
                             <div class="text-center p-2 bg-dark border border-primary rounded">
-                                <div class="h4 mb-0 text-success">8</div>
+                                <div class="h4 mb-0 text-success" id="tapePoolOnline">0</div>
                                 <small class="text-secondary">在线</small>
                             </div>
                         </div>
                         <div class="col-6">
                             <div class="text-center p-2 bg-dark border border-secondary rounded">
-                                <div class="h4 mb-0 text-secondary">4</div>
+                                <div class="h4 mb-0 text-secondary" id="tapePoolOffline">0</div>
                                 <small class="text-secondary">离线</small>
                             </div>
                         </div>
                     </div>
                     <div class="mb-3">
                         <small class="text-secondary d-block mb-2">最近检测</small>
-                        <div class="d-flex align-items-center">
+                        <div class="d-flex align-items-center" id="recentDeviceInfo">
                             <i class="bi bi-hdd-rack me-2 text-primary"></i>
                             <div>
-                                <div>IBM LTO-8 驱动器</div>
-                                <small class="text-secondary">序列号: UJ082200001</small>
+                                <div id="deviceModel">加载中...</div>
+                                <small class="text-secondary" id="deviceSerial">序列号: 加载中...</small>
                             </div>
                         </div>
                     </div>
@@ -285,51 +260,11 @@
                         </a>
                     </div>
                     
-                    <div class="list-group list-group-flush">
-                        <div class="list-group-item d-flex justify-content-between align-items-center bg-transparent border-secondary">
-                            <div class="d-flex align-items-center">
-                                <i class="bi bi-check-circle-fill text-success me-2"></i>
-                                <div>
-                                    <div class="fw-bold">完整备份 - 文档服务器</div>
-                                    <small class="text-secondary">2025-11-01 02:00:45 | 成功</small>
-                                </div>
+                    <div class="list-group list-group-flush" id="recentBackupsList">
+                        <div class="list-group-item bg-transparent border-secondary">
+                            <div class="text-center text-muted py-3">
+                                <i class="bi bi-hourglass-split me-2"></i>加载中...
                             </div>
-                            <span class="badge bg-success">1.2 GB</span>
-                        </div>
-                        
-                        <div class="list-group-item d-flex justify-content-between align-items-center bg-transparent border-secondary">
-                            <div class="d-flex align-items-center">
-                                <i class="bi bi-check-circle-fill text-success me-2"></i>
-                                <div>
-                                    <div class="fw-bold">增量备份 - 数据库</div>
-                                    <small class="text-secondary">2025-10-31 22:30:12 | 成功</small>
-                                </div>
-                            </div>
-                            <span class="badge bg-info">450 MB</span>
-                        </div>
-                        
-                        <div class="list-group-item d-flex justify-content-between align-items-center bg-transparent border-secondary">
-                            <div class="d-flex align-items-center">
-                                <i class="bi bi-hourglass-split text-warning me-2"></i>
-                                <div>
-                                    <div class="fw-bold">差异备份 - 邮件系统</div>
-                                    <small class="text-secondary">正在运行...</small>
-                                </div>
-                            </div>
-                            <div class="progress" style="width: 80px; height: 6px;">
-                                <div class="progress-bar" style="width: 65%"></div>
-                            </div>
-                        </div>
-                        
-                        <div class="list-group-item d-flex justify-content-between align-items-center bg-transparent border-secondary">
-                            <div class="d-flex align-items-center">
-                                <i class="bi bi-check-circle-fill text-success me-2"></i>
-                                <div>
-                                    <div class="fw-bold">归档备份 - 项目代码</div>
-                                    <small class="text-secondary">2025-10-31 15:20:08 | 成功</small>
-                                </div>
-                            </div>
-                            <span class="badge bg-primary">890 MB</span>
                         </div>
                     </div>
                 </div>
@@ -349,19 +284,19 @@
                         </tr>
                         <tr>
                             <td><i class="bi bi-collection me-2"></i>磁带池</td>
-                            <td class="text-end">12个磁带</td>
+                            <td class="text-end" id="systemTapePool">加载中...</td>
                         </tr>
                         <tr>
                             <td><i class="bi bi-pie-chart me-2"></i>存储容量</td>
-                            <td class="text-end">3.2TB / 4.4TB</td>
+                            <td class="text-end" id="systemStorage">加载中...</td>
                         </tr>
                         <tr>
                             <td><i class="bi bi-clock me-2"></i>最后备份</td>
-                            <td class="text-end">2天前</td>
+                            <td class="text-end" id="lastBackupTime">加载中...</td>
                         </tr>
                         <tr>
                             <td><i class="bi bi-activity me-2"></i>运行时间</td>
-                            <td class="text-end">15天</td>
+                            <td class="text-end" id="systemUptime">加载中...</td>
                         </tr>
                     </table>
                 </div>
@@ -371,6 +306,301 @@
 </div>
 
 <script>
+// 格式化字节大小
+function formatBytes(bytes) {
+    if (!bytes || bytes === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    let i = 0;
+    let size = bytes;
+    while (size >= 1024 && i < units.length - 1) {
+        size /= 1024;
+        i++;
+    }
+    return (i === 0 ? size : size.toFixed(1)) + ' ' + units[i];
+}
+
+// 格式化数字（添加千分位）
+function formatNumber(num) {
+    return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+// 格式化时间差
+function formatTimeAgo(dateStr) {
+    if (!dateStr) return '从未';
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diffMs = now - date;
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+    const diffMinutes = Math.floor(diffMs / (1000 * 60));
+    
+    if (diffDays > 0) return `${diffDays}天前`;
+    if (diffHours > 0) return `${diffHours}小时前`;
+    if (diffMinutes > 0) return `${diffMinutes}分钟前`;
+    return '刚刚';
+}
+
+// 格式化运行时间
+function formatUptime(seconds) {
+    if (!seconds) return '0秒';
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    
+    if (days > 0) return `${days}天`;
+    if (hours > 0) return `${hours}小时`;
+    if (minutes > 0) return `${minutes}分钟`;
+    return `${seconds}秒`;
+}
+
+// 获取备份类型名称
+function getBackupTypeName(type) {
+    const typeMap = {
+        'full': '完整备份',
+        'monthly_full': '完整备份',
+        'incremental': '增量备份',
+        'differential': '差异备份'
+    };
+    return typeMap[type] || '备份';
+}
+
+// 获取状态图标和颜色
+function getStatusIcon(status) {
+    const statusMap = {
+        'completed': { icon: 'bi-check-circle-fill', color: 'text-success' },
+        'running': { icon: 'bi-hourglass-split', color: 'text-warning' },
+        'failed': { icon: 'bi-x-circle-fill', color: 'text-danger' },
+        'pending': { icon: 'bi-clock', color: 'text-secondary' }
+    };
+    return statusMap[status] || { icon: 'bi-question-circle', color: 'text-secondary' };
+}
+
+// 加载统计数据
+async function loadDashboardData() {
+    try {
+        const response = await fetch('/api/system/statistics');
+        const data = await response.json();
+        
+        // 更新备份任务统计
+        if (data.backup_tasks) {
+            const running = data.backup_tasks.running || 0;
+            document.getElementById('backupTasksCount').textContent = `${running} 个活跃`;
+            document.getElementById('totalBackupsCount').textContent = formatNumber(data.backup_tasks.total || 0);
+            
+            // 本月备份次数变化
+            const monthChange = data.success_rate?.this_month_count || 0;
+            const monthChangeEl = document.getElementById('monthBackupsChange');
+            if (monthChange > 0) {
+                monthChangeEl.className = 'text-success';
+                monthChangeEl.innerHTML = `<i class="bi bi-arrow-up me-1"></i>本月 +${monthChange}`;
+            } else {
+                monthChangeEl.className = 'text-secondary';
+                monthChangeEl.innerHTML = `<i class="bi bi-dash me-1"></i>本月 +0`;
+            }
+        }
+        
+        // 更新存储统计
+        if (data.storage) {
+            const used = data.storage.used_capacity || 0;
+            const total = data.storage.total_capacity || 0;
+            const percent = data.storage.usage_percent || 0;
+            
+            document.getElementById('usedStorage').textContent = formatBytes(used);
+            document.getElementById('totalStorage').textContent = `共 ${formatBytes(total)}`;
+            document.getElementById('storageProgressBar').style.width = `${percent}%`;
+            document.getElementById('systemStorage').textContent = `${formatBytes(used)} / ${formatBytes(total)}`;
+        }
+        
+        // 更新磁带统计
+        if (data.tape_inventory) {
+            document.getElementById('tapeTotalCount').textContent = data.tape_inventory.total || 0;
+            document.getElementById('tapeOnlineCount').innerHTML = `<i class="bi bi-circle-fill me-1" style="color: var(--success);"></i>${data.tape_inventory.online || 0} 在线`;
+            document.getElementById('tapeAvailableCount').textContent = data.tape_inventory.available || 0;
+            
+            // 计算空闲空间（简化处理）
+            const freeSpace = (data.storage?.total_capacity || 0) - (data.storage?.used_capacity || 0);
+            document.getElementById('tapeFreeSpace').innerHTML = `<i class="bi bi-database me-1"></i>${formatBytes(freeSpace)} 空闲`;
+            
+            document.getElementById('tapePoolOnline').textContent = data.tape_inventory.online || 0;
+            document.getElementById('tapePoolOffline').textContent = data.tape_inventory.offline || 0;
+            document.getElementById('systemTapePool').textContent = `${data.tape_inventory.total || 0}个磁带`;
+        }
+        
+        // 更新成功率
+        if (data.success_rate) {
+            const rate = data.success_rate.overall || 0;
+            const change = data.success_rate.change || 0;
+            
+            document.getElementById('successRate').textContent = `${rate.toFixed(1)}%`;
+            const changeEl = document.getElementById('successRateChange');
+            if (change > 0) {
+                changeEl.className = 'text-success';
+                changeEl.innerHTML = `<i class="bi bi-arrow-up me-1"></i>较上月 +${change.toFixed(1)}%`;
+            } else if (change < 0) {
+                changeEl.className = 'text-danger';
+                changeEl.innerHTML = `<i class="bi bi-arrow-down me-1"></i>较上月 ${change.toFixed(1)}%`;
+            } else {
+                changeEl.className = 'text-secondary';
+                changeEl.innerHTML = `<i class="bi bi-dash me-1"></i>较上月 0%`;
+            }
+        }
+        
+        // 更新存储趋势图表
+        if (data.storage_trend && data.storage_trend.length > 0) {
+            renderStorageTrend(data.storage_trend);
+        } else {
+            document.getElementById('storageTrendChart').innerHTML = '<div class="text-center text-muted py-4 w-100">暂无数据</div>';
+        }
+        
+        // 更新最近备份活动
+        if (data.recent_backups && data.recent_backups.length > 0) {
+            renderRecentBackups(data.recent_backups);
+        } else {
+            document.getElementById('recentBackupsList').innerHTML = '<div class="list-group-item bg-transparent border-secondary"><div class="text-center text-muted py-3">暂无备份记录</div></div>';
+        }
+        
+        // 更新系统信息
+        if (data.recent_backups && data.recent_backups.length > 0) {
+            const lastBackup = data.recent_backups[0];
+            document.getElementById('lastBackupTime').textContent = formatTimeAgo(lastBackup.started_at || lastBackup.completed_at);
+        } else {
+            document.getElementById('lastBackupTime').textContent = '从未';
+        }
+        
+        document.getElementById('systemUptime').textContent = formatUptime(data.uptime || 0);
+        
+    } catch (error) {
+        console.error('加载统计数据失败:', error);
+    }
+}
+
+// 渲染存储趋势图表
+function renderStorageTrend(trend) {
+    const chartEl = document.getElementById('storageTrendChart');
+    if (!chartEl || !trend || trend.length === 0) return;
+    
+    // 找到最大值用于计算百分比
+    const maxBytes = Math.max(...trend.map(t => t.bytes || 0), 1);
+    
+    // 只显示最近7天的数据
+    const recentTrend = trend.slice(-7);
+    
+    chartEl.innerHTML = recentTrend.map(item => {
+        const date = new Date(item.date);
+        const dayName = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][date.getDay()];
+        const height = ((item.bytes || 0) / maxBytes * 100);
+        const isMax = item.bytes === maxBytes;
+        
+        return `
+            <div class="flex-fill d-flex flex-column align-items-center me-1">
+                <div class="${isMax ? 'bg-success' : 'bg-primary'}" style="width: 100%; height: ${height}%; border-radius: 4px 4px 0 0;"></div>
+                <small class="text-secondary mt-2" style="font-size: 0.7rem;">${dayName}</small>
+            </div>
+        `;
+    }).join('');
+}
+
+// 渲染最近备份活动
+function renderRecentBackups(backups) {
+    const listEl = document.getElementById('recentBackupsList');
+    if (!listEl) return;
+    
+    listEl.innerHTML = backups.map(backup => {
+        const statusInfo = getStatusIcon(backup.status);
+        const typeName = getBackupTypeName(backup.task_type);
+        const size = formatBytes(backup.size_bytes || 0);
+        
+        let statusText = '';
+        let statusBadge = '';
+        
+        if (backup.status === 'running') {
+            statusText = '正在运行...';
+            statusBadge = `<div class="progress" style="width: 80px; height: 6px;"><div class="progress-bar" style="width: 65%"></div></div>`;
+        } else if (backup.status === 'completed') {
+            const time = backup.completed_at ? new Date(backup.completed_at).toLocaleString('zh-CN') : '';
+            statusText = `${time} | 成功`;
+            statusBadge = `<span class="badge bg-success">${size}</span>`;
+        } else if (backup.status === 'failed') {
+            const time = backup.completed_at ? new Date(backup.completed_at).toLocaleString('zh-CN') : '';
+            statusText = `${time} | 失败`;
+            statusBadge = `<span class="badge bg-danger">失败</span>`;
+        } else {
+            statusText = '等待中...';
+            statusBadge = `<span class="badge bg-secondary">${size}</span>`;
+        }
+        
+        return `
+            <div class="list-group-item d-flex justify-content-between align-items-center bg-transparent border-secondary">
+                <div class="d-flex align-items-center">
+                    <i class="bi ${statusInfo.icon} ${statusInfo.color} me-2"></i>
+                    <div>
+                        <div class="fw-bold">${typeName} - ${backup.task_name}</div>
+                        <small class="text-secondary">${statusText}</small>
+                    </div>
+                </div>
+                ${statusBadge}
+            </div>
+        `;
+    }).join('');
+}
+
+// 加载磁带设备信息
+async function loadTapeDeviceInfo() {
+    try {
+        // 获取设备列表
+        const devicesResponse = await fetch('/api/tape/devices');
+        const devicesData = await devicesResponse.json();
+        
+        const deviceModelEl = document.getElementById('deviceModel');
+        const deviceSerialEl = document.getElementById('deviceSerial');
+        
+        if (devicesData && devicesData.devices && devicesData.devices.length > 0) {
+            const device = devicesData.devices[0]; // 使用第一个设备
+            
+            // 构建设备型号显示
+            let modelText = '';
+            if (device.vendor && device.model) {
+                modelText = `${device.vendor} ${device.model}`;
+                if (device.is_ibm_lto && device.lto_generation) {
+                    modelText += ` LTO-${device.lto_generation}`;
+                }
+                modelText += ' 驱动器';
+            } else {
+                modelText = '磁带驱动器';
+            }
+            
+            deviceModelEl.textContent = modelText;
+            
+            // 获取序列号（如果有）
+            if (device.serial) {
+                deviceSerialEl.textContent = `序列号: ${device.serial}`;
+            } else {
+                // 尝试从IBM API获取序列号
+                try {
+                    const serialResponse = await fetch('/api/tape/ibm/serial');
+                    const serialData = await serialResponse.json();
+                    if (serialData && serialData.success && serialData.serial_number) {
+                        deviceSerialEl.textContent = `序列号: ${serialData.serial_number}`;
+                    } else {
+                        deviceSerialEl.textContent = '序列号: N/A';
+                    }
+                } catch (e) {
+                    deviceSerialEl.textContent = '序列号: N/A';
+                }
+            }
+        } else {
+            deviceModelEl.textContent = '未检测到设备';
+            deviceSerialEl.textContent = '序列号: N/A';
+        }
+    } catch (error) {
+        console.error('加载磁带设备信息失败:', error);
+        const deviceModelEl = document.getElementById('deviceModel');
+        const deviceSerialEl = document.getElementById('deviceSerial');
+        if (deviceModelEl) deviceModelEl.textContent = '加载失败';
+        if (deviceSerialEl) deviceSerialEl.textContent = '序列号: N/A';
+    }
+}
+
 // 加载磁带设备状态
 async function loadTapeDeviceStatus() {
     try {
@@ -393,11 +623,46 @@ async function loadTapeDeviceStatus() {
     }
 }
 
+// 检查数据库连接状态
+async function checkDatabaseStatus() {
+    try {
+        const response = await fetch('/api/system/database/status');
+        const data = await response.json();
+        
+        const dbStatusEl = document.getElementById('dbStatus');
+        if (dbStatusEl && data.success) {
+            if (data.connected) {
+                dbStatusEl.className = 'status-indicator';
+                dbStatusEl.textContent = '已连接';
+            } else {
+                dbStatusEl.className = 'status-indicator stopped';
+                dbStatusEl.textContent = '未连接';
+            }
+        }
+    } catch (error) {
+        console.error('检查数据库状态失败:', error);
+        const dbStatusEl = document.getElementById('dbStatus');
+        if (dbStatusEl) {
+            dbStatusEl.className = 'status-indicator stopped';
+            dbStatusEl.textContent = '检查失败';
+        }
+    }
+}
+
 // 页面加载时获取状态
 document.addEventListener('DOMContentLoaded', function() {
+    loadDashboardData();
     loadTapeDeviceStatus();
+    loadTapeDeviceInfo();
+    checkDatabaseStatus();
+    
     // 每30秒刷新一次
-    setInterval(loadTapeDeviceStatus, 30000);
+    setInterval(() => {
+        loadDashboardData();
+        loadTapeDeviceStatus();
+        loadTapeDeviceInfo();
+        checkDatabaseStatus();
+    }, 30000);
 });
 </script>
 {% endblock %}

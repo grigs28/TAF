@@ -49,23 +49,27 @@ class BackupScheduler:
         logger.info("计划任务调度器初始化完成")
 
     async def _register_default_tasks(self):
-        """注册默认任务"""
+        """注册默认任务
+        
+        注意：计划任务的执行时间由用户在Web界面设置时确定，不再使用默认配置。
+        保留期检查任务已取消，改为在打开磁带管理页面时检查。
+        """
         if self.settings.SCHEDULER_ENABLED:
-            # 月度备份任务
-            await self.register_task(
-                "monthly_backup",
-                self.settings.MONTHLY_BACKUP_CRON,
-                self._execute_monthly_backup,
-                "月度完整备份任务"
-            )
+            # 月度备份任务 - 已废弃，计划任务通过Web界面创建，使用用户设置的Cron表达式
+            # await self.register_task(
+            #     "monthly_backup",
+            #     self.settings.MONTHLY_BACKUP_CRON,
+            #     self._execute_monthly_backup,
+            #     "月度完整备份任务"
+            # )
 
-            # 保留期检查任务
-            await self.register_task(
-                "retention_check",
-                self.settings.RETENTION_CHECK_CRON,
-                self._execute_retention_check,
-                "磁带保留期检查任务"
-            )
+            # 保留期检查任务 - 已取消，改为在打开磁带管理页面时检查
+            # await self.register_task(
+            #     "retention_check",
+            #     self.settings.RETENTION_CHECK_CRON,
+            #     self._execute_retention_check,
+            #     "磁带保留期检查任务"
+            # )
 
             # 系统健康检查任务
             await self.register_task(

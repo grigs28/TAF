@@ -574,7 +574,72 @@ class RecoveryActionHandler(ActionHandler):
     
     async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None, manual_run: bool = False) -> Dict[str, Any]:
         """执行恢复动作"""
-        return {"status": "success", "message": "恢复任务已执行"}
+        try:
+            logger.info("开始执行恢复任务")
+            
+            # 从配置中获取恢复参数
+            backup_set_id = config.get('backup_set_id')
+            files = config.get('files', [])
+            target_path = config.get('target_path')
+            
+            if not backup_set_id:
+                raise ValueError("恢复任务配置缺少 backup_set_id")
+            
+            if not files:
+                raise ValueError("恢复任务配置缺少 files（文件列表）")
+            
+            if not target_path:
+                raise ValueError("恢复任务配置缺少 target_path（目标路径）")
+            
+            # 获取恢复引擎
+            if not self.system_instance or not hasattr(self.system_instance, 'recovery_engine'):
+                raise RuntimeError("恢复引擎未初始化")
+            
+            recovery_engine = self.system_instance.recovery_engine
+            
+            # 创建恢复任务
+            recovery_id = await recovery_engine.create_recovery_task(
+                backup_set_id=backup_set_id,
+                files=files,
+                target_path=target_path,
+                created_by='scheduled_task' if scheduled_task else 'manual'
+            )
+            
+            if not recovery_id:
+                raise RuntimeError("创建恢复任务失败")
+            
+            logger.info(f"恢复任务已创建: {recovery_id}")
+            
+            # 执行恢复任务
+            success = await recovery_engine.execute_recovery(recovery_id)
+            
+            if success:
+                logger.info(f"恢复任务执行成功: {recovery_id}")
+                return {
+                    "status": "success",
+                    "message": f"恢复任务执行成功: {recovery_id}",
+                    "recovery_id": recovery_id
+                }
+            else:
+                error_msg = "恢复任务执行失败"
+                if recovery_engine._current_recovery and recovery_engine._current_recovery.get('error_message'):
+                    error_msg = recovery_engine._current_recovery['error_message']
+                
+                logger.error(f"恢复任务执行失败: {recovery_id}, 错误: {error_msg}")
+                return {
+                    "status": "failed",
+                    "message": f"恢复任务执行失败: {error_msg}",
+                    "recovery_id": recovery_id
+                }
+                
+        except Exception as e:
+            logger.error(f"执行恢复任务失败: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {
+                "status": "failed",
+                "message": f"执行恢复任务失败: {str(e)}"
+            }
 
 
 class CleanupActionHandler(ActionHandler):
