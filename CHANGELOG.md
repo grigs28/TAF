@@ -1,5 +1,45 @@
 # 更新日志
 
+## [0.1.5] - 2025-12-20
+
+### 修复
+
+#### 备份页面卡片显示修复
+- ✅ 修复进度计算逻辑
+  - 进度计算改为：`已处理文件数（累计）/总扫描文件数 * 100`
+  - 修复前端进度条显示，确保准确反映文件处理进度
+  - 修复卡片更新时的进度计算逻辑
+
+- ✅ 修复压缩包进度显示
+  - 修复 `estimated_archive_count` 传递问题
+  - 确保第一批压缩完成后正确保存和传递预计压缩包总数
+  - 改进 `estimated_archive_count` 的计算逻辑，基于总扫描文件数和平均文件大小
+  - 添加调试日志，便于追踪压缩包进度
+
+- ✅ 修复压缩率传递和显示
+  - 确保 `compression_ratio` 正确计算和返回（如 3.7%）
+  - 修复 `get_backup_tasks` API 返回 `compressed_bytes` 和 `compression_ratio`
+  - 修复前端压缩率显示逻辑，确保正确显示百分比格式
+
+- ✅ 修复开始时间和完成时间传递
+  - 确保 `started_at` 和 `completed_at` 都保存到数据库
+  - 修复 `_update_task_status` 方法，在状态变更时正确保存时间字段
+  - 确保 `get_task_status` 和 `get_backup_tasks` API 都返回时间字段
+  - 修复前端时间显示，确保开始时间和完成时间正确显示
+
+- ✅ 修复API返回字段完整性
+  - `get_backup_tasks` API 添加 `compressed_bytes` 和 `compression_ratio` 字段
+  - `get_task_status` API 添加 `completed_at` 字段
+  - 确保所有必需字段都正确传递到前端
+
+### 改进
+
+#### 备份任务状态更新优化
+- ✅ 改进 `_update_task_status` 方法
+  - 根据任务状态自动更新 `started_at`（RUNNING状态）和 `completed_at`（COMPLETED/FAILED状态）
+  - 使用动态SQL构建UPDATE语句，只更新必要的字段
+  - 确保时间字段在状态变更时正确保存
+
 ## [0.1.4] - 2025-12-19
 
 ### 改进
