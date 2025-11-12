@@ -61,6 +61,21 @@ def create_app(system_instance=None) -> FastAPI:
     # 配置静态文件
     app.mount("/static", StaticFiles(directory="web/static"), name="static")
 
+    # Favicon路由 - 处理浏览器默认请求的/favicon.ico
+    @app.get("/favicon.ico")
+    async def favicon():
+        from fastapi.responses import FileResponse
+        import os
+        favicon_path = os.path.join("web", "static", "favicon.ico")
+        if os.path.exists(favicon_path):
+            return FileResponse(favicon_path)
+        else:
+            # 如果static目录下没有，尝试templates目录
+            favicon_path = os.path.join("web", "templates", "favicon.ico")
+            if os.path.exists(favicon_path):
+                return FileResponse(favicon_path)
+            raise HTTPException(status_code=404, detail="Favicon not found")
+
     # 配置模板
     templates = Jinja2Templates(directory="web/templates")
 

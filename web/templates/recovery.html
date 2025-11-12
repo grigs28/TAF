@@ -4,7 +4,7 @@
 
 {% block extra_css %}
 <style>
-:root { --recoveryPaneHeight: 720px; }
+:root { --recoveryPaneHeight: 1200px; }
 .backup-set-card {
     transition: all 0.3s ease;
     border-left: 4px solid transparent;
@@ -18,22 +18,118 @@
 .backup-set-differential { border-left-color: #ffc107; }
 
 .file-tree {
+    min-height: 600px;
     max-height: var(--recoveryPaneHeight);
+    height: 600px;
     overflow-y: auto;
-    border: 1px solid #dee2e6;
+    border: 1px solid rgba(0, 170, 255, 0.2);
     border-radius: 4px;
+    padding: 8px;
+    background: rgba(13, 22, 38, 0.7);
+    color: var(--text-primary);
+}
+
+/* 文件树滚动条样式 */
+.file-tree::-webkit-scrollbar {
+    width: 8px;
+}
+.file-tree::-webkit-scrollbar-track {
+    background: rgba(13, 22, 38, 0.5);
+    border-radius: 4px;
+}
+.file-tree::-webkit-scrollbar-thumb {
+    background: rgba(0, 170, 255, 0.3);
+    border-radius: 4px;
+}
+.file-tree::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 170, 255, 0.5);
+}
+
+/* 文件树内的提示文本样式 */
+.file-tree .text-center.text-muted {
+    color: var(--text-secondary) !important;
+}
+
+.file-tree .alert {
+    background: rgba(13, 22, 38, 0.8);
+    border-color: rgba(0, 170, 255, 0.3);
+    color: var(--text-primary);
+}
+
+.file-tree .alert-danger {
+    background: rgba(255, 85, 119, 0.2);
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
+/* 确保恢复页面有足够的高度 */
+.console-panel {
+    min-height: calc(100vh - 200px);
+}
+
+/* 文件浏览器区域 */
+.service-card .card-body {
+    min-height: 600px;
 }
 
 .tree-node {
     padding: 4px 8px;
     cursor: pointer;
     transition: background-color 0.2s;
+    color: var(--text-primary);
+    border-radius: 4px;
+    margin: 2px 0;
 }
 .tree-node:hover {
-    background-color: #f8f9fa;
+    background-color: rgba(0, 170, 255, 0.15);
+    color: var(--primary-light);
 }
 .tree-node.selected {
-    background-color: #e3f2fd;
+    background-color: rgba(0, 170, 255, 0.25);
+    color: var(--primary-light);
+}
+
+/* 树节点文本颜色 */
+.tree-node span {
+    color: var(--text-primary);
+}
+.tree-node:hover span {
+    color: var(--primary-light);
+}
+.tree-node.selected span {
+    color: var(--primary-light);
+}
+
+/* 树节点小文本（文件大小） */
+.tree-node small {
+    color: var(--text-secondary);
+}
+.tree-node:hover small {
+    color: var(--text-secondary);
+}
+
+/* 树节点图标颜色 */
+.tree-node i {
+    color: var(--text-secondary);
+}
+.tree-node:hover i {
+    color: var(--primary-light);
+}
+.tree-node.selected i {
+    color: var(--primary-light);
+}
+
+/* 复选框样式 */
+.tree-node input[type="checkbox"] {
+    accent-color: var(--primary);
+}
+
+/* 展开/折叠按钮颜色 */
+.tree-toggle {
+    color: var(--text-secondary);
+}
+.tree-toggle:hover {
+    color: var(--primary-light);
 }
 </style>
 {% endblock %}
@@ -213,26 +309,133 @@
 
 .backup-set-card {
     cursor: pointer;
+    background: var(--card-bg);
+    color: var(--text-primary);
 }
 .backup-set-card.selected {
-    background-color: #e3f2fd;
-    border-color: #2196f3 !important;
+    background-color: rgba(0, 170, 255, 0.2) !important;
+    border-color: var(--primary) !important;
+    border-width: 2px !important;
+    color: var(--text-primary) !important;
+}
+.backup-set-card.selected h6,
+.backup-set-card.selected small,
+.backup-set-card.selected span,
+.backup-set-card.selected .badge {
+    color: var(--text-primary) !important;
 }
 
+/* 目录树竖向展示样式 */
 .tree-node {
     display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 2px 0;
+    margin: 0;
+    color: var(--text-primary);
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* 节点内容行（横向） */
+.tree-node > div:first-child {
+    display: flex;
     align-items: center;
+    width: 100%;
     padding: 4px 8px;
     border-radius: 4px;
-    margin: 1px 0;
+    transition: background-color 0.2s;
 }
 
-.tree-node:hover {
-    background-color: #f8f9fa;
+.tree-node:hover > div:first-child {
+    background-color: rgba(0, 170, 255, 0.15);
+    color: var(--primary-light);
 }
 
-.tree-node.selected {
-    background-color: #e3f2fd;
+.tree-node.selected > div:first-child {
+    background-color: rgba(0, 170, 255, 0.25);
+    color: var(--primary-light);
+}
+
+.tree-node.expanded > .tree-toggle {
+    transform: rotate(90deg);
+}
+
+.tree-toggle {
+    width: 16px;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: 4px;
+    cursor: pointer;
+    transition: transform 0.2s, color 0.2s;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.tree-toggle:hover {
+    color: var(--primary-light);
+}
+
+/* 子节点容器 - 竖向排列，通过左侧缩进显示层级 */
+.tree-children {
+    display: none;
+    width: 100%;
+    padding-left: 20px;
+    margin-left: 0;
+    box-sizing: border-box;
+    position: relative;
+}
+
+/* 子节点左侧连接线 */
+.tree-children::before {
+    content: '';
+    position: absolute;
+    left: 8px;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: rgba(0, 170, 255, 0.2);
+}
+
+.tree-node.expanded > .tree-children {
+    display: block;
+}
+
+/* 确保所有层级的节点都是竖向排列 */
+.tree-children .tree-node {
+    width: 100%;
+    margin: 0;
+    padding: 0;
+}
+
+.tree-node.leaf > .tree-toggle {
+    visibility: hidden;
+    width: 16px;
+}
+
+/* 节点内容区域 */
+.tree-node-content {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    flex: 1;
+    min-width: 0;
+}
+
+/* 文件名和大小 */
+.tree-node-content > span:not(.tree-toggle):not(small) {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tree-node-content > small {
+    flex-shrink: 0;
+    margin-left: auto;
 }
 </style>
 <script>
@@ -260,7 +463,7 @@
     const selectedFiles = new Set(); // only files
     const selectedFolders = new Set();
     let currentBackupSetId = null;
-    let allFiles = []; // 存储所有文件数据
+    // 注意：已改为按需加载，不再存储所有文件数据
 
     // 格式化字节大小
     function formatBytes(b){
@@ -383,95 +586,345 @@
         }
     }
 
-    // 从API加载备份集文件列表
+    // 从API加载备份集顶层目录（优化性能，按需加载）
     async function loadBackupSetFiles(backupSetId) {
         try {
-            const response = await fetch(`/api/recovery/backup-sets/${encodeURIComponent(backupSetId)}/files`);
-            const data = await response.json();
-            allFiles = data.files || [];
+            console.log('开始加载顶层目录，备份集ID:', backupSetId);
+            treeRoot.innerHTML = '<div class="text-center text-muted py-3"><i class="bi bi-hourglass-split me-2"></i>正在加载目录结构...</div>';
             
-            // 构建文件树
-            buildFileTree(allFiles);
+            const url = `/api/recovery/backup-sets/${encodeURIComponent(backupSetId)}/top-level`;
+            console.log('请求URL:', url);
+            const response = await fetch(url);
+            
+            if (!response.ok) {
+                throw new Error(`HTTP错误: ${response.status} ${response.statusText}`);
+            }
+            
+            const data = await response.json();
+            console.log('API返回数据:', data);
+            const items = data.items || [];
+            console.log('顶层目录项数量:', items.length);
+            
+            // 清空文件树和索引
+            treeRoot.innerHTML = '';
+            fileIndex.clear();
+            autoId = 1;
+            selectedFiles.clear();
+            selectedFolders.clear();
+            refreshStatsAndList();
+            
+            // 渲染顶层目录
+            if (items.length === 0) {
+                treeRoot.innerHTML = '<div class="text-center text-muted py-3">该备份集没有文件</div>';
+                return;
+            }
+            
+            console.log('开始渲染顶层节点，数量:', items.length);
+            items.forEach(item => {
+                renderTopLevelNode(item, backupSetId);
+            });
+            console.log('顶层节点渲染完成');
+            
+            // 自动展开 D: 目录并显示下一级
+            setTimeout(() => {
+                const dDriveNode = Array.from(treeRoot.querySelectorAll('.tree-node')).find(node => {
+                    const nameSpan = node.querySelector('span:not(.tree-toggle):not(small)');
+                    return nameSpan && nameSpan.textContent.trim() === 'D:';
+                });
+                if (dDriveNode) {
+                    console.log('找到 D: 目录，自动展开');
+                    toggleNode(dDriveNode);
+                }
+            }, 100);
         } catch (error) {
-            console.error('加载文件列表失败:', error);
-            treeRoot.innerHTML = '<div class="alert alert-danger">加载文件列表失败: ' + error.message + '</div>';
+            console.error('加载目录结构失败:', error);
+            treeRoot.innerHTML = '<div class="alert alert-danger">加载目录结构失败: ' + error.message + '</div>';
         }
     }
-
-    // 构建文件树
-    function buildFileTree(files) {
-        // 清空文件树
-        treeRoot.innerHTML = '';
-        fileIndex.clear();
-        autoId = 1;
+    
+    // 渲染顶层节点
+    function renderTopLevelNode(item, backupSetId) {
+        const isDir = item.type === 'directory';
+        const hasChildren = item.has_children !== false;
         
-        // 构建目录结构
-        const tree = {};
-        files.forEach(file => {
-            const pathParts = file.file_path.split('/').filter(p => p);
-            let current = tree;
-            
-            pathParts.forEach((part, index) => {
-                if (!current[part]) {
-                    current[part] = {
-                        type: index === pathParts.length - 1 ? file.file_type : 'directory',
-                        file: index === pathParts.length - 1 ? file : null,
-                        children: {}
-                    };
-                }
-                current = current[part].children;
-            });
-        });
+        const nodeEl = document.createElement('div');
+        nodeEl.className = 'tree-node' + (hasChildren ? '' : ' leaf');
+        nodeEl.dataset.id = 'n' + (autoId++);
+        nodeEl.dataset.path = item.path;
+        nodeEl.dataset.level = '0';
+        nodeEl.dataset.backupSetId = backupSetId;
         
-        // 渲染树节点
-        function renderNode(node, name, path, parentEl, level = 0) {
-            const isDir = node.type === 'directory';
-            const nodeEl = document.createElement('div');
-            nodeEl.className = 'tree-node';
-            nodeEl.dataset.id = 'n' + (autoId++);
-            nodeEl.style.paddingLeft = (level * 16) + 'px';
-            
-            const id = nodeEl.dataset.id;
-            const sizeBytes = node.file ? (node.file.file_size || 0) : 0;
-            
-            nodeEl.innerHTML = `
-                <input type="checkbox" class="form-check-input me-2">
-                <i class="bi ${isDir ? 'bi-folder' : getFileIcon(node.file?.file_name || name)} me-2"></i>
-                <span>${name}</span>
-                ${!isDir && sizeBytes > 0 ? `<small class="text-muted ms-2">${formatBytes(sizeBytes)}</small>` : ''}
-            `;
-            
-            const children = [];
-            if (isDir) {
-                Object.keys(node.children).sort().forEach(childName => {
-                    const childNode = node.children[childName];
-                    const childPath = path ? `${path}/${childName}` : childName;
-                    const childEl = renderNode(childNode, childName, childPath, null, level + 1);
-                    children.push(childEl.dataset.id);
-                });
-            }
-            
-            fileIndex.set(id, {
-                el: nodeEl,
-                type: isDir ? 'dir' : 'file',
-                sizeBytes: sizeBytes,
-                children: children,
-                name: name,
-                file: node.file
+        const id = nodeEl.dataset.id;
+        const sizeBytes = item.file ? (item.file.file_size || 0) : 0;
+        
+        // 创建节点内容容器
+        const nodeContent = document.createElement('div');
+        nodeContent.className = 'tree-node-content';
+        nodeContent.style.display = 'flex';
+        nodeContent.style.alignItems = 'center';
+        nodeContent.style.flex = '1';
+        nodeContent.style.minWidth = '0';
+        
+        // 展开/折叠按钮（仅目录且有子节点时显示）
+        const toggleBtn = document.createElement('span');
+        toggleBtn.className = 'tree-toggle';
+        if (hasChildren) {
+            toggleBtn.innerHTML = '<i class="bi bi-chevron-right"></i>';
+            toggleBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                toggleNode(nodeEl);
             });
-            
-            if (parentEl) {
-                parentEl.appendChild(nodeEl);
-            }
-            
-            return nodeEl;
+        } else {
+            toggleBtn.innerHTML = '<span style="width:16px;"></span>';
         }
         
-        // 渲染根节点
-        Object.keys(tree).sort().forEach(name => {
-            const node = tree[name];
-            const rootNode = renderNode(node, name, name, treeRoot, 0);
+        // 复选框
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'form-check-input me-2';
+        
+        // 图标
+        const icon = document.createElement('i');
+        icon.className = `bi ${isDir ? 'bi-folder' : getFileIcon(item.file?.file_name || item.name)} me-2`;
+        
+        // 名称
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = item.name;
+        
+        // 大小（仅文件）
+        const sizeSpan = document.createElement('small');
+        sizeSpan.className = 'text-muted ms-2';
+        if (!isDir && sizeBytes > 0) {
+            sizeSpan.textContent = formatBytes(sizeBytes);
+        }
+        
+        // 组装节点内容
+        nodeContent.appendChild(toggleBtn);
+        nodeContent.appendChild(checkbox);
+        nodeContent.appendChild(icon);
+        nodeContent.appendChild(nameSpan);
+        if (!isDir && sizeBytes > 0) {
+            nodeContent.appendChild(sizeSpan);
+        }
+        
+        // 子节点容器（懒加载）
+        const childrenContainer = document.createElement('div');
+        childrenContainer.className = 'tree-children';
+        
+        // 组装节点
+        nodeEl.appendChild(nodeContent);
+        nodeEl.appendChild(childrenContainer);
+        
+        // 点击节点名称区域展开/折叠（仅目录）
+        if (hasChildren) {
+            nameSpan.style.cursor = 'pointer';
+            nameSpan.addEventListener('click', function(e) {
+                e.stopPropagation();
+                toggleNode(nodeEl);
+            });
+        }
+        
+        fileIndex.set(id, {
+            el: nodeEl,
+            type: isDir ? 'dir' : 'file',
+            sizeBytes: sizeBytes,
+            children: [],
+            childrenData: null, // 懒加载，初始为null
+            name: item.name,
+            file: item.file,
+            path: item.path,
+            expanded: false,
+            rendered: true,
+            backupSetId: backupSetId,
+            loading: false // 是否正在加载
         });
+        
+        treeRoot.appendChild(nodeEl);
+    }
+
+    // 展开/折叠节点（按需加载）
+    async function toggleNode(nodeEl) {
+        const id = nodeEl.dataset.id;
+        const meta = fileIndex.get(id);
+        if (!meta || meta.type !== 'dir') return;
+        
+        if (meta.expanded) {
+            // 折叠：隐藏子节点
+            nodeEl.classList.remove('expanded');
+            meta.expanded = false;
+            const childrenContainer = nodeEl.querySelector('.tree-children');
+            if (childrenContainer) {
+                childrenContainer.innerHTML = '';
+            }
+        } else {
+            // 展开：加载并渲染子节点
+            nodeEl.classList.add('expanded');
+            meta.expanded = true;
+            const childrenContainer = nodeEl.querySelector('.tree-children');
+            
+            if (!childrenContainer) return;
+            
+            // 如果已经加载过，直接渲染
+            if (meta.childrenData && meta.childrenData.length > 0) {
+                const startId = autoId;
+                renderChildren(childrenContainer, meta.childrenData, parseInt(nodeEl.dataset.level) + 1, meta.backupSetId);
+                // 等待DOM更新完成后再设置children数组
+                await new Promise(resolve => setTimeout(resolve, 50));
+                // 从DOM中获取实际渲染的子节点ID
+                const renderedNodes = Array.from(childrenContainer.querySelectorAll('.tree-node'));
+                meta.children = renderedNodes.map(node => node.dataset.id);
+                console.log(`节点 ${meta.name} 已渲染的子节点，children数组:`, meta.children);
+                return;
+            }
+            
+            // 如果正在加载，不重复加载
+            if (meta.loading) return;
+            
+            // 从API加载子目录内容
+            meta.loading = true;
+            childrenContainer.innerHTML = '<div class="text-center text-muted py-2"><i class="bi bi-hourglass-split me-2"></i>加载中...</div>';
+            
+            try {
+                const path = meta.path || '';
+                const backupSetId = meta.backupSetId || currentBackupSetId;
+                const response = await fetch(
+                    `/api/recovery/backup-sets/${encodeURIComponent(backupSetId)}/directory?path=${encodeURIComponent(path)}`
+                );
+                const data = await response.json();
+                const items = data.items || [];
+                
+                // 保存子节点数据
+                meta.childrenData = items;
+                
+                // 渲染子节点
+                const startId = autoId;
+                renderChildren(childrenContainer, items, parseInt(nodeEl.dataset.level) + 1, backupSetId);
+                
+                // 等待DOM更新完成后再设置children数组
+                await new Promise(resolve => setTimeout(resolve, 100));
+                // 从DOM中获取实际渲染的子节点ID
+                const renderedNodes = Array.from(childrenContainer.querySelectorAll('.tree-node'));
+                meta.children = renderedNodes.map(node => node.dataset.id);
+                console.log(`节点 ${meta.name} 加载并渲染了 ${items.length} 个子节点，children数组:`, meta.children);
+            } catch (error) {
+                console.error('加载子目录失败:', error);
+                childrenContainer.innerHTML = '<div class="alert alert-danger py-2">加载失败: ' + error.message + '</div>';
+            } finally {
+                meta.loading = false;
+            }
+        }
+    }
+    
+    // 渲染子节点
+    function renderChildren(container, items, level, backupSetId) {
+        container.innerHTML = '';
+        items.forEach(item => {
+            const childEl = renderChildNode(item, container, level, backupSetId);
+        });
+    }
+    
+    // 渲染子节点
+    function renderChildNode(item, parentEl, level, backupSetId) {
+        const isDir = item.type === 'directory';
+        const hasChildren = item.has_children !== false;
+        
+        const nodeEl = document.createElement('div');
+        nodeEl.className = 'tree-node' + (hasChildren ? '' : ' leaf');
+        nodeEl.dataset.id = 'n' + (autoId++);
+        nodeEl.dataset.path = item.path;
+        nodeEl.dataset.level = level;
+        nodeEl.dataset.backupSetId = backupSetId;
+        
+        const id = nodeEl.dataset.id;
+        const sizeBytes = item.file ? (item.file.file_size || 0) : 0;
+        
+        // 创建节点内容容器
+        const nodeContent = document.createElement('div');
+        nodeContent.className = 'tree-node-content';
+        nodeContent.style.display = 'flex';
+        nodeContent.style.alignItems = 'center';
+        nodeContent.style.flex = '1';
+        nodeContent.style.minWidth = '0';
+        
+        // 展开/折叠按钮
+        const toggleBtn = document.createElement('span');
+        toggleBtn.className = 'tree-toggle';
+        if (hasChildren) {
+            toggleBtn.innerHTML = '<i class="bi bi-chevron-right"></i>';
+            toggleBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                toggleNode(nodeEl);
+            });
+        } else {
+            toggleBtn.innerHTML = '<span style="width:16px;"></span>';
+        }
+        
+        // 复选框
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'form-check-input me-2';
+        
+        // 图标
+        const icon = document.createElement('i');
+        icon.className = `bi ${isDir ? 'bi-folder' : getFileIcon(item.file?.file_name || item.name)} me-2`;
+        
+        // 名称
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = item.name;
+        
+        // 大小（仅文件）
+        const sizeSpan = document.createElement('small');
+        sizeSpan.className = 'text-muted ms-2';
+        if (!isDir && sizeBytes > 0) {
+            sizeSpan.textContent = formatBytes(sizeBytes);
+        }
+        
+        // 组装节点内容
+        nodeContent.appendChild(toggleBtn);
+        nodeContent.appendChild(checkbox);
+        nodeContent.appendChild(icon);
+        nodeContent.appendChild(nameSpan);
+        if (!isDir && sizeBytes > 0) {
+            nodeContent.appendChild(sizeSpan);
+        }
+        
+        // 子节点容器
+        const childrenContainer = document.createElement('div');
+        childrenContainer.className = 'tree-children';
+        
+        // 组装节点
+        nodeEl.appendChild(nodeContent);
+        nodeEl.appendChild(childrenContainer);
+        
+        // 点击节点名称区域展开/折叠（仅目录）
+        if (hasChildren) {
+            nameSpan.style.cursor = 'pointer';
+            nameSpan.addEventListener('click', function(e) {
+                e.stopPropagation();
+                toggleNode(nodeEl);
+            });
+        }
+        
+        fileIndex.set(id, {
+            el: nodeEl,
+            type: isDir ? 'dir' : 'file',
+            sizeBytes: sizeBytes,
+            children: [],
+            childrenData: null,
+            name: item.name,
+            file: item.file,
+            path: item.path,
+            expanded: false,
+            rendered: true,
+            backupSetId: backupSetId,
+            loading: false
+        });
+        
+        if (parentEl) {
+            parentEl.appendChild(nodeEl);
+        }
+        
+        return nodeEl;
     }
 
     // 获取文件图标
@@ -557,24 +1010,137 @@
         });
     }
 
-    function selectFile(id, on){
-        const meta = fileIndex.get(id); if (!meta) return;
-        const cb = meta.el.querySelector('input[type="checkbox"]');
-        if (cb) cb.checked = !!on;
-        if (meta.type === 'file'){
-            if (on) selectedFiles.add(id); else selectedFiles.delete(id);
-        } else {
-            if (on) selectedFolders.add(id); else selectedFolders.delete(id);
-            // 递归子孙
-            meta.children.forEach(ch => selectFile(ch, on));
-            // 递归更深层
-            meta.children.forEach(ch => {
-                const cm = fileIndex.get(ch);
-                if (cm && cm.type==='dir'){
-                    cm.children.forEach(grand => selectFile(grand, on));
-                }
-            });
+    // 递归选择所有子节点的辅助函数
+    async function selectAllChildren(parentId, on, maxDepth = 10, currentDepth = 0) {
+        if (currentDepth >= maxDepth) {
+            console.warn('达到最大递归深度，停止选择子节点');
+            return;
         }
+        
+        const meta = fileIndex.get(parentId);
+        if (!meta || meta.type !== 'dir') return;
+        
+        // 如果子节点未加载，先加载并展开
+        if (meta.has_children !== false && !meta.expanded && !meta.childrenData) {
+            console.log(`展开节点 ${meta.name} 以加载子节点`);
+            await toggleNode(meta.el);
+            // 等待子节点加载完成
+            let retryCount = 0;
+            while (!meta.childrenData && retryCount < 10) {
+                await new Promise(resolve => setTimeout(resolve, 200));
+                retryCount++;
+            }
+        }
+        
+        // 如果子节点数据已加载但未渲染，先渲染
+        if (meta.childrenData && meta.childrenData.length > 0) {
+            const childrenContainer = meta.el.querySelector('.tree-children');
+            if (childrenContainer) {
+                // 检查是否已经渲染了子节点
+                const renderedCount = childrenContainer.querySelectorAll('.tree-node').length;
+                if (renderedCount === 0) {
+                    console.log(`渲染节点 ${meta.name} 的子节点，数量: ${meta.childrenData.length}`);
+                    renderChildren(childrenContainer, meta.childrenData, parseInt(meta.el.dataset.level) + 1, meta.backupSetId);
+                    const startId = autoId;
+                    meta.children = meta.childrenData.map((_, idx) => 'n' + (startId + idx));
+                    autoId += meta.childrenData.length;
+                    // 等待DOM更新
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                } else if (!meta.children || meta.children.length === 0) {
+                    // 如果已渲染但children未设置，从DOM中获取
+                    const childNodes = Array.from(childrenContainer.querySelectorAll('.tree-node'));
+                    meta.children = childNodes.map(node => node.dataset.id);
+                }
+            }
+        }
+        
+        // 递归处理所有子节点
+        if (meta.children && meta.children.length > 0) {
+            console.log(`处理节点 ${meta.name} 的 ${meta.children.length} 个子节点`);
+            for (const chId of meta.children) {
+                if (typeof chId === 'string' && chId.startsWith('n')) {
+                    const childMeta = fileIndex.get(chId);
+                    if (childMeta && childMeta.el) {
+                        // 设置复选框状态 - 直接设置，不触发change事件避免循环
+                        const childCb = childMeta.el.querySelector('input[type="checkbox"]');
+                        if (childCb) {
+                            // 标记正在处理，避免触发change事件
+                            childCb.dataset.processing = 'true';
+                            childCb.checked = !!on;
+                            delete childCb.dataset.processing;
+                        } else {
+                            console.warn(`未找到子节点 ${childMeta.name} 的复选框`);
+                        }
+                        
+                        // 更新选中状态和样式
+                        if (on) {
+                            childMeta.el.classList.add('selected');
+                            if (childMeta.type === 'file') {
+                                selectedFiles.add(chId);
+                            } else {
+                                selectedFolders.add(chId);
+                            }
+                        } else {
+                            childMeta.el.classList.remove('selected');
+                            if (childMeta.type === 'file') {
+                                selectedFiles.delete(chId);
+                            } else {
+                                selectedFolders.delete(chId);
+                            }
+                        }
+                        
+                        // 如果是目录，递归处理其子节点
+                        if (childMeta.type === 'dir') {
+                            await selectAllChildren(chId, on, maxDepth, currentDepth + 1);
+                        }
+                    } else {
+                        console.warn(`未找到子节点ID ${chId} 的元数据`);
+                    }
+                }
+            }
+        } else {
+            console.log(`节点 ${meta.name} 没有子节点或children数组为空`);
+        }
+    }
+
+    async function selectFile(id, on){
+        const meta = fileIndex.get(id); 
+        if (!meta) return;
+        
+        const cb = meta.el.querySelector('input[type="checkbox"]');
+        if (cb) {
+            // 标记正在处理，避免触发change事件导致循环
+            cb.dataset.processing = 'true';
+            cb.checked = !!on;
+            delete cb.dataset.processing;
+        }
+        
+        // 更新选中状态和样式
+        if (on) {
+            meta.el.classList.add('selected');
+        } else {
+            meta.el.classList.remove('selected');
+        }
+        
+        if (meta.type === 'file'){
+            if (on) {
+                selectedFiles.add(id);
+            } else {
+                selectedFiles.delete(id);
+            }
+        } else {
+            // 目录节点
+            if (on) {
+                selectedFolders.add(id);
+            } else {
+                selectedFolders.delete(id);
+            }
+            
+            // 递归选择/取消选择所有子节点
+            console.log(`${on ? '选择' : '取消选择'}目录 ${meta.name}，开始处理子节点`);
+            await selectAllChildren(id, on);
+        }
+        
         refreshStatsAndList();
     }
 
@@ -610,7 +1176,16 @@
         if (target && target.matches('input[type="checkbox"]')){
             const node = target.closest('.tree-node');
             if (!node) return;
-            selectFile(node.dataset.id, target.checked);
+            const nodeId = node.dataset.id;
+            if (!nodeId) return;
+            
+            // 防止递归调用导致的无限循环
+            if (target.dataset.processing) return;
+            target.dataset.processing = 'true';
+            
+            selectFile(nodeId, target.checked).finally(() => {
+                delete target.dataset.processing;
+            });
         }
     });
 

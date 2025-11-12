@@ -92,7 +92,7 @@ class Settings(BaseSettings):
     # 压缩配置
     COMPRESSION_LEVEL: int = 9
     SOLID_BLOCK_SIZE: int = 67108864  # 64MB
-    MAX_FILE_SIZE: int = 3221225472  # 3GB
+    MAX_FILE_SIZE: int = 12 * 1024 * 1024 * 1024  # 3GB
 
     # 计划任务配置
     SCHEDULER_ENABLED: bool = True
@@ -116,8 +116,8 @@ class Settings(BaseSettings):
     BACKUP_TEMP_DIR: str = "temp/backup"
     RECOVERY_TEMP_DIR: str = "temp/recovery"
     COMPRESSION_THREADS: int = 4
-    SCAN_BATCH_SIZE: int = 1000  # 扫描批次大小：扫描到多少文件后开始压缩（默认1000个文件）
-    SCAN_BATCH_SIZE_BYTES: int = 1073741824  # 扫描批次大小（字节）：扫描到多少字节后开始压缩（默认1GB）
+    SCAN_BATCH_SIZE: int = 180000  # 扫描批次大小（文件数）：扫描到多少文件后开始压缩（默认30000个文件）
+    SCAN_BATCH_SIZE_BYTES: int = 18* 1024 * 1024 * 1024  # 扫描批次大小（字节）：扫描到多少字节后开始压缩（默认6GB = 6 * 1024 * 1024 * 1024）
 
     # 磁带管理配置
     TAPE_POOL_SIZE: int = 12  # 磁带池大小

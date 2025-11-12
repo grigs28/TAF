@@ -153,9 +153,9 @@
                         </div>
                     </div>
 
-                    <!-- 运行中的任务 -->
+                    <!-- 运行中的任务和最近失败的任务 -->
                     <h6 class="mb-3">
-                        <i class="bi bi-hourglass-split me-2"></i>运行中的任务
+                        <i class="bi bi-hourglass-split me-2"></i>运行中的任务和最近失败的任务
                     </h6>
                     <div class="row" id="runningTasksList">
                         <div class="col-12">
@@ -233,6 +233,13 @@ function formatBytes(bytes) {
     return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
 }
 
+// 格式化字节为GB单位
+function formatBytesToGB(bytes) {
+    if (!bytes || bytes === 0) return '0 G';
+    const gb = bytes / (1024 * 1024 * 1024);
+    return gb.toFixed(2) + ' G';
+}
+
 // 格式化日期时间
 function formatDateTime(dateStr) {
     if (!dateStr) return '-';
@@ -245,6 +252,32 @@ function formatDateTime(dateStr) {
         minute: '2-digit',
         second: '2-digit'
     });
+}
+
+// 格式化时间差（已用时间）
+function formatElapsedTime(startedAt, completedAt) {
+    if (!startedAt) return '-';
+    
+    const startTime = new Date(startedAt);
+    const endTime = completedAt ? new Date(completedAt) : new Date();
+    const diffMs = endTime - startTime;
+    
+    if (diffMs < 0) return '-';
+    
+    const seconds = Math.floor(diffMs / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+    
+    if (days > 0) {
+        return `${days}天 ${hours % 24}小时 ${minutes % 60}分钟`;
+    } else if (hours > 0) {
+        return `${hours}小时 ${minutes % 60}分钟`;
+    } else if (minutes > 0) {
+        return `${minutes}分钟 ${seconds % 60}秒`;
+    } else {
+        return `${seconds}秒`;
+    }
 }
 
 // 格式化任务类型
@@ -260,7 +293,7 @@ function formatTaskType(taskType) {
 }
 
 // 格式化状态
-function formatStatus(status) {
+function formatStatus(status, description) {
     const statusMap = {
         'completed': { text: '成功', class: 'bg-success' },
         'failed': { text: '失败', class: 'bg-danger' },
@@ -269,19 +302,69 @@ function formatStatus(status) {
         'cancelled': { text: '已取消', class: 'bg-secondary' },
         'paused': { text: '已暂停', class: 'bg-secondary' }
     };
-    const s = statusMap[status] || { text: status, class: 'bg-secondary' };
+    let s = statusMap[status] || { text: status, class: 'bg-secondary' };
+    
+    // 如果description中包含"格式化中"，显示格式化状态
+    if (description && description.includes('[格式化中]')) {
+        s = { text: '格式化中', class: 'bg-info' };
+    }
+    
     return `<span class="badge ${s.class}">${s.text}</span>`;
+}
+
+// 获取操作状态显示HTML
+function getOperationStatus(description) {
+    if (!description) return '';
+    
+    // 检查格式化状态（格式：[格式化中]）
+    if (description.includes('[格式化中]')) {
+        return `<div class="mb-2"><small class="text-info"><i class="bi bi-info-circle me-1"></i>正在格式化磁带...</small></div>`;
+    }
+    
+    // 提取操作状态（格式：[操作状态...]）
+    const operationMatch = description.match(/\[([^\]]+\.\.\.)\]/);
+    if (!operationMatch) return '';
+    
+    const operationText = operationMatch[1];
+    let icon = 'bi-hourglass-split';
+    let colorClass = 'text-info';
+    
+    // 根据操作类型选择图标和颜色
+    if (operationText.includes('扫描')) {
+        icon = 'bi-search';
+        colorClass = 'text-primary';
+    } else if (operationText.includes('压缩')) {
+        icon = 'bi-archive';
+        colorClass = 'text-warning';
+    } else if (operationText.includes('写入')) {
+        icon = 'bi-hdd';
+        colorClass = 'text-success';
+    } else if (operationText.includes('完成')) {
+        icon = 'bi-check-circle';
+        colorClass = 'text-success';
+    } else if (operationText.includes('准备')) {
+        icon = 'bi-gear';
+        colorClass = 'text-info';
+    }
+    
+    return `<div class="mb-2"><small class="${colorClass}"><i class="bi ${icon} me-1"></i>${operationText}</small></div>`;
 }
 
 // 运行中任务的轮询间隔
 let runningTasksPollInterval = null;
 let runningTaskCards = new Map(); // 存储运行中任务卡片的DOM元素和任务ID映射
 
-// 加载运行中的任务（带实时验证和更新）
+// 加载运行中的任务和最近失败的任务（带实时验证和更新）
 async function loadRunningTasks() {
     try {
-        const response = await fetch('/api/backup/tasks?status=running&limit=10');
-        const tasks = await response.json();
+        // 同时获取运行中和最近失败的任务（最近10分钟内失败的）
+        const [runningResponse, failedResponse] = await Promise.all([
+            fetch('/api/backup/tasks?status=running&limit=10'),
+            fetch('/api/backup/tasks?status=failed&limit=5')
+        ]);
+        
+        const runningTasks = await runningResponse.json();
+        const failedTasks = await failedResponse.json();
         
         const container = document.getElementById('runningTasksList');
         if (!container) return;
@@ -291,7 +374,9 @@ async function loadRunningTasks() {
         
         // 验证每个任务是否真的还在运行
         const validTasks = [];
-        for (const task of (tasks || [])) {
+        
+        // 处理运行中的任务
+        for (const task of (runningTasks || [])) {
             try {
                 // 验证任务状态
                 const statusResponse = await fetch(`/api/backup/tasks/${task.task_id || task.id}/status`);
@@ -304,7 +389,18 @@ async function loadRunningTasks() {
                             status: status.status,
                             progress_percent: status.progress_percent || task.progress_percent || 0,
                             processed_files: status.processed_files || task.processed_files || 0,
-                            total_files: status.total_files || task.total_files || 0
+                            total_files: status.total_files || task.total_files || 0,
+                            total_bytes: status.total_bytes || task.total_bytes || 0,
+                            processed_bytes: status.processed_bytes || task.processed_bytes || 0,
+                            compressed_bytes: status.compressed_bytes || task.compressed_bytes || 0,
+                            compression_ratio: status.compression_ratio || task.compression_ratio || 0,
+                            estimated_archive_count: status.estimated_archive_count || task.estimated_archive_count || null,
+                            description: status.description || task.description || '',
+                            source_paths: status.source_paths || task.source_paths || [],
+                            tape_device: status.tape_device || task.tape_device || null,
+                            tape_id: status.tape_id || task.tape_id || null,
+                            started_at: status.started_at || task.started_at || null,
+                            completed_at: status.completed_at || task.completed_at || null
                         });
                         currentTaskIds.add(task.task_id || task.id);
                     }
@@ -316,6 +412,26 @@ async function loadRunningTasks() {
                     validTasks.push(task);
                     currentTaskIds.add(task.task_id || task.id);
                 }
+            }
+        }
+        
+        // 处理最近失败的任务（只显示最近10分钟内失败的）
+        const now = new Date();
+        const tenMinutesAgo = new Date(now.getTime() - 10 * 60 * 1000);
+        
+        for (const task of (failedTasks || [])) {
+            // 检查任务是否在最近10分钟内失败
+            const completedAt = task.completed_at ? new Date(task.completed_at) : null;
+            if (completedAt && completedAt >= tenMinutesAgo) {
+                validTasks.push({
+                    ...task,
+                    status: 'failed',
+                    progress_percent: task.progress_percent || 0,
+                    processed_files: task.processed_files || 0,
+                    total_files: task.total_files || 0,
+                    description: task.description || ''
+                });
+                currentTaskIds.add(task.task_id || task.id);
             }
         }
         
@@ -332,13 +448,134 @@ async function loadRunningTasks() {
         // 更新或添加任务卡片
         validTasks.forEach(task => {
             const taskId = task.task_id || task.id;
-            const sourcePaths = Array.isArray(task.source_paths) ? task.source_paths.join(', ') : (task.source_paths || 'N/A');
+            // 优先使用从status API获取的source_paths，否则使用task中的
+            // 确保source_paths不为空，如果为空则显示"N/A"
+            let sourcePaths = 'N/A';
+            if (task.source_paths) {
+                if (Array.isArray(task.source_paths)) {
+                    sourcePaths = task.source_paths.length > 0 ? task.source_paths.join(', ') : 'N/A';
+                } else if (typeof task.source_paths === 'string' && task.source_paths.trim()) {
+                    sourcePaths = task.source_paths;
+                }
+            }
             const progress = Math.max(0, Math.min(100, task.progress_percent || 0));
             const startedTime = task.started_at ? formatDateTime(task.started_at) : '-';
+            const elapsedTime = formatElapsedTime(task.started_at, task.completed_at);
+            // 优先使用tape_device，其次tape_id，最后默认值
             const tapeInfo = task.tape_device || task.tape_id || '自动选择';
+            
+            // 计算压缩率：优先使用API返回的compression_ratio，否则根据compressed_bytes和processed_bytes计算
+            let compressionRatio = '0.00';
+            if (task.compression_ratio && task.compression_ratio > 0) {
+                compressionRatio = task.compression_ratio.toString();
+            } else if (task.compressed_bytes && task.processed_bytes && task.processed_bytes > 0) {
+                compressionRatio = (task.compressed_bytes / task.processed_bytes).toFixed(2);
+            }
+            
+            // 文件进度：已处理文件/批次相加的文件数
+            const processedFiles = task.processed_files || 0;  // 已处理文件数
+            const totalScannedFiles = task.total_bytes || 0;  // 所有扫描到的文件总数（批次相加的文件数）
+            
+            // 数据量进度
+            const processedBytes = task.processed_bytes || 0;  // 已处理字节数
+            const totalBytesActual = task.total_bytes_actual || null;  // 后端提供的实际总字节数（如果后端完成此任务）
+            
+            // 预估总字节数（如果后端未提供）
+            let estimatedTotalBytes = null;
+            if (!totalBytesActual || totalBytesActual === 0) {
+                // 策略1：如果已处理文件数和字节数都有，计算平均文件大小，然后预估总字节数
+                if (processedFiles > 0 && processedBytes > 0 && totalScannedFiles > 0) {
+                    const avgFileSize = processedBytes / processedFiles;
+                    estimatedTotalBytes = Math.round(avgFileSize * totalScannedFiles);
+                }
+                // 策略2：如果只有已处理字节数，根据当前进度预估（保守估算）
+                else if (processedBytes > 0 && progress > 0 && progress < 100) {
+                    // 假设当前进度是准确的，预估总字节数
+                    estimatedTotalBytes = Math.round(processedBytes / (progress / 100));
+                }
+                // 策略3：如果已处理字节数 > 0 但其他信息不足，使用保守倍数估算
+                else if (processedBytes > 0) {
+                    // 保守估算：假设已处理的数据量占总量的10-50%
+                    estimatedTotalBytes = Math.round(processedBytes * 3); // 假设已处理33%，保守估算
+                }
+            }
+            
+            // 使用实际总字节数或预估总字节数
+            const totalBytes = totalBytesActual || estimatedTotalBytes || 0;
+            
+            // 改进的进度计算：基于多因素加权
+            let calculatedProgress = progress;
+            
+            // 方案1：如果API返回了准确的进度，优先使用
+            if (progress > 0 && progress <= 100 && progress < 99.9) {
+                // 如果API进度不是接近完成，优先使用
+                calculatedProgress = progress;
+            } 
+            // 方案2：基于数据量的进度（最准确）
+            else if (totalBytes > 0 && processedBytes > 0) {
+                const bytesProgressRatio = processedBytes / totalBytes;
+                // 数据量进度占主要权重（80%）
+                calculatedProgress = bytesProgressRatio * 100;
+                
+                // 如果有文件数信息，结合文件数进度进行微调（20%权重）
+                if (totalScannedFiles > 0 && processedFiles > 0) {
+                    const fileProgressRatio = processedFiles / totalScannedFiles;
+                    // 加权平均：数据量80% + 文件数20%
+                    calculatedProgress = (bytesProgressRatio * 0.8 + fileProgressRatio * 0.2) * 100;
+                }
+            }
+            // 方案3：基于文件数的进度（适用于文件大小差异不大的情况）
+            else if (totalScannedFiles > 0 && processedFiles > 0) {
+                const fileProgressRatio = processedFiles / totalScannedFiles;
+                // 文件数进度占70%权重（扫描阶段）
+                calculatedProgress = fileProgressRatio * 70;
+                
+                // 如果已处理数据量 > 0，说明已进入压缩/写入阶段，进度应该 > 70%
+                if (processedBytes > 0) {
+                    const compressionRatio = task.compression_ratio || 0;
+                    if (compressionRatio > 0) {
+                        // 有压缩率信息，说明压缩阶段在进行
+                        calculatedProgress = 70 + (compressionRatio * 0.3 * 100); // 压缩阶段占30%
+                    } else {
+                        // 没有压缩率，可能是扫描阶段，进度保持在文件数进度
+                        calculatedProgress = Math.min(95, fileProgressRatio * 100);
+                    }
+                }
+            } 
+            // 方案4：如果只有已处理文件数，使用保守估算
+            else if (processedFiles > 0) {
+                // 保守估算：已处理文件数越多，进度越高，但不超过90%
+                calculatedProgress = Math.min(90, Math.sqrt(processedFiles / 100) * 50);
+            } 
+            // 方案5：初始阶段
+            else {
+                calculatedProgress = 0.0;
+            }
+            
+            // 确保进度在合理范围内
+            calculatedProgress = Math.max(0, Math.min(100, calculatedProgress));
+            
+            // 使用计算出的进度，如果API返回的进度更准确，优先使用API的进度
+            const finalProgress = Math.max(calculatedProgress, progress);
             
             // 检查是否已有该任务的卡片
             let taskCard = runningTaskCards.get(taskId);
+            
+            // 判断任务状态
+            const isFormatting = task.description && task.description.includes('[格式化中]');
+            const isFailed = task.status === 'failed';
+            let statusBadge, statusText;
+            if (isFailed) {
+                statusBadge = '<span class="badge bg-danger">失败</span>';
+                statusText = '失败';
+            } else if (isFormatting) {
+                statusBadge = '<span class="badge bg-info">格式化中</span>';
+                statusText = '格式化中';
+            } else {
+                statusBadge = '<span class="badge bg-primary">运行中</span>';
+                statusText = '运行中';
+            }
+            
             if (taskCard) {
                 // 更新现有卡片
                 const progressBar = taskCard.querySelector('.progress-bar');
@@ -353,21 +590,365 @@ async function loadRunningTasks() {
                 }
                 // 选择文件数文本：最后一个d-flex中的最后一个text-muted
                 const filesInfo = taskCard.querySelector('.d-flex.justify-content-between:last-of-type .text-muted:last-child');
+                // 更新状态徽章
+                const statusBadgeEl = taskCard.querySelector('.badge');
+                if (statusBadgeEl) {
+                    statusBadgeEl.outerHTML = statusBadge;
+                }
+                
+                // 更新源路径和目标信息
+                const sourcePathEl = taskCard.querySelector('code');
+                if (sourcePathEl && sourcePathEl.textContent) {
+                    // 找到源路径的code元素（在"源路径:"标签后的code）
+                    const allCodes = taskCard.querySelectorAll('code');
+                    if (allCodes.length >= 2) {
+                        // 第一个code是源路径
+                        allCodes[0].textContent = sourcePaths;
+                        allCodes[0].classList.add('text-white'); // 添加白色样式
+                        // 第二个code是目标
+                        allCodes[1].textContent = tapeInfo;
+                        // 如果包含scsi路径，添加白色样式
+                        if (tapeInfo.includes('\\\\.\\\\scsi') || tapeInfo.includes('\\\\.\\scsi')) {
+                            allCodes[1].classList.add('text-white');
+                        } else {
+                            allCodes[1].classList.remove('text-white');
+                        }
+                    } else if (allCodes.length === 1) {
+                        // 只有一个code，可能是源路径
+                        allCodes[0].textContent = sourcePaths;
+                        allCodes[0].classList.add('text-white'); // 添加白色样式
+                    }
+                } else {
+                    // 如果找不到code元素，尝试通过文本内容查找
+                    const mb2Elements = taskCard.querySelectorAll('.mb-2');
+                    for (const mb2 of mb2Elements) {
+                        const label = mb2.querySelector('small.text-muted');
+                        if (label && label.textContent.includes('源路径')) {
+                            const codeEl = mb2.querySelector('code');
+                            if (codeEl) {
+                                codeEl.textContent = sourcePaths;
+                                codeEl.classList.add('text-white'); // 添加白色样式
+                            }
+                        } else if (label && label.textContent.includes('目标')) {
+                            const codeEl = mb2.querySelector('code');
+                            if (codeEl) {
+                                codeEl.textContent = tapeInfo;
+                                // 如果包含scsi路径，添加白色样式
+                                if (tapeInfo.includes('\\\\.\\\\scsi') || tapeInfo.includes('\\\\.\\scsi')) {
+                                    codeEl.classList.add('text-white');
+                                } else {
+                                    codeEl.classList.remove('text-white');
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // 更新开始时间
+                const startedTimeEl = Array.from(taskCard.querySelectorAll('.mb-2 .d-flex.justify-content-between')).find(el => 
+                    el.textContent.includes('开始时间')
+                );
+                if (startedTimeEl) {
+                    const startedTimeValue = startedTimeEl.querySelector('.text-muted:last-child');
+                    if (startedTimeValue) {
+                        startedTimeValue.textContent = startedTime;
+                    }
+                }
+                
+                // 更新操作状态显示（确保从最新的status获取description）
+                const operationStatusEl = taskCard.querySelector('.operation-status');
+                // 优先使用从status API获取的最新description
+                const latestDescription = task.description || '';
+                const newStatusHtml = getOperationStatus(latestDescription);
+                
+                if (operationStatusEl) {
+                    if (newStatusHtml) {
+                        // 更新操作状态元素
+                        operationStatusEl.outerHTML = newStatusHtml.replace('class="mb-2"', 'class="mb-2 operation-status"');
+                    } else {
+                        // 如果没有操作状态，移除元素
+                        operationStatusEl.remove();
+                    }
+                } else if (newStatusHtml) {
+                    // 如果操作状态元素不存在，但description中有操作状态，添加它
+                    const cardBody = taskCard.querySelector('.card-body');
+                    // 找到格式化提示或错误提示之后的位置插入
+                    const formattingEl = cardBody.querySelector('.text-info');
+                    const errorEl = cardBody.querySelector('.text-danger');
+                    
+                    if (errorEl) {
+                        errorEl.insertAdjacentHTML('afterend', newStatusHtml.replace('class="mb-2"', 'class="mb-2 operation-status"'));
+                    } else if (formattingEl) {
+                        formattingEl.parentElement.insertAdjacentHTML('afterend', newStatusHtml.replace('class="mb-2"', 'class="mb-2 operation-status"'));
+                    } else {
+                        // 如果没有格式化或错误提示，在标题后插入
+                        const titleEl = cardBody.querySelector('.card-title');
+                        if (titleEl) {
+                            titleEl.parentElement.insertAdjacentHTML('afterend', newStatusHtml.replace('class="mb-2"', 'class="mb-2 operation-status"'));
+                        } else {
+                            const firstMb2 = cardBody.querySelector('.mb-2');
+                            if (firstMb2) {
+                                firstMb2.insertAdjacentHTML('beforebegin', newStatusHtml.replace('class="mb-2"', 'class="mb-2 operation-status"'));
+                            }
+                        }
+                    }
+                }
+                
+                // 改进的进度计算：基于多因素加权
+                let calculatedProgress = progress;
+                
+                const processedFiles = task.processed_files || 0;
+                const totalScannedFiles = task.total_bytes || 0;
+                const processedBytes = task.processed_bytes || 0;
+                const totalBytesActual = task.total_bytes_actual || null;
+                
+                // 预估总字节数（如果后端未提供）
+                let estimatedTotalBytes = null;
+                if (!totalBytesActual || totalBytesActual === 0) {
+                    if (processedFiles > 0 && processedBytes > 0 && totalScannedFiles > 0) {
+                        const avgFileSize = processedBytes / processedFiles;
+                        estimatedTotalBytes = Math.round(avgFileSize * totalScannedFiles);
+                    } else if (processedBytes > 0 && progress > 0 && progress < 100) {
+                        estimatedTotalBytes = Math.round(processedBytes / (progress / 100));
+                    } else if (processedBytes > 0) {
+                        estimatedTotalBytes = Math.round(processedBytes * 3);
+                    }
+                }
+                
+                const totalBytes = totalBytesActual || estimatedTotalBytes || 0;
+                
+                // 方案1：如果API返回了准确的进度，优先使用
+                if (progress > 0 && progress <= 100 && progress < 99.9) {
+                    calculatedProgress = progress;
+                } 
+                // 方案2：基于数据量的进度（最准确）
+                else if (totalBytes > 0 && processedBytes > 0) {
+                    const bytesProgressRatio = processedBytes / totalBytes;
+                    calculatedProgress = bytesProgressRatio * 100;
+                    
+                    if (totalScannedFiles > 0 && processedFiles > 0) {
+                        const fileProgressRatio = processedFiles / totalScannedFiles;
+                        calculatedProgress = (bytesProgressRatio * 0.8 + fileProgressRatio * 0.2) * 100;
+                    }
+                }
+                // 方案3：基于文件数的进度
+                else if (totalScannedFiles > 0 && processedFiles > 0) {
+                    const fileProgressRatio = processedFiles / totalScannedFiles;
+                    calculatedProgress = fileProgressRatio * 70;
+                    
+                    if (processedBytes > 0) {
+                        const compressionRatio = task.compression_ratio || 0;
+                        if (compressionRatio > 0) {
+                            calculatedProgress = 70 + (compressionRatio * 0.3 * 100);
+                        } else {
+                            calculatedProgress = Math.min(95, fileProgressRatio * 100);
+                        }
+                    }
+                } 
+                // 方案4：如果只有已处理文件数，使用保守估算
+                else if (processedFiles > 0) {
+                    calculatedProgress = Math.min(90, Math.sqrt(processedFiles / 100) * 50);
+                } 
+                // 方案5：初始阶段
+                else {
+                    calculatedProgress = 10.0;
+                }
+                
+                calculatedProgress = Math.max(0, Math.min(100, calculatedProgress));
+                const finalProgress = Math.max(calculatedProgress, progress);
                 
                 if (progressBar) {
-                    progressBar.style.width = progress + '%';
-                    progressBar.setAttribute('aria-valuenow', progress);
+                    progressBar.style.width = finalProgress + '%';
+                    progressBar.setAttribute('aria-valuenow', finalProgress);
                 }
                 if (progressText) {
-                    progressText.textContent = progress.toFixed(1) + '%';
+                    progressText.textContent = finalProgress.toFixed(1) + '%';
                 }
-                if (filesInfo) {
-                    filesInfo.textContent = `${task.processed_files || 0}/${task.total_files || 0} 文件`;
+                // 更新文件进度和已处理文件大小信息
+                const fileProgressEl = taskCard.querySelector('.mb-2 .d-flex.justify-content-between');
+                if (fileProgressEl) {
+                    // 更新文件进度：已处理文件/批次相加的文件数
+                    const fileProgressRow = Array.from(taskCard.querySelectorAll('.mb-2 .d-flex.justify-content-between')).find(el => 
+                        el.textContent.includes('文件进度')
+                    );
+                    if (fileProgressRow) {
+                        const fileProgressValue = fileProgressRow.querySelector('.text-muted:last-child');
+                        if (fileProgressValue) {
+                            const processedFiles = task.processed_files || 0;  // 已处理文件数
+                            const totalScannedFiles = task.total_bytes || 0;  // 所有扫描到的文件总数（批次相加的文件数）
+                            fileProgressValue.textContent = `${processedFiles}/${totalScannedFiles || processedFiles}`;
+                        }
+                    }
+                    
+                    // 更新数据量
+                    const processedSizeRow = Array.from(taskCard.querySelectorAll('.mb-2 .d-flex.justify-content-between')).find(el => 
+                        el.textContent.includes('数据量')
+                    );
+                    if (processedSizeRow) {
+                        const processedSizeValue = processedSizeRow.querySelector('.text-muted:last-child');
+                        if (processedSizeValue) {
+                            processedSizeValue.textContent = formatBytesToGB(task.processed_bytes || 0);
+                        }
+                    }
+                    
+                    // 更新已用时间
+                    const elapsedTimeRow = Array.from(taskCard.querySelectorAll('.mb-2 .d-flex.justify-content-between')).find(el => 
+                        el.textContent.includes('已用时间')
+                    );
+                    if (elapsedTimeRow) {
+                        const elapsedTimeValue = elapsedTimeRow.querySelector('.text-muted:last-child');
+                        if (elapsedTimeValue) {
+                            elapsedTimeValue.textContent = formatElapsedTime(task.started_at, task.completed_at);
+                        }
+                    }
+                    
+                    // 更新压缩率（如果存在）
+                    if (task.compressed_bytes > 0 && task.processed_bytes > 0) {
+                        const compressionRatioRow = Array.from(taskCard.querySelectorAll('.mb-2 .d-flex.justify-content-between')).find(el => 
+                            el.textContent.includes('压缩率')
+                        );
+                        if (compressionRatioRow) {
+                            const compressionRatioValue = compressionRatioRow.querySelector('.text-muted:last-child');
+                            if (compressionRatioValue) {
+                                // 计算压缩率：优先使用API返回的compression_ratio
+                                let ratio = 0;
+                                if (task.compression_ratio && task.compression_ratio > 0) {
+                                    ratio = task.compression_ratio;
+                                } else {
+                                    ratio = task.compressed_bytes / task.processed_bytes;
+                                }
+                                compressionRatioValue.textContent = `${(ratio * 100).toFixed(1)}%`;
+                            }
+                        } else {
+                            // 如果压缩率行不存在，添加它
+                            const fileProgressRow = Array.from(taskCard.querySelectorAll('.mb-2 .d-flex.justify-content-between')).find(el => 
+                                el.textContent.includes('已处理文件')
+                            );
+                            if (fileProgressRow) {
+                                const mb2Container = fileProgressRow.parentElement;
+                                if (mb2Container) {
+                                    let ratio = 0;
+                                    if (task.compression_ratio && task.compression_ratio > 0) {
+                                        ratio = task.compression_ratio;
+                                    } else {
+                                        ratio = task.compressed_bytes / task.processed_bytes;
+                                    }
+                                    const compressionHtml = `
+                                        <div class="d-flex justify-content-between">
+                                            <small class="text-muted">压缩率:</small>
+                                            <small class="text-muted">${(ratio * 100).toFixed(1)}%</small>
+                                        </div>
+                                    `;
+                                    mb2Container.insertAdjacentHTML('beforeend', compressionHtml);
+                                }
+                            }
+                        }
+                    }
+                } else if (fileProgressEl && fileProgressEl.textContent.includes('文件处理进度')) {
+                    // 兼容旧格式：更新文件处理进度
+                    const progressValue = fileProgressEl.querySelector('.text-muted:last-child');
+                    if (progressValue) {
+                        progressValue.textContent = `${task.processed_files || 0}/${task.total_files || 0}`;
+                    }
+                    
+                    // 更新压缩率（如果存在）
+                    if (task.compressed_bytes > 0 && task.processed_bytes > 0) {
+                        const compressionRatioRow = Array.from(taskCard.querySelectorAll('.mb-2 .d-flex.justify-content-between')).find(el => 
+                            el.textContent.includes('压缩率')
+                        );
+                        if (compressionRatioRow) {
+                            const compressionRatioValue = compressionRatioRow.querySelector('.text-muted:last-child');
+                            if (compressionRatioValue) {
+                                // 计算压缩率：优先使用API返回的compression_ratio
+                                let ratio = 0;
+                                if (task.compression_ratio && task.compression_ratio > 0) {
+                                    ratio = task.compression_ratio;
+                                } else {
+                                    ratio = task.compressed_bytes / task.processed_bytes;
+                                }
+                                compressionRatioValue.textContent = `${(ratio * 100).toFixed(1)}%`;
+                            }
+                        } else {
+                            // 如果压缩率行不存在，添加它
+                            const fileProgressRow = Array.from(taskCard.querySelectorAll('.mb-2 .d-flex.justify-content-between')).find(el => 
+                                el.textContent.includes('文件处理进度')
+                            );
+                            if (fileProgressRow) {
+                                const mb2Container = fileProgressRow.parentElement;
+                                if (mb2Container) {
+                                    let ratio = 0;
+                                    if (task.compression_ratio && task.compression_ratio > 0) {
+                                        ratio = task.compression_ratio;
+                                    } else {
+                                        ratio = task.compressed_bytes / task.processed_bytes;
+                                    }
+                                    const compressionHtml = `
+                                        <div class="d-flex justify-content-between">
+                                            <small class="text-muted">压缩率:</small>
+                                            <small class="text-muted">${(ratio * 100).toFixed(1)}%</small>
+                                        </div>
+                                    `;
+                                    mb2Container.insertAdjacentHTML('beforeend', compressionHtml);
+                                }
+                            }
+                    }
+                }
+                const totalFilesEl = taskCard.querySelector('.mb-2 .d-flex.justify-content-between');
+                if (totalFilesEl && totalFilesEl.textContent.includes('总文件数')) {
+                        // 更新总文件数
+                        const totalFilesRow = Array.from(taskCard.querySelectorAll('.mb-2 .d-flex.justify-content-between')).find(el => 
+                            el.textContent.includes('总文件数')
+                        );
+                        if (totalFilesRow) {
+                            const totalFilesValue = totalFilesRow.querySelector('.text-muted:last-child');
+                            if (totalFilesValue) {
+                                totalFilesValue.textContent = task.total_files || 0;
+                            }
+                        }
+                        
+                        // 更新已处理文件数
+                        const processedFilesRow = Array.from(taskCard.querySelectorAll('.mb-2 .d-flex.justify-content-between')).find(el => 
+                            el.textContent.includes('已处理')
+                        );
+                        if (processedFilesRow) {
+                            const processedFilesValue = processedFilesRow.querySelector('.text-muted:last-child');
+                            if (processedFilesValue) {
+                                processedFilesValue.textContent = task.processed_files || 0;
+                            }
+                        }
+                        
+                        // 更新压缩率（如果存在）
+                        if (task.compressed_bytes > 0) {
+                            const compressionRatioRow = Array.from(taskCard.querySelectorAll('.mb-2 .d-flex.justify-content-between')).find(el => 
+                                el.textContent.includes('压缩率')
+                            );
+                            if (compressionRatioRow) {
+                                const compressionRatioValue = compressionRatioRow.querySelector('.text-muted:last-child');
+                                if (compressionRatioValue) {
+                                    const ratio = task.compression_ratio || (task.compressed_bytes / task.processed_bytes);
+                                    compressionRatioValue.textContent = `${(ratio * 100).toFixed(1)}%`;
+                                }
+                            } else {
+                                // 如果压缩率行不存在，添加它
+                                const mb2Container = compressionRatioRow ? compressionRatioRow.parentElement : totalFilesRow.parentElement;
+                                if (mb2Container) {
+                                    const ratio = task.compression_ratio || (task.compressed_bytes / task.processed_bytes);
+                                    const compressionHtml = `
+                                        <div class="d-flex justify-content-between">
+                                            <small class="text-muted">压缩率:</small>
+                                            <small class="text-muted">${(ratio * 100).toFixed(1)}%</small>
+                                        </div>
+                                    `;
+                                    mb2Container.insertAdjacentHTML('beforeend', compressionHtml);
+                                }
+                            }
+                        }
+                    }
                 }
             } else {
                 // 创建新卡片
                 taskCard = document.createElement('div');
-                taskCard.className = 'col-md-6 col-lg-4 mb-3';
+                taskCard.className = 'col-md-4 col-lg-4 mb-3';
                 taskCard.setAttribute('data-task-id', taskId);
                 taskCard.innerHTML = `
                     <div class="service-card">
@@ -375,7 +956,7 @@ async function loadRunningTasks() {
                             <div class="d-flex justify-content-between align-items-start mb-2">
                                 <h6 class="card-title mb-0">${task.task_name || '未命名任务'}</h6>
                                 <div class="d-flex align-items-center gap-2">
-                                    <span class="badge bg-primary">运行中</span>
+                                    ${statusBadge}
                                     <button class="btn btn-sm btn-outline-danger btn-delete-task" 
                                             data-task-id="${taskId}" 
                                             title="删除任务记录"
@@ -384,32 +965,56 @@ async function loadRunningTasks() {
                                     </button>
                                 </div>
                             </div>
+                            ${getOperationStatus(task.description || '').replace('class="mb-2"', 'class="mb-2 operation-status"')}
+                            ${isFailed && task.error_message ? `<div class="mb-2"><small class="text-danger"><i class="bi bi-exclamation-triangle me-1"></i>错误: ${task.error_message.substring(0, 50)}${task.error_message.length > 50 ? '...' : ''}</small></div>` : ''}
                             <div class="mb-2">
                                 <small class="text-muted">源路径:</small><br>
-                                <code>${sourcePaths}</code>
+                                <code class="text-white">${sourcePaths}</code>
                             </div>
                             <div class="mb-2">
                                 <small class="text-muted">目标:</small><br>
-                                <code>${tapeInfo}</code>
+                                <code${tapeInfo.includes('\\\\.\\\\scsi') || tapeInfo.includes('\\\\.\\scsi') ? ' class="text-white"' : ''}>${tapeInfo}</code>
                             </div>
+                            ${!isFailed ? `
                             <div class="mb-2">
                                 <div class="d-flex justify-content-between align-items-center">
                                     <small class="text-muted">进度:</small>
-                                    <small class="text-muted">${progress.toFixed(1)}%</small>
+                                    <small class="text-muted">${finalProgress.toFixed(1)}%</small>
                                 </div>
                                 <div class="progress" style="height: 6px;">
                                     <div class="progress-bar bg-primary" 
                                          role="progressbar" 
-                                         style="width: ${progress}%" 
-                                         aria-valuenow="${progress}" 
+                                         style="width: ${finalProgress}%" 
+                                         aria-valuenow="${finalProgress}" 
                                          aria-valuemin="0" 
                                          aria-valuemax="100"></div>
                                 </div>
                             </div>
+                            <div class="mb-2">
+                                <div class="d-flex justify-content-between">
+                                    <small class="text-muted">文件进度:</small>
+                                    <small class="text-muted">${processedFiles}/${totalScannedFiles || processedFiles}</small>
+                                </div>
+                                <div class="d-flex justify-content-between">
+                                    <small class="text-muted">数据量:</small>
+                                    <small class="text-muted">${formatBytesToGB(task.processed_bytes || 0)}</small>
+                                </div>
+                                <div class="d-flex justify-content-between">
+                                    <small class="text-muted">已用时间:</small>
+                                    <small class="text-muted">${elapsedTime}</small>
+                                </div>
+                                ${task.compressed_bytes > 0 && parseFloat(compressionRatio) > 0 ? `
+                                <div class="d-flex justify-content-between">
+                                    <small class="text-muted">压缩率:</small>
+                                    <small class="text-muted">${(parseFloat(compressionRatio) * 100).toFixed(1)}%</small>
+                                </div>
+                                ` : ''}
+                            </div>
+                            ` : ''}
                             <div class="d-flex justify-content-between">
                                 <small class="text-muted">开始时间: ${startedTime}</small>
-                                <small class="text-muted">${task.processed_files || 0}/${task.total_files || 0} 文件</small>
                             </div>
+                            ${isFailed && task.completed_at ? `<div class="mt-2"><small class="text-muted">失败时间: ${formatDateTime(task.completed_at)}</small></div>` : ''}
                         </div>
                     </div>
                 `;
@@ -428,9 +1033,9 @@ async function loadRunningTasks() {
             }
         });
         
-        // 如果没有运行中的任务，显示提示
+        // 如果没有运行中的任务和最近失败的任务，显示提示
         if (validTasks.length === 0 && runningTaskCards.size === 0) {
-            container.innerHTML = '<div class="col-12"><p class="text-muted">暂无运行中的任务</p></div>';
+            container.innerHTML = '<div class="col-12"><p class="text-muted">暂无运行中的任务和最近失败的任务</p></div>';
         }
         
         // 更新统计数字
@@ -452,10 +1057,10 @@ function startRunningTasksPolling() {
         clearInterval(runningTasksPollInterval);
     }
     
-    // 每5秒更新一次运行中的任务
+    // 每2秒更新一次运行中的任务（更频繁的更新以便及时显示操作状态）
     runningTasksPollInterval = setInterval(() => {
         loadRunningTasks();
-    }, 5000);
+    }, 2000);
 }
 
 // 停止轮询运行中的任务
@@ -498,7 +1103,7 @@ async function loadAllTasks() {
                     <td><strong>${task.task_name || '未命名任务'}</strong>${task.is_template ? ' <span class="badge bg-secondary">模板</span>' : ''}</td>
                     <td>${formatTaskType(task.task_type || 'full')}</td>
                     <td><code class="text-truncate d-inline-block" style="max-width:200px;" title="${sourcePaths}">${sourcePaths}</code></td>
-                    <td>${formatStatus(task.status || 'pending')}</td>
+                    <td>${formatStatus(task.status || 'pending', task.description || '')}</td>
                     <td>${formatDateTime(task.started_at)}</td>
                     <td>${formatDateTime(task.completed_at)}</td>
                     <td>${formatBytes(task.processed_bytes || 0)}</td>
@@ -936,7 +1541,7 @@ async function deleteTaskRecord(taskId) {
             try {
                 const errorData = await response.json();
                 errorMessage = errorData.detail || errorData.message || errorMessage;
-            } catch {
+            } catch (e) {
                 errorMessage = `HTTP ${response.status}: ${response.statusText}`;
             }
             alert(errorMessage);

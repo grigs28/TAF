@@ -43,7 +43,7 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_
             if not got_lock:
                 await log_system(
                     level=LogLevel.INFO,
-                    category=LogCategory.SCHEDULER,
+                    category=LogCategory.SYSTEM,
                     message="任务已在执行中，跳过",
                     module="scheduler",
                     function="task_executor",
@@ -256,7 +256,8 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_
                         elif key == 'total_files':
                             logger.info(f"     总文件数: {value}")
                         elif key == 'total_bytes':
-                            logger.info(f"     总字节数: {value:,} ({value / (1024**3):.2f} GB)" if value else "     总字节数: N/A")
+                            # total_bytes 在备份引擎中表示所有扫描到的文件总数（批次相加的文件数），不是字节数
+                            logger.info(f"     扫描文件总数: {value:,}" if value else "     扫描文件总数: N/A")
                         elif key == 'processed_files':
                             logger.info(f"     已处理文件数: {value}")
                         else:

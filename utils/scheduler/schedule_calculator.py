@@ -69,7 +69,11 @@ def calculate_next_run_time(scheduled_task: ScheduledTask) -> Optional[datetime]
         elif schedule_type == ScheduleType.DAILY:
             # 每日任务：每天固定时间
             time_str = config.get('time', '02:00:00')
-            hour, minute, second = map(int, time_str.split(':'))
+            # 支持 HH:MM 和 HH:MM:SS 格式
+            time_parts = time_str.split(':')
+            hour = int(time_parts[0])
+            minute = int(time_parts[1]) if len(time_parts) > 1 else 0
+            second = int(time_parts[2]) if len(time_parts) > 2 else 0
             
             next_time = current_time.replace(hour=hour, minute=minute, second=second, microsecond=0)
             if next_time <= current_time:
@@ -82,12 +86,18 @@ def calculate_next_run_time(scheduled_task: ScheduledTask) -> Optional[datetime]
             # 每周任务：每周固定星期几的固定时间
             day_of_week = config.get('day_of_week', 0)  # 0=Monday, 6=Sunday
             time_str = config.get('time', '02:00:00')
-            hour, minute, second = map(int, time_str.split(':'))
+            # 支持 HH:MM 和 HH:MM:SS 格式
+            time_parts = time_str.split(':')
+            hour = int(time_parts[0])
+            minute = int(time_parts[1]) if len(time_parts) > 1 else 0
+            second = int(time_parts[2]) if len(time_parts) > 2 else 0
             
             current_weekday = current_time.weekday()  # 0=Monday, 6=Sunday
             days_ahead = day_of_week - current_weekday
             
-            if days_ahead < 0 or (days_ahead == 0 and current_time.time() >= datetime.strptime(time_str, '%H:%M:%S').time()):
+            # 构建时间对象用于比较
+            time_obj = datetime.strptime(f"{hour:02d}:{minute:02d}:{second:02d}", '%H:%M:%S').time()
+            if days_ahead < 0 or (days_ahead == 0 and current_time.time() >= time_obj):
                 days_ahead += 7
                 
             next_time = current_time + timedelta(days=days_ahead)
@@ -99,7 +109,11 @@ def calculate_next_run_time(scheduled_task: ScheduledTask) -> Optional[datetime]
             # 每月任务：每月固定日期的固定时间
             day_of_month = config.get('day_of_month', 1)
             time_str = config.get('time', '02:00:00')
-            hour, minute, second = map(int, time_str.split(':'))
+            # 支持 HH:MM 和 HH:MM:SS 格式
+            time_parts = time_str.split(':')
+            hour = int(time_parts[0])
+            minute = int(time_parts[1]) if len(time_parts) > 1 else 0
+            second = int(time_parts[2]) if len(time_parts) > 2 else 0
             
             next_time = current_time.replace(day=day_of_month, hour=hour, minute=minute, second=second, microsecond=0)
             if next_time <= current_time:
@@ -116,7 +130,11 @@ def calculate_next_run_time(scheduled_task: ScheduledTask) -> Optional[datetime]
             month = config.get('month', 1)
             day = config.get('day', 1)
             time_str = config.get('time', '02:00:00')
-            hour, minute, second = map(int, time_str.split(':'))
+            # 支持 HH:MM 和 HH:MM:SS 格式
+            time_parts = time_str.split(':')
+            hour = int(time_parts[0])
+            minute = int(time_parts[1]) if len(time_parts) > 1 else 0
+            second = int(time_parts[2]) if len(time_parts) > 2 else 0
             
             next_time = current_time.replace(month=month, day=day, hour=hour, minute=minute, second=second, microsecond=0)
             if next_time <= current_time:

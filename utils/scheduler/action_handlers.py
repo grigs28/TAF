@@ -92,7 +92,7 @@ class BackupActionHandler(ActionHandler):
                         )
                         await log_system(
                             level=LogLevel.INFO,
-                            category=LogCategory.SCHEDULER,
+                            category=LogCategory.SYSTEM,
                             message="计划任务跳过：当前周期已执行",
                             module="utils.scheduler.action_handlers",
                             function="BackupActionHandler.execute",
@@ -379,16 +379,11 @@ class BackupActionHandler(ActionHandler):
             if not source_paths:
                 raise ValueError("备份源路径不能为空")
             
-            # 发送“开始”通知
-            try:
-                if self.system_instance and getattr(self.system_instance, 'dingtalk_notifier', None):
-                    await self.system_instance.dingtalk_notifier.send_backup_notification(
-                        backup_name=(template_task.task_name if template_task else task_name),
-                        status='started',
-                        details=None
-                    )
-            except Exception:
-                pass
+            # 注意：不在这里发送"开始"通知，因为 backup_engine.execute_backup_task() 中已经会发送
+            # 这样可以避免重复通知，并且 backup_engine 中的通知会检查通知事件配置
+            
+            # 标记备份任务是否已执行（用于判断是否需要发送失败通知）
+            backup_executed = False
 
             # 创建备份任务执行记录（不是模板）
             if is_opengauss():
@@ -467,8 +462,42 @@ class BackupActionHandler(ActionHandler):
                     await session.refresh(backup_task)
             
             # 完整备份前：格式化磁带（计划任务使用当前年月生成卷标）
-            if (template_task and template_task.task_type == BackupTaskType.FULL) or (not template_task and task_type == BackupTaskType.FULL):
+            # 注意：手动运行时跳过格式化
+            logger.info(f"检查是否需要格式化: manual_run={manual_run}, task_type={task_type}, template_task_type={template_task.task_type if template_task else None}")
+            if not manual_run and ((template_task and template_task.task_type == BackupTaskType.FULL) or (not template_task and task_type == BackupTaskType.FULL)):
+                logger.info("开始执行格式化操作（自动运行模式）")
                 try:
+                    # 在格式化开始前，更新备份任务状态为RUNNING，并在description中注明"格式化中"
+                    # 注意：is_opengauss 和 get_opengauss_connection 已在文件顶部导入
+                    if is_opengauss():
+                        conn = await get_opengauss_connection()
+                        try:
+                            await conn.execute(
+                                """
+                                UPDATE backup_tasks
+                                SET status = $1::backuptaskstatus,
+                                    started_at = $2,
+                                    description = COALESCE(description, '') || ' [格式化中]',
+                                    updated_at = $2
+                                WHERE id = $3
+                                """,
+                                BackupTaskStatus.RUNNING.value,
+                                now(),
+                                backup_task.id
+                            )
+                        finally:
+                            await conn.close()
+                    else:
+                        async with db_manager.AsyncSessionLocal() as session:
+                            backup_task.status = BackupTaskStatus.RUNNING
+                            backup_task.started_at = now()
+                            if backup_task.description:
+                                backup_task.description = backup_task.description + ' [格式化中]'
+                            else:
+                                backup_task.description = '[格式化中]'
+                            await session.commit()
+                            await session.refresh(backup_task)
+                    
                     await log_system(
                         level=LogLevel.INFO,
                         category=LogCategory.BACKUP,
@@ -490,6 +519,28 @@ class BackupActionHandler(ActionHandler):
                                     module="utils.scheduler.action_handlers",
                                     function="BackupActionHandler.execute",
                                 )
+                            else:
+                                # 格式化成功，更新description，移除"格式化中"，准备开始备份
+                                if is_opengauss():
+                                    conn = await get_opengauss_connection()
+                                    try:
+                                        await conn.execute(
+                                            """
+                                            UPDATE backup_tasks
+                                            SET description = REPLACE(COALESCE(description, ''), ' [格式化中]', ''),
+                                                updated_at = $1
+                                            WHERE id = $2
+                                            """,
+                                            now(),
+                                            backup_task.id
+                                        )
+                                    finally:
+                                        await conn.close()
+                                else:
+                                    async with db_manager.AsyncSessionLocal() as session:
+                                        if backup_task.description:
+                                            backup_task.description = backup_task.description.replace(' [格式化中]', '')
+                                        await session.commit()
                 except Exception as _:
                     logger.warning("完整备份前格式化异常，将尝试继续执行备份")
                     await log_system(
@@ -499,6 +550,11 @@ class BackupActionHandler(ActionHandler):
                         module="utils.scheduler.action_handlers",
                         function="BackupActionHandler.execute",
                     )
+            else:
+                if manual_run:
+                    logger.info("手动运行模式，跳过格式化操作")
+                elif not ((template_task and template_task.task_type == BackupTaskType.FULL) or (not template_task and task_type == BackupTaskType.FULL)):
+                    logger.info("非完整备份任务，跳过格式化操作")
 
             # 执行备份任务
             await log_system(
@@ -511,61 +567,61 @@ class BackupActionHandler(ActionHandler):
             )
             # 执行备份任务（传入 scheduled_task 和 manual_run 以便进行执行前检查）
             logger.info(f"调用备份引擎执行备份任务... (手动运行: {manual_run})")
-            success = await self.system_instance.backup_engine.execute_backup_task(backup_task, scheduled_task=scheduled_task, manual_run=manual_run)
-            logger.info(f"备份任务执行完成，结果: {'成功' if success else '失败'}")
-            await log_system(
-                level=LogLevel.INFO if success else LogLevel.ERROR,
-                category=LogCategory.BACKUP,
-                message="备份任务执行结束" + ("(成功)" if success else "(失败)"),
-                module="utils.scheduler.action_handlers",
-                function="BackupActionHandler.execute",
-                details={
-                    "backup_task_id": getattr(backup_task, 'id', None),
-                    "total_bytes": getattr(backup_task, 'total_bytes', None),
-                    "total_files": getattr(backup_task, 'total_files', None),
-                }
-            )
-            
-            if success:
-                # 成功通知
-                try:
-                    if self.system_instance and getattr(self.system_instance, 'dingtalk_notifier', None):
-                        await self.system_instance.dingtalk_notifier.send_backup_notification(
-                            backup_name=(template_task.task_name if template_task else task_name),
-                            status='success',
-                            details={
-                                'size': backup_task.total_bytes,
-                                'file_count': backup_task.total_files
-                            }
-                        )
-                except Exception:
-                    pass
-                return {
-                    "status": "success",
-                    "message": "备份任务执行成功",
-                    "backup_task_id": backup_task.id,
-                    "backup_set_id": backup_task.backup_set_id,
-                    "tape_id": backup_task.tape_id,
-                    "total_files": backup_task.total_files,
-                    "total_bytes": backup_task.total_bytes,
-                    "processed_files": backup_task.processed_files,
-                    "template_id": template_task.id if template_task else None
-                }
-            else:
-                raise RuntimeError(f"备份任务执行失败: {backup_task.error_message}")
+            try:
+                success = await self.system_instance.backup_engine.execute_backup_task(backup_task, scheduled_task=scheduled_task, manual_run=manual_run)
+                backup_executed = True  # 标记备份任务已执行
+                logger.info(f"备份任务执行完成，结果: {'成功' if success else '失败'}")
+                await log_system(
+                    level=LogLevel.INFO if success else LogLevel.ERROR,
+                    category=LogCategory.BACKUP,
+                    message="备份任务执行结束" + ("(成功)" if success else "(失败)"),
+                    module="utils.scheduler.action_handlers",
+                    function="BackupActionHandler.execute",
+                    details={
+                        "backup_task_id": getattr(backup_task, 'id', None),
+                        "total_bytes": getattr(backup_task, 'total_bytes', None),
+                        "total_files": getattr(backup_task, 'total_files', None),
+                    }
+                )
+                
+                if success:
+                    # 注意：不在这里发送"成功"通知，因为 backup_engine.execute_backup_task() 中已经会发送
+                    # 这样可以避免重复通知，并且 backup_engine 中的通知会检查通知事件配置，信息更详细
+                    return {
+                        "status": "success",
+                        "message": "备份任务执行成功",
+                        "backup_task_id": backup_task.id,
+                        "backup_set_id": backup_task.backup_set_id,
+                        "tape_id": backup_task.tape_id,
+                        "total_files": backup_task.total_files,
+                        "total_bytes": backup_task.total_bytes,
+                        "processed_files": backup_task.processed_files,
+                        "template_id": template_task.id if template_task else None
+                    }
+                else:
+                    # 安全获取错误信息
+                    error_msg = getattr(backup_task, 'error_message', '备份任务执行失败（未知错误）')
+                    raise RuntimeError(f"备份任务执行失败: {error_msg}")
+            except Exception as backup_error:
+                # 如果备份任务已执行，backup_engine 中已经发送了失败通知，这里不再重复发送
+                if backup_executed:
+                    raise
+                # 如果备份任务未执行（比如创建任务失败、执行前检查失败等），需要发送失败通知
+                raise
                 
         except Exception as e:
             logger.error(f"执行备份动作失败: {str(e)}")
-            # 失败通知
-            try:
-                if self.system_instance and getattr(self.system_instance, 'dingtalk_notifier', None):
-                    await self.system_instance.dingtalk_notifier.send_backup_notification(
-                        backup_name=(template_task.task_name if 'template_task' in locals() and template_task else (config.get('task_name','计划备份'))),
-                        status='failed',
-                        details={'error': str(e)}
-                    )
-            except Exception:
-                pass
+            # 失败通知：只在备份任务未执行时发送（如果备份任务已执行，backup_engine 中已经发送了）
+            if not backup_executed:
+                try:
+                    if self.system_instance and getattr(self.system_instance, 'dingtalk_notifier', None):
+                        await self.system_instance.dingtalk_notifier.send_backup_notification(
+                            backup_name=(template_task.task_name if 'template_task' in locals() and template_task else (config.get('task_name','计划备份'))),
+                            status='failed',
+                            details={'error': str(e)}
+                        )
+                except Exception:
+                    pass
             raise
 
 

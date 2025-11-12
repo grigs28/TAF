@@ -281,6 +281,569 @@ class RecoveryEngine:
             logger.error(traceback.format_exc())
             return []
 
+    async def get_top_level_directories(self, backup_set_id: str) -> List[Dict]:
+        """获取备份集的顶层目录结构（只返回顶层目录和文件，不返回所有文件）
+        
+        用于优化性能，避免一次性加载所有文件导致前端卡顿
+        
+        Args:
+            backup_set_id: 备份集ID
+            
+        Returns:
+            顶层目录和文件列表，每个元素包含：
+            - name: 目录或文件名
+            - type: 'directory' 或 'file'
+            - path: 完整路径
+            - file: 如果是文件，包含文件信息；如果是目录，为None
+            - has_children: 是否有子节点（仅目录）
+        """
+        try:
+            directories = {}
+            files = []
+            
+            if is_opengauss():
+                conn = await get_opengauss_connection()
+                try:
+                    # 首先根据 set_id 查找备份集的 id
+                    backup_set_row = await conn.fetchrow(
+                        "SELECT id FROM backup_sets WHERE set_id = $1",
+                        backup_set_id
+                    )
+                    
+                    if not backup_set_row:
+                        logger.warning(f"备份集不存在: {backup_set_id}")
+                        return []
+                    
+                    backup_set_db_id = backup_set_row['id']
+                    
+                    # 使用SQL查询直接在数据库中提取唯一的顶层目录和文件
+                    # 使用字符串函数提取第一级路径，并使用GROUP BY去重
+                    # 这样可以避免在Python中遍历所有文件路径
+                    sql = """
+                        WITH normalized_paths AS (
+                            SELECT 
+                                file_path,
+                                REPLACE(file_path, '\\', '/') as normalized_path
+                            FROM backup_files
+                            WHERE backup_set_id = $1
+                        ),
+                        first_levels AS (
+                            SELECT 
+                                CASE 
+                                    WHEN POSITION('/' IN normalized_path) > 0 
+                                    THEN SUBSTRING(normalized_path FROM 1 FOR POSITION('/' IN normalized_path) - 1)
+                                    ELSE normalized_path
+                                END as first_level,
+                                file_path,
+                                CASE 
+                                    WHEN POSITION('/' IN normalized_path) > 0 THEN 'directory'
+                                    ELSE 'file'
+                                END as item_type
+                            FROM normalized_paths
+                        )
+                        SELECT DISTINCT
+                            first_level,
+                            item_type,
+                            MIN(file_path) as sample_path
+                        FROM first_levels
+                        GROUP BY first_level, item_type
+                        ORDER BY first_level ASC
+                    """
+                    rows = await conn.fetch(sql, backup_set_db_id)
+                    
+                    logger.info(f"通过SQL查询提取到 {len(rows)} 个唯一的顶层项")
+                    
+                    # 处理查询结果
+                    for row in rows:
+                        first_level = row['first_level']
+                        item_type = row['item_type']
+                        sample_path = row['sample_path']
+                        
+                        if not first_level:
+                            continue
+                        
+                        if item_type == 'file':
+                            # 顶层文件，查询文件详细信息
+                            file_row = await conn.fetchrow(
+                                """
+                                SELECT id, file_path, file_name, file_type, file_size, compressed_size,
+                                       file_permissions, created_time, modified_time, accessed_time,
+                                       compressed, checksum, backup_time, chunk_number
+                                FROM backup_files
+                                WHERE backup_set_id = $1 AND file_path = $2
+                                LIMIT 1
+                                """,
+                                backup_set_db_id,
+                                sample_path
+                            )
+                            
+                            if file_row:
+                                file_info = {
+                                    'id': file_row['id'],
+                                    'file_path': file_row['file_path'],
+                                    'file_name': file_row['file_name'],
+                                    'file_type': file_row['file_type'].value if hasattr(file_row['file_type'], 'value') else str(file_row['file_type']),
+                                    'file_size': file_row['file_size'] or 0,
+                                    'compressed_size': file_row['compressed_size'] or 0,
+                                    'file_permissions': file_row['file_permissions'],
+                                    'created_time': file_row['created_time'].isoformat() if file_row['created_time'] and isinstance(file_row['created_time'], datetime) else (str(file_row['created_time']) if file_row['created_time'] else None),
+                                    'modified_time': file_row['modified_time'].isoformat() if file_row['modified_time'] and isinstance(file_row['modified_time'], datetime) else (str(file_row['modified_time']) if file_row['modified_time'] else None),
+                                    'accessed_time': file_row['accessed_time'].isoformat() if file_row['accessed_time'] and isinstance(file_row['accessed_time'], datetime) else (str(file_row['accessed_time']) if file_row['accessed_time'] else None),
+                                    'compressed': file_row['compressed'] or False,
+                                    'checksum': file_row['checksum'],
+                                    'backup_time': file_row['backup_time'].isoformat() if file_row['backup_time'] and isinstance(file_row['backup_time'], datetime) else str(file_row['backup_time']),
+                                    'chunk_number': file_row['chunk_number']
+                                }
+                                files.append({
+                                    'name': first_level,
+                                    'type': 'file',
+                                    'path': sample_path,
+                                    'file': file_info,
+                                    'has_children': False
+                                })
+                        else:
+                            # 顶层目录，检查是否有子项
+                            has_children_sql = """
+                                SELECT COUNT(*) as cnt
+                                FROM backup_files
+                                WHERE backup_set_id = $1 
+                                  AND (
+                                      REPLACE(file_path, '\\', '/') LIKE $2 
+                                      OR REPLACE(file_path, '\\', '/') LIKE $3
+                                  )
+                                  AND REPLACE(file_path, '\\', '/') != $4
+                            """
+                            like_pattern1 = first_level + '/%'
+                            like_pattern2 = first_level + '\\%'
+                            count_row = await conn.fetchrow(has_children_sql, backup_set_db_id, like_pattern1, like_pattern2, first_level)
+                            has_children = (count_row['cnt'] > 0) if count_row else True
+                            
+                            directories[first_level] = {
+                                'name': first_level,
+                                'type': 'directory',
+                                'path': first_level,
+                                'file': None,
+                                'has_children': has_children
+                            }
+                finally:
+                    await conn.close()
+            else:
+                # 使用SQLAlchemy查询（PostgreSQL等数据库）
+                async with db_manager.AsyncSessionLocal() as session:
+                    stmt = select(BackupSet).where(BackupSet.set_id == backup_set_id)
+                    result = await session.execute(stmt)
+                    backup_set = result.scalar_one_or_none()
+                    
+                    if not backup_set:
+                        logger.warning(f"备份集不存在: {backup_set_id}")
+                        return []
+                    
+                    # 使用原生SQL查询来提取唯一的顶层目录和文件
+                    # 这样可以避免在Python中遍历所有文件路径
+                    from sqlalchemy import text
+                    sql = text("""
+                        WITH normalized_paths AS (
+                            SELECT 
+                                file_path,
+                                REPLACE(file_path, '\\', '/') as normalized_path
+                            FROM backup_files
+                            WHERE backup_set_id = :backup_set_id
+                        ),
+                        first_levels AS (
+                            SELECT 
+                                CASE 
+                                    WHEN POSITION('/' IN normalized_path) > 0 
+                                    THEN SUBSTRING(normalized_path FROM 1 FOR POSITION('/' IN normalized_path) - 1)
+                                    ELSE normalized_path
+                                END as first_level,
+                                file_path,
+                                CASE 
+                                    WHEN POSITION('/' IN normalized_path) > 0 THEN 'directory'
+                                    ELSE 'file'
+                                END as item_type
+                            FROM normalized_paths
+                        )
+                        SELECT DISTINCT
+                            first_level,
+                            item_type,
+                            MIN(file_path) as sample_path
+                        FROM first_levels
+                        GROUP BY first_level, item_type
+                        ORDER BY first_level ASC
+                    """)
+                    result = await session.execute(sql, {'backup_set_id': backup_set.id})
+                    rows = result.fetchall()
+                    
+                    logger.info(f"通过SQL查询提取到 {len(rows)} 个唯一的顶层项")
+                    
+                    # 处理查询结果
+                    for row in rows:
+                        first_level = row[0]
+                        item_type = row[1]
+                        sample_path = row[2]
+                        
+                        if not first_level:
+                            continue
+                        
+                        if item_type == 'file':
+                            # 顶层文件，查询文件信息
+                            file_stmt = select(BackupFile).where(
+                                BackupFile.backup_set_id == backup_set.id,
+                                BackupFile.file_path == sample_path
+                            ).limit(1)
+                            file_result = await session.execute(file_stmt)
+                            backup_file = file_result.scalar_one_or_none()
+                            
+                            if backup_file:
+                                file_info = {
+                                    'id': backup_file.id,
+                                    'file_path': backup_file.file_path,
+                                    'file_name': backup_file.file_name,
+                                    'file_type': backup_file.file_type.value if hasattr(backup_file.file_type, 'value') else str(backup_file.file_type),
+                                    'file_size': backup_file.file_size or 0,
+                                    'compressed_size': backup_file.compressed_size or 0,
+                                    'file_permissions': backup_file.file_permissions,
+                                    'created_time': backup_file.created_time.isoformat() if backup_file.created_time else None,
+                                    'modified_time': backup_file.modified_time.isoformat() if backup_file.modified_time else None,
+                                    'accessed_time': backup_file.accessed_time.isoformat() if backup_file.accessed_time else None,
+                                    'compressed': backup_file.compressed or False,
+                                    'checksum': backup_file.checksum,
+                                    'backup_time': backup_file.backup_time.isoformat() if backup_file.backup_time else None,
+                                    'chunk_number': backup_file.chunk_number
+                                }
+                                files.append({
+                                    'name': first_level,
+                                    'type': 'file',
+                                    'path': sample_path,
+                                    'file': file_info,
+                                    'has_children': False
+                                })
+                        else:
+                            # 顶层目录，检查是否有子项
+                            child_stmt = select(func.count(BackupFile.id)).where(
+                                BackupFile.backup_set_id == backup_set.id,
+                                or_(
+                                    func.replace(BackupFile.file_path, '\\', '/').like(first_level + '/%'),
+                                    func.replace(BackupFile.file_path, '\\', '/').like(first_level + '\\%')
+                                ),
+                                func.replace(BackupFile.file_path, '\\', '/') != first_level
+                            )
+                            child_result = await session.execute(child_stmt)
+                            has_children = child_result.scalar() > 0
+                            
+                            directories[first_level] = {
+                                'name': first_level,
+                                'type': 'directory',
+                                'path': first_level,
+                                'file': None,
+                                'has_children': has_children
+                            }
+            
+            # 合并目录和文件，目录在前
+            result = list(directories.values()) + files
+            logger.info(f"查询到 {len(result)} 个顶层目录项 (备份集: {backup_set_id})，其中目录: {len(directories)}, 文件: {len(files)}")
+            
+            # 如果顶层目录项过多，记录警告并显示前10个示例
+            if len(result) > 1000:
+                logger.warning(f"顶层目录项过多 ({len(result)} 个)，可能存在路径格式问题")
+                sample_paths = [item['path'] for item in result[:10]]
+                logger.warning(f"前10个顶层项示例: {sample_paths}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"获取顶层目录结构失败: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return []
+
+    async def get_directory_contents(self, backup_set_id: str, directory_path: str) -> List[Dict]:
+        """获取指定目录下的文件和子目录列表
+        
+        Args:
+            backup_set_id: 备份集ID
+            directory_path: 目录路径（如 'folder1' 或 'folder1/subfolder'）
+            
+        Returns:
+            目录内容列表，每个元素包含：
+            - name: 目录或文件名
+            - type: 'directory' 或 'file'
+            - path: 完整路径
+            - file: 如果是文件，包含文件信息；如果是目录，为None
+            - has_children: 是否有子节点（仅目录）
+        """
+        try:
+            # 规范化路径（移除前导和尾随斜杠）
+            directory_path = directory_path.strip('/').strip('\\')
+            
+            directories = {}
+            files = []
+            
+            if is_opengauss():
+                conn = await get_opengauss_connection()
+                try:
+                    # 首先根据 set_id 查找备份集的 id
+                    backup_set_row = await conn.fetchrow(
+                        "SELECT id FROM backup_sets WHERE set_id = $1",
+                        backup_set_id
+                    )
+                    
+                    if not backup_set_row:
+                        logger.warning(f"备份集不存在: {backup_set_id}")
+                        return []
+                    
+                    backup_set_db_id = backup_set_row['id']
+                    
+                    # 查询该目录下的所有文件
+                    if directory_path:
+                        # 规范化目录路径，统一使用正斜杠
+                        normalized_dir = directory_path.replace('\\', '/')
+                        # 构建匹配模式：支持 D:/ 和 D:\ 两种格式
+                        # 使用 REPLACE 规范化路径后再匹配
+                        sql = """
+                            SELECT id, file_path, file_name, file_type, file_size, compressed_size,
+                                   file_permissions, created_time, modified_time, accessed_time,
+                                   compressed, checksum, backup_time, chunk_number
+                            FROM backup_files
+                            WHERE backup_set_id = $1
+                              AND (
+                                  REPLACE(file_path, '\\', '/') = $2
+                                  OR REPLACE(file_path, '\\', '/') LIKE $3
+                                  OR REPLACE(file_path, '\\', '/') LIKE $4
+                              )
+                            ORDER BY file_path ASC
+                        """
+                        # 匹配模式：D:/ 或 D:\ 开头的路径
+                        like_pattern1 = normalized_dir + '/%'
+                        like_pattern2 = normalized_dir + '\\%'
+                        rows = await conn.fetch(sql, backup_set_db_id, normalized_dir, like_pattern1, like_pattern2)
+                    else:
+                        # 根目录
+                        sql = """
+                            SELECT id, file_path, file_name, file_type, file_size, compressed_size,
+                                   file_permissions, created_time, modified_time, accessed_time,
+                                   compressed, checksum, backup_time, chunk_number
+                            FROM backup_files
+                            WHERE backup_set_id = $1
+                            ORDER BY file_path ASC
+                        """
+                        rows = await conn.fetch(sql, backup_set_db_id)
+                    
+                    # 处理查询结果
+                    normalized_dir = directory_path.replace('\\', '/') if directory_path else ''
+                    
+                    for row in rows:
+                        file_path = row['file_path']
+                        
+                        # 规范化文件路径
+                        normalized_file_path = file_path.replace('\\', '/')
+                        
+                        # 计算相对路径
+                        if directory_path:
+                            # 检查路径是否匹配（支持 / 和 \ 两种分隔符）
+                            if normalized_file_path == normalized_dir:
+                                # 这是目录本身，跳过
+                                continue
+                            if not (normalized_file_path.startswith(normalized_dir + '/') or 
+                                   normalized_file_path.startswith(normalized_dir + '\\')):
+                                continue
+                            
+                            # 提取相对路径（跳过目录路径和分隔符）
+                            if normalized_file_path.startswith(normalized_dir + '/'):
+                                relative_path = normalized_file_path[len(normalized_dir + '/'):]
+                            elif normalized_file_path.startswith(normalized_dir + '\\'):
+                                relative_path = normalized_file_path[len(normalized_dir + '\\'):]
+                            else:
+                                continue
+                        else:
+                            relative_path = normalized_file_path
+                        
+                        # 分割路径
+                        path_parts = relative_path.split('/')
+                        path_parts = [p for p in path_parts if p]
+                        
+                        if not path_parts:
+                            continue
+                        
+                        # 获取当前层级的内容（第一个部分）
+                        first_part = path_parts[0]
+                        
+                        if len(path_parts) == 1:
+                            # 这是当前目录下的文件
+                            file_info = {
+                                'id': row['id'],
+                                'file_path': row['file_path'],
+                                'file_name': row['file_name'],
+                                'file_type': row['file_type'].value if hasattr(row['file_type'], 'value') else str(row['file_type']),
+                                'file_size': row['file_size'] or 0,
+                                'compressed_size': row['compressed_size'] or 0,
+                                'file_permissions': row['file_permissions'],
+                                'created_time': row['created_time'].isoformat() if row['created_time'] and isinstance(row['created_time'], datetime) else (str(row['created_time']) if row['created_time'] else None),
+                                'modified_time': row['modified_time'].isoformat() if row['modified_time'] and isinstance(row['modified_time'], datetime) else (str(row['modified_time']) if row['modified_time'] else None),
+                                'accessed_time': row['accessed_time'].isoformat() if row['accessed_time'] and isinstance(row['accessed_time'], datetime) else (str(row['accessed_time']) if row['accessed_time'] else None),
+                                'compressed': row['compressed'] or False,
+                                'checksum': row['checksum'],
+                                'backup_time': row['backup_time'].isoformat() if row['backup_time'] and isinstance(row['backup_time'], datetime) else str(row['backup_time']),
+                                'chunk_number': row['chunk_number']
+                            }
+                            files.append({
+                                'name': first_part,
+                                'type': 'file',
+                                'path': file_path,
+                                'file': file_info,
+                                'has_children': False
+                            })
+                        else:
+                            # 这是子目录
+                            if first_part not in directories:
+                                # 构建子目录路径，保持与原始路径格式一致
+                                if directory_path:
+                                    # 检查原始路径格式，使用相同的分隔符
+                                    if '\\' in directory_path:
+                                        child_path = directory_path + '\\' + first_part
+                                    else:
+                                        child_path = directory_path + '/' + first_part
+                                else:
+                                    child_path = first_part
+                                
+                                directories[first_part] = {
+                                    'name': first_part,
+                                    'type': 'directory',
+                                    'path': child_path,
+                                    'file': None,
+                                    'has_children': True
+                                }
+                finally:
+                    await conn.close()
+            else:
+                # 使用SQLAlchemy查询
+                async with db_manager.AsyncSessionLocal() as session:
+                    stmt = select(BackupSet).where(BackupSet.set_id == backup_set_id)
+                    result = await session.execute(stmt)
+                    backup_set = result.scalar_one_or_none()
+                    
+                    if not backup_set:
+                        logger.warning(f"备份集不存在: {backup_set_id}")
+                        return []
+                    
+                    # 查询该目录下的所有文件
+                    if directory_path:
+                        # 规范化目录路径
+                        normalized_dir = directory_path.replace('\\', '/')
+                        # 使用 func.replace 规范化路径后再匹配
+                        stmt = select(BackupFile).where(
+                            BackupFile.backup_set_id == backup_set.id
+                        ).where(
+                            or_(
+                                func.replace(BackupFile.file_path, '\\', '/') == normalized_dir,
+                                func.replace(BackupFile.file_path, '\\', '/').like(normalized_dir + '/%'),
+                                func.replace(BackupFile.file_path, '\\', '/').like(normalized_dir + '\\%')
+                            )
+                        ).order_by(BackupFile.file_path)
+                    else:
+                        stmt = select(BackupFile).where(
+                            BackupFile.backup_set_id == backup_set.id
+                        ).order_by(BackupFile.file_path)
+                    
+                    result = await session.execute(stmt)
+                    backup_files = result.scalars().all()
+                    
+                    # 处理查询结果
+                    normalized_dir = directory_path.replace('\\', '/') if directory_path else ''
+                    
+                    for file in backup_files:
+                        file_path = file.file_path
+                        
+                        # 规范化文件路径
+                        normalized_file_path = file_path.replace('\\', '/')
+                        
+                        # 计算相对路径
+                        if directory_path:
+                            # 检查路径是否匹配
+                            if normalized_file_path == normalized_dir:
+                                # 这是目录本身，跳过
+                                continue
+                            if not (normalized_file_path.startswith(normalized_dir + '/') or 
+                                   normalized_file_path.startswith(normalized_dir + '\\')):
+                                continue
+                            
+                            # 提取相对路径
+                            if normalized_file_path.startswith(normalized_dir + '/'):
+                                relative_path = normalized_file_path[len(normalized_dir + '/'):]
+                            elif normalized_file_path.startswith(normalized_dir + '\\'):
+                                relative_path = normalized_file_path[len(normalized_dir + '\\'):]
+                            else:
+                                continue
+                        else:
+                            relative_path = normalized_file_path
+                        
+                        # 分割路径
+                        path_parts = relative_path.split('/')
+                        path_parts = [p for p in path_parts if p]
+                        
+                        if not path_parts:
+                            continue
+                        
+                        # 获取当前层级的内容（第一个部分）
+                        first_part = path_parts[0]
+                        
+                        if len(path_parts) == 1:
+                            # 这是当前目录下的文件
+                            file_info = {
+                                'id': file.id,
+                                'file_path': file.file_path,
+                                'file_name': file.file_name,
+                                'file_type': file.file_type.value if hasattr(file.file_type, 'value') else str(file.file_type),
+                                'file_size': file.file_size or 0,
+                                'compressed_size': file.compressed_size or 0,
+                                'file_permissions': file.file_permissions,
+                                'created_time': file.created_time.isoformat() if file.created_time else None,
+                                'modified_time': file.modified_time.isoformat() if file.modified_time else None,
+                                'accessed_time': file.accessed_time.isoformat() if file.accessed_time else None,
+                                'compressed': file.compressed or False,
+                                'checksum': file.checksum,
+                                'backup_time': file.backup_time.isoformat() if file.backup_time else None,
+                                'chunk_number': file.chunk_number
+                            }
+                            files.append({
+                                'name': first_part,
+                                'type': 'file',
+                                'path': file_path,
+                                'file': file_info,
+                                'has_children': False
+                            })
+                        else:
+                            # 这是子目录
+                            if first_part not in directories:
+                                # 构建子目录路径，保持与原始路径格式一致
+                                if directory_path:
+                                    # 检查原始路径格式，使用相同的分隔符
+                                    if '\\' in directory_path:
+                                        child_path = directory_path + '\\' + first_part
+                                    else:
+                                        child_path = directory_path + '/' + first_part
+                                else:
+                                    child_path = first_part
+                                
+                                directories[first_part] = {
+                                    'name': first_part,
+                                    'type': 'directory',
+                                    'path': child_path,
+                                    'file': None,
+                                    'has_children': True
+                                }
+            
+            # 合并目录和文件，目录在前
+            result = list(directories.values()) + files
+            logger.info(f"查询到 {len(result)} 个目录项 (路径: {directory_path})")
+            return result
+            
+        except Exception as e:
+            logger.error(f"获取目录内容失败: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return []
+
     async def search_files(self, backup_set_id: str, search_term: str,
                          file_type: str = None) -> List[Dict]:
         """搜索文件"""

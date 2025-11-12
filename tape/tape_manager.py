@@ -382,13 +382,14 @@ class TapeManager:
                     return tape
 
             # 如果没有可用磁带，尝试清理过期磁带
-            if self.settings.AUTO_ERASE_EXPIRED:
-                await self._cleanup_expired_tapes()
-
-                # 再次查找可用磁带
-                for tape in self.tape_cartridges.values():
-                    if tape.status == TapeStatus.AVAILABLE and not tape.is_expired:
-                        return tape
+            # 已禁用：不再自动清理过期磁带
+            # if self.settings.AUTO_ERASE_EXPIRED:
+            #     await self._cleanup_expired_tapes()
+            #
+            #     # 再次查找可用磁带
+            #     for tape in self.tape_cartridges.values():
+            #         if tape.status == TapeStatus.AVAILABLE and not tape.is_expired:
+            #             return tape
 
             logger.warning("没有可用的磁带")
             return None
@@ -650,7 +651,7 @@ class TapeManager:
                         await self.erase_tape(tape.tape_id)
 
                         # 发送通知
-                        from ..utils.dingtalk_notifier import DingTalkNotifier
+                        from utils.dingtalk_notifier import DingTalkNotifier
                         notifier = DingTalkNotifier()
                         await notifier.send_tape_notification(
                             tape.tape_id,
@@ -662,8 +663,13 @@ class TapeManager:
             logger.error(f"检查磁带保留期失败: {str(e)}")
 
     async def _cleanup_expired_tapes(self):
-        """清理过期磁带"""
-        await self.check_retention_periods()
+        """清理过期磁带
+        
+        注意：此方法已禁用，不再自动调用过期检查
+        """
+        # 已禁用：不再自动调用过期检查
+        # await self.check_retention_periods()
+        pass
 
     async def _monitoring_loop(self):
         """磁带监控循环"""
@@ -676,7 +682,7 @@ class TapeManager:
                         # 检查容量预警
                         usage_percent = tape_info['usage_percent']
                         if usage_percent > 90:
-                            from ..utils.dingtalk_notifier import DingTalkNotifier
+                            from utils.dingtalk_notifier import DingTalkNotifier
                             notifier = DingTalkNotifier()
                             await notifier.send_capacity_warning(usage_percent, tape_info)
 

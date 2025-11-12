@@ -303,8 +303,9 @@ async def get_backup_tasks(
                 # 构建查询（包含模板与执行记录）- 不在SQL层做分页，合并后在内存分页
                 sql = f"""
                     SELECT id, task_name, task_type, status, progress_percent, total_files, 
-                           processed_files, total_bytes, processed_bytes, created_at, started_at, 
-                           completed_at, error_message, is_template, tape_device, source_paths
+                           processed_files, total_bytes, processed_bytes, compressed_bytes, 
+                           created_at, started_at, completed_at, error_message, is_template, 
+                           tape_device, source_paths, description, result_summary
                     FROM backup_tasks
                     WHERE {where_sql}
                     ORDER BY created_at DESC
@@ -326,16 +327,36 @@ async def get_backup_tasks(
                         except:
                             source_paths = None
                     
+                    # 计算压缩率
+                    compression_ratio = 0.0
+                    if row["processed_bytes"] and row["processed_bytes"] > 0 and row["compressed_bytes"]:
+                        compression_ratio = float(row["compressed_bytes"]) / float(row["processed_bytes"])
+                    
+                    # 解析result_summary获取预计的压缩包总数
+                    estimated_archive_count = None
+                    if row.get("result_summary"):
+                        try:
+                            if isinstance(row["result_summary"], str):
+                                result_summary_dict = json.loads(row["result_summary"])
+                                estimated_archive_count = result_summary_dict.get('estimated_archive_count')
+                            elif isinstance(row["result_summary"], dict):
+                                estimated_archive_count = row["result_summary"].get('estimated_archive_count')
+                        except:
+                            pass
+                    
                     tasks.append({
                         "task_id": row["id"],
                         "task_name": row["task_name"],
                         "task_type": row["task_type"].value if hasattr(row["task_type"], "value") else str(row["task_type"]),
                         "status": row["status"].value if hasattr(row["status"], "value") else str(row["status"]),
                         "progress_percent": float(row["progress_percent"]) if row["progress_percent"] else 0.0,
-                        "total_files": row["total_files"] or 0,
-                        "processed_files": row["processed_files"] or 0,
-                        "total_bytes": row["total_bytes"] or 0,
+                        "total_files": row["total_files"] or 0,  # 压缩包数量（已生成的压缩包数）
+                        "processed_files": row["processed_files"] or 0,  # 已处理文件数
+                        "total_bytes": row["total_bytes"] or 0,  # 所有扫描到的文件总数（批次相加的文件数）
                         "processed_bytes": row["processed_bytes"] or 0,
+                        "compressed_bytes": row["compressed_bytes"] or 0,
+                        "compression_ratio": compression_ratio,
+                        "estimated_archive_count": estimated_archive_count,  # 预计的压缩包总数
                         "created_at": row["created_at"],
                         "started_at": row["started_at"],
                         "completed_at": row["completed_at"],
@@ -343,6 +364,7 @@ async def get_backup_tasks(
                         "is_template": row["is_template"] or False,
                         "tape_device": row["tape_device"],
                         "source_paths": source_paths,
+                        "description": row["description"] or "",
                         "from_scheduler": False
                     })
                 # 追加计划任务（未运行模板）
@@ -474,7 +496,8 @@ async def get_backup_tasks(
                         "error_message": task.error_message,
                         "is_template": task.is_template or False,
                         "tape_device": task.tape_device,
-                        "source_paths": task.source_paths
+                        "source_paths": task.source_paths,
+                        "description": task.description or ""
                     })
                 
                 return tasks
@@ -496,7 +519,8 @@ async def get_backup_task(task_id: int, http_request: Request):
                     """
                     SELECT id, task_name, task_type, status, progress_percent, total_files, 
                            processed_files, total_bytes, processed_bytes, created_at, started_at, 
-                           completed_at, error_message, is_template, tape_device, source_paths
+                           completed_at, error_message, is_template, tape_device, source_paths,
+                           description
                     FROM backup_tasks
                     WHERE id = $1
                     """,
@@ -532,6 +556,7 @@ async def get_backup_task(task_id: int, http_request: Request):
                     "started_at": row["started_at"],
                     "completed_at": row["completed_at"],
                     "error_message": row["error_message"],
+                    "description": row["description"] or "",
                     "is_template": row["is_template"] or False,
                     "tape_device": row["tape_device"],
                     "source_paths": source_paths

@@ -376,7 +376,7 @@ class TapeOperations:
                     else:
                         logger.warning(f"未找到原卷标记录（tape_id={original_tape_id}, label={original_label}），无法更新数据库")
                 
-                await conn.commit()
+                # 注意：asyncpg连接对象不需要手动commit，每个execute操作都是自动提交的
             finally:
                 await conn.close()
                 
@@ -505,42 +505,36 @@ class TapeOperations:
             return False
 
     async def _write_block(self, data: bytes, block_number: int) -> bool:
-        """写入单个数据块"""
+        """写入单个数据块
+        
+        注意：此方法需要ITDT接口实现，当前使用SCSI接口的方法已废弃
+        """
         try:
-            # 使用SCSI接口的write_tape_data方法
-            result = await self.scsi_interface.write_tape_data(
-                device_path=None,
-                data=data,
-                block_number=block_number,
-                block_size=self.settings.DEFAULT_BLOCK_SIZE
-            )
-
-            if result['success']:
-                return True
-            else:
-                logger.error(f"写入数据块失败: {result.get('error', '未知错误')}")
+            if not self._initialized or not self.itdt_interface:
+                logger.error("磁带操作模块未初始化或ITDT接口不可用")
                 return False
+            
+            # TODO: 使用ITDT接口实现写入数据块功能
+            logger.warning("_write_block方法需要ITDT接口实现，当前未实现")
+            return False
 
         except Exception as e:
             logger.error(f"写入数据块异常: {str(e)}")
             return False
 
     async def _read_block(self, block_number: int, block_size: int) -> Optional[bytes]:
-        """读取单个数据块"""
+        """读取单个数据块
+        
+        注意：此方法需要ITDT接口实现，当前使用SCSI接口的方法已废弃
+        """
         try:
-            # 使用SCSI接口的read_tape_data方法
-            result = await self.scsi_interface.read_tape_data(
-                device_path=None,
-                block_number=block_number,
-                block_count=1,
-                block_size=block_size
-            )
-
-            if result['success']:
-                return result.get('data', b'')
-            else:
-                logger.debug(f"读取数据块失败: {result.get('error', '未知错误')}")
+            if not self._initialized or not self.itdt_interface:
+                logger.error("磁带操作模块未初始化或ITDT接口不可用")
                 return None
+            
+            # TODO: 使用ITDT接口实现读取数据块功能
+            logger.warning("_read_block方法需要ITDT接口实现，当前未实现")
+            return None
 
         except Exception as e:
             logger.error(f"读取数据块异常: {str(e)}")
@@ -549,16 +543,12 @@ class TapeOperations:
     async def _write_filemark(self) -> bool:
         """写入文件标记"""
         try:
-            # 构造WRITE_FILEMARKS(6) SCSI命令
-            cdb = bytes([0x10, 0x00, 0x00, 0x01, 0x00, 0x00])
-
-            result = await self.scsi_interface.execute_scsi_command(
-                device_path=None,
-                cdb=cdb,
-                timeout=30
-            )
-
-            return result['success']
+            if not self._initialized or not self.itdt_interface:
+                logger.error("磁带操作模块未初始化或ITDT接口不可用")
+                return False
+            
+            # 使用ITDT接口写入文件标记
+            return await self.itdt_interface.write_filemark(device_path=None, count=1)
 
         except Exception as e:
             logger.error(f"写入文件标记异常: {str(e)}")
@@ -596,14 +586,18 @@ class TapeOperations:
                     if progress_callback:
                         await progress_callback(backup_task, 0, 0)
             
-            # 1) 发送ERASE命令
-            result = await self.scsi_interface.execute_scsi_command(
+            # 1) 使用ITDT接口发送ERASE命令
+            if not self._initialized or not self.itdt_interface:
+                logger.error("磁带操作模块未初始化或ITDT接口不可用")
+                return False
+            
+            logger.info(f"发送{'LONG' if long_erase else 'SHORT'} ERASE命令...")
+            erase_success = await self.itdt_interface.erase(
                 device_path=None,
-                cdb=cdb,
-                timeout=timeout_seconds
+                short=not long_erase
             )
             
-            if not result.get('success', False):
+            if not erase_success:
                 logger.error("驱动器拒绝ERASE命令或命令执行失败")
                 return False
             
@@ -629,13 +623,9 @@ class TapeOperations:
                             await progress_callback(backup_task, poll_count, estimated_total_polls)
                     
                     # 发送TEST UNIT READY命令检查设备状态
-                    tur_result = await self.scsi_interface.execute_scsi_command(
-                        device_path=None,
-                        cdb=bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),  # TEST UNIT READY
-                        timeout=30
-                    )
+                    tur_result = await self.itdt_interface.test_unit_ready(None)
                     
-                    if tur_result.get('success', False):
+                    if tur_result:
                         # 擦除完成，设置进度为100%
                         if backup_task:
                             backup_task.progress_percent = 100.0
@@ -651,6 +641,11 @@ class TapeOperations:
                         elapsed_minutes = poll_count * poll_interval // 60
                         current_progress = backup_task.progress_percent if backup_task else 0.0
                         logger.info(f"LONG ERASE进行中... 已耗时约 {elapsed_minutes} 分钟，进度: {current_progress:.1f}%，请继续等待...")
+                    
+                    # 检查超时
+                    if poll_count * poll_interval > timeout_seconds:
+                        logger.error(f"LONG ERASE超时（超过 {timeout_seconds} 秒）")
+                        return False
             
             # 短擦除直接返回成功
             if backup_task:
@@ -666,9 +661,11 @@ class TapeOperations:
                 backup_task.progress_percent = 0.0
                 if progress_callback:
                     await progress_callback(backup_task, 0, 0)
-            raise
+            return False
         except Exception as e:
             logger.error(f"执行擦除命令异常: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             if backup_task:
                 backup_task.progress_percent = 0.0
                 if progress_callback:
@@ -676,27 +673,19 @@ class TapeOperations:
             return False
 
     async def _position_to_block(self, block_number: int) -> bool:
-        """定位到指定数据块"""
+        """定位到指定数据块
+        
+        注意：此方法需要ITDT接口实现，当前使用SCSI接口的方法已废弃
+        """
         try:
-            # 构造SPACE(6) SCSI命令
-            # SPACE: 11 00 XX XX XX XX
-            # XX: 代码 (00=块, 01=文件标记, 02=顺序文件标记, 03=结束数据)
-            cdb = bytes([
-                0x11,  # SPACE操作码
-                0x00,  # 代码=0 (块)
-                (block_number >> 16) & 0xFF,
-                (block_number >> 8) & 0xFF,
-                block_number & 0xFF,
-                0x00   # 控制字节
-            ])
-
-            result = await self.scsi_interface.execute_scsi_command(
-                device_path=None,
-                cdb=cdb,
-                timeout=60
-            )
-
-            return result['success']
+            if not self._initialized or not self.itdt_interface:
+                logger.error("磁带操作模块未初始化或ITDT接口不可用")
+                return False
+            
+            # TODO: 使用ITDT接口实现定位到指定数据块功能
+            # ITDT接口可能需要使用space命令或其他方式
+            logger.warning("_position_to_block方法需要ITDT接口实现，当前未实现")
+            return False
 
         except Exception as e:
             logger.error(f"定位数据块异常: {str(e)}")
@@ -705,54 +694,30 @@ class TapeOperations:
     async def _get_tape_position(self) -> Optional[int]:
         """获取当前磁带位置"""
         try:
-            # 构造READ_POSITION SCSI命令
-            cdb = bytes([0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00])
-
-            result = await self.scsi_interface.execute_scsi_command(
-                device_path=None,
-                cdb=cdb,
-                data_direction=1,
-                data_length=20,
-                timeout=30
-            )
-
-            if result['success']:
-                data = result['data']
-                if len(data) >= 20:
-                    # 解析位置信息
-                    block_number = int.from_bytes(data[4:8], byteorder='big')
-                    return block_number
-
-            return None
+            if not self._initialized or not self.itdt_interface:
+                logger.error("磁带操作模块未初始化或ITDT接口不可用")
+                return None
+            
+            # 使用ITDT接口查询位置
+            return await self.itdt_interface.query_position(device_path=None)
 
         except Exception as e:
             logger.error(f"获取磁带位置异常: {str(e)}")
             return None
 
     async def _get_tape_capacity(self) -> Optional[Tuple[int, int]]:
-        """获取磁带容量信息"""
+        """获取磁带容量信息
+        
+        注意：此方法需要ITDT接口实现，当前使用SCSI接口的方法已废弃
+        """
         try:
-            # 构造READ_CAPACITY SCSI命令
-            cdb = bytes([0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
-
-            result = await self.scsi_interface.execute_scsi_command(
-                device_path=None,
-                cdb=cdb,
-                data_direction=1,
-                data_length=8,
-                timeout=30
-            )
-
-            if result['success']:
-                data = result['data']
-                if len(data) >= 8:
-                    # 解析容量信息
-                    last_block = int.from_bytes(data[0:4], byteorder='big')
-                    block_size = int.from_bytes(data[4:8], byteorder='big')
-
-                    total_capacity = (last_block + 1) * block_size
-                    return (total_capacity, block_size)
-
+            if not self._initialized or not self.itdt_interface:
+                logger.error("磁带操作模块未初始化或ITDT接口不可用")
+                return None
+            
+            # TODO: 使用ITDT接口实现获取磁带容量功能
+            # ITDT接口可能需要使用tapeusage命令或其他方式
+            logger.warning("_get_tape_capacity方法需要ITDT接口实现，当前未实现")
             return None
 
         except Exception as e:
@@ -931,255 +896,160 @@ class TapeOperations:
 
     # IBM LTO特定功能
     async def get_ibm_tape_alerts(self) -> Dict[str, Any]:
-        """获取IBM磁带警报信息"""
+        """获取IBM磁带警报信息
+        
+        注意：此功能需要SCSI接口，当前使用ITDT接口时不可用
+        """
         try:
-            if not self._initialized or not self.scsi_interface:
+            if not self._initialized:
                 return {'success': False, 'error': '磁带操作模块未初始化'}
-
-            # 使用LOG SENSE命令获取TapeAlert信息
-            result = await self.scsi_interface.send_ibm_specific_command(
-                device_path=None,
-                command_type="log_sense",
-                parameters={'page_code': 0x2E}  # TapeAlert页面
-            )
-
-            if result['success']:
-                return self._parse_tape_alert_data(result['log_data'])
-            else:
-                return result
+            
+            # ITDT接口不支持SCSI LOG SENSE命令
+            return {'success': False, 'error': 'ITDT接口不支持IBM磁带警报功能，需要使用SCSI接口'}
 
         except Exception as e:
             logger.error(f"获取IBM磁带警报失败: {str(e)}")
             return {'success': False, 'error': str(e)}
 
     async def get_ibm_performance_stats(self) -> Dict[str, Any]:
-        """获取IBM磁带性能统计"""
+        """获取IBM磁带性能统计
+        
+        注意：此功能需要SCSI接口，当前使用ITDT接口时不可用
+        """
         try:
-            if not self._initialized or not self.scsi_interface:
+            if not self._initialized:
                 return {'success': False, 'error': '磁带操作模块未初始化'}
-
-            # 获取性能统计日志
-            result = await self.scsi_interface.send_ibm_specific_command(
-                device_path=None,
-                command_type="log_sense",
-                parameters={'page_code': 0x17}  # 性能统计页面
-            )
-
-            if result['success']:
-                return self._parse_performance_data(result['log_data'])
-            else:
-                return result
+            
+            # ITDT接口不支持SCSI LOG SENSE命令
+            return {'success': False, 'error': 'ITDT接口不支持IBM性能统计功能，需要使用SCSI接口'}
 
         except Exception as e:
             logger.error(f"获取IBM性能统计失败: {str(e)}")
             return {'success': False, 'error': str(e)}
 
     async def get_ibm_tape_usage(self) -> Dict[str, Any]:
-        """获取IBM磁带使用统计"""
+        """获取IBM磁带使用统计
+        
+        注意：此功能需要SCSI接口，当前使用ITDT接口时不可用
+        """
         try:
-            if not self._initialized or not self.scsi_interface:
+            if not self._initialized:
                 return {'success': False, 'error': '磁带操作模块未初始化'}
-
-            # 获取磁带使用统计
-            result = await self.scsi_interface.send_ibm_specific_command(
-                device_path=None,
-                command_type="log_sense",
-                parameters={'page_code': 0x31}  # 磁带使用统计页面
-            )
-
-            if result['success']:
-                return self._parse_usage_data(result['log_data'])
-            else:
-                return result
+            
+            # ITDT接口不支持SCSI LOG SENSE命令
+            return {'success': False, 'error': 'ITDT接口不支持IBM磁带使用统计功能，需要使用SCSI接口'}
 
         except Exception as e:
             logger.error(f"获取IBM磁带使用统计失败: {str(e)}")
             return {'success': False, 'error': str(e)}
 
     async def enable_ibm_encryption(self, encryption_key: str = None) -> Dict[str, Any]:
-        """启用IBM磁带加密"""
+        """启用IBM磁带加密
+        
+        注意：此功能需要SCSI接口，当前使用ITDT接口时不可用
+        """
         try:
-            if not self._initialized or not self.scsi_interface:
+            if not self._initialized:
                 return {'success': False, 'error': '磁带操作模块未初始化'}
-
-            # 使用MODE SENSE/SELECT配置加密
-            result = await self.scsi_interface.send_ibm_specific_command(
-                device_path=None,
-                command_type="mode_sense",
-                parameters={'page_code': 0x1F}  # 加密控制页面
-            )
-
-            if not result['success']:
-                return result
-
-            # 解析当前加密设置
-            current_mode = self._parse_encryption_mode(result['mode_data'])
-
-            # 构造新的加密设置
-            new_mode = self._build_encryption_mode(enable=True, key=encryption_key)
-
-            # 发送MODE SELECT命令
-            select_result = await self._send_mode_select(0x1F, new_mode)
-
-            if select_result['success']:
-                return {'success': True, 'message': '加密已启用'}
-            else:
-                return select_result
+            
+            # ITDT接口不支持MODE SENSE/SELECT命令
+            return {'success': False, 'error': 'ITDT接口不支持IBM加密功能，需要使用SCSI接口'}
 
         except Exception as e:
             logger.error(f"启用IBM加密失败: {str(e)}")
             return {'success': False, 'error': str(e)}
 
     async def disable_ibm_encryption(self) -> Dict[str, Any]:
-        """禁用IBM磁带加密"""
+        """禁用IBM磁带加密
+        
+        注意：此功能需要SCSI接口，当前使用ITDT接口时不可用
+        """
         try:
-            if not self._initialized or not self.scsi_interface:
+            if not self._initialized:
                 return {'success': False, 'error': '磁带操作模块未初始化'}
-
-            # 构造禁用加密的设置
-            new_mode = self._build_encryption_mode(enable=False)
-
-            # 发送MODE SELECT命令
-            result = await self._send_mode_select(0x1F, new_mode)
-
-            if result['success']:
-                return {'success': True, 'message': '加密已禁用'}
-            else:
-                return result
+            
+            # ITDT接口不支持MODE SENSE/SELECT命令
+            return {'success': False, 'error': 'ITDT接口不支持IBM加密功能，需要使用SCSI接口'}
 
         except Exception as e:
             logger.error(f"禁用IBM加密失败: {str(e)}")
             return {'success': False, 'error': str(e)}
 
     async def set_ibm_worm_mode(self, enable: bool = True) -> Dict[str, Any]:
-        """设置IBM WORM模式"""
+        """设置IBM WORM模式
+        
+        注意：此功能需要SCSI接口，当前使用ITDT接口时不可用
+        """
         try:
-            if not self._initialized or not self.scsi_interface:
+            if not self._initialized:
                 return {'success': False, 'error': '磁带操作模块未初始化'}
-
-            # 使用MODE SENSE/SELECT配置WORM模式
-            page_code = 0x1D  # WORM控制页面
-
-            if enable:
-                # 启用WORM模式
-                new_mode = self._build_worm_mode(enable=True)
-            else:
-                # 禁用WORM模式
-                new_mode = self._build_worm_mode(enable=False)
-
-            # 发送MODE SELECT命令
-            result = await self._send_mode_select(page_code, new_mode)
-
-            if result['success']:
-                mode_str = "启用" if enable else "禁用"
-                return {'success': True, 'message': f'WORM模式已{mode_str}'}
-            else:
-                return result
+            
+            # ITDT接口不支持MODE SENSE/SELECT命令
+            return {'success': False, 'error': 'ITDT接口不支持IBM WORM模式功能，需要使用SCSI接口'}
 
         except Exception as e:
             logger.error(f"设置IBM WORM模式失败: {str(e)}")
             return {'success': False, 'error': str(e)}
 
     async def get_ibm_temperature_status(self) -> Dict[str, Any]:
-        """获取IBM磁带机温度状态"""
+        """获取IBM磁带机温度状态
+        
+        注意：此功能需要SCSI接口，当前使用ITDT接口时不可用
+        """
         try:
-            if not self._initialized or not self.scsi_interface:
+            if not self._initialized:
                 return {'success': False, 'error': '磁带操作模块未初始化'}
-
-            # 获取温度监控日志
-            result = await self.scsi_interface.send_ibm_specific_command(
-                device_path=None,
-                command_type="log_sense",
-                parameters={'page_code': 0x0D}  # 温度页面
-            )
-
-            if result['success']:
-                return self._parse_temperature_data(result['log_data'])
-            else:
-                return result
+            
+            # ITDT接口不支持SCSI LOG SENSE命令
+            return {'success': False, 'error': 'ITDT接口不支持IBM温度状态功能，需要使用SCSI接口'}
 
         except Exception as e:
             logger.error(f"获取IBM温度状态失败: {str(e)}")
             return {'success': False, 'error': str(e)}
 
     async def get_ibm_drive_serial_number(self) -> Dict[str, Any]:
-        """获取IBM磁带机序列号"""
+        """获取IBM磁带机序列号
+        
+        注意：此功能需要SCSI接口，当前使用ITDT接口时不可用
+        """
         try:
-            if not self._initialized or not self.scsi_interface:
+            if not self._initialized:
                 return {'success': False, 'error': '磁带操作模块未初始化'}
-
-            # 使用INQUIRY VPD页面0x80获取单元序列号
-            result = await self.scsi_interface.send_ibm_specific_command(
-                device_path=None,
-                command_type="inquiry_vpd",
-                parameters={'page_code': 0x80}
-            )
-
-            if result['success']:
-                vpd_data = bytes.fromhex(result['vpd_data'])
-                if len(vpd_data) >= 4:
-                    serial_length = vpd_data[3]
-                    if len(vpd_data) >= 4 + serial_length:
-                        serial_number = vpd_data[4:4+serial_length].decode('ascii', errors='ignore').strip()
-                        return {
-                            'success': True,
-                            'serial_number': serial_number
-                        }
-
-            return {'success': False, 'error': '无法获取序列号'}
+            
+            # ITDT接口不支持INQUIRY VPD命令
+            return {'success': False, 'error': 'ITDT接口不支持IBM序列号查询功能，需要使用SCSI接口'}
 
         except Exception as e:
             logger.error(f"获取IBM磁带机序列号失败: {str(e)}")
             return {'success': False, 'error': str(e)}
 
     async def get_ibm_firmware_version(self) -> Dict[str, Any]:
-        """获取IBM磁带机固件版本"""
+        """获取IBM磁带机固件版本
+        
+        注意：此功能需要SCSI接口，当前使用ITDT接口时不可用
+        """
         try:
-            if not self._initialized or not self.scsi_interface:
+            if not self._initialized:
                 return {'success': False, 'error': '磁带操作模块未初始化'}
-
-            # 使用INQUIRY VPD页面获取固件版本
-            result = await self.scsi_interface.send_ibm_specific_command(
-                device_path=None,
-                command_type="inquiry_vpd",
-                parameters={'page_code': 0x00}  # 标准INQUIRY数据
-            )
-
-            if result['success']:
-                vpd_data = bytes.fromhex(result['vpd_data'])
-                if len(vpd_data) >= 36:
-                    # 产品修订级别在字节32-35
-                    revision = vpd_data[32:36].decode('ascii', errors='ignore').strip()
-                    return {
-                        'success': True,
-                        'firmware_version': revision
-                    }
-
-            return {'success': False, 'error': '无法获取固件版本'}
+            
+            # ITDT接口不支持INQUIRY VPD命令
+            return {'success': False, 'error': 'ITDT接口不支持IBM固件版本查询功能，需要使用SCSI接口'}
 
         except Exception as e:
             logger.error(f"获取IBM固件版本失败: {str(e)}")
             return {'success': False, 'error': str(e)}
 
     async def run_ibm_self_test(self) -> Dict[str, Any]:
-        """运行IBM磁带机自检"""
+        """运行IBM磁带机自检
+        
+        注意：此功能需要SCSI接口，当前使用ITDT接口时不可用
+        """
         try:
-            if not self._initialized or not self.scsi_interface:
+            if not self._initialized:
                 return {'success': False, 'error': '磁带操作模块未初始化'}
-
-            # 发送SEND DIAGNOSTIC命令
-            cdb = bytes([0x1D, 0x00, 0x00, 0x00, 0x00, 0x00])
-
-            result = await self.scsi_interface.execute_scsi_command(
-                device_path=None,
-                cdb=cdb,
-                timeout=120  # 自检可能需要较长时间
-            )
-
-            if result['success']:
-                return {'success': True, 'message': '自检完成'}
-            else:
-                return result
+            
+            # ITDT接口不支持SEND DIAGNOSTIC命令
+            return {'success': False, 'error': 'ITDT接口不支持IBM自检功能，需要使用SCSI接口'}
 
         except Exception as e:
             logger.error(f"运行IBM自检失败: {str(e)}")
@@ -1369,31 +1239,16 @@ class TapeOperations:
             return bytes([0x1D, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
 
     async def _send_mode_select(self, page_code: int, mode_data: bytes) -> Dict[str, Any]:
-        """发送MODE SELECT命令"""
+        """发送MODE SELECT命令
+        
+        注意：此方法需要SCSI接口，当前使用ITDT接口时不可用
+        """
         try:
-            # 构造MODE SELECT(10) CDB
-            cdb = bytes([
-                0x55,        # MODE SELECT(10)
-                0x00,        # 保留
-                0x00,        # 页面代码
-                0x00,        # 子页面代码
-                0x00,        # 保留
-                0x00,        # 保留
-                0x00,        # 保留
-                (len(mode_data) >> 8) & 0xFF,  # 参数列表长度高位
-                len(mode_data) & 0xFF,         # 参数列表长度低位
-                0x00         # 控制
-            ])
-
-            result = await self.scsi_interface.execute_scsi_command(
-                device_path=None,
-                cdb=cdb,
-                data_direction=0,  # 出方向
-                data_length=len(mode_data),
-                timeout=30
-            )
-
-            return result
+            if not self._initialized:
+                return {'success': False, 'error': '磁带操作模块未初始化'}
+            
+            # ITDT接口不支持MODE SELECT命令
+            return {'success': False, 'error': 'ITDT接口不支持MODE SELECT命令，需要使用SCSI接口'}
 
         except Exception as e:
             logger.error(f"发送MODE SELECT失败: {str(e)}")

@@ -330,14 +330,33 @@ class TaskScheduler:
                 }
                 
                 # 更新数据库中的下次执行时间
-                async with db_manager.AsyncSessionLocal() as session:
-                    scheduled_task.next_run_time = next_run
-                    session.add(scheduled_task)
-                    await session.commit()
+                if is_opengauss():
+                    # 使用openGauss原生连接，避免SQLAlchemy版本解析错误
+                    conn = await get_opengauss_connection()
+                    try:
+                        await conn.execute(
+                            """
+                            UPDATE scheduled_tasks
+                            SET next_run_time = $1
+                            WHERE id = $2
+                            """,
+                            next_run,
+                            scheduled_task.id
+                        )
+                    finally:
+                        await conn.close()
+                else:
+                    # 使用SQLAlchemy会话（其他数据库）
+                    async with db_manager.AsyncSessionLocal() as session:
+                        scheduled_task.next_run_time = next_run
+                        session.add(scheduled_task)
+                        await session.commit()
                     
                 logger.info(f"加载任务: {scheduled_task.task_name} (ID: {scheduled_task.id})")
         except Exception as e:
             logger.error(f"加载任务失败 {scheduled_task.task_name}: {str(e)}")
+            import traceback
+            logger.debug(f"错误详情:\n{traceback.format_exc()}")
 
     async def add_task(self, scheduled_task: ScheduledTask) -> bool:
         """添加计划任务"""

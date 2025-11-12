@@ -22,6 +22,66 @@ class RecoveryRequest(BaseModel):
     target_path: str
 
 
+# 注意：路由顺序很重要，更具体的路径应该放在前面
+# 先定义带路径参数的具体路由，再定义通用路由
+
+@router.get("/backup-sets/{backup_set_id}/top-level")
+async def get_top_level_directories(backup_set_id: str, request: Request):
+    """获取备份集的顶层目录结构（优化性能，避免一次性加载所有文件）"""
+    try:
+        logger.info(f"收到获取顶层目录请求: backup_set_id={backup_set_id}")
+        system = request.app.state.system
+        if not system:
+            logger.error("系统未初始化")
+            raise HTTPException(status_code=500, detail="系统未初始化")
+
+        directories = await system.recovery_engine.get_top_level_directories(backup_set_id)
+        logger.info(f"返回 {len(directories)} 个顶层目录项")
+        return {"items": directories}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取顶层目录结构失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/backup-sets/{backup_set_id}/directory")
+async def get_directory_contents(
+    backup_set_id: str, 
+    path: str = "",
+    request: Request = None
+):
+    """获取指定目录下的文件和子目录列表"""
+    try:
+        system = request.app.state.system
+        if not system:
+            raise HTTPException(status_code=500, detail="系统未初始化")
+
+        contents = await system.recovery_engine.get_directory_contents(backup_set_id, path)
+        return {"items": contents}
+
+    except Exception as e:
+        logger.error(f"获取目录内容失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/backup-sets/{backup_set_id}/files")
+async def get_backup_set_files(backup_set_id: str, request: Request):
+    """获取备份集文件列表"""
+    try:
+        system = request.app.state.system
+        if not system:
+            raise HTTPException(status_code=500, detail="系统未初始化")
+
+        files = await system.recovery_engine.get_backup_set_files(backup_set_id)
+        return {"files": files}
+
+    except Exception as e:
+        logger.error(f"获取备份集文件列表失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/backup-sets")
 async def search_backup_sets(
     request: Request,
@@ -53,22 +113,6 @@ async def search_backup_sets(
     except Exception as e:
         logger.error(f"搜索备份集失败: {str(e)}")
         return {"backup_sets": []}
-
-
-@router.get("/backup-sets/{backup_set_id}/files")
-async def get_backup_set_files(backup_set_id: str, request: Request):
-    """获取备份集文件列表"""
-    try:
-        system = request.app.state.system
-        if not system:
-            raise HTTPException(status_code=500, detail="系统未初始化")
-
-        files = await system.recovery_engine.get_backup_set_files(backup_set_id)
-        return {"files": files}
-
-    except Exception as e:
-        logger.error(f"获取备份集文件列表失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/tasks")

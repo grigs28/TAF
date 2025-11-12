@@ -1222,19 +1222,8 @@ async def check_tape_exists(tape_id: str, request: Request):
 
 @router.get("/list")
 async def list_tapes(request: Request):
-    """获取所有磁带列表
-    
-    注意：此接口在调用时会自动执行保留期检查，检查过期磁带并更新状态。
-    """
+    """获取所有磁带列表"""
     try:
-        # 执行保留期检查（在打开磁带管理页面时检查）
-        system = request.app.state.system
-        if system and hasattr(system, 'tape_manager') and system.tape_manager:
-            try:
-                await system.tape_manager.check_retention_periods()
-            except Exception as e:
-                logger.warning(f"执行保留期检查失败: {str(e)}")
-        
         import psycopg2
         from config.settings import get_settings
         

@@ -373,12 +373,12 @@ async def _get_storage_trend(days: int = 30) -> List[Dict[str, Any]]:
                 rows = await conn.fetch(
                     """
                     SELECT 
-                        DATE(backup_time) as backup_date,
+                        backup_time::date as backup_date,
                         SUM(compressed_bytes) as daily_bytes
                     FROM backup_sets
                     WHERE backup_time >= $1
                       AND LOWER(status::text) = LOWER('ACTIVE')
-                    GROUP BY DATE(backup_time)
+                    GROUP BY backup_time::date
                     ORDER BY backup_date ASC
                     """,
                     start_date
@@ -435,11 +435,11 @@ async def _get_success_rate_statistics() -> Dict[str, Any]:
             conn = await get_opengauss_connection()
             try:
                 total = await conn.fetchval(
-                    "SELECT COUNT(*) FROM backup_tasks WHERE is_template = FALSE AND status IN ('COMPLETED', 'FAILED')"
+                    "SELECT COUNT(*) FROM backup_tasks WHERE is_template = FALSE AND status::text IN ('completed', 'failed')"
                 ) or 0
                 
                 success = await conn.fetchval(
-                    "SELECT COUNT(*) FROM backup_tasks WHERE is_template = FALSE AND LOWER(status::text) = LOWER('COMPLETED')"
+                    "SELECT COUNT(*) FROM backup_tasks WHERE is_template = FALSE AND status::text = 'completed'"
                 ) or 0
                 
                 # 本月统计
@@ -448,7 +448,7 @@ async def _get_success_rate_statistics() -> Dict[str, Any]:
                     """
                     SELECT COUNT(*) FROM backup_tasks 
                     WHERE is_template = FALSE 
-                      AND status IN ('COMPLETED', 'FAILED')
+                      AND status::text IN ('completed', 'failed')
                       AND started_at >= $1
                     """,
                     this_month_start
@@ -458,7 +458,7 @@ async def _get_success_rate_statistics() -> Dict[str, Any]:
                     """
                     SELECT COUNT(*) FROM backup_tasks 
                     WHERE is_template = FALSE 
-                      AND LOWER(status::text) = LOWER('COMPLETED')
+                      AND status::text = 'completed'
                       AND started_at >= $1
                     """,
                     this_month_start
@@ -471,7 +471,7 @@ async def _get_success_rate_statistics() -> Dict[str, Any]:
                     """
                     SELECT COUNT(*) FROM backup_tasks 
                     WHERE is_template = FALSE 
-                      AND status IN ('COMPLETED', 'FAILED')
+                      AND status::text IN ('completed', 'failed')
                       AND started_at >= $1 AND started_at < $2
                     """,
                     last_month_start, this_month_start
@@ -481,7 +481,7 @@ async def _get_success_rate_statistics() -> Dict[str, Any]:
                     """
                     SELECT COUNT(*) FROM backup_tasks 
                     WHERE is_template = FALSE 
-                      AND LOWER(status::text) = LOWER('COMPLETED')
+                      AND status::text = 'completed'
                       AND started_at >= $1 AND started_at < $2
                     """,
                     last_month_start, this_month_start
