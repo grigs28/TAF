@@ -938,6 +938,50 @@ class BackupEngine:
             
             return success
 
+        except KeyboardInterrupt:
+            # 用户按 Ctrl+C 中止任务
+            logger.warning("========== 用户中止备份任务执行（Ctrl+C） ==========")
+            logger.warning(f"任务名称: {task_name}")
+            logger.warning(f"任务ID: {task_id}")
+            
+            # 更新任务状态为取消
+            if backup_task:
+                try:
+                    backup_task.error_message = "用户中止任务（Ctrl+C）"
+                    await self.backup_db.update_task_status(backup_task, BackupTaskStatus.CANCELLED)
+                    await self.backup_db.update_scan_progress(backup_task, 
+                                                            backup_task.processed_files if hasattr(backup_task, 'processed_files') else 0,
+                                                            backup_task.total_files if hasattr(backup_task, 'total_files') else 0, 
+                                                            "[已取消]")
+                    logger.info("任务状态已更新为取消")
+                except Exception as update_error:
+                    logger.error(f"更新任务状态失败: {str(update_error)}")
+            
+            # 重新抛出 KeyboardInterrupt，让上层处理
+            raise
+            
+        except asyncio.CancelledError:
+            # 任务被取消
+            logger.warning("========== 备份任务执行被取消 ==========")
+            logger.warning(f"任务名称: {task_name}")
+            logger.warning(f"任务ID: {task_id}")
+            
+            # 更新任务状态为取消
+            if backup_task:
+                try:
+                    backup_task.error_message = "任务被取消"
+                    await self.backup_db.update_task_status(backup_task, BackupTaskStatus.CANCELLED)
+                    await self.backup_db.update_scan_progress(backup_task, 
+                                                            backup_task.processed_files if hasattr(backup_task, 'processed_files') else 0,
+                                                            backup_task.total_files if hasattr(backup_task, 'total_files') else 0, 
+                                                            "[已取消]")
+                    logger.info("任务状态已更新为取消")
+                except Exception as update_error:
+                    logger.error(f"更新任务状态失败: {str(update_error)}")
+            
+            # 重新抛出 CancelledError，让上层处理
+            raise
+
         except Exception as e:
             error_msg = str(e)
             error_trace = traceback.format_exc()
@@ -1000,11 +1044,30 @@ class BackupEngine:
             backup_task: 备份任务对象
             scheduled_task: 计划任务对象（可选，用于获取排除规则等配置）
         """
+        scan_progress_task = None  # 后台扫描任务
         try:
             # 初始化扫描进度
             if backup_task:
                 backup_task.progress_percent = 0.0
                 await self.backup_db.update_scan_progress(backup_task, 0, 0)
+            
+            # 获取排除规则：优先从计划任务获取，否则从备份任务获取
+            exclude_patterns = []
+            if scheduled_task and hasattr(scheduled_task, 'action_config') and scheduled_task.action_config:
+                exclude_patterns = scheduled_task.action_config.get('exclude_patterns', [])
+                logger.info(f"从计划任务获取排除规则: {len(exclude_patterns)} 个模式")
+            elif backup_task and hasattr(backup_task, 'exclude_patterns') and backup_task.exclude_patterns:
+                exclude_patterns = backup_task.exclude_patterns if isinstance(backup_task.exclude_patterns, list) else []
+                logger.info(f"从备份任务获取排除规则: {len(exclude_patterns)} 个模式")
+            
+            if exclude_patterns:
+                logger.info(f"排除规则: {exclude_patterns}")
+            
+            # 初始化备份任务的统计信息
+            backup_task.processed_files = 0
+            backup_task.processed_bytes = 0  # 原始文件的总大小（未压缩）
+            backup_task.total_files = 0  # total_files: 总文件数（由后台扫描任务更新）
+            backup_task.total_bytes = 0  # total_bytes: 总字节数（由后台扫描任务更新）
             
             # 1. 检查磁带盘符是否可用（简单检查）
             logger.info("检查磁带盘符...")
@@ -1082,233 +1145,264 @@ class BackupEngine:
             processed_files = 0
             total_size = 0  # 压缩后的总大小
             total_original_size = 0  # 原始文件的总大小（未压缩）
-            total_scanned_files = 0  # 所有批次扫描到的文件总数（批次相加的文件数）
+            # 注意：不再使用 total_scanned_files 变量
+            # 总文件数和总字节数由独立的后台扫描任务 _scan_for_progress_update 负责更新
             estimated_archive_count = 0  # 预计的压缩包总数（估算值）
             group_idx = 0
             current_batch = []  # 当前批次文件列表
             current_batch_size = 0  # 当前批次大小（字节）
             
-            # 初始化备份任务的统计信息
-            backup_task.processed_files = 0
-            backup_task.processed_bytes = 0  # 原始文件的总大小（未压缩）
-            backup_task.total_files = 0  # total_files 现在表示压缩包数量（已生成的压缩包数）
-            backup_task.total_bytes = 0  # total_bytes 现在表示所有扫描到的文件总数（批次相加的文件数）
-            
             # 获取批次大小配置
             batch_size_files = self.settings.SCAN_BATCH_SIZE
             batch_size_bytes = self.settings.SCAN_BATCH_SIZE_BYTES
             
-            # 获取排除规则：优先从计划任务获取，否则从备份任务获取
-            exclude_patterns = []
-            if scheduled_task and hasattr(scheduled_task, 'action_config') and scheduled_task.action_config:
-                exclude_patterns = scheduled_task.action_config.get('exclude_patterns', [])
-                logger.info(f"从计划任务获取排除规则: {len(exclude_patterns)} 个模式")
-            elif backup_task and hasattr(backup_task, 'exclude_patterns') and backup_task.exclude_patterns:
-                exclude_patterns = backup_task.exclude_patterns if isinstance(backup_task.exclude_patterns, list) else []
-                logger.info(f"从备份任务获取排除规则: {len(exclude_patterns)} 个模式")
-            
-            if exclude_patterns:
-                logger.info(f"排除规则: {exclude_patterns}")
+            # 重要：在流式扫描和压缩循环之前启动独立的后台扫描任务
+            # 启动条件：与流式扫描和压缩循环完全相同（所有前置条件已通过）
+            # 移除所有判断条件，直接启动（因为流式扫描和压缩循环已经可以运行）
+            # 前置条件包括：磁带盘符检查、磁带信息获取、备份集创建等
+            # 使用与流式扫描和压缩循环完全相同的参数（backup_task.source_paths 和 exclude_patterns）
+            logger.info("========== 启动独立的后台扫描任务，用于更新卡片中的总文件数和总字节数 ==========")
+            logger.info(f"任务ID: {backup_task.id}, 源路径列表: {backup_task.source_paths}, 排除规则: {exclude_patterns}")
+            # 创建后台扫描任务，并保存引用以便后续取消
+            scan_progress_task = asyncio.create_task(
+                self._scan_for_progress_update(backup_task, backup_task.source_paths, exclude_patterns)
+            )
+            logger.info("后台扫描任务已启动（asyncio.create_task），与流式扫描和压缩循环共用前置条件（所有前置条件已通过）")
             
             # 流式扫描文件（异步生成器）
             # 重要：使用 async for 持续从生成器获取批次，直到所有文件扫描完成
             logger.info("========== 开始流式扫描和压缩循环 ==========")
             batch_count = 0
-            async for file_batch in self.file_scanner.scan_source_files_streaming(
-                backup_task.source_paths, 
-                exclude_patterns,  # 使用从计划任务获取的排除规则
-                backup_task
-            ):
-                batch_count += 1
-                logger.info(f"收到扫描批次 #{batch_count}，包含 {len(file_batch)} 个文件")
-                
-                # 将扫描到的文件添加到当前批次
-                current_batch.extend(file_batch)
-                current_batch_size += sum(f['size'] for f in file_batch)
-                
-                # 累计所有扫描到的文件总数（批次相加的文件数）
-                total_scanned_files += len(file_batch)
-                backup_task.total_bytes = total_scanned_files  # 存储所有扫描到的文件总数
-                
-                logger.info(f"当前批次累计：文件数={len(current_batch)}, 大小={format_bytes(current_batch_size)}, 总扫描文件数={total_scanned_files}")
-                
-                # 估算预计的压缩包总数：根据已扫描的文件数和平均文件大小估算
-                # 假设平均每个压缩包包含的文件数 = MAX_FILE_SIZE / 平均文件大小
-                if total_scanned_files > 0 and total_original_size > 0:
-                    avg_file_size = total_original_size / processed_files if processed_files > 0 else (current_batch_size / len(file_batch) if len(file_batch) > 0 else 0)
-                    if avg_file_size > 0:
-                        files_per_archive = min(self.settings.MAX_FILE_SIZE / avg_file_size, total_scanned_files)
-                        estimated_archive_count = max(1, int(total_scanned_files / files_per_archive) if files_per_archive > 0 else 1)
+            try:
+                async for file_batch in self.file_scanner.scan_source_files_streaming(
+                    backup_task.source_paths, 
+                    exclude_patterns,  # 使用从计划任务获取的排除规则
+                    backup_task
+                ):
+                    # 检查任务是否被取消
+                    try:
+                        current_task = asyncio.current_task()
+                        if current_task and current_task.cancelled():
+                            logger.warning("流式扫描循环：检测到任务已被取消")
+                            break
+                    except RuntimeError:
+                        # 如果没有当前任务，可能已经被取消
+                        logger.warning("流式扫描循环：检测到任务可能已被取消")
+                        break
+                    
+                    batch_count += 1
+                    logger.info(f"收到扫描批次 #{batch_count}，包含 {len(file_batch)} 个文件")
+                    
+                    # 将扫描到的文件添加到当前批次
+                    current_batch.extend(file_batch)
+                    batch_bytes = sum(f['size'] for f in file_batch)
+                    current_batch_size += batch_bytes
+                    
+                    # 注意：不再在这里更新 total_bytes 和 total_bytes_actual
+                    # 这些统计由独立的后台扫描任务 _scan_for_progress_update 负责更新
+                    
+                    logger.info(f"当前批次累计：文件数={len(current_batch)}, 大小={format_bytes(current_batch_size)}")
+                    
+                    # 从数据库读取总文件数（由后台扫描任务更新）
+                    total_files_from_db = await self._get_total_files_from_db(backup_task.id)
+                    
+                    # 估算预计的压缩包总数：根据已扫描的文件数和平均文件大小估算
+                    # 假设平均每个压缩包包含的文件数 = MAX_FILE_SIZE / 平均文件大小
+                    if total_files_from_db > 0 and total_original_size > 0:
+                        avg_file_size = total_original_size / processed_files if processed_files > 0 else (current_batch_size / len(file_batch) if len(file_batch) > 0 else 0)
+                        if avg_file_size > 0:
+                            files_per_archive = min(self.settings.MAX_FILE_SIZE / avg_file_size, total_files_from_db)
+                            estimated_archive_count = max(1, int(total_files_from_db / files_per_archive) if files_per_archive > 0 else 1)
+                        else:
+                            # 如果无法估算，使用已生成的压缩包数作为基准
+                            estimated_archive_count = max(group_idx + 1, int(total_files_from_db / 1000))  # 假设每1000个文件一个压缩包
+                    elif total_files_from_db > 0:
+                        # 初始估算：假设每1000个文件一个压缩包
+                        estimated_archive_count = max(1, int(total_files_from_db / 1000))
                     else:
-                        # 如果无法估算，使用已生成的压缩包数作为基准
-                        estimated_archive_count = max(group_idx + 1, int(total_scanned_files / 1000))  # 假设每1000个文件一个压缩包
-                else:
-                    # 初始估算：假设每1000个文件一个压缩包
-                    estimated_archive_count = max(1, int(total_scanned_files / 1000))
-                
-                # 检查是否达到批次阈值（文件数或字节数，满足任一条件即触发）
-                should_compress = (
-                    len(current_batch) >= batch_size_files or 
-                    current_batch_size >= batch_size_bytes
-                )
-                
-                # 如果达到阈值，处理当前批次，但继续循环等待下一批次
-                if should_compress and current_batch:
-                    # 确定是哪个阈值触发的
-                    trigger_reason = []
-                    if len(current_batch) >= batch_size_files:
-                        trigger_reason.append(f"文件数({len(current_batch)}>={batch_size_files})")
-                    if current_batch_size >= batch_size_bytes:
-                        trigger_reason.append(f"字节数({format_bytes(current_batch_size)}>={format_bytes(batch_size_bytes)})")
-                    trigger_text = "或".join(trigger_reason) if trigger_reason else "未知"
-                    logger.info(f"========== 达到批次阈值（{trigger_text}），开始压缩当前批次 ==========")
-                    logger.info(f"批次信息：文件数={len(current_batch)}, 大小={format_bytes(current_batch_size)}")
-                    logger.info(f"注意：压缩完成后将继续扫描后续文件...")
+                        # 如果还没有扫描到文件，使用保守估算
+                        estimated_archive_count = max(1, group_idx + 1)
                     
-                    # 更新操作状态为压缩中
-                    await self.backup_db.update_scan_progress(backup_task, processed_files, processed_files + len(current_batch), "[压缩文件中...]")
+                    # 检查是否达到批次阈值（文件数或字节数，满足任一条件即触发）
+                    should_compress = (
+                        len(current_batch) >= batch_size_files or 
+                        current_batch_size >= batch_size_bytes
+                    )
                     
-                    # 对当前批次进行分组（按 config 的 MAX_FILE_SIZE）
-                    file_groups = await self.compressor.group_files_for_compression(current_batch)
-                    logger.info(f"当前批次分为 {len(file_groups)} 个文件组")
-                    
-                    # 处理每个文件组
-                    for file_group in file_groups:
-                        logger.info(f"处理文件组 {group_idx + 1}/{len(file_groups)} (批次内文件组)，包含 {len(file_group)} 个文件")
+                    # 如果达到阈值，处理当前批次，但继续循环等待下一批次
+                    if should_compress and current_batch:
+                        # 确定是哪个阈值触发的
+                        trigger_reason = []
+                        if len(current_batch) >= batch_size_files:
+                            trigger_reason.append(f"文件数({len(current_batch)}>={batch_size_files})")
+                        if current_batch_size >= batch_size_bytes:
+                            trigger_reason.append(f"字节数({format_bytes(current_batch_size)}>={format_bytes(batch_size_bytes)})")
+                        trigger_text = "或".join(trigger_reason) if trigger_reason else "未知"
+                        logger.info(f"========== 达到批次阈值（{trigger_text}），开始压缩当前批次 ==========")
+                        logger.info(f"批次信息：文件数={len(current_batch)}, 大小={format_bytes(current_batch_size)}")
+                        logger.info(f"注意：压缩完成后将继续扫描后续文件...")
                         
-                        try:
-                            # 压缩文件组（使用7z压缩）
-                            compressed_file = await self.compressor.compress_file_group(
-                                file_group, 
-                                backup_set, 
-                                backup_task, 
-                                base_processed_files=processed_files,
-                                total_files=backup_task.total_files
-                            )
-                            if not compressed_file:
-                                logger.warning(f"文件组 {group_idx + 1} 压缩失败，跳过该文件组，继续处理其他文件组")
-                                group_idx += 1
-                                continue
-
+                        # 更新操作状态为压缩中
+                        await self.backup_db.update_scan_progress(backup_task, processed_files, processed_files + len(current_batch), "[压缩文件中...]")
+                        
+                        # 对当前批次进行分组（按 config 的 MAX_FILE_SIZE）
+                        file_groups = await self.compressor.group_files_for_compression(current_batch)
+                        logger.info(f"当前批次分为 {len(file_groups)} 个文件组")
+                        
+                        # 处理每个文件组
+                        # 从数据库读取总文件数（由后台扫描任务更新）
+                        total_files_from_db = await self._get_total_files_from_db(backup_task.id)
+                        
+                        for file_group in file_groups:
+                            logger.info(f"处理文件组 {group_idx + 1}/{len(file_groups)} (批次内文件组)，包含 {len(file_group)} 个文件")
+                            
                             try:
-                                # tar文件已直接写入磁带盘符，获取路径用于数据库记录
-                                tape_file_path = await self.tape_handler.write_to_tape_drive(compressed_file['path'], backup_set, group_idx)
-                                if not tape_file_path:
-                                    logger.warning(f"无法获取压缩文件路径: {compressed_file['path']}，但继续执行")
-                                    # 继续执行，因为文件已经写入磁带
-                            except Exception as tape_error:
-                                logger.warning(f"⚠️ 写入磁带路径获取失败，跳过: {str(tape_error)}，但继续执行")
-                                tape_file_path = None
-
-                            try:
-                                # 保存文件信息到数据库（便于恢复）
-                                await self.backup_db.save_backup_files_to_db(
+                                # 压缩文件组（使用7z压缩）
+                                compressed_file = await self.compressor.compress_file_group(
                                     file_group, 
                                     backup_set, 
-                                    compressed_file, 
-                                    tape_file_path or compressed_file['path'], 
-                                    group_idx
+                                    backup_task, 
+                                    base_processed_files=processed_files,
+                                    total_files=total_files_from_db  # 从数据库读取总文件数
                                 )
-                            except Exception as db_error:
-                                logger.warning(f"⚠️ 保存文件信息到数据库失败，跳过: {str(db_error)}，但继续执行")
-                                # 数据库保存失败不影响备份流程，继续执行
+                                if not compressed_file:
+                                    logger.warning(f"文件组 {group_idx + 1} 压缩失败，跳过该文件组，继续处理其他文件组")
+                                    group_idx += 1
+                                    continue
 
-                            # 更新进度
-                            processed_files += len(file_group)
-                            total_size += compressed_file['compressed_size']  # 压缩后的总大小
-                            total_original_size += compressed_file['original_size']  # 原始文件的总大小
-                            backup_task.processed_files = processed_files
-                            backup_task.processed_bytes = total_original_size  # 原始文件的总大小（未压缩）
-                            backup_task.compressed_bytes = total_size  # 压缩后的总大小
-                            
-                            # total_files 表示压缩包数量（已生成的压缩包数）
-                            backup_task.total_files = group_idx + 1
-                            
-                            # 重新估算预计的压缩包总数（基于已处理的文件数和平均文件大小）
-                            if processed_files > 0 and total_original_size > 0 and total_scanned_files > 0:
-                                avg_file_size = total_original_size / processed_files
-                                if avg_file_size > 0:
-                                    # 计算每个压缩包能容纳的文件数（基于MAX_FILE_SIZE）
-                                    files_per_archive = min(self.settings.MAX_FILE_SIZE / avg_file_size, total_scanned_files)
-                                    if files_per_archive > 0:
-                                        # 基于总扫描文件数估算压缩包总数
-                                        estimated_archive_count = max(group_idx + 1, int(total_scanned_files / files_per_archive))
+                                try:
+                                    # tar文件已直接写入磁带盘符，获取路径用于数据库记录
+                                    tape_file_path = await self.tape_handler.write_to_tape_drive(compressed_file['path'], backup_set, group_idx)
+                                    if not tape_file_path:
+                                        logger.warning(f"无法获取压缩文件路径: {compressed_file['path']}，但继续执行")
+                                        # 继续执行，因为文件已经写入磁带
+                                except Exception as tape_error:
+                                    logger.warning(f"⚠️ 写入磁带路径获取失败，跳过: {str(tape_error)}，但继续执行")
+                                    tape_file_path = None
+
+                                try:
+                                    # 保存文件信息到数据库（便于恢复）
+                                    await self.backup_db.save_backup_files_to_db(
+                                        file_group, 
+                                        backup_set, 
+                                        compressed_file, 
+                                        tape_file_path or compressed_file['path'], 
+                                        group_idx
+                                    )
+                                except Exception as db_error:
+                                    logger.warning(f"⚠️ 保存文件信息到数据库失败，跳过: {str(db_error)}，但继续执行")
+                                    # 数据库保存失败不影响备份流程，继续执行
+
+                                # 更新进度
+                                processed_files += len(file_group)
+                                total_size += compressed_file['compressed_size']  # 压缩后的总大小
+                                total_original_size += compressed_file['original_size']  # 原始文件的总大小
+                                backup_task.processed_files = processed_files
+                                backup_task.processed_bytes = total_original_size  # 原始文件的总大小（未压缩）
+                                backup_task.compressed_bytes = total_size  # 压缩后的总大小
+                                
+                                # 注意：不再更新 total_files 字段（压缩包数量）
+                                # 压缩包数量存储在 result_summary.estimated_archive_count 中
+                                # total_files 字段由后台扫描任务更新（总文件数）
+                                
+                                # 从数据库读取总文件数（由后台扫描任务更新）
+                                total_files_from_db = await self._get_total_files_from_db(backup_task.id)
+                                
+                                # 重新估算预计的压缩包总数（基于已处理的文件数和平均文件大小）
+                                if processed_files > 0 and total_original_size > 0 and total_files_from_db > 0:
+                                    avg_file_size = total_original_size / processed_files
+                                    if avg_file_size > 0:
+                                        # 计算每个压缩包能容纳的文件数（基于MAX_FILE_SIZE）
+                                        files_per_archive = min(self.settings.MAX_FILE_SIZE / avg_file_size, total_files_from_db)
+                                        if files_per_archive > 0:
+                                            # 基于总扫描文件数估算压缩包总数
+                                            estimated_archive_count = max(group_idx + 1, int(total_files_from_db / files_per_archive))
+                                        else:
+                                            # 如果文件很大，每个压缩包只能容纳很少文件，使用保守估算
+                                            estimated_archive_count = max(group_idx + 1, int(total_files_from_db / 100))
                                     else:
-                                        # 如果文件很大，每个压缩包只能容纳很少文件，使用保守估算
-                                        estimated_archive_count = max(group_idx + 1, int(total_scanned_files / 100))
+                                        # 无法计算平均文件大小，使用保守估算
+                                        estimated_archive_count = max(group_idx + 1, int(total_files_from_db / 1000))
+                                elif total_files_from_db > 0:
+                                    # 如果还没有处理文件，但已扫描了文件，使用保守估算
+                                    estimated_archive_count = max(group_idx + 1, int(total_files_from_db / 1000))
                                 else:
-                                    # 无法计算平均文件大小，使用保守估算
-                                    estimated_archive_count = max(group_idx + 1, int(total_scanned_files / 1000))
-                            elif total_scanned_files > 0:
-                                # 如果还没有处理文件，但已扫描了文件，使用保守估算
-                                estimated_archive_count = max(group_idx + 1, int(total_scanned_files / 1000))
-                            else:
-                                # 如果还没有扫描文件，使用已生成的压缩包数
-                                estimated_archive_count = max(group_idx + 1, 1)
-                            
-                            logger.debug(f"预计压缩包总数更新: {estimated_archive_count} (已生成: {group_idx + 1}, 总扫描文件: {total_scanned_files}, 已处理文件: {processed_files})")
-                            
-                            # 将预计的压缩包总数存储到 result_summary（JSON字段）
-                            if not hasattr(backup_task, 'result_summary') or backup_task.result_summary is None:
-                                backup_task.result_summary = {}
-                            if isinstance(backup_task.result_summary, dict):
-                                backup_task.result_summary['estimated_archive_count'] = estimated_archive_count
-                            else:
-                                import json
-                                backup_task.result_summary = {'estimated_archive_count': estimated_archive_count}
-                            
-                            # 更新进度百分比
-                            # 进度百分比基于：已处理文件数 / 总扫描文件数
-                            # 扫描阶段占10%，压缩阶段占90%，当文件处理完成时进度为100%
-                            if total_scanned_files > 0:
-                                # 基于已处理文件数和总扫描文件数计算进度
-                                file_progress_ratio = processed_files / total_scanned_files
-                                # 扫描阶段占10%，压缩阶段占90%
-                                backup_task.progress_percent = min(100.0, 10.0 + (file_progress_ratio * 90.0))
-                            elif processed_files > 0:
-                                # 如果还没有扫描完，但已处理了一些文件，使用估算进度
-                                # 估算：假设已处理的文件占总文件的很小一部分
-                                backup_task.progress_percent = min(95.0, 10.0 + (processed_files / max(processed_files * 100, 1)) * 85.0)
-                            else:
-                                # 还没有处理任何文件，进度为10%（扫描阶段）
-                                backup_task.progress_percent = 10.0
-                            
-                            # 更新操作状态：如果还有文件要处理，继续显示压缩中，否则显示写入中
-                            # total_files 现在等于 processed_files（已处理文件数的累计）
-                            if current_batch:
-                                await self.backup_db.update_scan_progress(backup_task, processed_files, backup_task.total_files, "[压缩文件中...]")
-                            else:
-                                await self.backup_db.update_scan_progress(backup_task, processed_files, backup_task.total_files, "[写入磁带中...]")
-                            
-                            # 通知进度更新
-                            await self._notify_progress(backup_task)
-                            
-                            group_idx += 1
-                        except Exception as group_error:
-                            # 文件组处理失败，记录错误但继续处理其他文件组
-                            logger.error(f"⚠️ 处理文件组 {group_idx + 1} 时发生错误: {str(group_error)}，跳过该文件组，继续处理其他文件组")
-                            import traceback
-                            logger.error(f"错误堆栈:\n{traceback.format_exc()}")
-                            group_idx += 1
-                            continue
+                                    # 如果还没有扫描文件，使用已生成的压缩包数
+                                    estimated_archive_count = max(group_idx + 1, 1)
+                                
+                                logger.debug(f"预计压缩包总数更新: {estimated_archive_count} (已生成: {group_idx + 1}, 总扫描文件: {total_files_from_db}, 已处理文件: {processed_files})")
+                                
+                                # 将预计的压缩包总数存储到 result_summary（JSON字段）
+                                if not hasattr(backup_task, 'result_summary') or backup_task.result_summary is None:
+                                    backup_task.result_summary = {}
+                                if isinstance(backup_task.result_summary, dict):
+                                    backup_task.result_summary['estimated_archive_count'] = estimated_archive_count
+                                else:
+                                    import json
+                                    backup_task.result_summary = {'estimated_archive_count': estimated_archive_count}
+                                
+                                # 更新进度百分比
+                                # 进度百分比基于：已处理文件数 / 总扫描文件数（从数据库读取）
+                                # 扫描阶段占10%，压缩阶段占90%，当文件处理完成时进度为100%
+                                # 注意：使用之前读取的 total_files_from_db（避免重复读取）
+                                if total_files_from_db > 0:
+                                    # 基于已处理文件数和总扫描文件数计算进度
+                                    file_progress_ratio = processed_files / total_files_from_db
+                                    # 扫描阶段占10%，压缩阶段占90%
+                                    backup_task.progress_percent = min(100.0, 10.0 + (file_progress_ratio * 90.0))
+                                elif processed_files > 0:
+                                    # 如果还没有扫描完，但已处理了一些文件，使用估算进度
+                                    # 估算：假设已处理的文件占总文件的很小一部分
+                                    backup_task.progress_percent = min(95.0, 10.0 + (processed_files / max(processed_files * 100, 1)) * 85.0)
+                                else:
+                                    # 还没有处理任何文件，进度为10%（扫描阶段）
+                                    backup_task.progress_percent = 10.0
+                                
+                                # 更新操作状态：如果还有文件要处理，继续显示压缩中，否则显示写入中
+                                # total_files 现在等于 processed_files（已处理文件数的累计）
+                                if current_batch:
+                                    await self.backup_db.update_scan_progress(backup_task, processed_files, backup_task.total_files, "[压缩文件中...]")
+                                else:
+                                    await self.backup_db.update_scan_progress(backup_task, processed_files, backup_task.total_files, "[写入磁带中...]")
+                                
+                                # 通知进度更新
+                                await self._notify_progress(backup_task)
+                                
+                                group_idx += 1
+                            except Exception as group_error:
+                                # 文件组处理失败，记录错误但继续处理其他文件组
+                                logger.error(f"⚠️ 处理文件组 {group_idx + 1} 时发生错误: {str(group_error)}，跳过该文件组，继续处理其他文件组")
+                                import traceback
+                                logger.error(f"错误堆栈:\n{traceback.format_exc()}")
+                                group_idx += 1
+                                continue
                     
-                    # 清空当前批次，准备下一批次
-                    # 重要：清空后继续循环，等待扫描生成器提供下一批次
-                    logger.info(f"========== 批次 #{batch_count} 压缩完成，已处理 {processed_files} 个文件，总大小 {format_bytes(total_size)} ==========")
-                    logger.info(f"继续等待扫描下一批次...")
-                    
-                    # 确保最新的 estimated_archive_count 被保存到数据库
-                    # 在清空批次前，确保 result_summary 中的 estimated_archive_count 已更新
-                    if hasattr(backup_task, 'result_summary') and backup_task.result_summary:
-                        estimated_count = backup_task.result_summary.get('estimated_archive_count', 'N/A')
-                        logger.info(f"批次 #{batch_count} 完成后，保存 estimated_archive_count: {estimated_count} (已生成压缩包: {backup_task.total_files}, 总扫描文件: {total_scanned_files})")
-                        await self.backup_db.update_scan_progress(backup_task, processed_files, backup_task.total_files, "[压缩文件中...]")
-                    
-                    current_batch = []
-                    current_batch_size = 0
-                else:
-                    # 未达到阈值，继续累积，等待下一批次或扫描完成
-                    logger.debug(f"当前批次未达到阈值（文件数={len(current_batch)}/{batch_size_files}, 大小={format_bytes(current_batch_size)}/{format_bytes(batch_size_bytes)}），继续累积...")
+                        # 清空当前批次，准备下一批次
+                        # 重要：清空后继续循环，等待扫描生成器提供下一批次
+                        logger.info(f"========== 批次 #{batch_count} 压缩完成，已处理 {processed_files} 个文件，总大小 {format_bytes(total_size)} ==========")
+                        logger.info(f"继续等待扫描下一批次...")
+                        
+                        # 确保最新的 estimated_archive_count 被保存到数据库
+                        # 在清空批次前，确保 result_summary 中的 estimated_archive_count 已更新
+                        if hasattr(backup_task, 'result_summary') and backup_task.result_summary:
+                            estimated_count = backup_task.result_summary.get('estimated_archive_count', 'N/A')
+                            total_files_from_db = await self._get_total_files_from_db(backup_task.id)
+                            logger.info(f"批次 #{batch_count} 完成后，保存 estimated_archive_count: {estimated_count} (已生成压缩包: {backup_task.total_files}, 总扫描文件: {total_files_from_db})")
+                            await self.backup_db.update_scan_progress(backup_task, processed_files, backup_task.total_files, "[压缩文件中...]")
+                        
+                        current_batch = []
+                        current_batch_size = 0
+                    else:
+                        # 未达到阈值，继续累积，等待下一批次或扫描完成
+                        logger.debug(f"当前批次未达到阈值（文件数={len(current_batch)}/{batch_size_files}, 大小={format_bytes(current_batch_size)}/{format_bytes(batch_size_bytes)}），继续累积...")
+                
+            except (KeyboardInterrupt, asyncio.CancelledError) as cancel_error:
+                # 流式扫描循环被取消
+                logger.warning(f"========== 流式扫描循环被中止 ==========")
+                logger.warning(f"任务ID: {backup_task.id if backup_task else 'N/A'}")
+                logger.warning(f"已处理批次: {batch_count}")
+                # 重新抛出异常，让上层处理
+                raise
             
             logger.info(f"========== 扫描生成器已完成，共收到 {batch_count} 个批次 ==========")
             
@@ -1316,6 +1410,9 @@ class BackupEngine:
             if current_batch:
                 logger.info(f"处理最后一批文件：文件数={len(current_batch)}, 大小={format_bytes(current_batch_size)}")
                 file_groups = await self.compressor.group_files_for_compression(current_batch)
+                
+                # 从数据库读取总文件数（由后台扫描任务更新）
+                total_files_from_db = await self._get_total_files_from_db(backup_task.id)
                 
                 for file_group in file_groups:
                     logger.info(f"处理文件组 {group_idx + 1} (最后一批)")
@@ -1326,7 +1423,7 @@ class BackupEngine:
                             backup_set, 
                             backup_task, 
                             base_processed_files=processed_files,
-                            total_files=backup_task.total_files
+                            total_files=total_files_from_db  # 从数据库读取总文件数
                         )
                         if not compressed_file:
                             logger.warning(f"文件组 {group_idx + 1} 压缩失败，跳过该文件组")
@@ -1359,32 +1456,36 @@ class BackupEngine:
                         backup_task.processed_bytes = total_original_size  # 原始文件的总大小（未压缩）
                         backup_task.compressed_bytes = total_size  # 压缩后的总大小
                         
-                        # total_files 表示压缩包数量（已生成的压缩包数）
-                        backup_task.total_files = group_idx + 1
+                        # 注意：不再更新 total_files 字段（压缩包数量）
+                        # 压缩包数量存储在 result_summary.estimated_archive_count 中
+                        # total_files 字段由后台扫描任务更新（总文件数）
+                        
+                        # 从数据库读取总文件数（由后台扫描任务更新）
+                        total_files_from_db = await self._get_total_files_from_db(backup_task.id)
                         
                         # 重新估算预计的压缩包总数（基于已处理的文件数和平均文件大小）
-                        if processed_files > 0 and total_original_size > 0 and total_scanned_files > 0:
+                        if processed_files > 0 and total_original_size > 0 and total_files_from_db > 0:
                             avg_file_size = total_original_size / processed_files
                             if avg_file_size > 0:
                                 # 计算每个压缩包能容纳的文件数（基于MAX_FILE_SIZE）
-                                files_per_archive = min(self.settings.MAX_FILE_SIZE / avg_file_size, total_scanned_files)
+                                files_per_archive = min(self.settings.MAX_FILE_SIZE / avg_file_size, total_files_from_db)
                                 if files_per_archive > 0:
                                     # 基于总扫描文件数估算压缩包总数
-                                    estimated_archive_count = max(group_idx + 1, int(total_scanned_files / files_per_archive))
+                                    estimated_archive_count = max(group_idx + 1, int(total_files_from_db / files_per_archive))
                                 else:
                                     # 如果文件很大，每个压缩包只能容纳很少文件，使用保守估算
-                                    estimated_archive_count = max(group_idx + 1, int(total_scanned_files / 100))
+                                    estimated_archive_count = max(group_idx + 1, int(total_files_from_db / 100))
                             else:
                                 # 无法计算平均文件大小，使用保守估算
-                                estimated_archive_count = max(group_idx + 1, int(total_scanned_files / 1000))
-                        elif total_scanned_files > 0:
+                                estimated_archive_count = max(group_idx + 1, int(total_files_from_db / 1000))
+                        elif total_files_from_db > 0:
                             # 如果还没有处理文件，但已扫描了文件，使用保守估算
-                            estimated_archive_count = max(group_idx + 1, int(total_scanned_files / 1000))
+                            estimated_archive_count = max(group_idx + 1, int(total_files_from_db / 1000))
                         else:
                             # 如果还没有扫描文件，使用已生成的压缩包数
                             estimated_archive_count = max(group_idx + 1, 1)
                         
-                        logger.debug(f"预计压缩包总数更新（最后一批）: {estimated_archive_count} (已生成: {group_idx + 1}, 总扫描文件: {total_scanned_files}, 已处理文件: {processed_files})")
+                        logger.debug(f"预计压缩包总数更新（最后一批）: {estimated_archive_count} (已生成: {group_idx + 1}, 总扫描文件: {total_files_from_db}, 已处理文件: {processed_files})")
                         
                         # 将预计的压缩包总数存储到 result_summary（JSON字段）
                         if not hasattr(backup_task, 'result_summary') or backup_task.result_summary is None:
@@ -1396,9 +1497,9 @@ class BackupEngine:
                             backup_task.result_summary = {'estimated_archive_count': estimated_archive_count}
                         
                         # 更新进度百分比（最后一批，基于实际处理进度）
-                        # 进度百分比基于：已处理文件数 / 总扫描文件数
-                        if total_scanned_files > 0:
-                            file_progress_ratio = processed_files / total_scanned_files
+                        # 进度百分比基于：已处理文件数 / 总扫描文件数（从数据库读取）
+                        if total_files_from_db > 0:
+                            file_progress_ratio = processed_files / total_files_from_db
                             backup_task.progress_percent = min(100.0, 10.0 + (file_progress_ratio * 90.0))
                         else:
                             # 如果没有总扫描文件数，设为100%（完成）
@@ -1421,8 +1522,9 @@ class BackupEngine:
             # 5. 完成备份集
             await self.backup_db.finalize_backup_set(backup_set, processed_files, total_size)
             
-            # 确保 total_files 等于压缩包数量（已生成的压缩包数）
-            backup_task.total_files = group_idx + 1
+            # 注意：不再更新 total_files 字段（压缩包数量）
+            # 压缩包数量存储在 result_summary.estimated_archive_count 中
+            # total_files 和 total_bytes 字段由独立的后台扫描任务 _scan_for_progress_update 负责更新（总文件数和总字节数）
             
             # 更新操作状态为完成
             await self.backup_db.update_scan_progress(backup_task, processed_files, backup_task.total_files, "[完成备份集...]")
@@ -1430,10 +1532,73 @@ class BackupEngine:
             logger.info(f"备份完成，共处理 {processed_files} 个文件，总大小 {format_bytes(total_size)}")
             return True
 
+        except KeyboardInterrupt:
+            # 用户按 Ctrl+C 中止任务
+            logger.warning("========== 用户中止备份任务（Ctrl+C） ==========")
+            logger.warning(f"任务ID: {backup_task.id if backup_task else 'N/A'}")
+            
+            # 更新任务状态为取消
+            if backup_task:
+                try:
+                    backup_task.error_message = "用户中止任务（Ctrl+C）"
+                    await self.backup_db.update_task_status(backup_task, BackupTaskStatus.CANCELLED)
+                    await self.backup_db.update_scan_progress(backup_task, processed_files if 'processed_files' in locals() else 0, 
+                                                            backup_task.total_files if hasattr(backup_task, 'total_files') else 0, 
+                                                            "[已取消]")
+                    logger.info("任务状态已更新为取消")
+                except Exception as update_error:
+                    logger.error(f"更新任务状态失败: {str(update_error)}")
+            
+            # 重新抛出 KeyboardInterrupt，让上层处理
+            raise
+            
+        except asyncio.CancelledError:
+            # 任务被取消
+            logger.warning("========== 备份任务被取消 ==========")
+            logger.warning(f"任务ID: {backup_task.id if backup_task else 'N/A'}")
+            
+            # 更新任务状态为取消
+            if backup_task:
+                try:
+                    backup_task.error_message = "任务被取消"
+                    await self.backup_db.update_task_status(backup_task, BackupTaskStatus.CANCELLED)
+                    await self.backup_db.update_scan_progress(backup_task, processed_files if 'processed_files' in locals() else 0, 
+                                                            backup_task.total_files if hasattr(backup_task, 'total_files') else 0, 
+                                                            "[已取消]")
+                    logger.info("任务状态已更新为取消")
+                except Exception as update_error:
+                    logger.error(f"更新任务状态失败: {str(update_error)}")
+            
+            # 重新抛出 CancelledError，让上层处理
+            raise
+            
         except Exception as e:
             logger.error(f"备份流程执行失败: {str(e)}")
-            backup_task.error_message = str(e)
+            import traceback
+            logger.error(f"错误堆栈:\n{traceback.format_exc()}")
+            if backup_task:
+                backup_task.error_message = str(e)
             return False
+            
+        finally:
+            # 清理资源：取消后台扫描任务
+            if scan_progress_task and not scan_progress_task.done():
+                logger.info("========== 取消后台扫描任务 ==========")
+                try:
+                    scan_progress_task.cancel()
+                    # 等待任务取消完成（带超时）
+                    try:
+                        await asyncio.wait_for(scan_progress_task, timeout=5.0)
+                    except asyncio.TimeoutError:
+                        logger.warning("后台扫描任务取消超时，强制终止")
+                    except asyncio.CancelledError:
+                        logger.info("后台扫描任务已成功取消")
+                    except Exception as cancel_error:
+                        logger.warning(f"取消后台扫描任务时发生错误: {str(cancel_error)}")
+                except Exception as cleanup_error:
+                    logger.error(f"清理后台扫描任务失败: {str(cleanup_error)}")
+                finally:
+                    logger.info("后台扫描任务清理完成")
 
     async def _scan_source_files_streaming(self, source_paths: List[str], exclude_patterns: List[str], 
                                            backup_task: Optional[BackupTask] = None):
@@ -2807,120 +2972,20 @@ class BackupEngine:
             logger.error(f"完成备份集失败: {str(e)}")
 
     async def _update_scan_progress(self, backup_task: BackupTask, scanned_count: int, valid_count: int, operation_status: str = None):
-        """更新扫描进度到数据库
+        """更新扫描进度到数据库（已废弃，请使用 backup_db.update_scan_progress）
+        
+        注意：此方法已不再使用，所有进度更新应通过 backup_db.update_scan_progress 方法完成。
+        此方法保留仅为了向后兼容，但不应该被调用。
         
         Args:
             backup_task: 备份任务对象
             scanned_count: 已扫描文件数（或已处理文件数）
-            valid_count: 有效文件数（或总文件数）
+            valid_count: 有效文件数（已废弃，不再使用）
             operation_status: 操作状态（如"[扫描文件中...]"、"[压缩文件中...]"等）
         """
-        try:
-            if not backup_task or not backup_task.id:
-                return
-            
-            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
-            if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
-                    if operation_status:
-                        # 先获取当前description，移除旧的操作状态，添加新的操作状态
-                        row = await conn.fetchrow(
-                            "SELECT description FROM backup_tasks WHERE id = $1",
-                            backup_task.id
-                        )
-                        current_desc = row['description'] if row and row['description'] else ''
-                        
-                        # 移除所有操作状态标记（保留格式化状态）
-                        import re
-                        # 移除所有 [操作状态...] 格式的标记，但保留 [格式化中]
-                        if '[格式化中]' in current_desc:
-                            # 保留格式化状态，移除其他操作状态
-                            cleaned_desc = re.sub(r'\[(?!格式化中)[^\]]+\.\.\.\]', '', current_desc)
-                            cleaned_desc = cleaned_desc.replace('  ', ' ').strip()
-                            new_desc = cleaned_desc + ' ' + operation_status if cleaned_desc else operation_status
-                        else:
-                            # 移除所有操作状态标记
-                            cleaned_desc = re.sub(r'\[[^\]]+\.\.\.\]', '', current_desc)
-                            cleaned_desc = cleaned_desc.replace('  ', ' ').strip()
-                            new_desc = cleaned_desc + ' ' + operation_status if cleaned_desc else operation_status
-                        
-                        # 获取compressed_bytes和processed_bytes用于更新
-                        compressed_bytes = getattr(backup_task, 'compressed_bytes', 0) or 0
-                        processed_bytes = getattr(backup_task, 'processed_bytes', 0) or 0
-                        total_bytes = getattr(backup_task, 'total_bytes', 0) or 0  # 所有扫描到的文件总数（批次相加的文件数）
-                        result_summary = getattr(backup_task, 'result_summary', None)
-                        
-                        # 将result_summary转换为JSON字符串
-                        import json
-                        result_summary_json = json.dumps(result_summary) if result_summary else None
-                        
-                        await conn.execute(
-                            """
-                            UPDATE backup_tasks
-                            SET progress_percent = $1,
-                                processed_files = $2,
-                                total_files = $3,
-                                total_bytes = $4,
-                                processed_bytes = $5,
-                                compressed_bytes = $6,
-                                result_summary = $7::json,
-                                description = $8,
-                                updated_at = $9
-                            WHERE id = $10
-                            """,
-                            backup_task.progress_percent,
-                            scanned_count,
-                            valid_count,
-                            total_bytes,
-                            processed_bytes,
-                            compressed_bytes,
-                            result_summary_json,
-                            new_desc,
-                            datetime.now(),
-                            backup_task.id
-                        )
-                    else:
-                        # 没有操作状态，只更新进度和字节数
-                        compressed_bytes = getattr(backup_task, 'compressed_bytes', 0) or 0
-                        processed_bytes = getattr(backup_task, 'processed_bytes', 0) or 0
-                        total_bytes = getattr(backup_task, 'total_bytes', 0) or 0  # 所有扫描到的文件总数（批次相加的文件数）
-                        result_summary = getattr(backup_task, 'result_summary', None)
-                        
-                        # 将result_summary转换为JSON字符串
-                        import json
-                        result_summary_json = json.dumps(result_summary) if result_summary else None
-                        
-                        await conn.execute(
-                            """
-                            UPDATE backup_tasks
-                            SET progress_percent = $1,
-                                processed_files = $2,
-                                total_files = $3,
-                                total_bytes = $4,
-                                processed_bytes = $5,
-                                compressed_bytes = $6,
-                                result_summary = $7::json,
-                                updated_at = $8
-                            WHERE id = $9
-                            """,
-                            backup_task.progress_percent,
-                            scanned_count,
-                            valid_count,
-                            total_bytes,
-                            processed_bytes,
-                            compressed_bytes,
-                            result_summary_json,
-                            datetime.now(),
-                            backup_task.id
-                        )
-                finally:
-                    await conn.close()
-            else:
-                # 非 openGauss 使用 SQLAlchemy（但当前项目仅支持 openGauss）
-                logger.warning("非 openGauss 数据库，跳过进度更新")
-        except Exception as e:
-            logger.debug(f"更新扫描进度失败（忽略继续）: {str(e)}")
+        # 已废弃：直接调用 backup_db.update_scan_progress 方法
+        logger.warning("_update_scan_progress 方法已废弃，请使用 backup_db.update_scan_progress")
+        await self.backup_db.update_scan_progress(backup_task, scanned_count, valid_count, operation_status)
 
     async def _update_task_status(self, backup_task: BackupTask, status: BackupTaskStatus):
         """更新任务状态"""
@@ -2987,3 +3052,410 @@ class BackupEngine:
         except Exception as e:
             logger.error(f"取消任务失败: {str(e)}")
             return False
+
+    async def _scan_for_progress_update(self, backup_task: BackupTask, source_paths: List[str], exclude_patterns: List[str]):
+        """独立的后台扫描任务，专门更新卡片中的总文件数和总字节数
+        
+        这个任务：
+        1. 独立扫描目录，统计文件数和字节数
+        2. 定期（每100个文件）更新数据库中的 total_files 和 total_bytes
+        3. 扫描完成后任务退出
+        4. 不影响压缩流程
+        5. 支持 KeyboardInterrupt 和 CancelledError，能够被正确取消
+        
+        Args:
+            backup_task: 备份任务对象
+            source_paths: 源路径列表
+            exclude_patterns: 排除模式列表
+        """
+        try:
+            logger.info("========== 后台扫描任务启动：专门更新卡片中的总文件数和总字节数 ==========")
+            logger.info(f"任务ID: {backup_task.id if backup_task else 'N/A'}")
+            logger.info(f"源路径列表: {source_paths}")
+            logger.info(f"排除规则: {exclude_patterns}")
+            
+            # 确保 source_paths 不为 None
+            if source_paths is None:
+                logger.warning("后台扫描任务：source_paths 为 None，使用空列表")
+                source_paths = []
+            
+            if not source_paths:
+                logger.warning("后台扫描任务：source_paths 为空列表，没有文件要扫描")
+                # 即使没有源路径，也要更新数据库（设置为0）
+                await self._update_scan_progress_only(backup_task, 0, 0)
+                logger.info("========== 后台扫描任务完成：没有源路径 ==========")
+                return
+            
+            total_files = 0  # 总文件数
+            total_bytes = 0  # 总字节数
+            update_interval = 100  # 每100个文件更新一次数据库
+            
+            # 处理网络路径（UNC路径）
+            from utils.network_path import is_unc_path, normalize_unc_path
+            
+            for source_path_str in source_paths:
+                logger.info(f"后台扫描任务：扫描源路径 {source_path_str}")
+                
+                # 处理 UNC 网络路径
+                if is_unc_path(source_path_str):
+                    normalized_path = normalize_unc_path(source_path_str)
+                    source_path = Path(normalized_path)
+                    logger.debug(f"后台扫描任务：检测到 UNC 路径，规范化后: {normalized_path}")
+                else:
+                    source_path = Path(source_path_str)
+                
+                if not source_path.exists():
+                    logger.warning(f"后台扫描任务：源路径不存在，跳过: {source_path_str}")
+                    continue
+                
+                try:
+                    if source_path.is_file():
+                        # 单个文件
+                        try:
+                            # 检查是否应该排除
+                            if self.file_scanner.should_exclude_file(str(source_path), exclude_patterns):
+                                continue
+                            
+                            # 获取文件信息
+                            file_info = await self.file_scanner.get_file_info(source_path)
+                            if file_info:
+                                total_files += 1
+                                total_bytes += file_info['size']
+                                
+                                # 每100个文件更新一次数据库
+                                if total_files % update_interval == 0:
+                                    await self._update_scan_progress_only(backup_task, total_files, total_bytes)
+                                    logger.info(f"后台扫描任务：已扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)}")
+                        except (PermissionError, OSError, FileNotFoundError, IOError) as e:
+                            logger.warning(f"后台扫描任务：跳过无法访问的文件: {source_path_str} (错误: {str(e)})")
+                            continue
+                        except Exception as e:
+                            logger.warning(f"后台扫描任务：跳过出错的文件: {source_path_str} (错误: {str(e)})")
+                            continue
+                    
+                    elif source_path.is_dir():
+                        # 目录：递归扫描
+                        logger.info(f"后台扫描任务：扫描目录 {source_path_str}")
+                        
+                        # 检查目录本身是否应该排除
+                        if self.file_scanner.should_exclude_file(str(source_path), exclude_patterns):
+                            logger.info(f"后台扫描任务：目录匹配排除规则，跳过整个目录: {source_path_str}")
+                            continue
+                        
+                        # 使用队列来传递扫描结果（每100个文件一批）
+                        scan_queue = asyncio.Queue(maxsize=0)  # 无限制队列
+                        
+                        # 重要：获取当前事件循环（主事件循环），在启动后台线程之前
+                        # 因为后台线程中无法使用 get_running_loop()
+                        main_loop = asyncio.get_running_loop()
+                        
+                        def sync_scan_worker():
+                            """在线程池中执行同步遍历，统计文件数和字节数，每100个文件提交一次"""
+                            batch_files = 0  # 当前批次的文件数
+                            batch_bytes = 0  # 当前批次的字节数
+                            
+                            try:
+                                logger.info(f"后台扫描任务：开始遍历目录 {source_path_str}（线程中）")
+                                file_count = 0
+                                for file_path in source_path.rglob('*'):
+                                    try:
+                                        # 检查是否应该排除
+                                        if self.file_scanner.should_exclude_file(str(file_path), exclude_patterns):
+                                            continue
+                                        
+                                        if file_path.is_file():
+                                            try:
+                                                stat = file_path.stat()
+                                                file_size = stat.st_size
+                                                
+                                                # 在线程中统计（本地变量，线程安全）
+                                                batch_files += 1
+                                                batch_bytes += file_size
+                                                file_count += 1
+                                                
+                                                # 每100个文件提交一次批次
+                                                if batch_files >= update_interval:
+                                                    try:
+                                                        # 使用主事件循环（在启动线程前获取的）
+                                                        asyncio.run_coroutine_threadsafe(
+                                                            scan_queue.put((batch_files, batch_bytes)),
+                                                            main_loop
+                                                        )
+                                                        logger.info(f"后台扫描任务：已提交批次到队列，文件数={batch_files}, 字节数={format_bytes(batch_bytes)}（目录: {source_path_str}）")
+                                                    except Exception as e:
+                                                        logger.warning(f"后台扫描任务：提交批次失败: {str(e)}")
+                                                    batch_files = 0
+                                                    batch_bytes = 0
+                                                    
+                                            except (PermissionError, OSError, FileNotFoundError, IOError):
+                                                # 跳过无法访问的文件
+                                                continue
+                                            except Exception:
+                                                # 跳过其他错误
+                                                continue
+                                    except Exception:
+                                        # 跳过路径处理错误
+                                        continue
+                                
+                                logger.info(f"后台扫描任务：目录遍历完成 {source_path_str}，共扫描 {file_count} 个文件")
+                            except Exception as e:
+                                logger.warning(f"后台扫描任务：遍历目录失败 {source_path}: {str(e)}")
+                                import traceback
+                                logger.debug(f"错误堆栈:\n{traceback.format_exc()}")
+                            finally:
+                                # 提交剩余的批次
+                                if batch_files > 0:
+                                    try:
+                                        # 使用主事件循环（在启动线程前获取的）
+                                        asyncio.run_coroutine_threadsafe(
+                                            scan_queue.put((batch_files, batch_bytes)),
+                                            main_loop
+                                        )
+                                        logger.info(f"后台扫描任务：提交剩余批次到队列，文件数={batch_files}, 字节数={format_bytes(batch_bytes)}（目录: {source_path_str}）")
+                                    except Exception as e:
+                                        logger.warning(f"后台扫描任务：提交剩余批次失败: {str(e)}")
+                                # 发送完成信号
+                                try:
+                                    # 使用主事件循环（在启动线程前获取的）
+                                    asyncio.run_coroutine_threadsafe(
+                                        scan_queue.put(None),  # None 表示完成
+                                        main_loop
+                                    )
+                                    logger.info(f"后台扫描任务：发送完成信号到队列（目录: {source_path_str}）")
+                                except Exception as e:
+                                    logger.warning(f"后台扫描任务：发送完成信号失败: {str(e)}")
+                        
+                        # 启动扫描任务
+                        logger.info(f"后台扫描任务：启动后台线程扫描目录 {source_path_str}")
+                        scan_task = asyncio.create_task(asyncio.to_thread(sync_scan_worker))
+                        
+                        # 从队列中获取批次并更新统计
+                        logger.info(f"后台扫描任务：开始从队列获取批次并更新统计（目录: {source_path_str}）")
+                        batch_received_count = 0
+                        while True:
+                            try:
+                                # 等待批次或完成信号（带超时，避免无限等待）
+                                try:
+                                    item = await asyncio.wait_for(scan_queue.get(), timeout=10.0)
+                                except asyncio.TimeoutError:
+                                    # 超时检查扫描任务是否完成
+                                    if scan_task.done():
+                                        logger.info(f"后台扫描任务：扫描任务已完成，获取队列中剩余的批次（目录: {source_path_str}）")
+                                        # 尝试获取队列中剩余的所有批次
+                                        remaining_count = 0
+                                        while not scan_queue.empty():
+                                            try:
+                                                item = scan_queue.get_nowait()
+                                                if item is None:
+                                                    break
+                                                batch_files, batch_bytes = item
+                                                total_files += batch_files
+                                                total_bytes += batch_bytes
+                                                remaining_count += 1
+                                                # 更新数据库
+                                                await self._update_scan_progress_only(backup_task, total_files, total_bytes)
+                                                logger.info(f"后台扫描任务：已扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)}（目录: {source_path_str}，剩余批次: {remaining_count}）")
+                                            except asyncio.QueueEmpty:
+                                                break
+                                        if remaining_count > 0:
+                                            logger.info(f"后台扫描任务：已处理 {remaining_count} 个剩余批次（目录: {source_path_str}）")
+                                        break
+                                    else:
+                                        # 如果扫描任务还在运行，继续等待（输出调试信息）
+                                        # 每10次超时输出一次日志，避免日志过多
+                                        if batch_received_count % 10 == 0:
+                                            logger.debug(f"后台扫描任务：等待批次中...（目录: {source_path_str}，已接收批次: {batch_received_count}）")
+                                        continue
+                                
+                                # 检查是否是完成信号
+                                if item is None:
+                                    logger.info(f"后台扫描任务：收到完成信号，获取队列中剩余的批次（目录: {source_path_str}）")
+                                    # 尝试获取队列中剩余的所有批次
+                                    remaining_count = 0
+                                    while not scan_queue.empty():
+                                        try:
+                                            batch_item = scan_queue.get_nowait()
+                                            if batch_item is None:
+                                                continue
+                                            batch_files, batch_bytes = batch_item
+                                            total_files += batch_files
+                                            total_bytes += batch_bytes
+                                            remaining_count += 1
+                                            # 更新数据库
+                                            await self._update_scan_progress_only(backup_task, total_files, total_bytes)
+                                            logger.info(f"后台扫描任务：已扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)}（目录: {source_path_str}，剩余批次: {remaining_count}）")
+                                        except asyncio.QueueEmpty:
+                                            break
+                                    if remaining_count > 0:
+                                        logger.info(f"后台扫描任务：已处理 {remaining_count} 个剩余批次（目录: {source_path_str}）")
+                                    break
+                                
+                                # 处理批次
+                                batch_files, batch_bytes = item
+                                total_files += batch_files
+                                total_bytes += batch_bytes
+                                batch_received_count += 1
+                                
+                                # 更新数据库
+                                await self._update_scan_progress_only(backup_task, total_files, total_bytes)
+                                logger.info(f"后台扫描任务：已扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)}（目录: {source_path_str}，批次: {batch_received_count}）")
+                                
+                            except Exception as e:
+                                logger.warning(f"后台扫描任务：处理批次失败（目录: {source_path_str}）: {str(e)}")
+                                import traceback
+                                logger.debug(f"错误堆栈:\n{traceback.format_exc()}")
+                                if scan_task.done():
+                                    logger.info(f"后台扫描任务：扫描任务已完成，退出循环（目录: {source_path_str}）")
+                                    break
+                        
+                        # 确保扫描任务完成
+                        try:
+                            await scan_task
+                        except Exception:
+                            pass
+                        
+                        # 扫描完一个目录后，最后更新一次数据库
+                        if total_files > 0:
+                            await self._update_scan_progress_only(backup_task, total_files, total_bytes)
+                            logger.info(f"后台扫描任务：目录扫描完成 {source_path_str}，累计 {total_files} 个文件，总大小 {format_bytes(total_bytes)}")
+                
+                except Exception as e:
+                    logger.error(f"后台扫描任务：处理源路径失败 {source_path_str}: {str(e)}")
+                    continue
+            
+            # 扫描完成，最后一次更新数据库
+            if total_files > 0:
+                await self._update_scan_progress_only(backup_task, total_files, total_bytes)
+                logger.info(f"========== 后台扫描任务完成：共扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)} ==========")
+            else:
+                logger.info("========== 后台扫描任务完成：未扫描到文件 ==========")
+        
+        except KeyboardInterrupt:
+            # 用户按 Ctrl+C 中止任务
+            logger.warning("========== 后台扫描任务被用户中止（Ctrl+C） ==========")
+            logger.warning(f"任务ID: {backup_task.id if backup_task else 'N/A'}")
+            # 即使被中止，也更新已扫描的文件数和字节数
+            if 'total_files' in locals() and total_files > 0:
+                try:
+                    await self._update_scan_progress_only(backup_task, total_files, total_bytes)
+                    logger.info(f"后台扫描任务：已更新已扫描的文件数 {total_files} 和总大小 {format_bytes(total_bytes)}")
+                except Exception as update_error:
+                    logger.error(f"更新扫描进度失败: {str(update_error)}")
+            # 重新抛出 KeyboardInterrupt，让上层处理
+            raise
+            
+        except asyncio.CancelledError:
+            # 任务被取消
+            logger.warning("========== 后台扫描任务被取消 ==========")
+            logger.warning(f"任务ID: {backup_task.id if backup_task else 'N/A'}")
+            # 即使被取消，也更新已扫描的文件数和字节数
+            if 'total_files' in locals() and total_files > 0:
+                try:
+                    await self._update_scan_progress_only(backup_task, total_files, total_bytes)
+                    logger.info(f"后台扫描任务：已更新已扫描的文件数 {total_files} 和总大小 {format_bytes(total_bytes)}")
+                except Exception as update_error:
+                    logger.error(f"更新扫描进度失败: {str(update_error)}")
+            # 重新抛出 CancelledError，让上层处理
+            raise
+        
+        except Exception as e:
+            logger.error(f"后台扫描任务失败: {str(e)}")
+            import traceback
+            logger.error(f"错误堆栈:\n{traceback.format_exc()}")
+            # 即使失败，也尝试更新已扫描的文件数和字节数
+            if 'total_files' in locals() and total_files > 0:
+                try:
+                    await self._update_scan_progress_only(backup_task, total_files, total_bytes)
+                    logger.info(f"后台扫描任务：已更新已扫描的文件数 {total_files} 和总大小 {format_bytes(total_bytes)}")
+                except Exception as update_error:
+                    logger.error(f"更新扫描进度失败: {str(update_error)}")
+
+    async def _get_total_files_from_db(self, task_id: int) -> int:
+        """从数据库读取总文件数（由后台扫描任务更新）
+        
+        Args:
+            task_id: 任务ID
+            
+        Returns:
+            总文件数，如果不存在则返回0
+        """
+        try:
+            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+            
+            if is_opengauss():
+                conn = await get_opengauss_connection()
+                try:
+                    row = await conn.fetchrow(
+                        "SELECT total_files FROM backup_tasks WHERE id = $1",
+                        task_id
+                    )
+                    if row:
+                        return row['total_files'] or 0
+                finally:
+                    await conn.close()
+            return 0
+        except Exception as e:
+            logger.debug(f"读取总文件数失败（忽略继续）: {str(e)}")
+            return 0
+
+    async def _update_scan_progress_only(self, backup_task: BackupTask, total_files: int, total_bytes: int):
+        """仅更新扫描进度（总文件数和总字节数），不更新已处理文件数
+        
+        Args:
+            backup_task: 备份任务对象
+            total_files: 总文件数
+            total_bytes: 总字节数
+        """
+        try:
+            if not backup_task or not backup_task.id:
+                return
+            
+            # 更新备份任务对象的统计信息
+            backup_task.total_files = total_files  # total_files: 总文件数
+            backup_task.total_bytes = total_bytes  # total_bytes: 总字节数
+            
+            # 更新数据库
+            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+            
+            if is_opengauss():
+                conn = await get_opengauss_connection()
+                try:
+                    # 获取当前的 result_summary
+                    row = await conn.fetchrow(
+                        "SELECT result_summary FROM backup_tasks WHERE id = $1",
+                        backup_task.id
+                    )
+                    result_summary = {}
+                    if row and row['result_summary']:
+                        try:
+                            if isinstance(row['result_summary'], str):
+                                result_summary = json.loads(row['result_summary'])
+                            elif isinstance(row['result_summary'], dict):
+                                result_summary = row['result_summary']
+                        except Exception:
+                            result_summary = {}
+                    
+                    # 更新 result_summary 中的总文件数和总字节数（作为备份存储）
+                    result_summary['total_scanned_files'] = total_files
+                    result_summary['total_scanned_bytes'] = total_bytes
+                    
+                    # 更新数据库：使用正确的字段存储总文件数和总字节数
+                    await conn.execute(
+                        """
+                        UPDATE backup_tasks
+                        SET total_files = $1,
+                            total_bytes = $2,
+                            result_summary = $3::json,
+                            updated_at = $4
+                        WHERE id = $5
+                        """,
+                        total_files,  # total_files: 总文件数
+                        total_bytes,   # total_bytes: 总字节数
+                        json.dumps(result_summary),
+                        datetime.now(),
+                        backup_task.id
+                    )
+                finally:
+                    await conn.close()
+        except Exception as e:
+            logger.debug(f"更新扫描进度失败（忽略继续）: {str(e)}")
