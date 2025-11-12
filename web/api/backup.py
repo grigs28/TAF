@@ -7,6 +7,7 @@ Backup Management API
 
 import logging
 import traceback
+import json
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Request
@@ -334,13 +335,16 @@ async def get_backup_tasks(
                     
                     # 解析result_summary获取预计的压缩包总数
                     estimated_archive_count = None
+                    result_summary_dict = None
                     if row.get("result_summary"):
                         try:
                             if isinstance(row["result_summary"], str):
                                 result_summary_dict = json.loads(row["result_summary"])
-                                estimated_archive_count = result_summary_dict.get('estimated_archive_count')
                             elif isinstance(row["result_summary"], dict):
-                                estimated_archive_count = row["result_summary"].get('estimated_archive_count')
+                                result_summary_dict = row["result_summary"]
+
+                            if isinstance(result_summary_dict, dict):
+                                estimated_archive_count = result_summary_dict.get('estimated_archive_count')
                         except:
                             pass
                     
@@ -350,13 +354,13 @@ async def get_backup_tasks(
                         "task_type": row["task_type"].value if hasattr(row["task_type"], "value") else str(row["task_type"]),
                         "status": row["status"].value if hasattr(row["status"], "value") else str(row["status"]),
                         "progress_percent": float(row["progress_percent"]) if row["progress_percent"] else 0.0,
-                        "total_files": row["total_files"] or 0,  # 压缩包数量（已生成的压缩包数）
+                        "total_files": row["total_files"] or 0,  # 总文件数（由后台扫描任务更新）
                         "processed_files": row["processed_files"] or 0,  # 已处理文件数
-                        "total_bytes": row["total_bytes"] or 0,  # 所有扫描到的文件总数（批次相加的文件数）
+                        "total_bytes": row["total_bytes"] or 0,  # 总字节数（由后台扫描任务更新）
                         "processed_bytes": row["processed_bytes"] or 0,
                         "compressed_bytes": row["compressed_bytes"] or 0,
                         "compression_ratio": compression_ratio,
-                        "estimated_archive_count": estimated_archive_count,  # 预计的压缩包总数
+                        "estimated_archive_count": estimated_archive_count,  # 压缩包数量（从 result_summary.estimated_archive_count 读取）
                         "created_at": row["created_at"],
                         "started_at": row["started_at"],
                         "completed_at": row["completed_at"],
@@ -416,6 +420,7 @@ async def get_backup_tasks(
                             "total_files": 0,
                             "processed_files": 0,
                             "total_bytes": 0,
+                            "total_bytes_actual": 0,
                             "processed_bytes": 0,
                             "created_at": srow["created_at"],
                             "started_at": None,
@@ -480,6 +485,19 @@ async def get_backup_tasks(
                 # 转换为响应格式
                 tasks = []
                 for task in backup_tasks:
+                    total_bytes_actual = 0
+                    try:
+                        result_summary_dict = None
+                        if task.result_summary:
+                            if isinstance(task.result_summary, str):
+                                result_summary_dict = json.loads(task.result_summary)
+                            elif isinstance(task.result_summary, dict):
+                                result_summary_dict = task.result_summary
+                        if isinstance(result_summary_dict, dict):
+                            total_bytes_actual = result_summary_dict.get('total_scanned_bytes') or 0
+                    except Exception:
+                        total_bytes_actual = 0
+                    
                     tasks.append({
                         "task_id": task.id,
                         "task_name": task.task_name,
@@ -489,6 +507,7 @@ async def get_backup_tasks(
                         "total_files": task.total_files or 0,
                         "processed_files": task.processed_files or 0,
                         "total_bytes": task.total_bytes or 0,
+                        "total_bytes_actual": total_bytes_actual,
                         "processed_bytes": task.processed_bytes or 0,
                         "created_at": task.created_at,
                         "started_at": task.started_at,
@@ -520,7 +539,7 @@ async def get_backup_task(task_id: int, http_request: Request):
                     SELECT id, task_name, task_type, status, progress_percent, total_files, 
                            processed_files, total_bytes, processed_bytes, created_at, started_at, 
                            completed_at, error_message, is_template, tape_device, source_paths,
-                           description
+                           description, result_summary
                     FROM backup_tasks
                     WHERE id = $1
                     """,
@@ -542,6 +561,20 @@ async def get_backup_task(task_id: int, http_request: Request):
                     except:
                         source_paths = None
                 
+                total_bytes_actual = 0
+                try:
+                    result_summary = row.get("result_summary")
+                    result_summary_dict = None
+                    if result_summary:
+                        if isinstance(result_summary, str):
+                            result_summary_dict = json.loads(result_summary)
+                        elif isinstance(result_summary, dict):
+                            result_summary_dict = result_summary
+                    if isinstance(result_summary_dict, dict):
+                        total_bytes_actual = result_summary_dict.get('total_scanned_bytes') or 0
+                except Exception:
+                    total_bytes_actual = 0
+                
                 return {
                     "task_id": row["id"],
                     "task_name": row["task_name"],
@@ -551,6 +584,7 @@ async def get_backup_task(task_id: int, http_request: Request):
                     "total_files": row["total_files"] or 0,
                     "processed_files": row["processed_files"] or 0,
                     "total_bytes": row["total_bytes"] or 0,
+                    "total_bytes_actual": total_bytes_actual,
                     "processed_bytes": row["processed_bytes"] or 0,
                     "created_at": row["created_at"],
                     "started_at": row["started_at"],
@@ -576,6 +610,20 @@ async def get_backup_task(task_id: int, http_request: Request):
                 if not task:
                     raise HTTPException(status_code=404, detail="备份任务不存在")
                 
+                total_bytes_actual = 0
+                try:
+                    result_summary = task.result_summary
+                    result_summary_dict = None
+                    if result_summary:
+                        if isinstance(result_summary, str):
+                            result_summary_dict = json.loads(result_summary)
+                        elif isinstance(result_summary, dict):
+                            result_summary_dict = result_summary
+                    if isinstance(result_summary_dict, dict):
+                        total_bytes_actual = result_summary_dict.get('total_scanned_bytes') or 0
+                except Exception:
+                    total_bytes_actual = 0
+                
                 return {
                     "task_id": task.id,
                     "task_name": task.task_name,
@@ -585,6 +633,7 @@ async def get_backup_task(task_id: int, http_request: Request):
                     "total_files": task.total_files or 0,
                     "processed_files": task.processed_files or 0,
                     "total_bytes": task.total_bytes or 0,
+                    "total_bytes_actual": total_bytes_actual,
                     "processed_bytes": task.processed_bytes or 0,
                     "created_at": task.created_at,
                     "started_at": task.started_at,

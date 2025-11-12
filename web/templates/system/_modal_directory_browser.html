@@ -41,9 +41,9 @@
                 </div>
                 
                 <!-- 右侧：目录和文件列表 -->
-                <div style="flex: 1; overflow-y: auto;">
+                <div style="flex: 1; overflow-y: auto; display: flex; flex-direction: column;">
                     <div class="p-3 border-bottom" style="background-color: #1a2332;">
-                        <div class="d-flex align-items-center justify-content-between">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
                             <div class="flex-grow-1">
                                 <input type="text" class="form-control form-control-sm" id="browserCurrentPath" 
                                        placeholder="当前路径" readonly>
@@ -52,9 +52,22 @@
                                 <i class="bi bi-arrow-clockwise"></i>刷新
                             </button>
                         </div>
+                        <div class="d-flex align-items-center justify-content-between">
+                            <small class="text-muted">
+                                <i class="bi bi-check-square me-1"></i>支持多选：勾选复选框选择多个目录
+                            </small>
+                            <div>
+                                <button class="btn btn-sm btn-outline-primary" type="button" id="selectAllBtn" style="display: none;">
+                                    <i class="bi bi-check-all me-1"></i>全选
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary ms-1" type="button" id="clearAllBtn" style="display: none;">
+                                    <i class="bi bi-x-square me-1"></i>清空
+                                </button>
+                            </div>
+                        </div>
                     </div>
                     
-                    <div class="p-3">
+                    <div class="p-3" style="flex: 1; overflow-y: auto;">
                         <div id="directoryItemsList">
                             <div class="text-center text-muted py-5">
                                 <i class="bi bi-folder-x display-4 d-block mb-3"></i>
@@ -66,13 +79,18 @@
             </div>
             <div class="modal-footer">
                 <div class="flex-grow-1">
-                    <input type="text" class="form-control" id="selectedPathInput" 
-                           placeholder="选中的路径或手动输入路径" style="font-family: monospace;">
+                    <textarea class="form-control" id="selectedPathInput" rows="3"
+                           placeholder="选中的路径（支持多选，每行一个）或手动输入路径" style="font-family: monospace; resize: vertical;"></textarea>
+                    <small class="text-muted">
+                        <i class="bi bi-info-circle me-1"></i>支持多选：勾选右侧复选框选择多个目录，或手动输入多个路径（每行一个）
+                    </small>
                 </div>
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                <button type="button" class="btn btn-primary" id="confirmPathBtn">
-                    <i class="bi bi-check-circle me-1"></i>确定
-                </button>
+                <div class="ms-2">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary" id="confirmPathBtn">
+                        <i class="bi bi-check-circle me-1"></i>确定
+                    </button>
+                </div>
             </div>
         </div>
     </div>

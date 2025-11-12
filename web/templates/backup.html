@@ -472,13 +472,13 @@ async function loadRunningTasks() {
                 compressionRatio = (task.compressed_bytes / task.processed_bytes).toFixed(2);
             }
             
-            // 文件进度：已处理文件/批次相加的文件数
+            // 文件进度：已处理文件/总文件数
             const processedFiles = task.processed_files || 0;  // 已处理文件数
-            const totalScannedFiles = task.total_bytes || 0;  // 所有扫描到的文件总数（批次相加的文件数）
+            const totalScannedFiles = task.total_files || 0;  // 总文件数（由后台扫描任务更新）
             
             // 数据量进度
             const processedBytes = task.processed_bytes || 0;  // 已处理字节数
-            const totalBytesActual = task.total_bytes_actual || null;  // 后端提供的实际总字节数（如果后端完成此任务）
+            const totalBytesActual = task.total_bytes || null;  // 总字节数（由后台扫描任务更新）
             
             // 预估总字节数（如果后端未提供）
             let estimatedTotalBytes = null;
@@ -698,9 +698,9 @@ async function loadRunningTasks() {
                 let calculatedProgress = progress;
                 
                 const processedFiles = task.processed_files || 0;
-                const totalScannedFiles = task.total_bytes || 0;
+                const totalScannedFiles = task.total_files || 0;  // 总文件数（由后台扫描任务更新）
                 const processedBytes = task.processed_bytes || 0;
-                const totalBytesActual = task.total_bytes_actual || null;
+                const totalBytesActual = task.total_bytes || null;  // 总字节数（由后台扫描任务更新）
                 
                 // 预估总字节数（如果后端未提供）
                 let estimatedTotalBytes = null;
@@ -775,7 +775,7 @@ async function loadRunningTasks() {
                         const fileProgressValue = fileProgressRow.querySelector('.text-muted:last-child');
                         if (fileProgressValue) {
                             const processedFiles = task.processed_files || 0;  // 已处理文件数
-                            const totalScannedFiles = task.total_bytes || 0;  // 所有扫描到的文件总数（批次相加的文件数）
+                            const totalScannedFiles = task.total_files || 0;  // 总文件数（由后台扫描任务更新）
                             fileProgressValue.textContent = `${processedFiles}/${totalScannedFiles || processedFiles}`;
                         }
                     }
