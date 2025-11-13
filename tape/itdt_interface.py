@@ -97,8 +97,7 @@ class ITDTInterface:
 			global_flags.append("-force-generic-dd")
 		cmd = [self.itdt_path] + global_flags + args
 		cmd_str = " ".join([str(a) for a in cmd])
-		# 输出完整命令行到终端（便于验证）
-		print(f"\n[ITDT 完整命令] {cmd_str}\n")
+		# 只记录日志，不输出到终端（避免Windows终端暂停）
 		logger.info("[ITDT] 执行: %s", cmd_str)
 
 		proc = await asyncio.create_subprocess_exec(
@@ -112,12 +111,12 @@ class ITDTInterface:
 		out_text = stdout.decode(errors="ignore") if stdout else ""
 		err_text = stderr.decode(errors="ignore") if stderr else ""
 
-		# 输出结果到终端（便于验证）
+		# 只记录日志，不输出到终端（避免Windows终端暂停）
 		if out_text.strip():
-			print(f"[ITDT 标准输出]\n{out_text}")
+			logger.debug("[ITDT] 标准输出: %s", out_text)
 		if err_text.strip():
-			print(f"[ITDT 标准错误]\n{err_text}")
-		print(f"[ITDT 退出码] {proc.returncode}\n")
+			logger.debug("[ITDT] 标准错误: %s", err_text)
+		logger.debug("[ITDT] 退出码: %s", proc.returncode)
 
 		for line in out_text.splitlines():
 			if line.strip():

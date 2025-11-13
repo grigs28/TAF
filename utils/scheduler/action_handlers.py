@@ -21,6 +21,44 @@ import json
 logger = logging.getLogger(__name__)
 
 
+def _parse_enum(enum_class, value: str, default=None):
+    """
+    解析枚举值（处理大小写不匹配问题）
+    
+    Args:
+        enum_class: 枚举类
+        value: 枚举值（可能是大写、小写或混合大小写）
+        default: 默认值（如果无法解析）
+    
+    Returns:
+        枚举值
+    
+    Raises:
+        ValueError: 如果枚举值无效且没有提供默认值
+    """
+    if not value:
+        return default
+    
+    # 转换为小写并去除空白
+    value_lower = value.lower().strip() if isinstance(value, str) else str(value).lower().strip()
+    
+    # 尝试直接匹配
+    try:
+        return enum_class(value_lower)
+    except ValueError:
+        # 如果直接匹配失败，尝试匹配枚举值
+        for enum_value in enum_class:
+            if enum_value.value.lower() == value_lower:
+                return enum_value
+        
+        # 如果仍然无法匹配，记录警告并返回默认值
+        if default is not None:
+            logger.warning(f"无法解析枚举值 '{value}' (类型: {enum_class.__name__})，使用默认值 {default}")
+            return default
+        else:
+            raise ValueError(f"无法解析枚举值 '{value}' (类型: {enum_class.__name__})")
+
+
 class ActionHandler:
     """动作处理器基类"""
     
@@ -226,7 +264,7 @@ class BackupActionHandler(ActionHandler):
                         template_task = type('BackupTask', (), {
                             'id': row['id'],
                             'task_name': row['task_name'],
-                            'task_type': BackupTaskType(row['task_type']) if row['task_type'] else None,
+                            'task_type': _parse_enum(BackupTaskType, row.get('task_type'), None),
                             'source_paths': row['source_paths'] if isinstance(row['source_paths'], list) else json.loads(row['source_paths']) if row['source_paths'] else [],
                             'exclude_patterns': row['exclude_patterns'] if isinstance(row['exclude_patterns'], list) else json.loads(row['exclude_patterns']) if row['exclude_patterns'] else [],
                             'compression_enabled': row['compression_enabled'],
@@ -234,7 +272,7 @@ class BackupActionHandler(ActionHandler):
                             'retention_days': row['retention_days'],
                             'description': row['description'],
                             'tape_device': row['tape_device'],
-                            'status': BackupTaskStatus(row['status']) if row['status'] else None,
+                            'status': _parse_enum(BackupTaskStatus, row.get('status'), None),
                             'is_template': row['is_template'],
                             'template_id': row['template_id'],
                         })()

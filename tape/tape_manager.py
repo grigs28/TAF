@@ -21,6 +21,39 @@ from tape.tape_operations import TapeOperations
 logger = logging.getLogger(__name__)
 
 
+def _parse_tape_status(status_value: str) -> TapeStatus:
+    """
+    解析磁带状态值（处理大小写不匹配问题）
+    
+    Args:
+        status_value: 状态值（可能是大写、小写或混合大小写）
+    
+    Returns:
+        TapeStatus: 磁带状态枚举值
+    
+    Raises:
+        ValueError: 如果状态值无效
+    """
+    if not status_value:
+        return TapeStatus.AVAILABLE
+    
+    # 转换为小写并去除空白
+    status_lower = status_value.lower().strip()
+    
+    # 尝试直接匹配
+    try:
+        return TapeStatus(status_lower)
+    except ValueError:
+        # 如果直接匹配失败，尝试匹配枚举值
+        for status in TapeStatus:
+            if status.value.lower() == status_lower:
+                return status
+        
+        # 如果仍然无法匹配，记录警告并返回默认值
+        logger.warning(f"无法解析磁带状态值 '{status_value}'，使用默认值 AVAILABLE")
+        return TapeStatus.AVAILABLE
+
+
 class TapeManager:
     """磁带管理器"""
 
@@ -245,10 +278,14 @@ class TapeManager:
                                        row.get('created_at') or 
                                        None)
                         
+                        # 解析状态值（处理大小写不匹配问题）
+                        status_value = row.get('status')
+                        tape_status = _parse_tape_status(status_value) if status_value else TapeStatus.AVAILABLE
+                        
                         tape = TapeCartridge(
                             tape_id=row['tape_id'],
                             label=row['label'],
-                            status=TapeStatus(row['status']) if row['status'] else TapeStatus.AVAILABLE,
+                            status=tape_status,
                             created_date=created_date,
                             expiry_date=row.get('expiry_date'),
                             capacity_bytes=row['capacity_bytes'] or 0,
@@ -328,10 +365,14 @@ class TapeManager:
                                          row.get('created_at') or 
                                          None)
                         
+                        # 解析状态值（处理大小写不匹配问题）
+                        status_value = row.get('status')
+                        tape_status = _parse_tape_status(status_value) if status_value else TapeStatus.AVAILABLE
+                        
                         tape = TapeCartridge(
                             tape_id=row['tape_id'],
                             label=row['label'],
-                            status=TapeStatus(row['status']) if row['status'] else TapeStatus.AVAILABLE,
+                            status=tape_status,
                             created_date=created_date,
                             expiry_date=row.get('expiry_date'),
                             capacity_bytes=row['capacity_bytes'] or 0,

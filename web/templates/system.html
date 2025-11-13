@@ -35,7 +35,6 @@
                         {% include 'system/_tab_database.html' %}
                         {% include 'system/_tab_notification.html' %}
                         {% include 'system/_tab_backup.html' %}
-                        {% include 'system/_tab_scheduler.html' %}
                         {% include 'system/_tab_logs.html' %}
                         {% include 'system/_tab_about.html' %}
                     </div>
@@ -47,39 +46,6 @@
 
 <!-- 模态框 -->
 {% include 'system/_modals.html' %}
-
-<!-- 计划任务管理JavaScript -->
-<script type="module">
-// 确保 axios 已加载
-if (typeof window.axios === 'undefined') {
-    console.error('axios 未加载，请确保在页面中引入了 axios.min.js');
-}
-
-import { SchedulerManager } from '/static/js/modules/system/scheduler.js';
-
-// 将SchedulerManager挂载到window对象，以便在HTML中使用
-window.SchedulerManager = SchedulerManager;
-
-// 页面加载完成后初始化
-document.addEventListener('DOMContentLoaded', function() {
-    // 当计划任务标签页激活时初始化
-    const schedulerTab = document.getElementById('scheduler-tab');
-    if (schedulerTab) {
-        schedulerTab.addEventListener('shown.bs.tab', function() {
-            if (!window.SchedulerManager.initialized) {
-                window.SchedulerManager.init();
-                window.SchedulerManager.initialized = true;
-            }
-        });
-        
-        // 如果标签页已经激活，立即初始化
-        if (schedulerTab.classList.contains('active')) {
-            window.SchedulerManager.init();
-            window.SchedulerManager.initialized = true;
-        }
-    }
-});
-</script>
 
 <!-- 系统设置JavaScript -->
 <script src="/static/js/modules/system/system.js"></script>

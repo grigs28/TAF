@@ -234,12 +234,16 @@ class TapeBackupSystem:
             config.worker_class = "asyncio"
 
             service_time = time.time() - start_time
-            print("=" * 80)
+            print("=" * 80, flush=True)
             safe_print(f"Web服务已启动 (服务启动耗时: {service_time:.2f}秒)")
             safe_print(f"访问地址: http://localhost:{self.settings.WEB_PORT}")
             safe_print(f"局域网访问: http://192.168.0.28:{self.settings.WEB_PORT}")
-            print("=" * 80)
+            print("=" * 80, flush=True)
             safe_print("提示: 按 Ctrl+C 停止服务\n")
+            # 确保输出缓冲区刷新，避免Windows终端等待
+            import sys
+            sys.stdout.flush()
+            sys.stderr.flush()
             
             logger.info(f"Web服务启动在端口 {self.settings.WEB_PORT}")
             logger.info(f"访问地址: http://localhost:{self.settings.WEB_PORT}")

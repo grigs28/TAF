@@ -20,15 +20,53 @@ from utils.log_utils import log_operation
 logger = logging.getLogger(__name__)
 
 
+def _parse_enum(enum_class, value: str, default=None):
+    """
+    解析枚举值（处理大小写不匹配问题）
+    
+    Args:
+        enum_class: 枚举类
+        value: 枚举值（可能是大写、小写或混合大小写）
+        default: 默认值（如果无法解析）
+    
+    Returns:
+        枚举值
+    
+    Raises:
+        ValueError: 如果枚举值无效且没有提供默认值
+    """
+    if not value:
+        return default
+    
+    # 转换为小写并去除空白
+    value_lower = value.lower().strip() if isinstance(value, str) else str(value).lower().strip()
+    
+    # 尝试直接匹配
+    try:
+        return enum_class(value_lower)
+    except ValueError:
+        # 如果直接匹配失败，尝试匹配枚举值
+        for enum_value in enum_class:
+            if enum_value.value.lower() == value_lower:
+                return enum_value
+        
+        # 如果仍然无法匹配，记录警告并返回默认值
+        if default is not None:
+            logger.warning(f"无法解析枚举值 '{value}' (类型: {enum_class.__name__})，使用默认值 {default}")
+            return default
+        else:
+            raise ValueError(f"无法解析枚举值 '{value}' (类型: {enum_class.__name__})")
+
+
 def row_to_task(row) -> ScheduledTask:
     """将数据库行转换为ScheduledTask对象"""
     task = ScheduledTask()
     task.id = row['id']
     task.task_name = row['task_name']
     task.description = row['description']
-    task.schedule_type = ScheduleType(row['schedule_type']) if row['schedule_type'] else None
-    task.action_type = TaskActionType(row['action_type']) if row['action_type'] else None
-    task.status = ScheduledTaskStatus(row['status']) if row['status'] else ScheduledTaskStatus.INACTIVE
+    task.schedule_type = _parse_enum(ScheduleType, row.get('schedule_type'), None)
+    task.action_type = _parse_enum(TaskActionType, row.get('action_type'), None)
+    task.status = _parse_enum(ScheduledTaskStatus, row.get('status'), ScheduledTaskStatus.INACTIVE)
     task.schedule_config = json.loads(row['schedule_config']) if row['schedule_config'] and isinstance(row['schedule_config'], str) else (row['schedule_config'] if row['schedule_config'] else {})
     task.action_config = json.loads(row['action_config']) if row['action_config'] and isinstance(row['action_config'], str) else (row['action_config'] if row['action_config'] else {})
     task.enabled = row['enabled']

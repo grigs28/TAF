@@ -23,7 +23,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/login",
         "/static",
         "/api/user/login",
-        "/api/user/register"
+        "/api/user/register",
+        # 页面路由（HTML页面不需要认证，由前端处理）
+        "/backup",
+        "/recovery",
+        "/tape",
+        "/tapedrive",
+        "/scheduler",
+        "/tools",
+        "/system"
     }
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
@@ -31,7 +39,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # 检查是否需要跳过认证
         if self._should_skip_auth(path):
+            logger.debug(f"跳过认证检查: {path}")
             return await call_next(request)
+        
+        logger.debug(f"需要认证检查: {path}")
 
         # 检查认证令牌
         auth_header = request.headers.get("Authorization")

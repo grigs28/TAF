@@ -82,20 +82,21 @@ class TapeHandler:
                                             created_date = datetime.fromisoformat(created_date.split('T')[0])
                                     
                                     # 处理状态值（数据库可能返回大写，枚举是小写）
-                                    status_str = row['status']
+                                    status_str = row.get('status')
                                     if status_str:
-                                        status_str_lower = status_str.lower()
-                                        # 将数据库状态映射到枚举值
-                                        status_map = {
-                                            'available': TapeStatus.AVAILABLE,
-                                            'in_use': TapeStatus.IN_USE,
-                                            'full': TapeStatus.FULL,
-                                            'expired': TapeStatus.EXPIRED,
-                                            'error': TapeStatus.ERROR,
-                                            'maintenance': TapeStatus.MAINTENANCE,
-                                            'new': TapeStatus.NEW
-                                        }
-                                        tape_status = status_map.get(status_str_lower, TapeStatus.AVAILABLE)
+                                        # 转换为小写并尝试创建枚举
+                                        status_lower = status_str.lower().strip() if isinstance(status_str, str) else str(status_str).lower().strip()
+                                        try:
+                                            tape_status = TapeStatus(status_lower)
+                                        except ValueError:
+                                            # 如果直接匹配失败，尝试匹配枚举值
+                                            tape_status = TapeStatus.AVAILABLE
+                                            for status in TapeStatus:
+                                                if status.value.lower() == status_lower:
+                                                    tape_status = status
+                                                    break
+                                            else:
+                                                logger.warning(f"无法解析磁带状态值 '{status_str}'，使用默认值 AVAILABLE")
                                     else:
                                         tape_status = TapeStatus.AVAILABLE
                                     
