@@ -280,7 +280,15 @@ class TapeBackupSystem:
                 except Exception:
                     pass
 
-            # 关闭数据库连接
+            # 关闭openGauss连接池（如果使用openGauss，先关闭连接池）
+            try:
+                from utils.scheduler.db_utils import is_opengauss, close_opengauss_pool
+                if is_opengauss():
+                    await close_opengauss_pool()
+            except Exception as e:
+                logger.warning(f"关闭openGauss连接池失败: {str(e)}")
+
+            # 关闭数据库连接（后关闭数据库管理器）
             if self.db_manager:
                 try:
                     await self.db_manager.close()

@@ -304,15 +304,13 @@ async def _check_tape_label_exists(volume_label: str) -> bool:
     """
     try:
         if is_opengauss():
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 row = await conn.fetchrow(
                     "SELECT tape_id FROM tape_cartridges WHERE label = $1 LIMIT 1",
                     volume_label
                 )
                 return row is not None
-            finally:
-                await conn.close()
         else:
             # 使用SQLAlchemy
             from config.database import db_manager
@@ -343,8 +341,8 @@ async def _generate_serial_number(year: int, month: int) -> str:
         
         # 查询当前月份已有多少张磁盘（查询TP + 月份开头的序列号）
         if is_opengauss():
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 查询序列号以TPMM开头的记录数量（排除NULL）
                 count = await conn.fetchval(
                     """
@@ -355,8 +353,6 @@ async def _generate_serial_number(year: int, month: int) -> str:
                 )
                 # 序号从01开始
                 sequence = (count or 0) + 1
-            finally:
-                await conn.close()
         else:
             # 使用SQLAlchemy
             from config.database import db_manager

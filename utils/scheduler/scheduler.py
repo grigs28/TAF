@@ -332,8 +332,8 @@ class TaskScheduler:
                 # 更新数据库中的下次执行时间
                 if is_opengauss():
                     # 使用openGauss原生连接，避免SQLAlchemy版本解析错误
-                    conn = await get_opengauss_connection()
-                    try:
+                    # 使用连接池
+                    async with get_opengauss_connection() as conn:
                         await conn.execute(
                             """
                             UPDATE scheduled_tasks
@@ -343,8 +343,6 @@ class TaskScheduler:
                             next_run,
                             scheduled_task.id
                         )
-                    finally:
-                        await conn.close()
                 else:
                     # 使用SQLAlchemy会话（其他数据库）
                     async with db_manager.AsyncSessionLocal() as session:

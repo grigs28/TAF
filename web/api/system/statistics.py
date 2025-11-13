@@ -68,8 +68,8 @@ async def _get_backup_tasks_statistics() -> Dict[str, Any]:
     """获取备份任务统计"""
     try:
         if is_opengauss():
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 统计运行中的任务
                 running_count = await conn.fetchval(
                     "SELECT COUNT(*) FROM backup_tasks WHERE LOWER(status::text) = LOWER('RUNNING') AND is_template = FALSE"
@@ -96,8 +96,6 @@ async def _get_backup_tasks_statistics() -> Dict[str, Any]:
                     "completed": completed_count,
                     "failed": failed_count
                 }
-            finally:
-                await conn.close()
         else:
             async with db_manager.AsyncSessionLocal() as session:
                 running_count = await session.scalar(
@@ -146,8 +144,8 @@ async def _get_tape_inventory_statistics() -> Dict[str, Any]:
     """获取磁带库存统计"""
     try:
         if is_opengauss():
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 total_count = await conn.fetchval("SELECT COUNT(*) FROM tape_cartridges") or 0
                 available_count = await conn.fetchval(
                     "SELECT COUNT(*) FROM tape_cartridges WHERE LOWER(status::text) = LOWER('AVAILABLE')"
@@ -171,8 +169,6 @@ async def _get_tape_inventory_statistics() -> Dict[str, Any]:
                     "online": online_count,
                     "offline": offline_count
                 }
-            finally:
-                await conn.close()
         else:
             async with db_manager.AsyncSessionLocal() as session:
                 total_count = await session.scalar(select(func.count(TapeCartridgeModel.id))) or 0
@@ -212,8 +208,8 @@ async def _get_storage_statistics() -> Dict[str, Any]:
     """获取存储统计"""
     try:
         if is_opengauss():
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 从备份集统计存储使用情况
                 result = await conn.fetchrow(
                     """
@@ -253,8 +249,6 @@ async def _get_storage_statistics() -> Dict[str, Any]:
                     "used_capacity": used_capacity,
                     "usage_percent": round(usage_percent, 1)
                 }
-            finally:
-                await conn.close()
         else:
             async with db_manager.AsyncSessionLocal() as session:
                 # 从备份集统计
@@ -299,8 +293,8 @@ async def _get_recent_backups(limit: int = 5) -> List[Dict[str, Any]]:
     """获取最近备份活动"""
     try:
         if is_opengauss():
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 rows = await conn.fetch(
                     """
                     SELECT id, task_name, task_type, status, total_bytes, started_at, completed_at, error_message
@@ -329,8 +323,6 @@ async def _get_recent_backups(limit: int = 5) -> List[Dict[str, Any]]:
                     })
                 
                 return backups
-            finally:
-                await conn.close()
         else:
             async with db_manager.AsyncSessionLocal() as session:
                 stmt = select(BackupTask).where(
@@ -366,8 +358,8 @@ async def _get_storage_trend(days: int = 30) -> List[Dict[str, Any]]:
     """获取存储使用趋势"""
     try:
         if is_opengauss():
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 按日期分组统计每天的存储使用量
                 start_date = datetime.now() - timedelta(days=days)
                 rows = await conn.fetch(
@@ -392,8 +384,6 @@ async def _get_storage_trend(days: int = 30) -> List[Dict[str, Any]]:
                     })
                 
                 return trend
-            finally:
-                await conn.close()
         else:
             async with db_manager.AsyncSessionLocal() as session:
                 from sqlalchemy import func, cast, Date
@@ -432,8 +422,8 @@ async def _get_success_rate_statistics() -> Dict[str, Any]:
     """获取成功率统计"""
     try:
         if is_opengauss():
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 total = await conn.fetchval(
                     "SELECT COUNT(*) FROM backup_tasks WHERE is_template = FALSE AND status::text IN ('completed', 'failed')"
                 ) or 0
@@ -501,8 +491,6 @@ async def _get_success_rate_statistics() -> Dict[str, Any]:
                     "this_month_count": this_month_success,
                     "last_month_count": last_month_success
                 }
-            finally:
-                await conn.close()
         else:
             async with db_manager.AsyncSessionLocal() as session:
                 total = await session.scalar(

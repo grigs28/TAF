@@ -1,5 +1,86 @@
 # 更新日志
 
+## [0.1.10] - 2025-11-13
+
+### 修复
+
+#### 数据库连接池全面重构
+- ✅ 将所有数据库连接从旧模式迁移到连接池模式
+  - 修复了78处使用旧连接模式（`conn = await get_opengauss_connection()` + `await conn.close()`）的代码
+  - 统一使用新的连接池模式（`async with get_opengauss_connection() as conn:`）
+  - 修复了 `TypeError: object _AsyncGeneratorContextManager can't be used in 'await' expression` 错误
+  - 解决了 `WinError 121: 信号灯超时时间已到` 连接超时问题
+
+- ✅ 修复的文件列表（共19个文件）:
+  - `backup/backup_engine.py` - 6处
+  - `backup/backup_db.py` - 9处
+  - `backup/backup_task_manager.py` - 3处
+  - `backup/tape_handler.py` - 1处
+  - `web/api/backup.py` - 8处
+  - `web/api/system/notification.py` - 4处
+  - `web/api/system/statistics.py` - 6处
+  - `web/api/system/logs.py` - 1处
+  - `web/api/system/tape_config.py` - 1处
+  - `web/api/scheduler.py` - 2处
+  - `web/api/tape/crud.py` - 1处
+  - `recovery/recovery_engine.py` - 6处
+  - `tape/tape_manager.py` - 2处
+  - `tape/tape_operations.py` - 1处
+  - `utils/log_utils.py` - 2处
+  - `utils/scheduler/task_storage.py` - 12处
+  - `utils/scheduler/scheduler.py` - 1处
+  - `utils/scheduler/task_executor.py` - 6处
+  - `utils/scheduler/action_handlers.py` - 5处
+
+- ✅ 应用关闭时正确释放连接池资源
+  - 在 `main.py` 的 `shutdown()` 方法中添加了关闭 openGauss 连接池的逻辑
+  - 优化了关闭顺序：先关闭连接池，再关闭数据库管理器
+  - 确保所有数据库连接在应用关闭时正确释放
+
+### 改进
+
+#### 连接池配置可配置化
+- ✅ 添加了连接池超时时间配置项
+  - `DB_POOL_TIMEOUT: float = 30.0` - 连接池连接超时时间（秒）
+  - `DB_COMMAND_TIMEOUT: float = 60.0` - 命令超时时间（秒）
+  - `DB_ACQUIRE_TIMEOUT: float = 10.0` - 从连接池获取连接的超时时间（秒）
+  - 所有超时时间都可以通过配置文件（`.env`）调整
+
+- ✅ 连接池参数使用配置值
+  - 连接池创建时使用配置的超时参数
+  - 获取连接时使用配置的超时参数
+  - 日志输出包含实际使用的超时值，便于监控和调试
+
+#### 连接池错误处理优化
+- ✅ 改进了连接池错误处理
+  - 正确处理 `UNLISTEN statement is not yet supported` 警告（openGauss 限制）
+  - 将 openGauss 限制性警告降级为 DEBUG 级别日志
+  - 其他错误使用 WARNING 级别日志
+  - 确保连接释放不会因为 openGauss 限制而失败
+
+### 技术细节
+
+#### 连接池实现
+- 使用 `asyncpg.create_pool()` 创建连接池
+- 连接池参数：
+  - `min_size`: 最小连接数（pool_size // 2）
+  - `max_size`: 最大连接数（pool_size + max_overflow）
+  - `timeout`: 连接超时时间（可配置）
+  - `command_timeout`: 命令超时时间（可配置）
+  - `max_queries`: 每个连接的最大查询数（50000）
+  - `max_inactive_connection_lifetime`: 非活跃连接的最大生命周期（300秒）
+
+#### 连接获取机制
+- 使用 `async with get_opengauss_connection() as conn:` 获取连接
+- 自动管理连接的获取和释放
+- 支持连接获取超时重试（最多3次，指数退避）
+- 连接池关闭时自动重新创建
+
+#### 使用场景
+- 适用于所有使用 openGauss 数据库的场景
+- 特别适用于高并发场景（连接池可以复用连接）
+- 解决了大量并发请求时的连接超时问题
+
 ## [0.1.9] - 2025-11-12
 
 ### 改进

@@ -226,8 +226,8 @@ class TapeManager:
             
             if is_opengauss():
                 # 使用 openGauss 原生 SQL 查询
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     rows = await conn.fetch(
                         """
                         SELECT tape_id, label, status, first_use_date, manufactured_date, expiry_date,
@@ -262,8 +262,6 @@ class TapeManager:
                         self.tape_cartridges[tape.tape_id] = tape
                     
                     logger.info(f"从数据库加载了 {len(rows)} 个磁带信息")
-                finally:
-                    await conn.close()
             else:
                 # 非 openGauss 数据库，暂时使用示例数据
                 sample_tapes = [
@@ -308,8 +306,8 @@ class TapeManager:
             
             if is_opengauss():
                 # 使用 openGauss 原生 SQL 查询
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     # 使用 fetch 而不是 fetchrow（openGauss 使用 asyncpg）
                     rows = await conn.fetch(
                         """
@@ -349,8 +347,6 @@ class TapeManager:
                     else:
                         logger.warning(f"数据库中未找到磁带 {tape_id}")
                         return None
-                finally:
-                    await conn.close()
             else:
                 # 非 openGauss 数据库，返回None
                 logger.warning("数据库不是 openGauss，无法从数据库获取磁带")

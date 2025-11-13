@@ -529,9 +529,9 @@ async def get_tape_drive_history(request: Request, limit: int = 50, offset: int 
         database_url = settings.DATABASE_URL
         
         # 检查是否为openGauss
-        is_opengauss = "opengauss" in database_url.lower()
+        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
         
-        if not is_opengauss:
+        if not is_opengauss():
             # 非openGauss数据库，使用SQLAlchemy
             from config.database import db_manager
             from models.system_log import OperationLog
@@ -570,28 +570,8 @@ async def get_tape_drive_history(request: Request, limit: int = 50, offset: int 
                 }
         else:
             # 使用openGauss原生SQL
-            import asyncpg
-            import re
-            
-            # 解析URL
-            url = database_url.replace("opengauss://", "postgresql://")
-            pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
-            match = re.match(pattern, url)
-            
-            if not match:
-                raise ValueError("无法解析openGauss数据库URL")
-            
-            username, password, host, port, database = match.groups()
-            
-            conn = await asyncpg.connect(
-                host=host,
-                port=int(port),
-                user=username,
-                password=password,
-                database=database
-            )
-            
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 查询磁带机相关操作日志（resource_type = 'tape_drive' 或操作名称包含'磁带机'）
                 sql = """
                     SELECT 
@@ -646,9 +626,6 @@ async def get_tape_drive_history(request: Request, limit: int = 50, offset: int 
                     "history": history,
                     "count": len(history)
                 }
-            
-            finally:
-                await conn.close()
     
     except Exception as e:
         duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)

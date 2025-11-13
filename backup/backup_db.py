@@ -47,8 +47,8 @@ class BackupDB:
             from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
             if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     # 准备 source_info JSON
                     source_info_json = json.dumps({'paths': backup_task.source_paths}) if backup_task.source_paths else None
                     
@@ -105,8 +105,6 @@ class BackupDB:
                         )
                     else:
                         raise RuntimeError(f"备份集插入后查询失败: {set_id}")
-                finally:
-                    await conn.close()
             else:
                 # 非 openGauss 使用 SQLAlchemy（其他数据库）- 但当前项目只支持 openGauss
                 raise RuntimeError("当前项目仅支持 openGauss 数据库")
@@ -139,8 +137,8 @@ class BackupDB:
             from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
             if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     await conn.execute(
                         """
                         UPDATE backup_sets
@@ -160,8 +158,6 @@ class BackupDB:
                         datetime.now(),
                         backup_set.set_id
                     )
-                finally:
-                    await conn.close()
             else:
                 # 非 openGauss 使用 SQLAlchemy
                 from config.database import get_db
@@ -199,147 +195,143 @@ class BackupDB:
                 logger.warning("非openGauss数据库，跳过保存备份文件信息")
                 return
             
-            conn = await get_opengauss_connection()
-            try:
-                # 获取备份集的数据库ID
-                backup_set_row = await conn.fetchrow(
-                    """
-                    SELECT id FROM backup_sets WHERE set_id = $1
-                    """,
-                    backup_set.set_id
-                )
-                
-                if not backup_set_row:
-                    logger.warning(f"找不到备份集: {backup_set.set_id}，跳过保存文件信息")
-                    return
-                
-                backup_set_db_id = backup_set_row['id']
-                backup_time = datetime.now()
-                
-                # 在线程池中批量处理文件信息，避免阻塞事件循环
-                loop = asyncio.get_event_loop()
-                
-                def _process_file_info(file_info):
-                    """在线程中处理单个文件信息"""
-                    try:
-                        file_path = Path(file_info['path'])
-                        
-                        # 确定文件类型（使用枚举值）
-                        if file_info.get('is_dir', False):
-                            file_type = BackupFileType.DIRECTORY.value
-                        elif file_info.get('is_symlink', False):
-                            if hasattr(BackupFileType, 'SYMLINK'):
-                                file_type = BackupFileType.SYMLINK.value
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
+                try:
+                    # 获取备份集的数据库ID
+                    backup_set_row = await conn.fetchrow(
+                        """
+                        SELECT id FROM backup_sets WHERE set_id = $1
+                        """,
+                        backup_set.set_id
+                    )
+                    
+                    if not backup_set_row:
+                        logger.warning(f"找不到备份集: {backup_set.set_id}，跳过保存文件信息")
+                        return
+                    
+                    backup_set_db_id = backup_set_row['id']
+                    backup_time = datetime.now()
+                    
+                    # 在线程池中批量处理文件信息，避免阻塞事件循环
+                    loop = asyncio.get_event_loop()
+                    
+                    def _process_file_info(file_info):
+                        """在线程中处理单个文件信息"""
+                        try:
+                            file_path = Path(file_info['path'])
+                            
+                            # 确定文件类型（使用枚举值）
+                            if file_info.get('is_dir', False):
+                                file_type = BackupFileType.DIRECTORY.value
+                            elif file_info.get('is_symlink', False):
+                                if hasattr(BackupFileType, 'SYMLINK'):
+                                    file_type = BackupFileType.SYMLINK.value
+                                else:
+                                    file_type = BackupFileType.FILE.value
                             else:
                                 file_type = BackupFileType.FILE.value
-                        else:
-                            file_type = BackupFileType.FILE.value
-                        
-                        # 获取文件元数据（同步操作，在线程中执行）
-                        try:
-                            file_stat = file_path.stat() if file_path.exists() else None
-                        except (PermissionError, OSError, FileNotFoundError, IOError) as stat_error:
-                            logger.debug(f"无法获取文件统计信息: {file_path} (错误: {str(stat_error)})")
-                            file_stat = None
-                        except Exception as stat_error:
-                            logger.warning(f"获取文件统计信息失败: {file_path} (错误: {str(stat_error)})")
-                            file_stat = None
-                        
-                        # 跳过单个文件的校验和计算（文件已压缩，压缩包本身有校验和，避免阻塞）
-                        file_checksum = None
-                        
-                        # 获取文件权限（Windows上可能不可用）
-                        file_permissions = None
-                        if file_stat:
+                            
+                            # 获取文件元数据（同步操作，在线程中执行）
                             try:
-                                file_permissions = oct(file_stat.st_mode)[-3:]
-                            except:
-                                pass
-                        
-                        return {
-                            'file_path': str(file_path),
-                            'file_name': file_path.name,
-                            'file_type': file_type,
-                            'file_size': file_info.get('size', 0),
-                            'file_stat': file_stat,
-                            'file_permissions': file_permissions,
-                            'file_checksum': file_checksum
-                        }
-                    except Exception as process_error:
-                        logger.warning(f"处理文件信息失败: {file_info.get('path', 'unknown')} (错误: {str(process_error)})")
-                        return None
-                
-                # 批量处理文件信息（在线程池中执行）
-                processed_files = await asyncio.gather(*[
-                    loop.run_in_executor(None, _process_file_info, file_info)
-                    for file_info in file_group
-                ], return_exceptions=True)
-                
-                # 过滤掉处理失败的文件（返回None或异常）
-                valid_processed_files = [f for f in processed_files if f is not None and not isinstance(f, Exception)]
-                
-                if len(valid_processed_files) < len(file_group):
-                    failed_count = len(file_group) - len(valid_processed_files)
-                    logger.warning(f"⚠️ 处理文件信息时，{failed_count} 个文件失败，继续保存其他文件")
-                
-                # 批量插入文件记录（使用事务）
-                success_count = 0
-                failed_count = 0
-                for processed_file in valid_processed_files:
-                    try:
-                        file_stat = processed_file['file_stat']
-                        await conn.execute(
-                            """
-                            INSERT INTO backup_files (
-                                backup_set_id, file_path, file_name, file_type, file_size,
-                                compressed_size, file_permissions, created_time, modified_time,
-                                accessed_time, compressed, checksum, backup_time, chunk_number,
-                                tape_block_start, file_metadata
-                            ) VALUES (
-                                $1, $2, $3, $4::backupfiletype, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::json
-                            )
-                            """,
-                            backup_set_db_id,
-                            processed_file['file_path'],
-                            processed_file['file_name'],
-                            processed_file['file_type'],
-                            processed_file['file_size'],
-                            compressed_file.get('compressed_size', 0) // len(file_group) if file_group else 0,  # 平均分配压缩后大小
-                            processed_file['file_permissions'],
-                            datetime.fromtimestamp(file_stat.st_ctime) if file_stat else None,
-                            datetime.fromtimestamp(file_stat.st_mtime) if file_stat else None,
-                            datetime.fromtimestamp(file_stat.st_atime) if file_stat else None,
-                            compressed_file.get('compression_enabled', False),
-                            processed_file['file_checksum'],
-                            backup_time,
-                            chunk_number,
-                            0,  # tape_block_start（文件系统操作，暂时设为0）
-                            json.dumps({
-                                'tape_file_path': tape_file_path,
-                                'chunk_number': chunk_number,
-                                'original_path': processed_file['file_path'],
-                                'relative_path': str(Path(processed_file['file_path']).relative_to(Path(processed_file['file_path']).anchor)) if Path(processed_file['file_path']).is_absolute() else processed_file['file_path']
-                            })  # file_metadata 需要序列化为 JSON 字符串
-                        )
-                        success_count += 1
-                    except Exception as insert_error:
-                        failed_count += 1
-                        logger.warning(f"⚠️ 插入文件记录失败: {processed_file.get('file_path', 'unknown')} (错误: {str(insert_error)})")
-                        continue
-                
-                if success_count > 0:
-                    logger.debug(f"已保存 {success_count} 个文件信息到数据库（chunk {chunk_number}）")
-                if failed_count > 0:
-                    logger.warning(f"⚠️ 保存文件信息到数据库时，{failed_count} 个文件失败，但备份流程继续")
+                                file_stat = file_path.stat() if file_path.exists() else None
+                            except (PermissionError, OSError, FileNotFoundError, IOError) as stat_error:
+                                logger.debug(f"无法获取文件统计信息: {file_path} (错误: {str(stat_error)})")
+                                file_stat = None
+                            except Exception as stat_error:
+                                logger.warning(f"获取文件统计信息失败: {file_path} (错误: {str(stat_error)})")
+                                file_stat = None
+                            
+                            # 跳过单个文件的校验和计算（文件已压缩，压缩包本身有校验和，避免阻塞）
+                            file_checksum = None
+                            
+                            # 获取文件权限（Windows上可能不可用）
+                            file_permissions = None
+                            if file_stat:
+                                try:
+                                    file_permissions = oct(file_stat.st_mode)[-3:]
+                                except:
+                                    pass
+                            
+                            return {
+                                'file_path': str(file_path),
+                                'file_name': file_path.name,
+                                'file_type': file_type,
+                                'file_size': file_info.get('size', 0),
+                                'file_stat': file_stat,
+                                'file_permissions': file_permissions,
+                                'file_checksum': file_checksum
+                            }
+                        except Exception as process_error:
+                            logger.warning(f"处理文件信息失败: {file_info.get('path', 'unknown')} (错误: {str(process_error)})")
+                            return None
                     
-            except Exception as db_conn_error:
-                logger.warning(f"⚠️ 数据库连接或查询失败，跳过保存文件信息: {str(db_conn_error)}")
-                # 数据库错误不影响备份流程，继续执行
-            finally:
-                try:
-                    await conn.close()
-                except:
-                    pass
+                    # 批量处理文件信息（在线程池中执行）
+                    processed_files = await asyncio.gather(*[
+                        loop.run_in_executor(None, _process_file_info, file_info)
+                        for file_info in file_group
+                    ], return_exceptions=True)
+                    
+                    # 过滤掉处理失败的文件（返回None或异常）
+                    valid_processed_files = [f for f in processed_files if f is not None and not isinstance(f, Exception)]
+                    
+                    if len(valid_processed_files) < len(file_group):
+                        failed_count = len(file_group) - len(valid_processed_files)
+                        logger.warning(f"⚠️ 处理文件信息时，{failed_count} 个文件失败，继续保存其他文件")
+                    
+                    # 批量插入文件记录（使用事务）
+                    success_count = 0
+                    failed_count = 0
+                    for processed_file in valid_processed_files:
+                        try:
+                            file_stat = processed_file['file_stat']
+                            await conn.execute(
+                                """
+                                INSERT INTO backup_files (
+                                    backup_set_id, file_path, file_name, file_type, file_size,
+                                    compressed_size, file_permissions, created_time, modified_time,
+                                    accessed_time, compressed, checksum, backup_time, chunk_number,
+                                    tape_block_start, file_metadata
+                                ) VALUES (
+                                    $1, $2, $3, $4::backupfiletype, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::json
+                                )
+                                """,
+                                backup_set_db_id,
+                                processed_file['file_path'],
+                                processed_file['file_name'],
+                                processed_file['file_type'],
+                                processed_file['file_size'],
+                                compressed_file.get('compressed_size', 0) // len(file_group) if file_group else 0,  # 平均分配压缩后大小
+                                processed_file['file_permissions'],
+                                datetime.fromtimestamp(file_stat.st_ctime) if file_stat else None,
+                                datetime.fromtimestamp(file_stat.st_mtime) if file_stat else None,
+                                datetime.fromtimestamp(file_stat.st_atime) if file_stat else None,
+                                compressed_file.get('compression_enabled', False),
+                                processed_file['file_checksum'],
+                                backup_time,
+                                chunk_number,
+                                0,  # tape_block_start（文件系统操作，暂时设为0）
+                                json.dumps({
+                                    'tape_file_path': tape_file_path,
+                                    'chunk_number': chunk_number,
+                                    'original_path': processed_file['file_path'],
+                                    'relative_path': str(Path(processed_file['file_path']).relative_to(Path(processed_file['file_path']).anchor)) if Path(processed_file['file_path']).is_absolute() else processed_file['file_path']
+                                })  # file_metadata 需要序列化为 JSON 字符串
+                            )
+                            success_count += 1
+                        except Exception as insert_error:
+                            failed_count += 1
+                            logger.warning(f"⚠️ 插入文件记录失败: {processed_file.get('file_path', 'unknown')} (错误: {str(insert_error)})")
+                            continue
+                    
+                    if success_count > 0:
+                        logger.debug(f"已保存 {success_count} 个文件信息到数据库（chunk {chunk_number}）")
+                    if failed_count > 0:
+                        logger.warning(f"⚠️ 保存文件信息到数据库时，{failed_count} 个文件失败，但备份流程继续")
+                        
+                except Exception as db_conn_error:
+                    logger.warning(f"⚠️ 数据库连接或查询失败，跳过保存文件信息: {str(db_conn_error)}")
+                    # 数据库错误不影响备份流程，继续执行
                     
         except Exception as e:
             logger.warning(f"⚠️ 保存备份文件信息到数据库失败: {str(e)}，但备份流程继续")
@@ -368,8 +360,8 @@ class BackupDB:
             
             from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     # 重要：不再更新 total_files 字段（压缩包数量）
                     # total_files 字段由独立的后台扫描任务 _scan_for_progress_update 负责更新（总文件数）
                     # 压缩包数量存储在 result_summary.estimated_archive_count 中
@@ -509,8 +501,6 @@ class BackupDB:
                             backup_task.id
                         )
                         # 注意：total_bytes 字段不更新，由后台扫描任务负责更新
-                finally:
-                    await conn.close()
             else:
                 # 非 openGauss 使用 SQLAlchemy（但当前项目仅支持 openGauss）
                 logger.warning("非 openGauss 数据库，跳过进度更新")
@@ -554,8 +544,8 @@ class BackupDB:
             from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
             if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     # 动态构建UPDATE语句
                     set_clauses = []
                     params = []
@@ -581,8 +571,6 @@ class BackupDB:
                         """,
                         *params
                     )
-                finally:
-                    await conn.close()
             else:
                 # 非 openGauss 使用 SQLAlchemy
                 from config.database import get_db
@@ -611,8 +599,8 @@ class BackupDB:
             from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
             if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     # 动态构建UPDATE语句
                     set_clauses = []
                     params = []
@@ -643,8 +631,6 @@ class BackupDB:
                         """,
                         *params
                     )
-                finally:
-                    await conn.close()
             else:
                 # 非 openGauss 使用 SQLAlchemy
                 from config.database import get_db
@@ -667,8 +653,8 @@ class BackupDB:
             from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
             if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     row = await conn.fetchrow(
                         """
                         SELECT id, status, progress_percent, processed_files, total_files,
@@ -731,8 +717,6 @@ class BackupDB:
                             'started_at': row['started_at'],
                             'completed_at': row['completed_at']
                         }
-                finally:
-                    await conn.close()
             
             return None
         except Exception as e:
@@ -752,16 +736,14 @@ class BackupDB:
             from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
             if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     row = await conn.fetchrow(
                         "SELECT total_files FROM backup_tasks WHERE id = $1",
                         task_id
                     )
                     if row:
                         return row['total_files'] or 0
-                finally:
-                    await conn.close()
             return 0
         except Exception as e:
             logger.debug(f"读取总文件数失败（忽略继续）: {str(e)}")
@@ -787,8 +769,8 @@ class BackupDB:
             from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
             if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     # 获取当前的 result_summary
                     row = await conn.fetchrow(
                         "SELECT result_summary FROM backup_tasks WHERE id = $1",
@@ -824,8 +806,6 @@ class BackupDB:
                         datetime.now(),
                         backup_task.id
                     )
-                finally:
-                    await conn.close()
         except Exception as e:
             logger.debug(f"更新扫描进度失败（忽略继续）: {str(e)}")
 

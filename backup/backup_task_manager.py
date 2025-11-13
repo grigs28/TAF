@@ -102,8 +102,8 @@ class BackupTaskManager:
             from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
             if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     # 插入备份任务
                     task_id = await conn.fetchval(
                         """
@@ -130,8 +130,6 @@ class BackupTaskManager:
                         datetime.now()
                     )
                     backup_task.id = task_id
-                finally:
-                    await conn.close()
             else:
                 # 非 openGauss 使用 SQLAlchemy（其他数据库）
                 async for db in get_db():
@@ -159,8 +157,8 @@ class BackupTaskManager:
             from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
             if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     row = await conn.fetchrow(
                         """
                         SELECT id, task_name, task_type, status, progress_percent, 
@@ -204,8 +202,6 @@ class BackupTaskManager:
                             'tape_id': row['tape_id'],
                             'description': row['description']
                         }
-                finally:
-                    await conn.close()
             else:
                 # 非 openGauss 使用 SQLAlchemy
                 async for db in get_db():
@@ -260,8 +256,8 @@ class BackupTaskManager:
             from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
             if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     # 更新任务状态为取消
                     await conn.execute(
                         """
@@ -287,8 +283,6 @@ class BackupTaskManager:
                     if row:
                         logger.info(f"任务已取消: {task_id}")
                         return True
-                finally:
-                    await conn.close()
             else:
                 # 非 openGauss 使用 SQLAlchemy
                 async for db in get_db():

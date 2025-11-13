@@ -473,8 +473,8 @@ async def get_notification_users(request: Request):
     try:
         if is_opengauss():
             # 使用原生SQL查询
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 rows = await conn.fetch("""
                     SELECT id, phone, name, remark, enabled, created_at, updated_at, created_by, updated_by
                     FROM notification_users
@@ -494,8 +494,6 @@ async def get_notification_users(request: Request):
                         "updated_by": row["updated_by"]
                     })
                 return {"success": True, "users": users}
-            finally:
-                await conn.close()
         else:
             # 使用SQLAlchemy查询
             from config.database import db_manager
@@ -532,8 +530,8 @@ async def create_notification_user(user: NotificationUser, request: Request):
     try:
         if is_opengauss():
             # 使用原生SQL插入
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 检查手机号是否已存在
                 existing = await conn.fetchrow(
                     "SELECT id FROM notification_users WHERE phone = $1",
@@ -583,8 +581,6 @@ async def create_notification_user(user: NotificationUser, request: Request):
                 )
                 
                 return {"success": True, "message": "通知人员创建成功", "user_id": user_id}
-            finally:
-                await conn.close()
         else:
             # 使用SQLAlchemy插入
             from config.database import db_manager
@@ -671,8 +667,8 @@ async def update_notification_user(user_id: int, user: NotificationUser, request
     try:
         if is_opengauss():
             # 使用原生SQL更新
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 获取旧值
                 old_row = await conn.fetchrow(
                     "SELECT phone, name, remark, enabled FROM notification_users WHERE id = $1",
@@ -743,8 +739,6 @@ async def update_notification_user(user_id: int, user: NotificationUser, request
                 )
                 
                 return {"success": True, "message": "通知人员更新成功"}
-            finally:
-                await conn.close()
         else:
             # 使用SQLAlchemy更新
             from config.database import db_manager
@@ -852,8 +846,8 @@ async def delete_notification_user(user_id: int, request: Request):
     try:
         if is_opengauss():
             # 使用原生SQL删除
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 获取旧值
                 old_row = await conn.fetchrow(
                     "SELECT phone, name, remark, enabled FROM notification_users WHERE id = $1",
@@ -896,8 +890,6 @@ async def delete_notification_user(user_id: int, request: Request):
                 )
                 
                 return {"success": True, "message": "通知人员删除成功"}
-            finally:
-                await conn.close()
         else:
             # 使用SQLAlchemy删除
             from config.database import db_manager

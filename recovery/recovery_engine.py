@@ -69,8 +69,8 @@ class RecoveryEngine:
 
             if is_opengauss():
                 # openGauss 原生SQL查询
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     # 构建WHERE子句
                     where_clauses = []
                     params = []
@@ -132,8 +132,6 @@ class RecoveryEngine:
                             'created_at': row['created_at'].isoformat() if isinstance(row['created_at'], datetime) else str(row['created_at'])
                         }
                         backup_sets.append(backup_set)
-                finally:
-                    await conn.close()
             else:
                 # 使用SQLAlchemy查询
                 async with db_manager.AsyncSessionLocal() as session:
@@ -190,8 +188,8 @@ class RecoveryEngine:
 
             if is_opengauss():
                 # openGauss 原生SQL查询
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     # 首先根据 set_id 查找备份集的 id
                     backup_set_row = await conn.fetchrow(
                         "SELECT id FROM backup_sets WHERE set_id = $1",
@@ -234,8 +232,6 @@ class RecoveryEngine:
                             'chunk_number': row['chunk_number']
                         }
                         files.append(file_info)
-                finally:
-                    await conn.close()
             else:
                 # 使用SQLAlchemy查询
                 async with db_manager.AsyncSessionLocal() as session:
@@ -302,8 +298,8 @@ class RecoveryEngine:
             files = []
             
             if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     # 首先根据 set_id 查找备份集的 id
                     backup_set_row = await conn.fetchrow(
                         "SELECT id FROM backup_sets WHERE set_id = $1",
@@ -425,8 +421,6 @@ class RecoveryEngine:
                                 'file': None,
                                 'has_children': has_children
                             }
-                finally:
-                    await conn.close()
             else:
                 # 使用SQLAlchemy查询（PostgreSQL等数据库）
                 async with db_manager.AsyncSessionLocal() as session:
@@ -580,8 +574,8 @@ class RecoveryEngine:
             files = []
             
             if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     # 首先根据 set_id 查找备份集的 id
                     backup_set_row = await conn.fetchrow(
                         "SELECT id FROM backup_sets WHERE set_id = $1",
@@ -713,8 +707,6 @@ class RecoveryEngine:
                                     'file': None,
                                     'has_children': True
                                 }
-                finally:
-                    await conn.close()
             else:
                 # 使用SQLAlchemy查询
                 async with db_manager.AsyncSessionLocal() as session:
@@ -1051,8 +1043,8 @@ class RecoveryEngine:
         try:
             if is_opengauss():
                 # openGauss 原生SQL查询
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     row = await conn.fetchrow(
                         """
                         SELECT id, set_id, set_name, backup_group, backup_type, backup_time,
@@ -1079,8 +1071,6 @@ class RecoveryEngine:
                         'tape_id': row['tape_id'],
                         'status': row['status'].value if hasattr(row['status'], 'value') else str(row['status'])
                     }
-                finally:
-                    await conn.close()
             else:
                 # 使用SQLAlchemy查询
                 async with db_manager.AsyncSessionLocal() as session:
@@ -1218,8 +1208,8 @@ class RecoveryEngine:
 
             if is_opengauss():
                 # openGauss 原生SQL查询
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     # 查询所有不重复的备份组，按时间倒序
                     sql = """
                         SELECT DISTINCT backup_group
@@ -1230,8 +1220,6 @@ class RecoveryEngine:
                     """
                     rows = await conn.fetch(sql)
                     groups = [row['backup_group'] for row in rows]
-                finally:
-                    await conn.close()
             else:
                 # 使用SQLAlchemy查询
                 async with db_manager.AsyncSessionLocal() as session:

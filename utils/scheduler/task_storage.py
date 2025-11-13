@@ -54,8 +54,8 @@ async def load_tasks_from_db(enabled_only: bool = True) -> List[ScheduledTask]:
     try:
         if is_opengauss():
             # 使用原生SQL查询
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 if enabled_only:
                     rows = await conn.fetch("SELECT * FROM scheduled_tasks WHERE enabled = true ORDER BY id")
                 else:
@@ -67,8 +67,6 @@ async def load_tasks_from_db(enabled_only: bool = True) -> List[ScheduledTask]:
                     tasks.append(row_to_task(row))
                 
                 return tasks
-            finally:
-                await conn.close()
         else:
             # 非openGauss数据库，使用SQLAlchemy
             async with db_manager.AsyncSessionLocal() as session:
@@ -92,8 +90,8 @@ async def record_run_start(task_id: int, execution_id: str, started_at: datetime
     """记录任务开始运行（openGauss 原生）"""
     try:
         if is_opengauss():
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 确保表存在
                 await conn.execute(
                     """
@@ -117,8 +115,6 @@ async def record_run_start(task_id: int, execution_id: str, started_at: datetime
                     """,
                     task_id, execution_id, started_at
                 )
-            finally:
-                await conn.close()
         else:
             # 非 openGauss 暂不实现（保留 SQLAlchemy 版本可选）
             pass
@@ -132,8 +128,8 @@ async def record_run_end(execution_id: str, completed_at: datetime, status: str,
     """记录任务结束（openGauss 原生）"""
     try:
         if is_opengauss():
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 await conn.execute(
                     """
                     UPDATE task_runs
@@ -146,8 +142,6 @@ async def record_run_end(execution_id: str, completed_at: datetime, status: str,
                     completed_at, status, json.dumps(result) if result is not None else None,
                     error_message, execution_id
                 )
-            finally:
-                await conn.close()
         else:
             pass
     except Exception as e:
@@ -159,8 +153,8 @@ async def acquire_task_lock(task_id: int, execution_id: str) -> bool:
     """尝试获取任务锁（同一任务仅允许一个运行实例）"""
     try:
         if is_opengauss():
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 确保锁表存在（task_id 唯一）
                 await conn.execute(
                     """
@@ -260,8 +254,6 @@ async def acquire_task_lock(task_id: int, execution_id: str) -> bool:
                         else:
                             logger.warning(f"插入任务锁失败（可能被其他进程占用）: {str(insert_error)}")
                             return False
-            finally:
-                await conn.close()
         else:
             return True
     except Exception as e:
@@ -273,8 +265,8 @@ async def release_task_lock(task_id: int, execution_id: str) -> None:
     """释放任务锁"""
     try:
         if is_opengauss():
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 await conn.execute(
                     """
                     UPDATE task_locks
@@ -283,8 +275,6 @@ async def release_task_lock(task_id: int, execution_id: str) -> None:
                     """,
                     task_id, execution_id
                 )
-            finally:
-                await conn.close()
         else:
             pass
     except Exception as e:
@@ -295,8 +285,8 @@ async def release_task_locks_by_task(task_id: int) -> None:
     """释放指定任务的所有活跃锁"""
     try:
         if is_opengauss():
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 先查询有多少锁被释放
                 count_row = await conn.fetchrow(
                     """
@@ -322,8 +312,6 @@ async def release_task_locks_by_task(task_id: int) -> None:
                     logger.info(f"已释放任务 {task_id} 的 {lock_count} 个活跃锁")
                 else:
                     logger.info(f"任务 {task_id} 没有活跃锁需要释放")
-            finally:
-                await conn.close()
         else:
             pass
     except Exception as e:
@@ -334,8 +322,8 @@ async def release_all_active_locks() -> None:
     """释放所有活跃的任务锁（用于程序退出时清理）"""
     try:
         if is_opengauss():
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 先查询有多少锁被释放
                 count_row = await conn.fetchrow(
                     """
@@ -359,8 +347,6 @@ async def release_all_active_locks() -> None:
                     logger.info(f"已释放所有活跃的任务锁，共 {lock_count} 个")
                 else:
                     logger.info("没有活跃的任务锁需要释放")
-            finally:
-                await conn.close()
         else:
             pass
     except Exception as e:
@@ -372,14 +358,12 @@ async def get_task_by_id(task_id: int) -> Optional[ScheduledTask]:
     try:
         if is_opengauss():
             # 使用原生asyncpg查询
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 row = await conn.fetchrow("SELECT * FROM scheduled_tasks WHERE id = $1", task_id)
                 if not row:
                     return None
                 return row_to_task(row)
-            finally:
-                await conn.close()
         else:
             # 非openGauss数据库，使用SQLAlchemy
             async with db_manager.AsyncSessionLocal() as session:
@@ -399,8 +383,8 @@ async def get_all_tasks(enabled_only: bool = False) -> List[ScheduledTask]:
     try:
         if is_opengauss():
             # 使用原生asyncpg查询
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 构建查询SQL
                 if enabled_only:
                     query = "SELECT * FROM scheduled_tasks WHERE enabled = true ORDER BY id"
@@ -415,8 +399,6 @@ async def get_all_tasks(enabled_only: bool = False) -> List[ScheduledTask]:
                     tasks.append(row_to_task(row))
                 
                 return tasks
-            finally:
-                await conn.close()
         else:
             # 非openGauss数据库，使用SQLAlchemy
             async with db_manager.AsyncSessionLocal() as session:
@@ -439,8 +421,8 @@ async def add_task(scheduled_task: ScheduledTask) -> bool:
     try:
         if is_opengauss():
             # 使用原生asyncpg插入
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 准备插入SQL
                 insert_sql = """
                     INSERT INTO scheduled_tasks (
@@ -517,8 +499,6 @@ async def add_task(scheduled_task: ScheduledTask) -> bool:
                 )
                 
                 return True
-            finally:
-                await conn.close()
         else:
             # 非openGauss数据库，使用SQLAlchemy
             async with db_manager.AsyncSessionLocal() as session:
@@ -576,8 +556,8 @@ async def delete_task(task_id: int) -> bool:
     try:
         if is_opengauss():
             # 使用原生asyncpg删除
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 先检查任务是否存在
                 row = await conn.fetchrow("SELECT task_name FROM scheduled_tasks WHERE id = $1", task_id)
                 if not row:
@@ -607,8 +587,6 @@ async def delete_task(task_id: int) -> bool:
                 await conn.execute("DELETE FROM scheduled_tasks WHERE id = $1", task_id)
                 logger.info(f"使用原生SQL删除计划任务成功: {task_name} (ID: {task_id})")
                 return True
-            finally:
-                await conn.close()
         else:
             # 非openGauss数据库，使用SQLAlchemy
             async with db_manager.AsyncSessionLocal() as session:
@@ -674,8 +652,8 @@ async def update_task(task_id: int, updates: Dict[str, Any], next_run_time: Opti
     try:
         if is_opengauss():
             # 使用原生asyncpg更新
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 先获取任务
                 row = await conn.fetchrow("SELECT * FROM scheduled_tasks WHERE id = $1", task_id)
                 if not row:
@@ -783,8 +761,6 @@ async def update_task(task_id: int, updates: Dict[str, Any], next_run_time: Opti
                 
                 # 重新获取更新后的任务
                 return await get_task_by_id(task_id)
-            finally:
-                await conn.close()
         else:
             # 非openGauss数据库，使用SQLAlchemy
             async with db_manager.AsyncSessionLocal() as session:

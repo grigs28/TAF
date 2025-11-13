@@ -69,8 +69,8 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_
             
             # 更新任务状态为运行中（openGauss使用原生SQL，其他使用SQLAlchemy）
             if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     await conn.execute(
                         """
                         UPDATE scheduled_tasks
@@ -79,8 +79,6 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_
                         """,
                         'running', start_time, scheduled_task.id
                     )
-                finally:
-                    await conn.close()
             else:
                 async with db_manager.AsyncSessionLocal() as session:
                     scheduled_task.status = ScheduledTaskStatus.RUNNING
@@ -154,8 +152,8 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_
                     pass
                 
                 # 更新任务统计（使用原生SQL）
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     # 获取当前统计值
                     current_task = await conn.fetchrow(
                         """
@@ -191,8 +189,6 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_
                         """,
                         'active', end_time, total_runs, success_runs, avg_duration, next_run, scheduled_task.id
                     )
-                finally:
-                    await conn.close()
             else:
                 # 使用SQLAlchemy更新
                 async with db_manager.AsyncSessionLocal() as session:
@@ -267,8 +263,8 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_
             
             # 输出任务统计信息
             if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     current_task = await conn.fetchrow(
                         """
                         SELECT total_runs, success_runs, failure_runs, average_duration
@@ -284,8 +280,6 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_
                         logger.info(f"     失败次数: {current_task['failure_runs'] or 0}")
                         if current_task['average_duration']:
                             logger.info(f"     平均执行时长: {current_task['average_duration']}秒")
-                finally:
-                    await conn.close()
             else:
                 logger.info(f"   任务统计:")
                 logger.info(f"     总执行次数: {scheduled_task.total_runs or 0}")
@@ -343,8 +337,8 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_
             # 更新任务状态为错误（使用 try-except 确保即使失败也不影响 finally 执行）
             try:
                 if is_opengauss():
-                    conn = await get_opengauss_connection()
-                    try:
+                    # 使用连接池
+                    async with get_opengauss_connection() as conn:
                         await conn.execute(
                             """
                             UPDATE scheduled_tasks
@@ -354,8 +348,6 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_
                             """,
                             'error', error_msg, scheduled_task.id
                         )
-                    finally:
-                        await conn.close()
             except Exception as update_error:
                 logger.error(f"更新任务状态失败（忽略继续）: {str(update_error)}")
             
@@ -398,8 +390,8 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_
                 
                 # 更新任务统计（使用原生SQL）
                 try:
-                    conn = await get_opengauss_connection()
-                    try:
+                    # 使用连接池
+                    async with get_opengauss_connection() as conn:
                         # 获取当前统计值
                         current_task = await conn.fetchrow(
                             """
@@ -426,8 +418,6 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_
                             """,
                             'error', total_runs, failure_runs, end_time, error_msg, scheduled_task.id
                         )
-                    finally:
-                        await conn.close()
                 except Exception as db_error:
                     logger.error(f"更新任务日志失败: {str(db_error)}")
             else:
@@ -457,8 +447,8 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_
             
             # 输出任务统计信息（失败后）
             if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     current_task = await conn.fetchrow(
                         """
                         SELECT total_runs, success_runs, failure_runs, average_duration
@@ -474,8 +464,6 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_
                         logger.error(f"     失败次数: {current_task['failure_runs'] or 0}")
                         if current_task['average_duration']:
                             logger.error(f"     平均执行时长: {current_task['average_duration']}秒")
-                finally:
-                    await conn.close()
             else:
                 logger.error(f"   任务统计:")
                 logger.error(f"     总执行次数: {scheduled_task.total_runs or 0}")

@@ -206,8 +206,8 @@ class BackupActionHandler(ActionHandler):
             if backup_task_id:
                 if is_opengauss():
                     # openGauss 原生SQL查询
-                    conn = await get_opengauss_connection()
-                    try:
+                    # 使用连接池
+                    async with get_opengauss_connection() as conn:
                         row = await conn.fetchrow(
                             """
                             SELECT id, task_name, task_type, source_paths, exclude_patterns,
@@ -238,8 +238,6 @@ class BackupActionHandler(ActionHandler):
                             'is_template': row['is_template'],
                             'template_id': row['template_id'],
                         })()
-                    finally:
-                        await conn.close()
                 else:
                     # 使用SQLAlchemy查询
                     async with db_manager.AsyncSessionLocal() as session:
@@ -265,8 +263,8 @@ class BackupActionHandler(ActionHandler):
                     # 检查是否有相同模板的任务正在执行
                     if is_opengauss():
                         # openGauss 原生SQL查询
-                        conn = await get_opengauss_connection()
-                        try:
+                        # 使用连接池
+                        async with get_opengauss_connection() as conn:
                             running_task_row = await conn.fetchrow(
                                 """
                                 SELECT id, started_at FROM backup_tasks
@@ -276,8 +274,6 @@ class BackupActionHandler(ActionHandler):
                                 template_id, 'running'
                             )
                             running_task = dict(running_task_row) if running_task_row else None
-                        finally:
-                            await conn.close()
                     else:
                         # 使用SQLAlchemy查询
                         async with db_manager.AsyncSessionLocal() as session:
@@ -388,8 +384,8 @@ class BackupActionHandler(ActionHandler):
             # 创建备份任务执行记录（不是模板）
             if is_opengauss():
                 # openGauss 原生SQL插入
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     backup_task_id = await conn.fetchval(
                         """
                         INSERT INTO backup_tasks (
@@ -436,8 +432,6 @@ class BackupActionHandler(ActionHandler):
                         'template_id': template_task.id if template_task else None,
                         'created_by': 'scheduled_task',
                     })()
-                finally:
-                    await conn.close()
             else:
                 # 使用SQLAlchemy插入
                 async with db_manager.AsyncSessionLocal() as session:
@@ -470,8 +464,8 @@ class BackupActionHandler(ActionHandler):
                     # 在格式化开始前，更新备份任务状态为RUNNING，并在description中注明"格式化中"
                     # 注意：is_opengauss 和 get_opengauss_connection 已在文件顶部导入
                     if is_opengauss():
-                        conn = await get_opengauss_connection()
-                        try:
+                        # 使用连接池
+                        async with get_opengauss_connection() as conn:
                             await conn.execute(
                                 """
                                 UPDATE backup_tasks
@@ -485,8 +479,6 @@ class BackupActionHandler(ActionHandler):
                                 now(),
                                 backup_task.id
                             )
-                        finally:
-                            await conn.close()
                     else:
                         async with db_manager.AsyncSessionLocal() as session:
                             backup_task.status = BackupTaskStatus.RUNNING
@@ -522,8 +514,8 @@ class BackupActionHandler(ActionHandler):
                             else:
                                 # 格式化成功，更新description，移除"格式化中"，准备开始备份
                                 if is_opengauss():
-                                    conn = await get_opengauss_connection()
-                                    try:
+                                    # 使用连接池
+                                    async with get_opengauss_connection() as conn:
                                         await conn.execute(
                                             """
                                             UPDATE backup_tasks
@@ -534,8 +526,6 @@ class BackupActionHandler(ActionHandler):
                                             now(),
                                             backup_task.id
                                         )
-                                    finally:
-                                        await conn.close()
                                 else:
                                     async with db_manager.AsyncSessionLocal() as session:
                                         if backup_task.description:

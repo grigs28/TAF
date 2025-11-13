@@ -315,8 +315,8 @@ class TapeOperations:
                 logger.warning("格式化前未记录原卷标，无法更新数据库记录")
                 return
             
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 使用原卷标查找数据库记录
                 # 优先使用tape_id查找，如果没有则使用label查找
                 old_tape = None
@@ -377,8 +377,6 @@ class TapeOperations:
                         logger.warning(f"未找到原卷标记录（tape_id={original_tape_id}, label={original_label}），无法更新数据库")
                 
                 # 注意：asyncpg连接对象不需要手动commit，每个execute操作都是自动提交的
-            finally:
-                await conn.close()
                 
         except Exception as e:
             logger.error(f"更新数据库磁带卷标失败: {str(e)}")

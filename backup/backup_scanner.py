@@ -160,16 +160,16 @@ class BackupScanner:
                                 """
                                 if dir_count >= 50000:
                                     # 目录数量很多（>50000），使用10个文件作为批次阈值
-                                    return 10
+                                    return 300
                                 elif dir_count >= 10000:
                                     # 目录数量较多（10000-50000），使用25个文件作为批次阈值
-                                    return 25
+                                    return 500
                                 elif dir_count >= 1000:
                                     # 目录数量中等（1000-10000），使用50个文件作为批次阈值
-                                    return 50
+                                    return 800
                                 else:
                                     # 目录数量少（<1000），使用100个文件作为批次阈值
-                                    return 100
+                                    return 1000
                             MAX_PATH_LENGTH = 260  # Windows路径最大长度（字符）
                             MAX_PATH_DISPLAY = 200  # 日志中显示的最大路径长度（字符）
                             

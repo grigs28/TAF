@@ -57,8 +57,8 @@ class TapeHandler:
                         # 检查数据库中是否有该磁带
                         from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
                         if is_opengauss():
-                            conn = await get_opengauss_connection()
-                            try:
+                            # 使用连接池
+                            async with get_opengauss_connection() as conn:
                                 row = await conn.fetchrow(
                                     """
                                     SELECT tape_id, label, status, 
@@ -120,8 +120,6 @@ class TapeHandler:
                                     logger.error("检测到驱动器中的磁带未在数据库中注册，任务将停止")
                                     # 抛出异常，停止任务执行
                                     raise RuntimeError(f"驱动器中的磁带 {tape_id} 未在数据库中注册，请先在磁带管理页面添加该磁带")
-                            finally:
-                                await conn.close()
             except Exception as e:
                 logger.warning(f"扫描当前驱动器磁带失败: {str(e)}")
                 return None

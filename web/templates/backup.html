@@ -780,14 +780,26 @@ async function loadRunningTasks() {
                         }
                     }
                     
-                    // 更新数据量
+                    // 更新数据量：显示独立扫描的文件总大小（total_bytes），如果有压缩数据则显示压缩大小/总大小
                     const processedSizeRow = Array.from(taskCard.querySelectorAll('.mb-2 .d-flex.justify-content-between')).find(el => 
                         el.textContent.includes('数据量')
                     );
                     if (processedSizeRow) {
                         const processedSizeValue = processedSizeRow.querySelector('.text-muted:last-child');
                         if (processedSizeValue) {
-                            processedSizeValue.textContent = formatBytesToGB(task.processed_bytes || 0);
+                            const totalBytes = task.total_bytes || 0;  // 独立扫描的文件总大小
+                            const compressedBytes = task.compressed_bytes || 0;  // 压缩后文件大小
+                            
+                            if (compressedBytes > 0 && totalBytes > 0) {
+                                // 显示格式：压缩大小/总大小
+                                processedSizeValue.textContent = `${formatBytes(compressedBytes)}/${formatBytes(totalBytes)}`;
+                            } else if (totalBytes > 0) {
+                                // 只显示总大小
+                                processedSizeValue.textContent = formatBytes(totalBytes);
+                            } else {
+                                // 如果没有总大小，显示已处理字节数（向后兼容）
+                                processedSizeValue.textContent = formatBytes(task.processed_bytes || 0);
+                            }
                         }
                     }
                     
@@ -997,7 +1009,21 @@ async function loadRunningTasks() {
                                 </div>
                                 <div class="d-flex justify-content-between">
                                     <small class="text-muted">数据量:</small>
-                                    <small class="text-muted">${formatBytesToGB(task.processed_bytes || 0)}</small>
+                                    <small class="text-muted">${(() => {
+                                        const totalBytes = task.total_bytes || 0;  // 独立扫描的文件总大小
+                                        const compressedBytes = task.compressed_bytes || 0;  // 压缩后文件大小
+                                        
+                                        if (compressedBytes > 0 && totalBytes > 0) {
+                                            // 显示格式：压缩大小/总大小
+                                            return `${formatBytes(compressedBytes)}/${formatBytes(totalBytes)}`;
+                                        } else if (totalBytes > 0) {
+                                            // 只显示总大小
+                                            return formatBytes(totalBytes);
+                                        } else {
+                                            // 如果没有总大小，显示已处理字节数（向后兼容）
+                                            return formatBytes(task.processed_bytes || 0);
+                                        }
+                                    })()}</small>
                                 </div>
                                 <div class="d-flex justify-content-between">
                                     <small class="text-muted">已用时间:</small>
@@ -1106,7 +1132,21 @@ async function loadAllTasks() {
                     <td>${formatStatus(task.status || 'pending', task.description || '')}</td>
                     <td>${formatDateTime(task.started_at)}</td>
                     <td>${formatDateTime(task.completed_at)}</td>
-                    <td>${formatBytes(task.processed_bytes || 0)}</td>
+                    <td>${(() => {
+                        const totalBytes = task.total_bytes || 0;  // 独立扫描的文件总大小
+                        const compressedBytes = task.compressed_bytes || 0;  // 压缩后文件大小
+                        
+                        if (compressedBytes > 0 && totalBytes > 0) {
+                            // 显示格式：压缩大小/总大小
+                            return `${formatBytes(compressedBytes)}/${formatBytes(totalBytes)}`;
+                        } else if (totalBytes > 0) {
+                            // 只显示总大小
+                            return formatBytes(totalBytes);
+                        } else {
+                            // 如果没有总大小，显示已处理字节数（向后兼容）
+                            return formatBytes(task.processed_bytes || 0);
+                        }
+                    })()}</td>
                     <td>
                         <div class="btn-group btn-group-sm" data-task-id="${task.task_id}" data-from-scheduler="${task.from_scheduler ? 'true' : 'false'}" data-enabled="${task.enabled !== false ? 'true' : 'false'}">
                             ${task.from_scheduler ? `

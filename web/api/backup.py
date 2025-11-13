@@ -100,9 +100,8 @@ async def create_backup_task(
         
         # 创建备份任务模板
         if is_opengauss():
-            # 使用原生SQL插入
-            conn = await get_opengauss_connection()
-            try:
+            # 使用原生SQL插入（使用连接池）
+            async with get_opengauss_connection() as conn:
                 task_id = await conn.fetchval(
                     """
                     INSERT INTO backup_tasks (
@@ -164,8 +163,6 @@ async def create_backup_task(
                     "task_name": request.task_name,
                     "is_template": True
                 }
-            finally:
-                await conn.close()
         else:
             # 使用SQLAlchemy插入
             from config.database import db_manager
@@ -267,9 +264,8 @@ async def get_backup_tasks(
     """
     try:
         if is_opengauss():
-            # 使用原生SQL查询
-            conn = await get_opengauss_connection()
-            try:
+            # 使用原生SQL查询（使用连接池）
+            async with get_opengauss_connection() as conn:
                 # 构建WHERE子句
                 where_clauses = []
                 params = []
@@ -283,7 +279,7 @@ async def get_backup_tasks(
                     where_clauses.append(f"LOWER(status::text) = LOWER(${param_index})")
                     params.append(status)
                     param_index += 1
-                # 未运行：仅限从 backup_tasks 侧筛选“未启动”的pending记录
+                # 未运行：仅限从 backup_tasks 侧筛选"未启动"的pending记录
                 if include_not_run:
                     where_clauses.append("(started_at IS NULL) AND LOWER(status::text)=LOWER('PENDING')")
                 
@@ -445,8 +441,6 @@ async def get_backup_tasks(
                         return 0.0
                 tasks.sort(key=lambda x: _ts(x.get('created_at')), reverse=True)
                 return tasks[offset:offset+limit]
-            finally:
-                await conn.close()
         else:
             # 使用SQLAlchemy查询
             from config.database import db_manager
@@ -531,9 +525,8 @@ async def get_backup_task(task_id: int, http_request: Request):
     """获取备份任务详情"""
     try:
         if is_opengauss():
-            # 使用原生SQL查询
-            conn = await get_opengauss_connection()
-            try:
+            # 使用原生SQL查询（使用连接池）
+            async with get_opengauss_connection() as conn:
                 row = await conn.fetchrow(
                     """
                     SELECT id, task_name, task_type, status, progress_percent, total_files, 
@@ -595,8 +588,6 @@ async def get_backup_task(task_id: int, http_request: Request):
                     "tape_device": row["tape_device"],
                     "source_paths": source_paths
                 }
-            finally:
-                await conn.close()
         else:
             # 使用SQLAlchemy查询
             from config.database import db_manager
@@ -711,8 +702,8 @@ async def update_backup_task(
     try:
         # 验证：只能更新模板
         if is_opengauss():
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 row = await conn.fetchrow(
                     "SELECT is_template FROM backup_tasks WHERE id = $1",
                     task_id
@@ -721,8 +712,6 @@ async def update_backup_task(
                     raise HTTPException(status_code=404, detail="备份任务不存在")
                 if not row["is_template"]:
                     raise HTTPException(status_code=400, detail="只能更新备份任务模板，不能更新执行记录")
-            finally:
-                await conn.close()
         else:
             from config.database import db_manager
             from sqlalchemy import select
@@ -764,16 +753,17 @@ async def update_backup_task(
         updates["updated_at"] = datetime.now()
         
         if is_opengauss():
-            # 使用原生SQL更新
-            conn = await get_opengauss_connection()
-            try:
+            # 使用原生SQL更新（使用连接池）
+            async with get_opengauss_connection() as conn:
                 # 构建更新SQL
                 set_clauses = []
                 params = []
                 param_index = 1
                 
                 for key, value in updates.items():
-                    if key == "task_type":
+                    if key == "source_paths" or key == "exclude_patterns":
+                        set_clauses.append(f"{key} = ${param_index}::json")
+                    elif key == "task_type":
                         set_clauses.append(f"task_type = CAST(${param_index} AS backuptasktype)")
                     elif key == "updated_at":
                         set_clauses.append(f"updated_at = ${param_index}")
@@ -813,8 +803,6 @@ async def update_backup_task(
                 )
                 
                 return {"success": True, "message": "备份任务模板已更新"}
-            finally:
-                await conn.close()
         else:
             # 使用SQLAlchemy更新
             from config.database import db_manager
@@ -896,8 +884,8 @@ async def delete_backup_task(task_id: int, http_request: Request):
         is_template = None
         task_status = None
         if is_opengauss():
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 row = await conn.fetchrow(
                     "SELECT task_name, is_template, status FROM backup_tasks WHERE id = $1",
                     task_id
@@ -907,8 +895,6 @@ async def delete_backup_task(task_id: int, http_request: Request):
                 task_name = row["task_name"]
                 is_template = row["is_template"]
                 task_status = row["status"].value if hasattr(row["status"], "value") else str(row["status"])
-            finally:
-                await conn.close()
         else:
             from config.database import db_manager
             from sqlalchemy import select
@@ -923,9 +909,8 @@ async def delete_backup_task(task_id: int, http_request: Request):
                 task_status = task.status.value
         
         if is_opengauss():
-            # 使用原生SQL删除
-            conn = await get_opengauss_connection()
-            try:
+            # 使用原生SQL删除（使用连接池）
+            async with get_opengauss_connection() as conn:
                 # 先检查是否有外键约束（backup_sets表可能引用此任务）
                 # 删除顺序：backup_files -> backup_sets -> backup_tasks
                 backup_sets_count = await conn.fetchval(
@@ -1072,8 +1057,6 @@ async def delete_backup_task(task_id: int, http_request: Request):
                 )
                 
                 return {"success": True, "message": f"{resource_type_name}已删除"}
-            finally:
-                await conn.close()
         else:
             # 使用SQLAlchemy删除
             from config.database import db_manager
@@ -1151,8 +1134,8 @@ async def cancel_backup_task(task_id: int, http_request: Request):
         # 先获取任务信息用于日志
         task_info = None
         if is_opengauss():
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 row = await conn.fetchrow(
                     "SELECT task_name, status FROM backup_tasks WHERE id = $1",
                     task_id
@@ -1162,8 +1145,6 @@ async def cancel_backup_task(task_id: int, http_request: Request):
                         "task_name": row["task_name"],
                         "status": row["status"].value if hasattr(row["status"], "value") else str(row["status"])
                     }
-            finally:
-                await conn.close()
         else:
             from config.database import db_manager
             from sqlalchemy import select
@@ -1275,9 +1256,8 @@ async def get_backup_statistics(http_request: Request):
     """获取备份统计信息（使用真实数据）"""
     try:
         if is_opengauss():
-            # 使用原生SQL查询
-            conn = await get_opengauss_connection()
-            try:
+            # 使用原生SQL查询（使用连接池）
+            async with get_opengauss_connection() as conn:
                 # 总任务数（包含模板与执行记录）
                 total_row = await conn.fetchrow("SELECT COUNT(*) as total FROM backup_tasks")
                 total_tasks = total_row["total"] if total_row else 0
@@ -1398,8 +1378,6 @@ async def get_backup_statistics(http_request: Request):
                         "data_backed_up": recent_data
                     }
                 }
-            finally:
-                await conn.close()
         else:
             # 使用SQLAlchemy查询
             from config.database import db_manager

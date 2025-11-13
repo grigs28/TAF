@@ -73,8 +73,8 @@ async def log_operation(
         
         if is_opengauss():
             # 使用原生SQL插入操作日志
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 构建SQL语句
                 sql = """
                     INSERT INTO operation_logs (
@@ -114,8 +114,6 @@ async def log_operation(
                 
                 await conn.execute(sql, *params)
                 return True
-            finally:
-                await conn.close()
         else:
             # 使用SQLAlchemy插入操作日志
             async with db_manager.AsyncSessionLocal() as session:
@@ -197,8 +195,8 @@ async def log_system(
         
         if is_opengauss():
             # 使用原生SQL插入系统日志
-            conn = await get_opengauss_connection()
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 构建SQL语句
                 sql = """
                     INSERT INTO system_logs (
@@ -233,8 +231,6 @@ async def log_system(
                 
                 await conn.execute(sql, *params)
                 return True
-            finally:
-                await conn.close()
         else:
             # 使用SQLAlchemy插入系统日志
             async with db_manager.AsyncSessionLocal() as session:

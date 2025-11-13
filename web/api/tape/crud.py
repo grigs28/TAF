@@ -1535,28 +1535,10 @@ async def get_tape_history(request: Request, limit: int = 50, offset: int = 0):
                 }
         else:
             # 使用openGauss原生SQL
-            import asyncpg
-            import re
+            # 使用连接池
+            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
-            # 解析URL
-            url = database_url.replace("opengauss://", "postgresql://")
-            pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
-            match = re.match(pattern, url)
-            
-            if not match:
-                raise ValueError("无法解析openGauss数据库URL")
-            
-            username, password, host, port, database = match.groups()
-            
-            conn = await asyncpg.connect(
-                host=host,
-                port=int(port),
-                user=username,
-                password=password,
-                database=database
-            )
-            
-            try:
+            async with get_opengauss_connection() as conn:
                 # 查询磁带相关操作日志（resource_type = 'tape'）
                 sql = """
                     SELECT 
@@ -1627,9 +1609,6 @@ async def get_tape_history(request: Request, limit: int = 50, offset: int = 0):
                     "history": history,
                     "count": len(history)
                 }
-            
-            finally:
-                await conn.close()
     
     except Exception as e:
         duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)

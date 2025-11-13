@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "opengauss://username:password@localhost:5432/backup_db"
     DB_POOL_SIZE: int = 10
     DB_MAX_OVERFLOW: int = 20
+    DB_POOL_TIMEOUT: float = 30.0  # 连接池连接超时时间（秒）
+    DB_COMMAND_TIMEOUT: float = 60.0  # 命令超时时间（秒）
+    DB_ACQUIRE_TIMEOUT: float = 10.0  # 从连接池获取连接的超时时间（秒）
 
     # 数据库配置（兼容格式）
     DB_HOST: Optional[str] = "localhost"

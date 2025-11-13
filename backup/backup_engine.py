@@ -203,8 +203,8 @@ class BackupEngine:
                     from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
                     
                     if is_opengauss():
-                        conn = await get_opengauss_connection()
-                        try:
+                        # 使用连接池
+                        async with get_opengauss_connection() as conn:
                             # 检查是否有相同模板的任务在存活期内已成功执行
                             completed_task = await conn.fetchrow(
                                 """
@@ -219,8 +219,6 @@ class BackupEngine:
                             if completed_task and completed_task['completed_at']:
                                 logger.info(f"找到已完成的模板任务: {completed_task['id']}, 完成时间: {completed_task['completed_at']}")
                                 # 这里可以根据存活期判断是否在存活期内，暂时跳过
-                        finally:
-                            await conn.close()
             elif manual_run:
                 logger.info("========== 手动运行模式，跳过任务执行状态检查 ==========")
 
@@ -229,8 +227,8 @@ class BackupEngine:
             from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
             if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     running_task = await conn.fetchrow(
                         """
                         SELECT id, started_at FROM backup_tasks
@@ -253,8 +251,6 @@ class BackupEngine:
                         return False
                     else:
                         logger.info(f"任务 {task_id} 未在运行，可以执行")
-                finally:
-                    await conn.close()
 
             # 3. 检查磁带卷标是否当月（仅当备份目标为磁带时）
             logger.info("========== 执行前检查：磁带卷标当月验证 ==========")
@@ -424,8 +420,8 @@ class BackupEngine:
                                 # 保存任务结果
                                 from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
                                 if is_opengauss():
-                                    conn = await get_opengauss_connection()
-                                    try:
+                                    # 使用连接池
+                                    async with get_opengauss_connection() as conn:
                                         await conn.execute(
                                             """
                                             UPDATE backup_tasks
@@ -441,8 +437,6 @@ class BackupEngine:
                                             datetime.now(),
                                             backup_task.id
                                         )
-                                    finally:
-                                        await conn.close()
                                 
                                 logger.error(f"========== 任务已停止并标记为失败 ==========")
                                 logger.error(f"任务名称: {task_name}")
@@ -510,8 +504,8 @@ class BackupEngine:
                         # 保存任务结果
                         from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
                         if is_opengauss():
-                            conn = await get_opengauss_connection()
-                            try:
+                            # 使用连接池
+                            async with get_opengauss_connection() as conn:
                                 await conn.execute(
                                     """
                                     UPDATE backup_tasks
@@ -527,8 +521,6 @@ class BackupEngine:
                                     datetime.now(),
                                     backup_task.id
                                 )
-                            finally:
-                                await conn.close()
                         
                         logger.error(f"========== 任务已停止并标记为失败 ==========")
                         logger.error(f"任务名称: {task_name}")
@@ -714,8 +706,8 @@ class BackupEngine:
             from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
             if is_opengauss():
-                conn = await get_opengauss_connection()
-                try:
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
                     await conn.execute(
                         """
                         UPDATE backup_tasks
@@ -731,8 +723,6 @@ class BackupEngine:
                         datetime.now(),
                         backup_task.id
                     )
-                finally:
-                    await conn.close()
             else:
                 # 非 openGauss 使用 SQLAlchemy
                 async for db in get_db():
@@ -824,8 +814,8 @@ class BackupEngine:
                         # 如果 BackupTask 是字典或没有 error_message 属性，使用数据库更新
                         from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
                         if is_opengauss():
-                            conn = await get_opengauss_connection()
-                            try:
+                            # 使用连接池
+                            async with get_opengauss_connection() as conn:
                                 await conn.execute(
                                     """
                                     UPDATE backup_tasks
@@ -836,8 +826,6 @@ class BackupEngine:
                                     datetime.now(),
                                     backup_task.id
                                 )
-                            finally:
-                                await conn.close()
                 except Exception as update_error:
                     logger.warning(f"更新错误信息失败: {str(update_error)}")
                 await self.backup_db.update_task_status(backup_task, BackupTaskStatus.FAILED)
@@ -1178,7 +1166,7 @@ class BackupEngine:
                                     await self.backup_db.update_scan_progress(backup_task, processed_files, backup_task.total_files, "[写入磁带中...]")
                                 
                                 # 通知进度更新
-                                await self._notify_progress(backup_task)
+                                await self.backup_notifier.notify_progress(backup_task)
                                 
                                 group_idx += 1
                             except Exception as group_error:
@@ -1321,7 +1309,7 @@ class BackupEngine:
                         # total_files 现在等于 processed_files（已处理文件数的累计）
                         await self.backup_db.update_scan_progress(backup_task, processed_files, backup_task.total_files, "[写入磁带中...]")
                         
-                        await self._notify_progress(backup_task)
+                        await self.backup_notifier.notify_progress(backup_task)
                         group_idx += 1
                     except Exception as group_error:
                         # 文件组处理失败，记录错误但继续处理其他文件组

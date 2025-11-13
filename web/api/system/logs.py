@@ -47,10 +47,6 @@ async def get_system_logs(
         from datetime import datetime, timedelta
         import json
         
-        # 检查是否为openGauss
-        database_url = db_manager.settings.DATABASE_URL
-        is_opengauss = "opengauss" in database_url.lower()
-        
         # 如果没有指定时间范围，默认查询最近24小时的日志
         if not start_time:
             start_time = datetime.now() - timedelta(days=1)
@@ -59,29 +55,13 @@ async def get_system_logs(
         
         logs = []
         
-        if is_opengauss:
+        # 检查是否为 openGauss 数据库
+        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+        
+        if is_opengauss():
             # 使用原生SQL查询（openGauss）
-            import asyncpg
-            import re
-            
-            # 获取数据库连接
-            url = database_url.replace("opengauss://", "postgresql://")
-            pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
-            match = re.match(pattern, url)
-            if not match:
-                raise ValueError("无法解析openGauss数据库URL")
-            
-            username, password, host, port, database = match.groups()
-            
-            conn = await asyncpg.connect(
-                host=host,
-                port=int(port),
-                user=username,
-                password=password,
-                database=database
-            )
-            
-            try:
+            # 使用连接池
+            async with get_opengauss_connection() as conn:
                 # 查询操作日志
                 operation_where = []
                 params = []
@@ -215,8 +195,6 @@ async def get_system_logs(
                         "cpu_usage_percent": row.get('cpu_usage_percent')
                     })
                 
-            finally:
-                await conn.close()
         else:
             # 使用SQLAlchemy查询（其他数据库）
             # 仅在非openGauss时导入SQLAlchemy模型，避免解析openGauss
