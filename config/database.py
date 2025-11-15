@@ -353,6 +353,7 @@ class DatabaseManager:
                     ('compressed_bytes', 'BIGINT', '0', '压缩后字节数'),
                     ('scan_status', 'VARCHAR(50)', "'pending'", '扫描状态'),
                     ('scan_completed_at', 'TIMESTAMPTZ', 'NULL', '扫描完成时间'),
+                    ('operation_stage', 'VARCHAR(50)', 'NULL', '操作阶段（scan/compress/copy/finalize）'),
                 ],
                 'backup_sets': [
                     ('compressed_bytes', 'BIGINT', '0', '压缩后字节数'),
@@ -431,6 +432,7 @@ class DatabaseManager:
                     ('compressed_bytes', 'BIGINT', '0', '压缩后字节数'),
                     ('scan_status', 'VARCHAR(50)', "'pending'", '扫描状态'),
                     ('scan_completed_at', 'TIMESTAMPTZ', None, '扫描完成时间'),
+                    ('operation_stage', 'VARCHAR(50)', None, '操作阶段（scan/compress/copy/finalize）'),
                 ],
                 'backup_sets': [
                     ('compressed_bytes', 'BIGINT', '0', '压缩后字节数'),

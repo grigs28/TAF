@@ -773,7 +773,7 @@ class FileScanner:
                                     skipped_dirs += 1
                                     continue
                                 
-                                    if file_path.is_file():
+                                if file_path.is_file():
                                     scanned_count += 1
                                     total_scanned += 1
                                     

@@ -989,8 +989,8 @@ class BackupDB:
         except Exception as e:
             logger.error(f"更新任务状态失败: {str(e)}")
 
-    def update_task_stage(self, backup_task: BackupTask, stage_code: str):
-        """更新任务的操作阶段（同步方法）
+    async def update_task_stage_async(self, backup_task: BackupTask, stage_code: str):
+        """更新任务的操作阶段（异步方法）
 
         Args:
             backup_task: 备份任务对象
@@ -1009,62 +1009,69 @@ class BackupDB:
             current_time = datetime.now()
 
             if is_opengauss():
-                # openGauss 数据库更新
-                async def _update_opengauss():
-                    conn = await get_opengauss_connection()
-                    try:
-                        await conn.execute("""
-                            UPDATE backup_tasks
-                            SET operation_stage = $1,
-                                updated_at = $2
-                            WHERE id = $3
-                        """, stage_code, current_time, task_id)
-                    finally:
-                        await conn.close()
-
-                # 在新的事件循环中运行
-                loop = None
-                try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-
-                if loop.is_running():
-                    # 如果循环正在运行，创建任务
-                    asyncio.create_task(_update_opengauss())
-                else:
-                    # 如果循环没有运行，直接运行
-                    loop.run_until_complete(_update_opengauss())
+                async with get_opengauss_connection() as conn:
+                    await conn.execute("""
+                        UPDATE backup_tasks
+                        SET operation_stage = $1,
+                            updated_at = $2
+                        WHERE id = $3
+                    """, stage_code, current_time, task_id)
             else:
-                # 非 openGauss 数据库更新（同步方式）
-                import asyncio
-                async def _update_sqlalchemy():
-                    from config.database import get_db
-                    async for db in get_db():
-                        # 这里假设模型有operation_stage字段
-                        if hasattr(backup_task, 'operation_stage'):
-                            backup_task.operation_stage = stage_code
-                        backup_task.updated_at = current_time
-                        await db.commit()
-                        break
-
-                # 在新的事件循环中运行
-                loop = None
-                try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-
-                if loop.is_running():
-                    # 如果循环正在运行，创建任务
-                    asyncio.create_task(_update_sqlalchemy())
-                else:
-                    # 如果循环没有运行，直接运行
-                    loop.run_until_complete(_update_sqlalchemy())
+                # 非 openGauss 数据库更新
+                from config.database import get_db
+                async for db in get_db():
+                    # 这里假设模型有operation_stage字段
+                    if hasattr(backup_task, 'operation_stage'):
+                        backup_task.operation_stage = stage_code
+                    backup_task.updated_at = current_time
+                    await db.commit()
+                    break
 
             logger.info(f"任务 {task_id} 阶段更新为: {stage_code}")
+
+        except Exception as e:
+            logger.error(f"更新任务阶段失败: {str(e)}")
+
+    def update_task_stage(self, backup_task: BackupTask, stage_code: str, main_loop=None):
+        """更新任务的操作阶段（同步方法，在线程中调用时需要使用主事件循环）
+
+        Args:
+            backup_task: 备份任务对象
+            stage_code: 阶段代码（scan/compress/copy/finalize）
+            main_loop: 主事件循环（如果在线程中调用，必须提供）
+        """
+        try:
+            if not backup_task or not getattr(backup_task, 'id', None):
+                logger.warning("无效的任务对象，无法更新阶段")
+                return
+
+            import asyncio
+
+            # 如果提供了主事件循环，使用它（从线程中调用）
+            if main_loop:
+                try:
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.update_task_stage_async(backup_task, stage_code),
+                        main_loop
+                    )
+                    # 等待完成（设置超时避免阻塞）
+                    future.result(timeout=5.0)
+                except Exception as e:
+                    logger.warning(f"通过主事件循环更新任务阶段失败: {str(e)}")
+                return
+
+            # 否则，尝试在当前事件循环中执行
+            try:
+                loop = asyncio.get_running_loop()
+                # 如果事件循环正在运行，创建任务
+                loop.create_task(self.update_task_stage_async(backup_task, stage_code))
+            except RuntimeError:
+                # 没有运行的事件循环，创建新的
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(self.update_task_stage_async(backup_task, stage_code))
+                finally:
+                    loop.close()
 
         except Exception as e:
             logger.error(f"更新任务阶段失败: {str(e)}")

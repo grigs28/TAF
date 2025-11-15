@@ -45,13 +45,14 @@ class TapeFileMover:
     3. 确保磁带机操作是串行的
     """
     
-    def __init__(self, tape_handler, settings=None):
+    def __init__(self, tape_handler, settings=None, main_loop=None):
         """
         初始化文件移动队列管理器
         
         Args:
             tape_handler: TapeHandler实例，用于实际移动文件
             settings: 系统设置
+            main_loop: 主事件循环（用于在线程中执行异步操作）
         """
         self.tape_handler = tape_handler
         self.settings = settings or get_settings()
@@ -60,6 +61,7 @@ class TapeFileMover:
         self._running = False
         self._lock = threading.Lock()
         self._current_task: Optional[MoveTask] = None
+        self._main_loop = main_loop  # 保存主事件循环引用
         
     def start(self):
         """启动移动队列工作线程"""
@@ -188,7 +190,8 @@ class TapeFileMover:
             try:
                 from backup.backup_db import BackupDB
                 backup_db = BackupDB()
-                backup_db.update_task_stage(task.backup_task, "copy")
+                # 使用主事件循环更新状态（如果可用）
+                backup_db.update_task_stage(task.backup_task, "copy", main_loop=self._main_loop)
                 logger.info(f"任务 {task.backup_task.task_name} 状态更新为: 写入磁带")
             except Exception as stage_error:
                 logger.warning(f"更新任务状态失败: {str(stage_error)}")
@@ -231,7 +234,8 @@ class TapeFileMover:
                         try:
                             from backup.backup_db import BackupDB
                             backup_db = BackupDB()
-                            backup_db.update_task_stage(task.backup_task, "finalize")
+                            # 使用主事件循环更新状态（如果可用）
+                            backup_db.update_task_stage(task.backup_task, "finalize", main_loop=self._main_loop)
                             logger.info(f"任务 {task.backup_task.task_name} 状态更新为: 完成备份")
                         except Exception as stage_error:
                             logger.warning(f"更新任务状态失败: {str(stage_error)}")

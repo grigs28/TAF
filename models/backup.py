@@ -79,6 +79,7 @@ class BackupTask(BaseModel):
     result_summary = Column(JSON, comment="结果摘要")
     scan_status = Column(String(50), default="pending", comment="扫描状态")
     scan_completed_at = Column(DateTime(timezone=True), comment="扫描完成时间")
+    operation_stage = Column(String(50), comment="操作阶段（scan/compress/copy/finalize）")
 
     # 关联关系
     backup_sets = relationship("BackupSet", back_populates="backup_task", cascade="all, delete-orphan")

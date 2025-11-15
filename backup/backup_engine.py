@@ -114,9 +114,16 @@ class BackupEngine:
                 Path(temp_dir).mkdir(parents=True, exist_ok=True)
             
             # 初始化文件移动队列管理器
+            # 获取主事件循环，以便在线程中使用
+            try:
+                main_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                main_loop = None
+            
             self.tape_file_mover = TapeFileMover(
                 tape_handler=self.tape_handler,
-                settings=self.settings
+                settings=self.settings,
+                main_loop=main_loop
             )
             self.tape_file_mover.start()
             logger.info("文件移动队列管理器已启动")

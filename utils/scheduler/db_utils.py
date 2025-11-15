@@ -207,19 +207,29 @@ async def get_opengauss_connection():
     finally:
         try:
             monitor = get_opengauss_monitor()
+            release_coro = pool.release(conn)
             if monitor.enabled:
-                await monitor.watch(
-                    pool.release(conn),
-                    operation="pool.release",
-                    timeout=5.0,
-                )
+                try:
+                    await monitor.watch(
+                        release_coro,
+                        operation="pool.release",
+                        timeout=5.0,
+                    )
+                except Exception as watch_error:
+                    # 监控可能会捕获异常，但我们需要检查是否是 UNLISTEN 错误
+                    error_msg = str(watch_error)
+                    if "UNLISTEN" not in error_msg and "not yet supported" not in error_msg:
+                        raise
+                    # UNLISTEN 错误可以忽略
+                    logger.debug(f"释放连接时遇到 openGauss 限制（可忽略）: {error_msg}")
             else:
-                await pool.release(conn)
+                await release_coro
         except Exception as e:
             # openGauss 不支持 UNLISTEN 语句，这是 asyncpg 在释放连接时尝试执行的
             # 可以安全忽略这个错误，不影响连接释放
             error_msg = str(e)
-            if "UNLISTEN" in error_msg or "not yet supported" in error_msg:
+            import asyncpg
+            if isinstance(e, asyncpg.exceptions.FeatureNotSupportedError) or "UNLISTEN" in error_msg or "not yet supported" in error_msg:
                 # 这是 openGauss 的限制，不是真正的错误，使用 DEBUG 级别记录
                 logger.debug(f"释放连接时遇到 openGauss 限制（可忽略）: {error_msg}")
             else:

@@ -1,5 +1,25 @@
 # 更新日志
 
+## [0.1.14] - 2025-11-15
+
+### 修复
+
+#### 数据库字段缺失问题
+- ✅ 修复 `backup_tasks` 表缺少 `operation_stage` 字段导致的错误
+  - 在 `models/backup.py` 中添加 `operation_stage` 字段定义
+  - 在 `config/database.py` 的字段迁移逻辑中添加 `operation_stage` 字段
+  - openGauss 数据库：`_migrate_missing_columns` 方法自动检测并添加缺失字段
+  - PostgreSQL 数据库：`_migrate_missing_columns_postgresql` 方法自动检测并添加缺失字段
+  - 重启应用后自动为现有数据库添加缺失字段，无需手动执行 SQL
+  - 修复 `column "operation_stage" of relation "backup_tasks" does not exist` 错误
+
+#### 事件循环冲突问题
+- ✅ 修复多线程环境下更新任务阶段时的 `RuntimeError: Task got Future attached to a different loop` 错误
+  - 重构 `update_task_stage` 方法，分为 `update_task_stage_async`（异步）和 `update_task_stage`（同步包装）
+  - 同步方法支持 `main_loop` 参数，使用 `asyncio.run_coroutine_threadsafe` 在主事件循环中执行
+  - `TapeFileMover` 初始化时保存主事件循环引用，并传递给数据库更新操作
+  - 确保数据库操作在主事件循环中执行，避免事件循环冲突
+
 ## [0.1.13] - 2025-11-15
 
 ### 改进
