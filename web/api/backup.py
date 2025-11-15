@@ -8,6 +8,7 @@ Backup Management API
 import logging
 import traceback
 import json
+import re
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Request
@@ -23,6 +24,116 @@ from utils.log_utils import log_operation, log_system
 logger = get_logger(__name__)
 router = APIRouter()
 settings = get_settings()
+
+STAGE_FLOW_DEFINITION = [
+    ("scan", "扫描文件"),
+    ("compress", "压缩/打包"),
+    ("copy", "写入磁带"),
+    ("finalize", "完成"),
+]
+STAGE_INDEX = {code: idx for idx, (code, _) in enumerate(STAGE_FLOW_DEFINITION)}
+STAGE_LABELS = {
+    "scan": "扫描文件",
+    "compress": "压缩/打包",
+    "copy": "写入磁带",
+    "finalize": "完成备份",
+    "waiting": "等待批次",
+    "cancelled": "任务已取消",
+    "failed": "任务失败",
+    "format": "格式化磁带",
+}
+OP_STATUS_PATTERN = re.compile(r'\[([^\]]+)\]')
+OP_STAGE_KEYWORDS = [
+    ("扫描", "scan"),
+    ("准备压缩", "compress"),
+    ("压缩", "compress"),
+    ("等待下一批", "compress"),
+    ("复制", "copy"),
+    ("写入", "copy"),
+    ("完成", "finalize"),
+    ("格式化", "format"),
+    ("取消", "cancelled"),
+    ("失败", "failed"),
+]
+
+
+def _normalize_status_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "value"):
+        return value.value
+    return str(value)
+
+
+def _build_stage_info(description: Optional[str], scan_status: Optional[str], status_value: str) -> Dict[str, Any]:
+    desc = description or ""
+    matches = OP_STATUS_PATTERN.findall(desc)
+    operation_status = matches[-1] if matches else None
+    if operation_status:
+        operation_status = operation_status.replace("...", "")
+
+    stage_code = None
+    if operation_status:
+        lowered = operation_status.lower()
+        for keyword, code in OP_STAGE_KEYWORDS:
+            if keyword.lower() in lowered:
+                stage_code = code
+                break
+
+    normalized_status = (status_value or "").lower()
+    normalized_scan = (scan_status or "").lower()
+
+    if not stage_code:
+        if normalized_status in ("failed",):
+            stage_code = "failed"
+            operation_status = operation_status or "任务失败"
+        elif normalized_status in ("cancelled", "canceled"):
+            stage_code = "cancelled"
+            operation_status = operation_status or "任务已取消"
+        elif normalized_status == "completed":
+            stage_code = "finalize"
+            operation_status = operation_status or "备份完成"
+        elif normalized_scan in ("pending", "running"):
+            stage_code = "scan"
+            operation_status = operation_status or "扫描文件中"
+        elif normalized_scan == "completed" and normalized_status == "running":
+            stage_code = "compress"
+            operation_status = operation_status or "压缩文件中"
+        else:
+            stage_code = "scan"
+            operation_status = operation_status or "等待任务开始"
+
+    stage_label = STAGE_LABELS.get(stage_code, operation_status or "")
+    current_index = STAGE_INDEX.get(stage_code, None)
+    if current_index is None:
+        if stage_code in ("cancelled", "failed", "finalize"):
+            current_index = len(STAGE_FLOW_DEFINITION) - 1
+        else:
+            current_index = 0
+
+    stage_steps = []
+    for idx, (code, label) in enumerate(STAGE_FLOW_DEFINITION):
+        if stage_code in ("cancelled", "failed"):
+            state = "current" if idx == current_index else "done"
+        else:
+            if idx < current_index:
+                state = "done"
+            elif idx == current_index:
+                state = "current"
+            else:
+                state = "pending"
+        stage_steps.append({
+            "code": code,
+            "label": label,
+            "state": state
+        })
+
+    return {
+        "operation_status": operation_status,
+        "operation_stage": stage_code,
+        "operation_stage_label": stage_label,
+        "stage_steps": stage_steps
+    }
 
 
 def get_system_instance(request: Request):
@@ -66,11 +177,26 @@ class BackupTaskResponse(BaseModel):
     total_files: int
     processed_files: int
     total_bytes: int
+    total_bytes_actual: int = 0
     processed_bytes: int
+    compressed_bytes: int = 0
+    compression_ratio: float = 0.0
     created_at: datetime
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
     error_message: Optional[str]
+    source_paths: List[str] = Field(default_factory=list)
+    tape_device: Optional[str] = None
+    tape_id: Optional[str] = None
+    is_template: bool = False
+    from_scheduler: bool = False
+    enabled: Optional[bool] = True
+    description: Optional[str] = ""
+    estimated_archive_count: Optional[int] = None
+    operation_status: Optional[str] = None
+    operation_stage: Optional[str] = None
+    operation_stage_label: Optional[str] = None
+    stage_steps: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 @router.post("/tasks", response_model=Dict[str, Any])
@@ -264,6 +390,28 @@ async def get_backup_tasks(
     """
     try:
         if is_opengauss():
+            def _decode_json_field(value, default=None):
+                """openGauss driver可能返回str/memoryview/bytes，统一解码为Python对象"""
+                if value is None:
+                    return default
+                if isinstance(value, memoryview):
+                    try:
+                        value = value.tobytes()
+                    except Exception:
+                        return default
+                if isinstance(value, (bytes, bytearray)):
+                    try:
+                        value = value.decode('utf-8')
+                    except Exception:
+                        return default
+                if isinstance(value, str):
+                    try:
+                        return json.loads(value)
+                    except json.JSONDecodeError:
+                        return default
+                if isinstance(value, (list, dict)):
+                    return value
+                return default
             # 使用原生SQL查询（使用连接池）
             async with get_opengauss_connection() as conn:
                 # 构建WHERE子句
@@ -302,7 +450,7 @@ async def get_backup_tasks(
                     SELECT id, task_name, task_type, status, progress_percent, total_files, 
                            processed_files, total_bytes, processed_bytes, compressed_bytes, 
                            created_at, started_at, completed_at, error_message, is_template, 
-                           tape_device, source_paths, description, result_summary
+                           tape_device, source_paths, description, result_summary, scan_status
                     FROM backup_tasks
                     WHERE {where_sql}
                     ORDER BY created_at DESC
@@ -310,49 +458,44 @@ async def get_backup_tasks(
                 rows = await conn.fetch(sql, *params)
                 
                 # 转换为响应格式
-                import json
                 tasks = []
                 for row in rows:
                     # 解析JSON字段
-                    source_paths = None
-                    if row["source_paths"]:
-                        try:
-                            if isinstance(row["source_paths"], str):
-                                source_paths = json.loads(row["source_paths"])
-                            else:
-                                source_paths = row["source_paths"]
-                        except:
-                            source_paths = None
+                    source_paths = _decode_json_field(row.get("source_paths"), default=[])
                     
                     # 计算压缩率
                     compression_ratio = 0.0
+                    total_bytes_actual = 0
                     if row["processed_bytes"] and row["processed_bytes"] > 0 and row["compressed_bytes"]:
                         compression_ratio = float(row["compressed_bytes"]) / float(row["processed_bytes"])
                     
                     # 解析result_summary获取预计的压缩包总数
                     estimated_archive_count = None
-                    result_summary_dict = None
-                    if row.get("result_summary"):
-                        try:
-                            if isinstance(row["result_summary"], str):
-                                result_summary_dict = json.loads(row["result_summary"])
-                            elif isinstance(row["result_summary"], dict):
-                                result_summary_dict = row["result_summary"]
-
-                            if isinstance(result_summary_dict, dict):
-                                estimated_archive_count = result_summary_dict.get('estimated_archive_count')
-                        except:
-                            pass
+                    result_summary_dict = _decode_json_field(row.get("result_summary"), default={})
+                    if isinstance(result_summary_dict, dict):
+                        estimated_archive_count = result_summary_dict.get('estimated_archive_count')
+                        total_bytes_actual = (
+                            result_summary_dict.get('total_scanned_bytes')
+                            or result_summary_dict.get('total_bytes_actual')
+                            or 0
+                        )
+                    status_value = _normalize_status_value(row["status"])
+                    stage_info = _build_stage_info(
+                        row.get("description"),
+                        row.get("scan_status"),
+                        status_value
+                    )
                     
                     tasks.append({
                         "task_id": row["id"],
                         "task_name": row["task_name"],
                         "task_type": row["task_type"].value if hasattr(row["task_type"], "value") else str(row["task_type"]),
-                        "status": row["status"].value if hasattr(row["status"], "value") else str(row["status"]),
+                        "status": status_value,
                         "progress_percent": float(row["progress_percent"]) if row["progress_percent"] else 0.0,
                         "total_files": row["total_files"] or 0,  # 总文件数（由后台扫描任务更新）
                         "processed_files": row["processed_files"] or 0,  # 已处理文件数
                         "total_bytes": row["total_bytes"] or 0,  # 总字节数（由后台扫描任务更新）
+                        "total_bytes_actual": total_bytes_actual,
                         "processed_bytes": row["processed_bytes"] or 0,
                         "compressed_bytes": row["compressed_bytes"] or 0,
                         "compression_ratio": compression_ratio,
@@ -363,9 +506,13 @@ async def get_backup_tasks(
                         "error_message": row["error_message"],
                         "is_template": row["is_template"] or False,
                         "tape_device": row["tape_device"],
-                        "source_paths": source_paths,
+                        "source_paths": source_paths or [],
                         "description": row["description"] or "",
-                        "from_scheduler": False
+                        "from_scheduler": False,
+                        "operation_status": stage_info["operation_status"],
+                        "operation_stage": stage_info["operation_stage"],
+                        "operation_stage_label": stage_info["operation_stage_label"],
+                        "stage_steps": stage_info["stage_steps"]
                     })
                 # 追加计划任务（未运行模板）
                 # 仅当无状态过滤或过滤为pending/all时返回
@@ -388,25 +535,62 @@ async def get_backup_tasks(
                             sched_params.append(f"%\"task_type\": \"{task_type}\"%")
                     # 未运行：计划任务自然视作未运行
                     sched_sql = f"""
-                        SELECT id, task_name, status, enabled, created_at, action_config
+                        SELECT id, task_name, status, enabled, created_at, action_config, task_metadata
                         FROM scheduled_tasks
                         WHERE {' AND '.join(sched_where)}
                         ORDER BY created_at DESC
                     """
                     sched_rows = await conn.fetch(sched_sql, *sched_params)
+                    template_ids = set()
+                    parsed_sched_rows = []
                     for srow in sched_rows:
-                        # 从action_config中提取task_type/tape_device
+                        action_cfg = _decode_json_field(srow.get("action_config"), default={})
+                        task_metadata = _decode_json_field(srow.get("task_metadata"), default={})
+                        backup_template_id = None
+                        if isinstance(task_metadata, dict):
+                            backup_template_id = task_metadata.get("backup_task_id")
+                            if backup_template_id:
+                                template_ids.add(int(backup_template_id))
+                        parsed_sched_rows.append((srow, action_cfg, task_metadata, backup_template_id))
+
+                    template_info_map = {}
+                    if template_ids:
+                        template_rows = await conn.fetch(
+                            """
+                            SELECT id, source_paths, tape_device
+                            FROM backup_tasks
+                            WHERE id = ANY($1::int[])
+                            """,
+                            list(template_ids)
+                        )
+                        for trow in template_rows:
+                            t_source_paths = _decode_json_field(trow.get('source_paths'), default=[])
+                            template_info_map[trow['id']] = {
+                                "source_paths": t_source_paths or [],
+                                "tape_device": trow.get('tape_device')
+                            }
+                    for srow, acfg, metadata, template_id in parsed_sched_rows:
+                        # 从action_config中提取task_type/tape_device/source_paths
                         atype = 'full'
                         tdev = None
+                        spaths: Optional[List[str]] = None
                         try:
-                            acfg = srow["action_config"]
-                            if isinstance(acfg, str):
-                                acfg = json.loads(acfg)
                             if isinstance(acfg, dict):
                                 atype = acfg.get('task_type') or atype
                                 tdev = acfg.get('tape_device')
-                        except:
-                            pass
+                                cfg_paths = acfg.get('source_paths')
+                                if isinstance(cfg_paths, list):
+                                    spaths = [str(p) for p in cfg_paths if p]
+                                elif isinstance(cfg_paths, str) and cfg_paths.strip():
+                                    spaths = [cfg_paths.strip()]
+                        except Exception as parse_error:
+                            logger.debug(f"解析计划任务 action_config 失败: {parse_error}")
+                        template_fallback = template_info_map.get(int(template_id)) if template_id else None
+                        if (not spaths) and template_fallback:
+                            spaths = template_fallback.get("source_paths") or []
+                        if (not tdev) and template_fallback:
+                            tdev = template_fallback.get("tape_device")
+                        stage_info = _build_stage_info("", None, "pending")
                         tasks.append({
                             "task_id": srow["id"],
                             "task_name": srow["task_name"],
@@ -418,15 +602,23 @@ async def get_backup_tasks(
                             "total_bytes": 0,
                             "total_bytes_actual": 0,
                             "processed_bytes": 0,
+                            "compressed_bytes": 0,
+                            "compression_ratio": 0.0,
                             "created_at": srow["created_at"],
                             "started_at": None,
                             "completed_at": None,
                             "error_message": None,
                             "is_template": True,
                             "tape_device": tdev,
-                            "source_paths": None,
+                            "source_paths": spaths or [],
                             "from_scheduler": True,
-                            "enabled": srow.get("enabled", True)
+                            "enabled": srow.get("enabled", True),
+                            "description": "",
+                            "estimated_archive_count": None,
+                            "operation_status": stage_info["operation_status"],
+                            "operation_stage": stage_info["operation_stage"],
+                            "operation_stage_label": stage_info["operation_stage_label"],
+                            "stage_steps": stage_info["stage_steps"]
                         })
                 # 合并后排序与分页（统一为时间戳，避免aware/naive比较异常）
                 def _ts(val):
@@ -480,6 +672,8 @@ async def get_backup_tasks(
                 tasks = []
                 for task in backup_tasks:
                     total_bytes_actual = 0
+                    compression_ratio = 0.0
+                    estimated_archive_count = None
                     try:
                         result_summary_dict = None
                         if task.result_summary:
@@ -489,8 +683,19 @@ async def get_backup_tasks(
                                 result_summary_dict = task.result_summary
                         if isinstance(result_summary_dict, dict):
                             total_bytes_actual = result_summary_dict.get('total_scanned_bytes') or 0
+                            estimated_archive_count = result_summary_dict.get('estimated_archive_count')
                     except Exception:
                         total_bytes_actual = 0
+                    try:
+                        if task.processed_bytes and task.processed_bytes > 0 and task.compressed_bytes:
+                            compression_ratio = float(task.compressed_bytes) / float(task.processed_bytes)
+                    except Exception:
+                        compression_ratio = 0.0
+                    stage_info = _build_stage_info(
+                        task.description,
+                        getattr(task, "scan_status", None),
+                        task.status.value if task.status else ""
+                    )
                     
                     tasks.append({
                         "task_id": task.id,
@@ -503,6 +708,13 @@ async def get_backup_tasks(
                         "total_bytes": task.total_bytes or 0,
                         "total_bytes_actual": total_bytes_actual,
                         "processed_bytes": task.processed_bytes or 0,
+                        "compressed_bytes": task.compressed_bytes or 0,
+                        "compression_ratio": compression_ratio,
+                        "operation_status": stage_info["operation_status"],
+                        "operation_stage": stage_info["operation_stage"],
+                        "operation_stage_label": stage_info["operation_stage_label"],
+                        "stage_steps": stage_info["stage_steps"],
+                        "estimated_archive_count": estimated_archive_count,
                         "created_at": task.created_at,
                         "started_at": task.started_at,
                         "completed_at": task.completed_at,
@@ -510,7 +722,9 @@ async def get_backup_tasks(
                         "is_template": task.is_template or False,
                         "tape_device": task.tape_device,
                         "source_paths": task.source_paths,
-                        "description": task.description or ""
+                        "description": task.description or "",
+                        "from_scheduler": False,
+                        "enabled": getattr(task, "enabled", True)
                     })
                 
                 return tasks
@@ -530,9 +744,9 @@ async def get_backup_task(task_id: int, http_request: Request):
                 row = await conn.fetchrow(
                     """
                     SELECT id, task_name, task_type, status, progress_percent, total_files, 
-                           processed_files, total_bytes, processed_bytes, created_at, started_at, 
-                           completed_at, error_message, is_template, tape_device, source_paths,
-                           description, result_summary
+                           processed_files, total_bytes, processed_bytes, compressed_bytes,
+                           created_at, started_at, completed_at, error_message, is_template,
+                           tape_device, source_paths, description, result_summary, enabled
                     FROM backup_tasks
                     WHERE id = $1
                     """,
@@ -555,6 +769,7 @@ async def get_backup_task(task_id: int, http_request: Request):
                         source_paths = None
                 
                 total_bytes_actual = 0
+                estimated_archive_count = None
                 try:
                     result_summary = row.get("result_summary")
                     result_summary_dict = None
@@ -565,20 +780,37 @@ async def get_backup_task(task_id: int, http_request: Request):
                             result_summary_dict = result_summary
                     if isinstance(result_summary_dict, dict):
                         total_bytes_actual = result_summary_dict.get('total_scanned_bytes') or 0
+                        estimated_archive_count = result_summary_dict.get('estimated_archive_count')
                 except Exception:
                     total_bytes_actual = 0
+                compression_ratio = 0.0
+                compressed_bytes = row.get("compressed_bytes") or 0
+                try:
+                    if row["processed_bytes"] and row["processed_bytes"] > 0 and compressed_bytes:
+                        compression_ratio = float(compressed_bytes) / float(row["processed_bytes"])
+                except Exception:
+                    compression_ratio = 0.0
                 
+                status_value = _normalize_status_value(row["status"])
+                stage_info = _build_stage_info(
+                    row.get("description"),
+                    row.get("scan_status"),
+                    status_value
+                )
                 return {
                     "task_id": row["id"],
                     "task_name": row["task_name"],
                     "task_type": row["task_type"].value if hasattr(row["task_type"], "value") else str(row["task_type"]),
-                    "status": row["status"].value if hasattr(row["status"], "value") else str(row["status"]),
+                    "status": status_value,
                     "progress_percent": float(row["progress_percent"]) if row["progress_percent"] else 0.0,
                     "total_files": row["total_files"] or 0,
                     "processed_files": row["processed_files"] or 0,
                     "total_bytes": row["total_bytes"] or 0,
                     "total_bytes_actual": total_bytes_actual,
                     "processed_bytes": row["processed_bytes"] or 0,
+                    "compressed_bytes": compressed_bytes,
+                    "compression_ratio": compression_ratio,
+                    "estimated_archive_count": estimated_archive_count,
                     "created_at": row["created_at"],
                     "started_at": row["started_at"],
                     "completed_at": row["completed_at"],
@@ -586,7 +818,13 @@ async def get_backup_task(task_id: int, http_request: Request):
                     "description": row["description"] or "",
                     "is_template": row["is_template"] or False,
                     "tape_device": row["tape_device"],
-                    "source_paths": source_paths
+                    "source_paths": source_paths or [],
+                    "enabled": row.get("enabled", True),
+                    "from_scheduler": False,
+                        "operation_status": stage_info["operation_status"],
+                    "operation_stage": stage_info["operation_stage"],
+                    "operation_stage_label": stage_info["operation_stage_label"],
+                    "stage_steps": stage_info["stage_steps"]
                 }
         else:
             # 使用SQLAlchemy查询
@@ -602,6 +840,7 @@ async def get_backup_task(task_id: int, http_request: Request):
                     raise HTTPException(status_code=404, detail="备份任务不存在")
                 
                 total_bytes_actual = 0
+                estimated_archive_count = None
                 try:
                     result_summary = task.result_summary
                     result_summary_dict = None
@@ -612,9 +851,21 @@ async def get_backup_task(task_id: int, http_request: Request):
                             result_summary_dict = result_summary
                     if isinstance(result_summary_dict, dict):
                         total_bytes_actual = result_summary_dict.get('total_scanned_bytes') or 0
+                        estimated_archive_count = result_summary_dict.get('estimated_archive_count')
                 except Exception:
                     total_bytes_actual = 0
+                compression_ratio = 0.0
+                try:
+                    if task.processed_bytes and task.processed_bytes > 0 and task.compressed_bytes:
+                        compression_ratio = float(task.compressed_bytes) / float(task.processed_bytes)
+                except Exception:
+                    compression_ratio = 0.0
                 
+                stage_info = _build_stage_info(
+                    task.description,
+                    getattr(task, "scan_status", None),
+                    task.status.value if task.status else ""
+                )
                 return {
                     "task_id": task.id,
                     "task_name": task.task_name,
@@ -626,13 +877,23 @@ async def get_backup_task(task_id: int, http_request: Request):
                     "total_bytes": task.total_bytes or 0,
                     "total_bytes_actual": total_bytes_actual,
                     "processed_bytes": task.processed_bytes or 0,
+                    "compressed_bytes": task.compressed_bytes or 0,
+                    "compression_ratio": compression_ratio,
+                    "estimated_archive_count": estimated_archive_count,
                     "created_at": task.created_at,
                     "started_at": task.started_at,
                     "completed_at": task.completed_at,
                     "error_message": task.error_message,
+                    "description": task.description or "",
                     "is_template": task.is_template or False,
                     "tape_device": task.tape_device,
-                    "source_paths": task.source_paths
+                    "source_paths": task.source_paths,
+                    "operation_status": stage_info["operation_status"],
+                    "operation_stage": stage_info["operation_stage"],
+                    "operation_stage_label": stage_info["operation_stage_label"],
+                    "stage_steps": stage_info["stage_steps"],
+                    "enabled": getattr(task, "enabled", True),
+                    "from_scheduler": False
                 }
 
     except HTTPException:

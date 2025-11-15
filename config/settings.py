@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     DB_POOL_TIMEOUT: float = 30.0  # 连接池连接超时时间（秒）
     DB_COMMAND_TIMEOUT: float = 60.0  # 命令超时时间（秒）
     DB_ACQUIRE_TIMEOUT: float = 10.0  # 从连接池获取连接的超时时间（秒）
+    DB_FLAVOR: Optional[str] = None  # 显式指定数据库类型（如 opengauss/postgresql/sqlite）
+    OG_HEARTBEAT_INTERVAL: int = 30  # openGauss 心跳间隔（秒）
+    OG_HEARTBEAT_TIMEOUT: float = 5.0  # 单次心跳超时时间
+    OG_OPERATION_TIMEOUT: float = 45.0  # 默认数据库操作超时
+    OG_OPERATION_WARN_THRESHOLD: float = 5.0  # 操作耗时告警阈值
+    OG_OPERATION_FAILURE_THRESHOLD: int = 3  # 连续失败次数触发告警
+    OG_MAX_HEARTBEAT_FAILURES: int = 3  # 心跳失败重试次数
+    OG_ALERT_COOLDOWN: int = 600  # 告警冷却时间（秒）
 
     # 数据库配置（兼容格式）
     DB_HOST: Optional[str] = "localhost"
@@ -96,6 +104,8 @@ class Settings(BaseSettings):
     COMPRESSION_LEVEL: int = 9
     SOLID_BLOCK_SIZE: int = 67108864  # 64MB
     MAX_FILE_SIZE: int = 12 * 1024 * 1024 * 1024  # 3GB
+    COMPRESSION_DICTIONARY_SIZE: str = "256m"  # 7-Zip字典大小（固定256M）
+    COMPRESS_DIRECTLY_TO_TAPE: bool = True  # 是否直接压缩到磁带机（默认True，跳过temp/final目录）
 
     # 计划任务配置
     SCHEDULER_ENABLED: bool = True
@@ -118,7 +128,14 @@ class Settings(BaseSettings):
     # 备份配置
     BACKUP_TEMP_DIR: str = "temp/backup"
     RECOVERY_TEMP_DIR: str = "temp/recovery"
-    COMPRESSION_THREADS: int = 4
+    BACKUP_COMPRESS_DIR: str = "temp/compress"  # 压缩文件临时目录（先压缩到这里，再移动到磁带机）
+    COMPRESSION_THREADS: int = 4  # Python压缩线程数（py7zr/PGZip）
+    # 压缩方法配置
+    COMPRESSION_METHOD: str = "pgzip"  # 压缩方法: "pgzip"、"py7zr" 或 "7zip_command"
+    SEVENZIP_PATH: str = r"C:\Program Files\7-Zip\7z.exe"  # 7-Zip程序路径
+    # 注意：COMPRESSION_COMMAND_THREADS 默认使用 WEB_WORKERS 的值，在代码中动态获取
+    PGZIP_BLOCK_SIZE: str = "1G"  # PGZip块大小
+    PGZIP_THREADS: int = 4  # PGZip线程数
     SCAN_BATCH_SIZE: int = 180000  # 扫描批次大小（文件数）：扫描到多少文件后开始压缩（默认30000个文件）
     SCAN_BATCH_SIZE_BYTES: int = 18* 1024 * 1024 * 1024  # 扫描批次大小（字节）：扫描到多少字节后开始压缩（默认6GB = 6 * 1024 * 1024 * 1024）
 
@@ -139,7 +156,7 @@ class Settings(BaseSettings):
     # 高级配置
     ENVIRONMENT: str = "production"
     WEB_HOST: str = "0.0.0.0"
-    WEB_WORKERS: int = 4
+    WEB_WORKERS: int = 4  # Web服务器工作进程数，同时作为7-Zip命令行线程数（-mmt参数）的默认值
     ENABLE_CORS: bool = True
     CORS_ORIGINS: str = "*"
     ENABLE_GZIP: bool = True

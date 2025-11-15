@@ -9,6 +9,7 @@ import logging
 import traceback
 import json
 import re
+import os
 import asyncio
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -20,6 +21,7 @@ from models.system_log import OperationType, LogCategory, LogLevel
 from utils.log_utils import log_operation, log_system
 from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
 from utils.tape_tools import tape_tools_manager
+from config.database import db_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -278,14 +280,25 @@ async def create_tape(request: CreateTapeRequest, http_request: Request, backgro
                         
                         # 格式化成功后，从磁盘读取实际的卷标和SN，然后更新数据库
                         try:
-                            # 等待一小段时间，确保格式化操作完全完成
                             import asyncio
-                            await asyncio.sleep(2)
+                            # 等待几秒，确保 LTFS 自动挂载完成
+                            await asyncio.sleep(3)
                             
-                            # 读取磁盘上的实际卷标和序列号
-                            label_result = await tape_tools_manager.read_tape_label_windows()
+                            # 确认盘符挂载，如果尚未挂载则尝试重新分配
+                            drive_with_colon = drive_letter if drive_letter.endswith(':') else f"{drive_letter}:"
+                            if not os.path.exists(drive_with_colon):
+                                logger.info(f"LTFS盘符 {drive_with_colon} 暂未挂载，尝试重新分配")
+                                assign_result = await tape_tools_manager.assign_tape_ltfs(drive_letter)
+                                if not assign_result.get("success"):
+                                    logger.warning(f"重新分配 {drive_with_colon} 失败，错误: {assign_result.get('error')}, 暂不读取卷标")
+                                    label_result = None
+                                else:
+                                    await asyncio.sleep(1)  # 再给 1 秒钟完成挂载
+                                    label_result = await tape_tools_manager.read_tape_label_windows()
+                            else:
+                                label_result = await tape_tools_manager.read_tape_label_windows()
                             
-                            if label_result.get("success"):
+                            if label_result and label_result.get("success"):
                                 actual_label = label_result.get("volume_name", "").strip()
                                 actual_serial = label_result.get("serial_number", "").strip()
                                 
@@ -1494,14 +1507,15 @@ async def get_tape_history(request: Request, limit: int = 50, offset: int = 0):
         from datetime import timedelta
         
         settings = get_settings()
-        database_url = settings.DATABASE_URL
+        is_opengauss_db = False
+        if hasattr(db_manager, "is_opengauss_database"):
+            try:
+                is_opengauss_db = db_manager.is_opengauss_database()
+            except Exception:
+                is_opengauss_db = False
         
-        # 检查是否为openGauss
-        is_opengauss = "opengauss" in database_url.lower()
-        
-        if not is_opengauss:
+        if not is_opengauss_db:
             # 非openGauss数据库，使用SQLAlchemy
-            from config.database import db_manager
             from models.system_log import OperationLog
             from sqlalchemy import select, desc
             
@@ -1535,9 +1549,6 @@ async def get_tape_history(request: Request, limit: int = 50, offset: int = 0):
                 }
         else:
             # 使用openGauss原生SQL
-            # 使用连接池
-            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
-            
             async with get_opengauss_connection() as conn:
                 # 查询磁带相关操作日志（resource_type = 'tape'）
                 sql = """

@@ -65,13 +65,20 @@ class ActionHandler:
     def __init__(self, system_instance):
         self.system_instance = system_instance
     
-    async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None, manual_run: bool = False) -> Dict[str, Any]:
+    async def execute(
+        self,
+        config: Dict,
+        scheduled_task: Optional[ScheduledTask] = None,
+        manual_run: bool = False,
+        run_options: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """执行动作（子类实现）
         
         参数:
             config: 动作配置
             scheduled_task: 计划任务对象（可选）
             manual_run: 是否为手动运行（Web界面点击运行），默认为False
+            run_options: 手动运行附加选项（如继续/重启模式）
         """
         raise NotImplementedError
 
@@ -79,8 +86,14 @@ class ActionHandler:
 class BackupActionHandler(ActionHandler):
     """备份动作处理器"""
     
-    async def execute(self, config: Dict, backup_task_id: Optional[int] = None, 
-                     scheduled_task: Optional[ScheduledTask] = None, manual_run: bool = False) -> Dict[str, Any]:
+    async def execute(
+        self,
+        config: Dict,
+        backup_task_id: Optional[int] = None, 
+        scheduled_task: Optional[ScheduledTask] = None,
+        manual_run: bool = False,
+        run_options: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """执行备份动作
         
         参数:
@@ -93,6 +106,18 @@ class BackupActionHandler(ActionHandler):
             raise ValueError("备份引擎未初始化")
         
         try:
+            run_options = run_options or {}
+            run_mode = str(run_options.get('mode') or 'auto').lower()
+            if run_mode not in ('auto', 'resume', 'restart'):
+                run_mode = 'auto'
+            force_rescan_option = bool(run_options.get('force_rescan', False))
+            resume_only = run_mode == 'resume'
+            restart_requested = run_mode == 'restart'
+            
+            logger.info(
+                f"备份任务运行模式: manual_run={manual_run}, run_mode={run_mode}, force_rescan={force_rescan_option}"
+            )
+            
             # 执行前判定：周期内是否已成功执行、是否正在执行、磁带标签是否当月
             current_time = now()
             if scheduled_task and not manual_run:
@@ -364,6 +389,41 @@ class BackupActionHandler(ActionHandler):
                                             f"(任务ID: {running_task.id})"
                                         )
             
+            backup_executed = False
+            backup_task = None
+            resumed_from_existing = False
+
+            resume_template_id = template_task.id if template_task else backup_task_id
+            if scheduled_task and scheduled_task.task_metadata:
+                resume_template_id = scheduled_task.task_metadata.get('backup_task_id') or resume_template_id
+            if manual_run and resume_template_id:
+                if restart_requested:
+                    cancelled_task_id = await self._cancel_incomplete_backup_task(resume_template_id)
+                    if cancelled_task_id:
+                        logger.info(f"手动运行选择重新开始，已取消未完成任务 {cancelled_task_id}")
+                        try:
+                            await log_system(
+                                level=LogLevel.INFO,
+                                category=LogCategory.BACKUP,
+                                message=f"手动运行重新开始：取消未完成任务 {cancelled_task_id}",
+                                module="utils.scheduler.action_handlers",
+                                function="BackupActionHandler.execute",
+                            )
+                        except Exception:
+                            pass
+                else:
+                    existing_task = await self._load_incomplete_backup_task(resume_template_id)
+                    if existing_task:
+                        backup_task = existing_task
+                        resumed_from_existing = True
+                        logger.info(f"检测到未完成的备份任务 {existing_task.id}，尝试继续执行")
+                    elif resume_only:
+                        logger.info("手动运行模式选择仅继续，但未找到可继续的备份任务")
+                        return {
+                            "status": "skipped",
+                            "message": "没有未完成的备份任务可继续"
+                        }
+
             # 从模板或配置中获取备份参数（若缺省则从系统实例配置补齐）
             if template_task:
                 source_paths = template_task.source_paths or []
@@ -416,82 +476,84 @@ class BackupActionHandler(ActionHandler):
             # 注意：不在这里发送"开始"通知，因为 backup_engine.execute_backup_task() 中已经会发送
             # 这样可以避免重复通知，并且 backup_engine 中的通知会检查通知事件配置
             
-            # 标记备份任务是否已执行（用于判断是否需要发送失败通知）
-            backup_executed = False
-
             # 创建备份任务执行记录（不是模板）
-            if is_opengauss():
-                # openGauss 原生SQL插入
-                # 使用连接池
-                async with get_opengauss_connection() as conn:
-                    backup_task_id = await conn.fetchval(
-                        """
-                        INSERT INTO backup_tasks (
-                            task_name, task_type, source_paths, exclude_patterns,
-                            compression_enabled, encryption_enabled, retention_days,
-                            description, tape_device, status, is_template, template_id,
-                            created_by, created_at, updated_at
-                        ) VALUES (
-                            $1, $2::backuptasktype, $3, $4,
-                            $5, $6, $7,
-                            $8, $9, $10::backuptaskstatus, FALSE, $11,
-                            $12, $13, $13
-                        ) RETURNING id
-                        """,
-                        task_name,
-                        task_type.value if hasattr(task_type, 'value') else str(task_type),
-                        json.dumps(source_paths) if source_paths else None,
-                        json.dumps(exclude_patterns) if exclude_patterns else None,
-                        compression_enabled,
-                        encryption_enabled,
-                        retention_days,
-                        description,
-                        tape_device,
-                        'pending',
-                        template_task.id if template_task else None,
-                        'scheduled_task',
-                        now()
-                    )
-                    
-                    # 创建一个简化的 BackupTask 对象用于后续使用
-                    backup_task = type('BackupTask', (), {
-                        'id': backup_task_id,
-                        'task_name': task_name,
-                        'task_type': task_type,
-                        'source_paths': source_paths,
-                        'exclude_patterns': exclude_patterns,
-                        'compression_enabled': compression_enabled,
-                        'encryption_enabled': encryption_enabled,
-                        'retention_days': retention_days,
-                        'description': description,
-                        'tape_device': tape_device,
-                        'status': BackupTaskStatus.PENDING,
-                        'is_template': False,
-                        'template_id': template_task.id if template_task else None,
-                        'created_by': 'scheduled_task',
-                    })()
-            else:
-                # 使用SQLAlchemy插入
-                async with db_manager.AsyncSessionLocal() as session:
-                    backup_task = BackupTask(
-                        task_name=task_name,
-                        task_type=task_type,
-                        source_paths=source_paths,
-                        exclude_patterns=exclude_patterns,
-                        compression_enabled=compression_enabled,
-                        encryption_enabled=encryption_enabled,
-                        retention_days=retention_days,
-                        description=description,
-                        tape_device=tape_device,  # 保存磁带设备配置（执行时会选择）
-                        status=BackupTaskStatus.PENDING,
-                        is_template=False,  # 标记为执行记录
-                        template_id=template_task.id if template_task else None,  # 关联模板
-                        created_by='scheduled_task'
-                    )
-                    
-                    session.add(backup_task)
-                    await session.commit()
-                    await session.refresh(backup_task)
+            if backup_task is None:
+                if is_opengauss():
+                    async with get_opengauss_connection() as conn:
+                        backup_task_id = await conn.fetchval(
+                            """
+                            INSERT INTO backup_tasks (
+                                task_name, task_type, source_paths, exclude_patterns,
+                                compression_enabled, encryption_enabled, retention_days,
+                                description, tape_device, status, is_template, template_id,
+                                created_by, created_at, updated_at, scan_status
+                            ) VALUES (
+                                $1, $2::backuptasktype, $3, $4,
+                                $5, $6, $7,
+                                $8, $9, $10::backuptaskstatus, FALSE, $11,
+                                $12, $13, $13, 'pending'
+                            ) RETURNING id
+                            """,
+                            task_name,
+                            task_type.value if hasattr(task_type, 'value') else str(task_type),
+                            json.dumps(source_paths) if source_paths else None,
+                            json.dumps(exclude_patterns) if exclude_patterns else None,
+                            compression_enabled,
+                            encryption_enabled,
+                            retention_days,
+                            description,
+                            tape_device,
+                            'pending',
+                            template_task.id if template_task else None,
+                            'scheduled_task',
+                            now()
+                        )
+                        
+                        backup_task = type('BackupTask', (), {
+                            'id': backup_task_id,
+                            'task_name': task_name,
+                            'task_type': task_type,
+                            'source_paths': source_paths,
+                            'exclude_patterns': exclude_patterns,
+                            'compression_enabled': compression_enabled,
+                            'encryption_enabled': encryption_enabled,
+                            'retention_days': retention_days,
+                            'description': description,
+                            'tape_device': tape_device,
+                            'status': BackupTaskStatus.PENDING,
+                            'is_template': False,
+                            'template_id': template_task.id if template_task else None,
+                            'created_by': 'scheduled_task',
+                            'scan_status': 'pending',
+                            'backup_set_id': None,
+                        })()
+                else:
+                    async with db_manager.AsyncSessionLocal() as session:
+                        backup_task = BackupTask(
+                            task_name=task_name,
+                            task_type=task_type,
+                            source_paths=source_paths,
+                            exclude_patterns=exclude_patterns,
+                            compression_enabled=compression_enabled,
+                            encryption_enabled=encryption_enabled,
+                            retention_days=retention_days,
+                            description=description,
+                            tape_device=tape_device,
+                            status=BackupTaskStatus.PENDING,
+                            is_template=False,
+                            template_id=template_task.id if template_task else None,
+                            created_by='scheduled_task',
+                            scan_status='pending'
+                        )
+                        
+                        session.add(backup_task)
+                        await session.commit()
+                        await session.refresh(backup_task)
+            
+            if not hasattr(backup_task, 'force_rescan'):
+                backup_task.force_rescan = False
+            if force_rescan_option:
+                backup_task.force_rescan = True
             
             # 完整备份前：格式化磁带（计划任务使用当前年月生成卷标）
             # 注意：手动运行时跳过格式化
@@ -584,6 +646,9 @@ class BackupActionHandler(ActionHandler):
                 elif not ((template_task and template_task.task_type == BackupTaskType.FULL) or (not template_task and task_type == BackupTaskType.FULL)):
                     logger.info("非完整备份任务，跳过格式化操作")
 
+            if backup_task:
+                task_name = backup_task.task_name
+
             # 执行备份任务
             await log_system(
                 level=LogLevel.INFO,
@@ -651,12 +716,121 @@ class BackupActionHandler(ActionHandler):
                 except Exception:
                     pass
             raise
+    
+    async def _load_incomplete_backup_task(self, template_id: int):
+        if not template_id:
+            return None
+        if is_opengauss():
+            async with get_opengauss_connection() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, task_name, task_type, source_paths, exclude_patterns,
+                           compression_enabled, encryption_enabled, retention_days,
+                           description, tape_device, status, template_id, tape_id,
+                           total_files, processed_files, total_bytes, processed_bytes,
+                           compressed_bytes, backup_set_id, scan_status, scan_completed_at,
+                           result_summary
+                    FROM backup_tasks
+                    WHERE template_id = $1 AND status <> 'completed'
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    template_id
+                )
+            if not row:
+                return None
+            return self._build_backup_task_from_row(row)
+        else:
+            async with db_manager.AsyncSessionLocal() as session:
+                stmt = (
+                    select(BackupTask)
+                    .where(
+                        and_(
+                            BackupTask.template_id == template_id,
+                            BackupTask.status != BackupTaskStatus.COMPLETED
+                        )
+                    )
+                    .order_by(BackupTask.id.desc())
+                    .limit(1)
+                )
+                result = await session.execute(stmt)
+                task = result.scalar_one_or_none()
+                if task:
+                    task.force_rescan = False
+                return task
+
+    async def _cancel_incomplete_backup_task(self, template_id: int) -> Optional[int]:
+        """取消并清理未完成的备份任务"""
+        existing_task = await self._load_incomplete_backup_task(template_id)
+        if not existing_task:
+            return None
+        
+        backup_engine = getattr(self.system_instance, 'backup_engine', None)
+        backup_db = getattr(backup_engine, 'backup_db', None) if backup_engine else None
+        
+        if backup_db and getattr(existing_task, 'backup_set_id', None):
+            try:
+                backup_set = await backup_db.get_backup_set_by_set_id(existing_task.backup_set_id)
+                if backup_set and getattr(backup_set, 'id', None):
+                    await backup_db.clear_backup_files_for_set(backup_set.id)
+            except Exception as e:
+                logger.warning(f"清理历史 backup_files 失败: {e}")
+        
+        if backup_db:
+            try:
+                await backup_db.update_task_status(existing_task, BackupTaskStatus.CANCELLED)
+            except Exception as e:
+                logger.warning(f"更新未完成备份任务状态为取消失败: {e}")
+        
+        return existing_task.id
+
+    def _build_backup_task_from_row(self, row) -> BackupTask:
+        backup_task = BackupTask()
+        backup_task.id = row['id']
+        backup_task.task_name = row['task_name']
+        backup_task.task_type = _parse_enum(BackupTaskType, row.get('task_type'), BackupTaskType.FULL)
+        source_paths = row.get('source_paths')
+        backup_task.source_paths = source_paths if isinstance(source_paths, list) else json.loads(source_paths) if source_paths else []
+        exclude_patterns = row.get('exclude_patterns')
+        backup_task.exclude_patterns = exclude_patterns if isinstance(exclude_patterns, list) else json.loads(exclude_patterns) if exclude_patterns else []
+        backup_task.compression_enabled = row.get('compression_enabled')
+        backup_task.encryption_enabled = row.get('encryption_enabled')
+        backup_task.retention_days = row.get('retention_days')
+        backup_task.description = row.get('description')
+        backup_task.tape_device = row.get('tape_device')
+        backup_task.tape_id = row.get('tape_id')
+        backup_task.status = _parse_enum(BackupTaskStatus, row.get('status'), BackupTaskStatus.PENDING)
+        backup_task.is_template = False
+        backup_task.template_id = row.get('template_id')
+        backup_task.total_files = row.get('total_files') or 0
+        backup_task.processed_files = row.get('processed_files') or 0
+        backup_task.total_bytes = row.get('total_bytes') or 0
+        backup_task.processed_bytes = row.get('processed_bytes') or 0
+        backup_task.compressed_bytes = row.get('compressed_bytes') or 0
+        backup_task.backup_set_id = row.get('backup_set_id')
+        backup_task.scan_status = row.get('scan_status') or 'pending'
+        backup_task.scan_completed_at = row.get('scan_completed_at')
+        summary = row.get('result_summary')
+        if summary and isinstance(summary, str):
+            try:
+                summary = json.loads(summary)
+            except json.JSONDecodeError:
+                summary = {}
+        backup_task.result_summary = summary or {}
+        backup_task.force_rescan = False
+        return backup_task
 
 
 class RecoveryActionHandler(ActionHandler):
     """恢复动作处理器"""
     
-    async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None, manual_run: bool = False) -> Dict[str, Any]:
+    async def execute(
+        self,
+        config: Dict,
+        scheduled_task: Optional[ScheduledTask] = None,
+        manual_run: bool = False,
+        run_options: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """执行恢复动作"""
         try:
             logger.info("开始执行恢复任务")
@@ -729,7 +903,13 @@ class RecoveryActionHandler(ActionHandler):
 class CleanupActionHandler(ActionHandler):
     """清理动作处理器"""
     
-    async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None, manual_run: bool = False) -> Dict[str, Any]:
+    async def execute(
+        self,
+        config: Dict,
+        scheduled_task: Optional[ScheduledTask] = None,
+        manual_run: bool = False,
+        run_options: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """执行清理动作"""
         return {"status": "success", "message": "清理任务已执行"}
 
@@ -737,7 +917,13 @@ class CleanupActionHandler(ActionHandler):
 class HealthCheckActionHandler(ActionHandler):
     """健康检查动作处理器"""
     
-    async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None, manual_run: bool = False) -> Dict[str, Any]:
+    async def execute(
+        self,
+        config: Dict,
+        scheduled_task: Optional[ScheduledTask] = None,
+        manual_run: bool = False,
+        run_options: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """执行健康检查动作"""
         return {"status": "success", "message": "健康检查已完成"}
 
@@ -745,7 +931,13 @@ class HealthCheckActionHandler(ActionHandler):
 class RetentionCheckActionHandler(ActionHandler):
     """保留期检查动作处理器"""
     
-    async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None, manual_run: bool = False) -> Dict[str, Any]:
+    async def execute(
+        self,
+        config: Dict,
+        scheduled_task: Optional[ScheduledTask] = None,
+        manual_run: bool = False,
+        run_options: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """执行保留期检查动作"""
         return {"status": "success", "message": "保留期检查已完成"}
 
@@ -753,7 +945,13 @@ class RetentionCheckActionHandler(ActionHandler):
 class CustomActionHandler(ActionHandler):
     """自定义动作处理器"""
     
-    async def execute(self, config: Dict, scheduled_task: Optional[ScheduledTask] = None, manual_run: bool = False) -> Dict[str, Any]:
+    async def execute(
+        self,
+        config: Dict,
+        scheduled_task: Optional[ScheduledTask] = None,
+        manual_run: bool = False,
+        run_options: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """执行自定义动作"""
         return {"status": "success", "message": "自定义任务已执行"}
 

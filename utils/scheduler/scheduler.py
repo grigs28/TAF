@@ -452,7 +452,7 @@ class TaskScheduler:
             logger.error(f"错误详情:\n{error_detail}")
             return False
 
-    async def run_task(self, task_id: int) -> bool:
+    async def run_task(self, task_id: int, run_options: Optional[Dict[str, Any]] = None) -> bool:
         """立即运行计划任务"""
         try:
             task = await get_task_by_id(task_id)
@@ -466,7 +466,12 @@ class TaskScheduler:
                 await self._load_task(task)
             
             # 创建执行函数并执行（手动运行标记为True，因为是从Web界面点击运行的）
-            execute_func = create_task_executor(task, self.system_instance, manual_run=True)
+            execute_func = create_task_executor(
+                task,
+                self.system_instance,
+                manual_run=True,
+                run_options=run_options
+            )
             
             # 在后台执行（不阻塞）
             execution_task = asyncio.create_task(execute_func())

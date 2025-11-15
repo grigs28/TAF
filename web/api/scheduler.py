@@ -129,6 +129,12 @@ class ScheduledTaskResponse(BaseModel):
         from_attributes = True
 
 
+class ScheduledTaskRunRequest(BaseModel):
+    """手动运行计划任务的选项"""
+    mode: Optional[str] = Field("auto", description="运行模式: auto/resume/restart")
+    force_rescan: Optional[bool] = Field(False, description="强制重新扫描/压缩前置文件")
+
+
 # ===== API端点 =====
 
 @router.get("/tasks", response_model=List[ScheduledTaskResponse])
@@ -723,7 +729,11 @@ async def _check_and_format_tape_if_needed(
 
 # 更具体的路径必须在通用路径之前定义，以确保路由匹配正确
 @router.post("/tasks/{task_id}/run")
-async def run_scheduled_task(task_id: int, request: Request = None):
+async def run_scheduled_task(
+    task_id: int,
+    run_request: Optional[ScheduledTaskRunRequest] = None,
+    request: Request = None
+):
     """立即运行计划任务"""
     try:
         system = request.app.state.system
@@ -737,7 +747,13 @@ async def run_scheduled_task(task_id: int, request: Request = None):
         if not task:
             raise HTTPException(status_code=404, detail="计划任务不存在")
         
-        success = await scheduler.run_task(task_id)
+        run_options = {"mode": "auto"}
+        if run_request:
+            run_options = run_request.dict(exclude_none=True)
+            if 'mode' not in run_options or not run_options['mode']:
+                run_options['mode'] = "auto"
+        
+        success = await scheduler.run_task(task_id, run_options=run_options)
         
         if not success:
             raise HTTPException(status_code=404, detail="计划任务不存在")
@@ -758,7 +774,11 @@ async def run_scheduled_task(task_id: int, request: Request = None):
             ip_address=request.client.host if request and request.client else None
         )
         
-        return {"success": True, "message": "计划任务已开始执行"}
+        return {
+            "success": True,
+            "message": "计划任务已开始执行",
+            "run_options": run_options
+        }
         
     except HTTPException:
         raise

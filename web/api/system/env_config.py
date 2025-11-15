@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+系统环境配置API
+System Environment Configuration API
+"""
+
+import logging
+from typing import Dict, Any, Optional, Union
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field
+
+from config.env_file_manager import get_env_manager
+from config.settings import get_settings, reload_settings
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+
+class SystemEnvConfig(BaseModel):
+    """系统环境配置模型"""
+    # 应用配置
+    app_name: Optional[str] = Field(None, description="应用名称")
+    debug: Optional[bool] = Field(None, description="调试模式")
+    environment: Optional[str] = Field(None, description="运行环境")
+    
+    # Web服务配置
+    web_host: Optional[str] = Field(None, description="监听地址")
+    web_port: Optional[int] = Field(None, description="监听端口")
+    enable_cors: Optional[bool] = Field(None, description="启用CORS")
+    
+    # 数据库配置
+    db_host: Optional[str] = Field(None, description="数据库主机")
+    db_port: Optional[int] = Field(None, description="数据库端口")
+    db_user: Optional[str] = Field(None, description="数据库用户名")
+    db_password: Optional[str] = Field(None, description="数据库密码")
+    db_database: Optional[str] = Field(None, description="数据库名称")
+    db_pool_size: Optional[int] = Field(None, description="连接池大小")
+    db_max_overflow: Optional[int] = Field(None, description="最大溢出")
+    
+    # ITDT工具配置
+    itdt_path: Optional[str] = Field(None, description="ITDT可执行文件路径")
+    itdt_device_path: Optional[str] = Field(None, description="磁带设备路径")
+    
+    # LTFS工具配置
+    ltfs_tools_dir: Optional[str] = Field(None, description="LTFS工具目录")
+    tape_drive_letter: Optional[str] = Field(None, description="挂载盘符")
+    
+    # 钉钉通知配置
+    dingtalk_api_url: Optional[str] = Field(None, description="钉钉API地址")
+    dingtalk_api_key: Optional[str] = Field(None, description="钉钉API密钥")
+    dingtalk_default_phone: Optional[str] = Field(None, description="默认手机号")
+    
+    # 备份策略配置
+    default_retention_months: Optional[int] = Field(None, description="默认保留月数")
+    auto_erase_expired: Optional[bool] = Field(None, description="自动擦除过期磁带")
+    max_file_size: Optional[int] = Field(None, description="最大文件大小（字节）")
+    scan_batch_size: Optional[int] = Field(None, description="扫描批次大小（文件数）")
+    scan_batch_size_bytes: Optional[int] = Field(None, description="扫描批次大小（字节）")
+    backup_compress_dir: Optional[str] = Field(None, description="压缩文件临时目录")
+    
+    # 日志配置
+    log_level: Optional[str] = Field(None, description="日志级别")
+
+
+@router.get("/env-config")
+async def get_env_config():
+    """获取系统环境配置（从.env文件读取，结合settings默认值）"""
+    try:
+        env_manager = get_env_manager()
+        
+        # 从.env文件读取配置（会自动合并settings默认值）
+        env_vars = env_manager.read_env_file(include_defaults=True)
+        
+        # 辅助函数：解析布尔值
+        def parse_bool(value: Any, default: bool = False) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.lower() in ['true', '1', 'yes', 'on']
+            return default
+        
+        # 辅助函数：解析整数
+        def parse_int(value: Any, default: int = 0) -> int:
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str):
+                try:
+                    return int(value) if value else default
+                except (ValueError, TypeError):
+                    return default
+            return default
+        
+        # 构建配置字典（env_vars已经包含了.env文件和settings的合并值）
+        # 直接从 env_vars 读取，因为它已经合并了 .env 文件和 settings 的默认值
+        # .env 文件中的值会覆盖 settings 中的默认值
+        config = {
+            # 应用配置
+            "app_name": env_vars.get("APP_NAME", ""),
+            "debug": parse_bool(env_vars.get("DEBUG"), False),
+            "environment": env_vars.get("ENVIRONMENT", "production"),
+            
+            # Web服务配置
+            "web_host": env_vars.get("WEB_HOST", "0.0.0.0"),
+            "web_port": parse_int(env_vars.get("WEB_PORT"), 8080),
+            # web_workers已移除，由压缩配置中的compression_command_threads替代
+            "enable_cors": parse_bool(env_vars.get("ENABLE_CORS"), True),
+            
+            # 数据库配置
+            "db_host": env_vars.get("DB_HOST", ""),
+            "db_port": parse_int(env_vars.get("DB_PORT"), None) if env_vars.get("DB_PORT") else None,
+            "db_user": env_vars.get("DB_USER", ""),
+            "db_password": env_vars.get("DB_PASSWORD", ""),
+            "db_database": env_vars.get("DB_DATABASE", ""),
+            "db_pool_size": parse_int(env_vars.get("DB_POOL_SIZE"), 10),
+            "db_max_overflow": parse_int(env_vars.get("DB_MAX_OVERFLOW"), 20),
+            
+            # ITDT工具配置
+            "itdt_path": env_vars.get("ITDT_PATH", ""),
+            "itdt_device_path": env_vars.get("ITDT_DEVICE_PATH", ""),
+            
+            # LTFS工具配置
+            "ltfs_tools_dir": env_vars.get("LTFS_TOOLS_DIR", ""),
+            "tape_drive_letter": env_vars.get("TAPE_DRIVE_LETTER", "O"),
+            
+            # 钉钉通知配置
+            "dingtalk_api_url": env_vars.get("DINGTALK_API_URL", ""),
+            "dingtalk_api_key": env_vars.get("DINGTALK_API_KEY", ""),
+            "dingtalk_default_phone": env_vars.get("DINGTALK_DEFAULT_PHONE", ""),
+            
+            # 备份策略配置
+            "default_retention_months": parse_int(env_vars.get("DEFAULT_RETENTION_MONTHS"), 6),
+            "auto_erase_expired": parse_bool(env_vars.get("AUTO_ERASE_EXPIRED"), True),
+            # compression_level已移除，由压缩配置中的compression_level替代
+            "max_file_size": parse_int(env_vars.get("MAX_FILE_SIZE"), 12 * 1024 * 1024 * 1024),
+            "scan_batch_size": parse_int(env_vars.get("SCAN_BATCH_SIZE"), 180000),
+            "scan_batch_size_bytes": parse_int(env_vars.get("SCAN_BATCH_SIZE_BYTES"), 18 * 1024 * 1024 * 1024),
+            "backup_compress_dir": env_vars.get("BACKUP_COMPRESS_DIR", "temp/compress"),
+            
+            # 日志配置
+            "log_level": env_vars.get("LOG_LEVEL", "INFO"),
+        }
+        
+        return {
+            "success": True,
+            "config": config
+        }
+    
+    except Exception as e:
+        logger.error(f"获取环境配置失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"获取环境配置失败: {str(e)}")
+
+
+@router.put("/env-config")
+async def update_env_config(config: SystemEnvConfig, request: Request):
+    """更新系统环境配置（写入.env文件）"""
+    try:
+        env_manager = get_env_manager()
+        
+        # 构建更新字典（只包含非None的值）
+        updates: Dict[str, str] = {}
+        
+        # 应用配置
+        if config.app_name is not None:
+            updates["APP_NAME"] = config.app_name
+        if config.debug is not None:
+            updates["DEBUG"] = str(config.debug).lower()
+        if config.environment is not None:
+            updates["ENVIRONMENT"] = config.environment
+        
+        # Web服务配置
+        if config.web_host is not None:
+            updates["WEB_HOST"] = config.web_host
+        if config.web_port is not None:
+            updates["WEB_PORT"] = str(config.web_port)
+        # web_workers已移除，由压缩配置中的compression_command_threads替代
+        if config.enable_cors is not None:
+            updates["ENABLE_CORS"] = str(config.enable_cors).lower()
+        
+        # 数据库配置
+        if config.db_host is not None:
+            updates["DB_HOST"] = config.db_host
+        if config.db_port is not None:
+            updates["DB_PORT"] = str(config.db_port)
+        if config.db_user is not None:
+            updates["DB_USER"] = config.db_user
+        if config.db_password is not None:
+            updates["DB_PASSWORD"] = config.db_password
+        if config.db_database is not None:
+            updates["DB_DATABASE"] = config.db_database
+        if config.db_pool_size is not None:
+            updates["DB_POOL_SIZE"] = str(config.db_pool_size)
+        if config.db_max_overflow is not None:
+            updates["DB_MAX_OVERFLOW"] = str(config.db_max_overflow)
+        
+        # ITDT工具配置
+        if config.itdt_path is not None:
+            updates["ITDT_PATH"] = config.itdt_path
+        if config.itdt_device_path is not None:
+            updates["ITDT_DEVICE_PATH"] = config.itdt_device_path
+        
+        # LTFS工具配置
+        if config.ltfs_tools_dir is not None:
+            updates["LTFS_TOOLS_DIR"] = config.ltfs_tools_dir
+        if config.tape_drive_letter is not None:
+            updates["TAPE_DRIVE_LETTER"] = config.tape_drive_letter.upper()
+        
+        # 钉钉通知配置
+        if config.dingtalk_api_url is not None:
+            updates["DINGTALK_API_URL"] = config.dingtalk_api_url
+        if config.dingtalk_api_key is not None:
+            updates["DINGTALK_API_KEY"] = config.dingtalk_api_key
+        if config.dingtalk_default_phone is not None:
+            updates["DINGTALK_DEFAULT_PHONE"] = config.dingtalk_default_phone
+        
+        # 备份策略配置
+        if config.default_retention_months is not None:
+            updates["DEFAULT_RETENTION_MONTHS"] = str(config.default_retention_months)
+        if config.auto_erase_expired is not None:
+            updates["AUTO_ERASE_EXPIRED"] = str(config.auto_erase_expired).lower()
+        # compression_level已移除，由压缩配置中的compression_level替代
+        if config.max_file_size is not None:
+            updates["MAX_FILE_SIZE"] = str(config.max_file_size)
+        if config.scan_batch_size is not None:
+            updates["SCAN_BATCH_SIZE"] = str(config.scan_batch_size)
+        if config.scan_batch_size_bytes is not None:
+            updates["SCAN_BATCH_SIZE_BYTES"] = str(config.scan_batch_size_bytes)
+        
+        # 日志配置
+        if config.log_level is not None:
+            updates["LOG_LEVEL"] = config.log_level
+        
+        # 更新数据库URL（如果数据库配置有变化）
+        if any(key in updates for key in ["DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_DATABASE"]):
+            # 从当前配置读取数据库类型
+            current_settings = get_settings()
+            db_url = current_settings.DATABASE_URL
+            
+            # 确定数据库类型
+            if db_url.startswith("sqlite"):
+                # SQLite不需要更新URL
+                pass
+            elif db_url.startswith("opengauss://") or db_url.startswith("postgresql://"):
+                # 构建新的数据库URL
+                db_host = updates.get("DB_HOST", current_settings.DB_HOST or "localhost")
+                db_port = updates.get("DB_PORT", str(current_settings.DB_PORT or 5432))
+                db_user = updates.get("DB_USER", current_settings.DB_USER or "username")
+                db_password = updates.get("DB_PASSWORD", current_settings.DB_PASSWORD or "password")
+                db_database = updates.get("DB_DATABASE", current_settings.DB_DATABASE or "backup_db")
+                
+                # 确定协议（opengauss或postgresql）
+                if db_url.startswith("opengauss://"):
+                    db_protocol = "opengauss://"
+                else:
+                    db_protocol = "postgresql://"
+                
+                new_db_url = f"{db_protocol}{db_user}:{db_password}@{db_host}:{db_port}/{db_database}"
+                updates["DATABASE_URL"] = new_db_url
+        
+        # 写入.env文件
+        success = env_manager.write_env_file(updates, backup=True)
+        
+        if not success:
+            raise HTTPException(status_code=500, detail="写入环境配置失败")
+        
+        logger.info(f"环境配置已更新: {len(updates)} 个配置项")
+        
+        # 重新加载配置（注意：这不会影响正在运行的实例，需要重启才能生效）
+        # reload_settings()
+        
+        return {
+            "success": True,
+            "message": "环境配置已更新（需要重启服务才能生效）",
+            "updated_keys": list(updates.keys())
+        }
+    
+    except Exception as e:
+        logger.error(f"更新环境配置失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"更新环境配置失败: {str(e)}")
+

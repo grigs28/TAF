@@ -131,10 +131,15 @@ class TapeHandler:
             return None
     
     async def write_to_tape_drive(self, source_path: str, backup_set: BackupSet, group_idx: int) -> Optional[str]:
-        """tar文件已直接写入磁带盘符，这里只需要返回路径
+        """将压缩文件从本地目录复制到磁带机（LTFS挂载的盘符）
+        
+        流程：
+        1. 先复制文件到磁带盘符（通过LTFS挂载）
+        2. 验证复制成功（检查文件大小）
+        3. 确认成功后再删除源文件
         
         Args:
-            source_path: 源文件路径（已写入磁带盘符）
+            source_path: 源文件路径（本地压缩文件路径）
             backup_set: 备份集对象
             group_idx: 组索引
             
@@ -142,21 +147,62 @@ class TapeHandler:
             str: 磁带上的相对路径，如果失败则返回None
         """
         try:
-            # tar文件已经在压缩时直接写入磁带盘符了
-            # 这里只需要返回路径用于数据库记录
-            tape_drive = self.settings.TAPE_DRIVE_LETTER.upper() + ":\\"
-            tar_file = Path(source_path)
+            import shutil
             
-            if tar_file.exists():
-                # 返回磁带上的相对路径
-                relative_path = str(tar_file.relative_to(Path(tape_drive)))
-                logger.info(f"tar文件已写入磁带: {relative_path}")
-                return relative_path
-            else:
-                logger.error(f"tar文件不存在: {source_path}")
+            source_file = Path(source_path)
+            if not source_file.exists():
+                logger.error(f"压缩文件不存在: {source_path}")
                 return None
             
+            # 获取源文件大小（用于验证）
+            source_size = source_file.stat().st_size
+            logger.info(f"准备复制文件到磁带机: {source_file} (大小: {source_size} 字节)")
+            
+            # 目标路径：磁带盘符（通过LTFS挂载）
+            tape_drive = self.settings.TAPE_DRIVE_LETTER.upper() + ":\\"
+            tape_backup_dir = Path(tape_drive) / backup_set.set_id
+            tape_backup_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 目标文件路径
+            target_file = tape_backup_dir / source_file.name
+            
+            # 步骤1: 复制文件到磁带机（LTFS挂载的盘符）
+            logger.info(f"正在复制文件到磁带机: {source_file} -> {target_file}")
+            shutil.copy2(str(source_file), str(target_file))
+            
+            # 步骤2: 验证复制成功（检查文件是否存在且大小匹配）
+            if not target_file.exists():
+                logger.error(f"复制后目标文件不存在: {target_file}")
+                return None
+            
+            target_size = target_file.stat().st_size
+            if target_size != source_size:
+                logger.error(f"文件大小不匹配: 源文件={source_size} 字节, 目标文件={target_size} 字节")
+                # 删除不完整的文件
+                try:
+                    target_file.unlink()
+                except Exception:
+                    pass
+                return None
+            
+            # 步骤3: 验证成功，删除源文件
+            logger.info(f"文件复制成功，验证通过（大小: {target_size} 字节），删除源文件")
+            try:
+                source_file.unlink()
+                logger.info(f"源文件已删除: {source_file}")
+            except Exception as del_error:
+                logger.warning(f"删除源文件失败（可稍后手动删除）: {del_error}")
+                # 删除失败不影响备份流程，继续执行
+            
+            # 返回磁带上的相对路径
+            relative_path = str(target_file.relative_to(Path(tape_drive)))
+            logger.info(f"压缩文件已成功复制到磁带: {relative_path}")
+            
+            return relative_path
+            
         except Exception as e:
-            logger.error(f"获取文件路径失败: {str(e)}")
+            logger.error(f"复制文件到磁带机失败: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
 

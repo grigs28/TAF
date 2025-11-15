@@ -111,7 +111,8 @@ class FileScanner:
         source_paths: List[str], 
         exclude_patterns: List[str], 
         backup_task: Optional[object] = None,
-        batch_size: int = 100
+        batch_size: int = 100,
+        log_context: Optional[str] = None
     ) -> AsyncGenerator[List[Dict], None]:
         """流式扫描源文件（异步生成器，分批返回文件）
         
@@ -124,6 +125,7 @@ class FileScanner:
             exclude_patterns: 排除模式列表
             backup_task: 备份任务对象（可选，用于进度更新）
             batch_size: 每批返回的文件数
+            log_context: 日志上下文前缀（用于区分调用场景）
             
         Yields:
             List[Dict]: 每批文件列表
@@ -131,6 +133,8 @@ class FileScanner:
         if not source_paths:
             logger.warning("源路径列表为空")
             return
+        
+        context_prefix = f"{log_context} " if log_context else ""
         
         # 不再估算总文件数，直接使用后台扫描任务提供的 total_files
         # 后台扫描任务会独立扫描并更新数据库中的 total_files 和 total_bytes
@@ -339,14 +343,14 @@ class FileScanner:
                                                     is_large_dir_structure = True
                                                     # 根据待扫描目录数量获取批次阈值
                                                     current_batch_threshold = get_batch_threshold(len(dirs_to_scan))
-                                                    logger.info(f"流式扫描：检测到大型目录结构（已扫描 {dir_count} 个目录，待扫描目录: {len(dirs_to_scan)}），批次阈值: {current_batch_threshold}，将使用更频繁的进度日志（源路径: {path}）")
+                                                    logger.info(f"{context_prefix}流式扫描：检测到大型目录结构（已扫描 {dir_count} 个目录，待扫描目录: {len(dirs_to_scan)}），批次阈值: {current_batch_threshold}，将使用更频繁的进度日志（源路径: {path}）")
                                                 
                                                 # 每2分钟输出一次当前扫描的目录（大型目录结构时每30秒输出一次）
                                                 current_time = time.time()
                                                 elapsed_since_dir_log = current_time - last_dir_log_time
                                                 dir_log_interval = 30.0 if is_large_dir_structure else DIR_LOG_INTERVAL
                                                 if current_dir and elapsed_since_dir_log >= dir_log_interval:
-                                                    logger.info(f"流式扫描：正在扫描目录 {format_path_for_log(current_dir)}，已扫描 {dir_count} 个目录，{total_paths_scanned} 个路径（源路径: {path}）")
+                                                    logger.info(f"{context_prefix}流式扫描：正在扫描目录 {format_path_for_log(current_dir)}，已扫描 {dir_count} 个目录，{total_paths_scanned} 个路径（源路径: {path}）")
                                                     last_dir_log_time = current_time
                                                 
                                                 try:
@@ -368,11 +372,11 @@ class FileScanner:
                                                                     if path_len > MAX_PATH_LENGTH:
                                                                         path_too_long_count += 1
                                                                         if path_too_long_count <= 10:  # 只记录前10个路径过长的情况
-                                                                            logger.warning(f"流式扫描：路径过长（{path_len} 字符 > {MAX_PATH_LENGTH} 字符）: {format_path_for_log(current_path_str)}")
+                                                                            logger.warning(f"{context_prefix}流式扫描：路径过长（{path_len} 字符 > {MAX_PATH_LENGTH} 字符）: {format_path_for_log(current_path_str)}")
                                                                         continue
                                                                 except Exception as path_str_err:
                                                                     # 路径字符串化失败（可能是编码问题）
-                                                                    logger.debug(f"流式扫描：路径字符串化失败: {str(path_str_err)}")
+                                                                    logger.debug(f"{context_prefix}流式扫描：路径字符串化失败: {str(path_str_err)}")
                                                                     continue
                                                                 
                                                                 # 处理目录和文件
@@ -395,7 +399,7 @@ class FileScanner:
                                                                     except Exception:
                                                                         permission_error_count += 1
                                                                         if permission_error_count <= 20:
-                                                                            logger.debug(f"流式扫描：无法访问路径: {format_path_for_log(current_path_str)}，错误: {str(entry_err)}")
+                                                                            logger.debug(f"{context_prefix}流式扫描：无法访问路径: {format_path_for_log(current_path_str)}，错误: {str(entry_err)}")
                                                                         continue
                                                                 
                                                                 # 检查是否需要强制提交批次（即使没有达到阈值，也要定期提交）
@@ -416,9 +420,9 @@ class FileScanner:
                                                                         else:
                                                                             asyncio.run(path_queue.put(batch.copy()))
                                                                         current_dir_display = format_path_for_log(current_dir) if current_dir else "未知"
-                                                                        logger.info(f"流式扫描：强制提交批次到队列（超过{BATCH_FORCE_INTERVAL}秒），路径数={len(batch)}，累计已扫描={total_paths_scanned}个路径，{dir_count}个目录，待扫描目录: {len(dirs_to_scan)}，批次阈值: {batch_threshold}，当前目录: {current_dir_display}（源路径: {path}）")
+                                                                        logger.info(f"{context_prefix}流式扫描：强制提交批次到队列（超过{BATCH_FORCE_INTERVAL}秒），路径数={len(batch)}，累计已扫描={total_paths_scanned}个路径，{dir_count}个目录，待扫描目录: {len(dirs_to_scan)}，批次阈值: {batch_threshold}，当前目录: {current_dir_display}（源路径: {path}）")
                                                                     except Exception as e:
-                                                                        logger.error(f"流式扫描：强制提交批次失败: {str(e)}", exc_info=True)
+                                                                        logger.error(f"{context_prefix}流式扫描：强制提交批次失败: {str(e)}", exc_info=True)
                                                                     batch = []
                                                                     last_batch_submit_time = current_time
                                                                 
@@ -434,7 +438,7 @@ class FileScanner:
                                                                         else:
                                                                             asyncio.run(path_queue.put(batch.copy()))
                                                                     except Exception as e:
-                                                                        logger.warning(f"流式扫描：放入路径队列失败: {str(e)}")
+                                                                        logger.warning(f"{context_prefix}流式扫描：放入路径队列失败: {str(e)}")
                                                                     batch = []
                                                                     last_batch_submit_time = current_time
                                                                 
@@ -445,7 +449,7 @@ class FileScanner:
                                                                     elapsed = current_time - start_time if start_time else 0
                                                                     rate = (total_paths_scanned - last_log_count) / elapsed_since_last_progress if elapsed_since_last_progress > 0 else 0
                                                                     current_dir_display = format_path_for_log(current_dir) if current_dir else "未知"
-                                                                    logger.info(f"流式扫描：正在扫描目录 {path}，已扫描 {total_paths_scanned} 个路径，{dir_count} 个目录，待扫描目录: {len(dirs_to_scan)}，批次阈值: {batch_threshold}，当前批次 {len(batch)} 个路径，耗时 {elapsed:.1f} 秒，速度 {rate:.0f} 路径/秒，距上次提交 {elapsed_since_last_batch:.1f} 秒，当前目录: {current_dir_display}，权限错误: {permission_error_count}，路径过长: {path_too_long_count}（线程运行中）")
+                                                                    logger.info(f"{context_prefix}流式扫描：已扫描 {total_paths_scanned} 个路径（包含目录），{dir_count} 个目录，待扫描目录: {len(dirs_to_scan)}，批次阈值: {batch_threshold}，当前批次 {len(batch)} 个路径，耗时 {elapsed:.1f} 秒，速度 {rate:.0f} 路径/秒，距上次提交 {elapsed_since_last_batch:.1f} 秒，当前目录: {current_dir_display}，权限错误: {permission_error_count}，路径过长: {path_too_long_count}（线程运行中）")
                                                                     last_log_count = total_paths_scanned
                                                                     last_progress_log_time = current_time
                                                                     
@@ -456,9 +460,9 @@ class FileScanner:
                                                                     path_str = str(entry.path) if hasattr(entry, 'path') else "未知路径"
                                                                     path_display = format_path_for_log(path_str)
                                                                     if permission_error_count <= 20:  # 只记录前20个权限错误
-                                                                        logger.warning(f"流式扫描：路径权限错误（路径 #{permission_error_count}）: {path_display}，错误: {str(entry_err)}")
+                                                                        logger.warning(f"{context_prefix}流式扫描：路径权限错误（路径 #{permission_error_count}）: {path_display}，错误: {str(entry_err)}")
                                                                 except Exception:
-                                                                    logger.warning(f"流式扫描：路径权限错误（路径 #{permission_error_count}）: 无法获取路径，错误: {str(entry_err)}")
+                                                                    logger.warning(f"{context_prefix}流式扫描：路径权限错误（路径 #{permission_error_count}）: 无法获取路径，错误: {str(entry_err)}")
                                                                 continue
                                                             except (FileNotFoundError, IOError) as entry_err:
                                                                 # 路径不存在或IO错误：跳过
@@ -468,9 +472,9 @@ class FileScanner:
                                                                 try:
                                                                     path_str = str(entry.path) if hasattr(entry, 'path') else "未知路径"
                                                                     path_display = format_path_for_log(path_str)
-                                                                    logger.debug(f"流式扫描：跳过路径错误 {path_display}: {str(entry_err)}")
+                                                                    logger.debug(f"{context_prefix}流式扫描：跳过路径错误 {path_display}: {str(entry_err)}")
                                                                 except Exception:
-                                                                    logger.debug(f"流式扫描：跳过路径错误: {str(entry_err)}")
+                                                                    logger.debug(f"{context_prefix}流式扫描：跳过路径错误: {str(entry_err)}")
                                                                 continue
                                                 except (PermissionError, OSError) as scan_dir_err:
                                                     # 目录权限错误：记录并跳过该目录
@@ -478,9 +482,9 @@ class FileScanner:
                                                     try:
                                                         path_display = format_path_for_log(current_scan_dir_str)
                                                         if permission_error_count <= 20:  # 只记录前20个权限错误
-                                                            logger.warning(f"流式扫描：目录权限错误（目录 #{permission_error_count}）: {path_display}，错误: {str(scan_dir_err)}")
+                                                            logger.warning(f"{context_prefix}流式扫描：目录权限错误（目录 #{permission_error_count}）: {path_display}，错误: {str(scan_dir_err)}")
                                                     except Exception:
-                                                        logger.warning(f"流式扫描：目录权限错误（目录 #{permission_error_count}）: 无法获取路径，错误: {str(scan_dir_err)}")
+                                                        logger.warning(f"{context_prefix}流式扫描：目录权限错误（目录 #{permission_error_count}）: 无法获取路径，错误: {str(scan_dir_err)}")
                                                     continue
                                                 except (FileNotFoundError, IOError) as scan_dir_err:
                                                     # 目录不存在或IO错误：跳过
@@ -489,9 +493,9 @@ class FileScanner:
                                                     # 记录目录错误但继续扫描
                                                     try:
                                                         path_display = format_path_for_log(current_scan_dir_str)
-                                                        logger.debug(f"流式扫描：跳过目录错误 {path_display}: {str(scan_dir_err)}")
+                                                        logger.debug(f"{context_prefix}流式扫描：跳过目录错误 {path_display}: {str(scan_dir_err)}")
                                                     except Exception:
-                                                        logger.debug(f"流式扫描：跳过目录错误: {str(scan_dir_err)}")
+                                                        logger.debug(f"{context_prefix}流式扫描：跳过目录错误: {str(scan_dir_err)}")
                                                     continue
                                                 
                                                 # 检查是否被取消
@@ -503,27 +507,27 @@ class FileScanner:
                                                 # 这里记录但不抛出，继续执行 finally 块
                                                 scan_cancelled = True
                                                 scan_error_info = "用户中断（KeyboardInterrupt）"
-                                                logger.warning(f"流式扫描：遍历目录被中断 {path}，已扫描 {total_paths_scanned} 个路径，{dir_count} 个目录")
+                                                logger.warning(f"{context_prefix}流式扫描：遍历目录被中断 {path}，已扫描 {total_paths_scanned} 个路径，{dir_count} 个目录")
                                                 break
                                             except Exception as dir_scan_err:
                                                 # 目录扫描错误：记录但继续
-                                                logger.debug(f"流式扫描：目录扫描错误: {str(dir_scan_err)}")
+                                                logger.debug(f"{context_prefix}流式扫描：目录扫描错误: {str(dir_scan_err)}")
                                                 continue
                                         
                                         # 如果还有待扫描的目录，记录警告
                                         if dirs_to_scan and not scan_cancelled:
-                                            logger.warning(f"流式扫描：还有 {len(dirs_to_scan)} 个目录待扫描，但主循环已退出（源路径: {path}）")
+                                            logger.warning(f"{context_prefix}流式扫描：还有 {len(dirs_to_scan)} 个目录待扫描，但主循环已退出（源路径: {path}）")
                                             
                                     except KeyboardInterrupt:
                                         # 在主线程中捕获 KeyboardInterrupt 时，会通过任务取消来通知
                                         # 这里记录但不抛出，继续执行 finally 块
                                         scan_cancelled = True
                                         scan_error_info = "用户中断（KeyboardInterrupt）"
-                                        logger.warning(f"流式扫描：遍历目录被中断 {path}，已扫描 {total_paths_scanned} 个路径，{dir_count} 个目录")
+                                        logger.warning(f"{context_prefix}流式扫描：遍历目录被中断 {path}，已扫描 {total_paths_scanned} 个路径，{dir_count} 个目录")
                                     except Exception as scan_err:
                                         # 扫描过程出错
                                         scan_error_info = str(scan_err)
-                                        logger.error(f"流式扫描：扫描目录失败 {path}，已扫描 {total_paths_scanned} 个路径，{dir_count} 个目录: {scan_error_info}", exc_info=True)
+                                        logger.error(f"{context_prefix}流式扫描：扫描目录失败 {path}，已扫描 {total_paths_scanned} 个路径，{dir_count} 个目录: {scan_error_info}", exc_info=True)
                                     
                                     # 放入剩余的路径
                                     if batch:
@@ -541,17 +545,17 @@ class FileScanner:
                                     
                                     total_time = time.time() - start_time
                                     if scan_cancelled:
-                                        logger.warning(f"流式扫描：目录遍历被中断 {path}，共扫描 {total_paths_scanned} 个路径，{dir_count} 个目录，权限错误: {permission_error_count} 个，路径过长: {path_too_long_count} 个，总耗时 {total_time:.1f} 秒")
+                                        logger.warning(f"{context_prefix}流式扫描：目录遍历被中断 {path}，共扫描 {total_paths_scanned} 个路径，{dir_count} 个目录，权限错误: {permission_error_count} 个，路径过长: {path_too_long_count} 个，总耗时 {total_time:.1f} 秒")
                                     else:
-                                        logger.info(f"流式扫描：目录树遍历完成，共扫描 {total_paths_scanned} 个路径，{dir_count} 个目录，权限错误: {permission_error_count} 个，路径过长: {path_too_long_count} 个，总耗时 {total_time:.1f} 秒")
+                                        logger.info(f"{context_prefix}流式扫描：目录树遍历完成，共扫描 {total_paths_scanned} 个路径，{dir_count} 个目录，权限错误: {permission_error_count} 个，路径过长: {path_too_long_count} 个，总耗时 {total_time:.1f} 秒")
                                 except KeyboardInterrupt:
                                     # 线程级别的 KeyboardInterrupt（很少发生，因为主线程会先捕获）
                                     scan_cancelled = True
                                     scan_error_info = "用户中断（KeyboardInterrupt）"
-                                    logger.warning(f"流式扫描：线程被中断 {path}，已扫描 {total_paths_scanned} 个路径")
+                                    logger.warning(f"{context_prefix}流式扫描：线程被中断 {path}，已扫描 {total_paths_scanned} 个路径")
                                 except Exception as e:
                                     scan_error_info = str(e)
-                                    logger.error(f"流式扫描：遍历目录失败 {path}: {str(e)}", exc_info=True)
+                                    logger.error(f"{context_prefix}流式扫描：遍历目录失败 {path}: {str(e)}", exc_info=True)
                                 finally:
                                     # 重要：无论是否异常，都确保发送停止信号到队列，让主循环知道线程已退出
                                     scan_done = True
@@ -567,7 +571,7 @@ class FileScanner:
                                                         main_loop
                                                     )
                                                     future.result(timeout=10.0)
-                                                    logger.warning(f"流式扫描：发送取消信号到队列（源路径: {path}），错误: {scan_error_info}，已扫描: {total_paths_scanned} 个路径")
+                                                    logger.warning(f"{context_prefix}流式扫描：发送取消信号到队列（源路径: {path}），错误: {scan_error_info}，已扫描: {total_paths_scanned} 个路径")
                                                 else:
                                                     # 正常完成信号
                                                     future = asyncio.run_coroutine_threadsafe(
@@ -581,10 +585,10 @@ class FileScanner:
                                                 else:
                                                     asyncio.run(path_queue.put((stop_signal, total_paths_scanned)))
                                         except Exception as signal_err:
-                                            logger.error(f"流式扫描：发送停止信号失败: {str(signal_err)}", exc_info=True)
+                                            logger.error(f"{context_prefix}流式扫描：发送停止信号失败: {str(signal_err)}", exc_info=True)
                                     except Exception as finally_err:
                                         # finally 块中的异常不应该阻止信号发送，但需要记录
-                                        logger.error(f"流式扫描：finally 块中发生异常（源路径: {path}）: {str(finally_err)}", exc_info=True)
+                                        logger.error(f"{context_prefix}流式扫描：finally 块中发生异常（源路径: {path}）: {str(finally_err)}", exc_info=True)
                                         # 尝试最后一次发送信号（使用最简单的方式）
                                         try:
                                             if main_loop:
@@ -609,14 +613,14 @@ class FileScanner:
                                         try:
                                             current_task = asyncio.current_task()
                                             if current_task and current_task.cancelled():
-                                                logger.warning("流式扫描循环：检测到任务已被取消（Ctrl+C）")
+                                                logger.warning(f"{context_prefix}流式扫描循环：检测到任务已被取消（Ctrl+C）")
                                                 # 取消后台扫描任务
                                                 if not scan_task.done():
                                                     scan_task.cancel()
                                                 break
                                         except RuntimeError:
                                             # 如果没有当前任务，可能已经被取消
-                                            logger.warning("流式扫描循环：检测到任务可能已被取消")
+                                            logger.warning(f"{context_prefix}流式扫描循环：检测到任务可能已被取消")
                                             if not scan_task.done():
                                                 scan_task.cancel()
                                             break
@@ -640,7 +644,7 @@ class FileScanner:
                                                                 # 取消信号
                                                                 error_msg = item[1] if len(item) > 1 else "用户中断"
                                                                 scanned_count = item[2] if len(item) > 2 else total_paths_count
-                                                                logger.warning(f"流式扫描：收到取消信号，错误: {error_msg}，已扫描: {scanned_count} 个路径")
+                                                                logger.warning(f"{context_prefix}流式扫描：收到取消信号，错误: {error_msg}，已扫描: {scanned_count} 个路径")
                                                                 break
                                                         elif item is stop_signal:
                                                             break
@@ -655,7 +659,7 @@ class FileScanner:
                                             continue
                                         except asyncio.CancelledError:
                                             # 任务被取消（Ctrl+C）
-                                            logger.warning("流式扫描循环：任务被取消（CancelledError）")
+                                            logger.warning(f"{context_prefix}流式扫描循环：任务被取消（CancelledError）")
                                             if not scan_task.done():
                                                 scan_task.cancel()
                                             raise
@@ -669,7 +673,7 @@ class FileScanner:
                                                 # 取消信号
                                                 error_msg = item[1] if len(item) > 1 else "用户中断"
                                                 scanned_count = item[2] if len(item) > 2 else total_paths_count
-                                                logger.warning(f"流式扫描：收到取消信号，错误: {error_msg}，已扫描: {scanned_count} 个路径")
+                                                logger.warning(f"{context_prefix}流式扫描：收到取消信号，错误: {error_msg}，已扫描: {scanned_count} 个路径")
                                                 # 取消后台扫描任务
                                                 if not scan_task.done():
                                                     scan_task.cancel()
@@ -684,25 +688,25 @@ class FileScanner:
                                             
                                     except asyncio.CancelledError:
                                         # 任务被取消（Ctrl+C）
-                                        logger.warning("流式扫描循环：任务被取消（CancelledError）")
+                                        logger.warning(f"{context_prefix}流式扫描循环：任务被取消（CancelledError）")
                                         if not scan_task.done():
                                             scan_task.cancel()
                                         raise
                                     except Exception as e:
-                                        logger.error(f"流式扫描：处理批次失败: {str(e)}", exc_info=True)
+                                        logger.error(f"{context_prefix}流式扫描：处理批次失败: {str(e)}", exc_info=True)
                                         # 检查扫描任务状态
                                         if scan_task.done():
                                             break
                                         continue
                             except asyncio.CancelledError:
                                 # 任务被取消（Ctrl+C）
-                                logger.warning("流式扫描：任务被取消")
+                                logger.warning(f"{context_prefix}流式扫描：任务被取消")
                                 if not scan_task.done():
                                     scan_task.cancel()
                                 raise
                             except KeyboardInterrupt:
                                 # 用户中断
-                                logger.warning("流式扫描：用户中断（KeyboardInterrupt）")
+                                logger.warning(f"{context_prefix}流式扫描：用户中断（KeyboardInterrupt）")
                                 if not scan_task.done():
                                     scan_task.cancel()
                                 raise
@@ -769,13 +773,13 @@ class FileScanner:
                                     skipped_dirs += 1
                                     continue
                                 
-                                if file_path.is_file():
+                                    if file_path.is_file():
                                     scanned_count += 1
                                     total_scanned += 1
                                     
-                                    # 每扫描100个文件输出一次进度
-                                    if scanned_count % 100 == 0:
-                                        logger.info(f"已扫描 {scanned_count} 个文件，找到 {total_valid_files} 个有效文件（当前批次: {len(current_batch)} 个）...")
+                                    # 每扫描10000个文件输出一次进度（避免日志过多）
+                                    if scanned_count % 10000 == 0:
+                                        logger.info(f"{context_prefix}压缩扫描：已扫描 {scanned_count} 个文件（当前源路径，仅为当前源路径的文件数），找到 {total_valid_files} 个有效文件（当前批次: {len(current_batch)} 个）...")
                                     
                                     # 每扫描50个文件更新一次进度（使用后台扫描任务提供的 total_files）
                                     if total_scanned % 50 == 0 and backup_task and self.update_progress_callback:
@@ -792,15 +796,16 @@ class FileScanner:
                                     try:
                                         file_info = await self.get_file_info(file_path)
                                         if file_info:
-                                            # 排除规则从计划任务获取（scheduled_task.action_config.exclude_patterns）
-                                            if not self.should_exclude_file(file_info['path'], exclude_patterns):
+                                            path_str = file_info.get('path', '')
+                                            if len(path_str) > MAX_PATH_LENGTH:
+                                                path_too_long_count += 1
+                                                if path_too_long_count <= 20:
+                                                    logger.warning(f"压缩扫描：跳过路径过长文件（{len(path_str)} 字符）: {format_path_for_log(path_str)}")
+                                                continue
+                                            if not self.should_exclude_file(path_str, exclude_patterns):
                                                 current_batch.append(file_info)
                                                 total_valid_files += 1  # 累计有效文件数
                                                 total_scanned_size += file_info['size']
-                                                # 注意：不再在这里更新 total_bytes_actual
-                                                # 这些统计由独立的后台扫描任务 _scan_for_progress_update 负责更新
-                                                
-                                                # 达到批次大小，yield当前批次
                                                 if len(current_batch) >= batch_size:
                                                     yield current_batch
                                                     current_batch = []
@@ -1123,8 +1128,8 @@ class FileScanner:
                                                         total_scanned += 1
                                                         
                                                         # 每扫描100个文件输出一次进度并更新数据库
-                                                        if scanned_count % 100 == 0:
-                                                            logger.info(f"已扫描 {scanned_count} 个文件，找到 {len(file_list)} 个有效文件...")
+                                                    if scanned_count % 10000 == 0:
+                                                        logger.info(f"{context_prefix}压缩扫描：已扫描 {scanned_count} 个文件（当前源路径，仅为当前源路径的文件数），找到 {len(file_list)} 个有效文件...")
                                                         
                                                         # 每扫描50个文件更新一次进度（避免过于频繁）
                                                         if total_scanned % 50 == 0 and backup_task and self.update_progress_callback:

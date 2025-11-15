@@ -14,8 +14,9 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
-from models.backup import BackupTask
+from models.backup import BackupTask, BackupSet
 from backup.utils import format_bytes
+from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +33,16 @@ class BackupScanner:
         """
         self.file_scanner = file_scanner
         self.backup_db = backup_db
+        self.settings = get_settings()
     
-    async def scan_for_progress_update(self, backup_task: BackupTask, source_paths: List[str], exclude_patterns: List[str]):
+    async def scan_for_progress_update(
+        self,
+        backup_task: BackupTask,
+        source_paths: List[str],
+        exclude_patterns: List[str],
+        backup_set: BackupSet,
+        restart: bool = False
+    ):
         """独立的后台扫描任务，专门更新卡片中的总文件数和总字节数
         
         这个任务：
@@ -48,7 +57,17 @@ class BackupScanner:
             source_paths: 源路径列表
             exclude_patterns: 排除模式列表
         """
+        backup_set_db_id = getattr(backup_set, 'id', None)
+
         try:
+            if backup_task and backup_task.id:
+                await self.backup_db.update_scan_status(backup_task.id, 'running')
+            if restart and backup_set_db_id:
+                await self.backup_db.clear_backup_files_for_set(backup_set_db_id)
+            
+            # 记录关键阶段：扫描文件开始
+            self.backup_db._log_operation_stage_event(backup_task, "[扫描文件中...]")
+            
             logger.info("========== 后台扫描任务启动：专门更新卡片中的总文件数和总字节数 ==========")
             logger.info(f"任务ID: {backup_task.id if backup_task else 'N/A'}")
             logger.info(f"源路径列表: {source_paths}")
@@ -66,9 +85,43 @@ class BackupScanner:
                 logger.info("========== 后台扫描任务完成：没有源路径 ==========")
                 return
             
+            use_streaming = True
+            if use_streaming:
+                total_files = 0
+                total_bytes = 0
+                update_interval = 500
+                
+                async for file_batch in self.file_scanner.scan_source_files_streaming(
+                    source_paths,
+                    exclude_patterns,
+                    backup_task,
+                    log_context="[后台扫描]"
+                ):
+                    for file_info in file_batch:
+                        file_size = file_info.get('size', 0) or 0
+                        total_files += 1
+                        total_bytes += file_size
+                        
+                        if backup_set_db_id:
+                            await self.backup_db.upsert_scanned_file_record(backup_set_db_id, file_info)
+                        
+                        if total_files % update_interval == 0:
+                            await self.backup_db.update_scan_progress_only(backup_task, total_files, total_bytes)
+                            logger.info(f"后台扫描任务：已扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)}")
+                
+                await self.backup_db.update_scan_progress_only(backup_task, total_files, total_bytes)
+                logger.info(f"后台扫描任务完成，共扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)}")
+                
+                # 记录关键阶段：扫描完成
+                self.backup_db._log_operation_stage_event(backup_task, f"[扫描完成] 共 {total_files} 个文件，总大小 {format_bytes(total_bytes)}")
+                
+                if backup_task and backup_task.id:
+                    await self.backup_db.update_scan_status(backup_task.id, 'completed')
+                return
+            
             total_files = 0  # 总文件数
             total_bytes = 0  # 总字节数
-            update_interval = 100  # 每100个文件更新一次数据库
+            update_interval = 500  # 每100个文件更新一次数据库
             
             # 处理网络路径（UNC路径）
             from utils.network_path import is_unc_path, normalize_unc_path
@@ -99,6 +152,8 @@ class BackupScanner:
                             # 获取文件信息
                             file_info = await self.file_scanner.get_file_info(source_path)
                             if file_info:
+                                if backup_set_db_id:
+                                    await self.backup_db.upsert_scanned_file_record(backup_set_db_id, file_info)
                                 total_files += 1
                                 total_bytes += file_info['size']
                                 
@@ -129,6 +184,10 @@ class BackupScanner:
                         # 因为后台线程中无法使用 get_running_loop()
                         main_loop = asyncio.get_running_loop()
                         
+                        # 创建停止标志（用于响应 Ctrl+C）
+                        import threading
+                        stop_event = threading.Event()
+                        
                         def sync_scan_worker():
                             """在线程池中执行同步遍历，统计文件数和字节数，根据目录数量智能匹配批次阈值（10、25、50、100个文件）提交一次，或者每20分钟强制提交一次"""
                             batch_files = 0  # 当前批次的文件数
@@ -152,24 +211,32 @@ class BackupScanner:
                             def get_batch_threshold(dir_count: int) -> int:
                                 """根据目录数量智能匹配批次阈值
                                 
+                                使用 settings.SCAN_BATCH_SIZE 作为基础值，根据目录数量进行比例调整
+                                
                                 Args:
                                     dir_count: 待扫描目录数量
                                 
                                 Returns:
                                     int: 批次阈值（文件数）
                                 """
+                                # 使用 settings.SCAN_BATCH_SIZE 作为基础值
+                                base_batch_size = self.settings.SCAN_BATCH_SIZE
+                                
                                 if dir_count >= 50000:
-                                    # 目录数量很多（>50000），使用10个文件作为批次阈值
-                                    return 300
+                                    # 目录数量很多（>50000），使用基础值的约1.7%（300/180000）
+                                    return int(base_batch_size * 0.0017)
                                 elif dir_count >= 10000:
-                                    # 目录数量较多（10000-50000），使用25个文件作为批次阈值
-                                    return 500
+                                    # 目录数量较多（10000-50000），使用基础值的约0.28%（500/180000）
+                                    return int(base_batch_size * 0.0028)
                                 elif dir_count >= 1000:
-                                    # 目录数量中等（1000-10000），使用50个文件作为批次阈值
-                                    return 800
+                                    # 目录数量中等（1000-10000），使用基础值的约0.44%（800/180000）
+                                    return int(base_batch_size * 0.0044)
                                 else:
-                                    # 目录数量少（<1000），使用100个文件作为批次阈值
-                                    return 1000
+                                    # 目录数量少（<1000），使用基础值的约0.56%（1000/180000）
+                                    return int(base_batch_size * 0.0056)
+                            
+                            # 获取批次字节数阈值（与压缩扫描使用相同的参数）
+                            batch_bytes_threshold = self.settings.SCAN_BATCH_SIZE_BYTES
                             MAX_PATH_LENGTH = 260  # Windows路径最大长度（字符）
                             MAX_PATH_DISPLAY = 200  # 日志中显示的最大路径长度（字符）
                             
@@ -214,6 +281,13 @@ class BackupScanner:
                                 
                                 try:
                                     while dirs_to_scan:
+                                        # 检查停止标志（响应 Ctrl+C）
+                                        if stop_event.is_set():
+                                            logger.warning(f"后台扫描任务：检测到停止信号，中止扫描（目录: {source_path_str}），已扫描 {file_count} 个文件，{dir_count} 个目录")
+                                            scan_failed = True
+                                            scan_error = "用户中断（Ctrl+C）"
+                                            break
+                                        
                                         try:
                                             current_scan_dir = dirs_to_scan.pop(0)
                                             
@@ -245,10 +319,23 @@ class BackupScanner:
                                                 logger.info(f"后台扫描任务：正在扫描目录 {format_path_for_log(current_dir)}，已扫描 {dir_count} 个目录，{file_count} 个文件，待扫描目录: {len(dirs_to_scan)}（目录: {source_path_str}）")
                                                 last_dir_log_time = current_time
                                             
+                                            # 检查停止标志（在扫描目录前检查）
+                                            if stop_event.is_set():
+                                                logger.warning(f"后台扫描任务：检测到停止信号，中止扫描（目录: {source_path_str}），已扫描 {file_count} 个文件，{dir_count} 个目录")
+                                                scan_failed = True
+                                                scan_error = "用户中断（Ctrl+C）"
+                                                break
+                                            
                                             try:
                                                 # 使用 os.scandir() 扫描当前目录
                                                 with os.scandir(current_scan_dir_str) as entries:
                                                     for entry in entries:
+                                                        # 检查停止标志（在每次迭代时检查，提高响应速度）
+                                                        if stop_event.is_set():
+                                                            logger.warning(f"后台扫描任务：检测到停止信号，中止扫描（目录: {source_path_str}），已扫描 {file_count} 个文件，{dir_count} 个目录")
+                                                            scan_failed = True
+                                                            scan_error = "用户中断（Ctrl+C）"
+                                                            break
                                                         try:
                                                             # 获取路径
                                                             try:
@@ -277,6 +364,13 @@ class BackupScanner:
                                                                     # 目录：添加到待扫描队列
                                                                     dirs_to_scan.append(entry_path)
                                                                 elif entry.is_file(follow_symlinks=False):
+                                                                    # 检查停止标志（在处理文件前检查）
+                                                                    if stop_event.is_set():
+                                                                        logger.warning(f"后台扫描任务：检测到停止信号，中止扫描（目录: {source_path_str}），已扫描 {file_count} 个文件，{dir_count} 个目录")
+                                                                        scan_failed = True
+                                                                        scan_error = "用户中断（Ctrl+C）"
+                                                                        break
+                                                                    
                                                                     # 文件：统计文件大小
                                                                     try:
                                                                         stat = entry_path.stat()
@@ -288,6 +382,14 @@ class BackupScanner:
                                                                         file_count += 1
                                                                         
                                                                         current_time = time.time()
+                                                                        
+                                                                        # 每处理1000个文件检查一次停止标志（提高响应速度）
+                                                                        if file_count % 1000 == 0:
+                                                                            if stop_event.is_set():
+                                                                                logger.warning(f"后台扫描任务：检测到停止信号，中止扫描（目录: {source_path_str}），已扫描 {file_count} 个文件，{dir_count} 个目录")
+                                                                                scan_failed = True
+                                                                                scan_error = "用户中断（Ctrl+C）"
+                                                                                break
                                                                         
                                                                         # 检查是否需要强制提交批次（即使没有达到阈值，也要定期提交）
                                                                         elapsed_since_last_batch = current_time - last_batch_submit_time
@@ -309,7 +411,8 @@ class BackupScanner:
                                                                             batch_bytes = 0
                                                                             last_batch_submit_time = current_time
                                                                         # 根据目录数量智能匹配批次阈值提交批次（正常提交）
-                                                                        elif batch_files >= batch_threshold:
+                                                                        # 检查文件数或字节数是否达到阈值（与压缩扫描使用相同的逻辑）
+                                                                        elif batch_files >= batch_threshold or batch_bytes >= batch_bytes_threshold:
                                                                             try:
                                                                                 # 使用主事件循环（在启动线程前获取的）
                                                                                 asyncio.run_coroutine_threadsafe(
@@ -329,6 +432,13 @@ class BackupScanner:
                                                                         elapsed_since_last_progress = current_time - last_progress_log_time
                                                                         progress_log_interval = 30.0 if is_large_dir_structure else PROGRESS_LOG_INTERVAL
                                                                         if file_count - last_log_count >= 10000 or elapsed_since_last_progress >= progress_log_interval:
+                                                                            # 检查停止标志（在输出日志时也检查，提高响应速度）
+                                                                            if stop_event.is_set():
+                                                                                logger.warning(f"后台扫描任务：检测到停止信号，中止扫描（目录: {source_path_str}），已扫描 {file_count} 个文件，{dir_count} 个目录")
+                                                                                scan_failed = True
+                                                                                scan_error = "用户中断（Ctrl+C）"
+                                                                                break
+                                                                            
                                                                             elapsed = current_time - last_log_time if last_log_time else 0
                                                                             rate = (file_count - last_log_count) / elapsed_since_last_progress if elapsed_since_last_progress > 0 else 0
                                                                             current_dir_display = format_path_for_log(current_dir) if current_dir else "未知"
@@ -420,6 +530,8 @@ class BackupScanner:
                                                 continue
                                         except KeyboardInterrupt:
                                             logger.warning(f"后台扫描任务：遍历目录被中断 {source_path_str}，已扫描 {file_count} 个文件，{dir_count} 个目录")
+                                            # 设置停止标志，通知其他部分停止
+                                            stop_event.set()
                                             scan_failed = True
                                             scan_error = "用户中断（KeyboardInterrupt）"
                                             break
@@ -450,6 +562,8 @@ class BackupScanner:
                                 logger.warning(f"后台扫描任务：线程被中断 {source_path_str}，已扫描 {file_count} 个文件")
                                 scan_failed = True
                                 scan_error = "用户中断（KeyboardInterrupt）"
+                                # 设置停止标志
+                                stop_event.set()
                                 raise
                             except Exception as e:
                                 # 记录所有其他异常，包括完整的堆栈跟踪
@@ -524,6 +638,8 @@ class BackupScanner:
                                         current_task = asyncio.current_task()
                                         if current_task and current_task.cancelled():
                                             logger.warning("后台扫描任务：检测到任务已被取消（Ctrl+C）")
+                                            # 设置停止标志，通知后台线程停止
+                                            stop_event.set()
                                             # 取消后台扫描任务
                                             if not scan_task.done():
                                                 scan_task.cancel()
@@ -531,6 +647,15 @@ class BackupScanner:
                                     except RuntimeError:
                                         # 如果没有当前任务，可能已经被取消
                                         logger.warning("后台扫描任务：检测到任务可能已被取消")
+                                        # 设置停止标志，通知后台线程停止
+                                        stop_event.set()
+                                        if not scan_task.done():
+                                            scan_task.cancel()
+                                        break
+                                    
+                                    # 检查停止标志（在主循环中也要检查）
+                                    if stop_event.is_set():
+                                        logger.warning("后台扫描任务：检测到停止信号，退出主循环")
                                         if not scan_task.done():
                                             scan_task.cancel()
                                         break
@@ -542,6 +667,8 @@ class BackupScanner:
                                     except asyncio.CancelledError:
                                         # 任务被取消（Ctrl+C）
                                         logger.warning("后台扫描任务：任务被取消（CancelledError）")
+                                        # 设置停止标志，通知后台线程停止
+                                        stop_event.set()
                                         if not scan_task.done():
                                             scan_task.cancel()
                                         raise
@@ -728,6 +855,8 @@ class BackupScanner:
                         except KeyboardInterrupt:
                             # 用户中断（Ctrl+C）
                             logger.warning("后台扫描任务：用户中断（KeyboardInterrupt）")
+                            # 设置停止标志，通知后台线程停止
+                            stop_event.set()
                             if not scan_task.done():
                                 scan_task.cancel()
                             raise
@@ -805,4 +934,6 @@ class BackupScanner:
                     logger.info(f"后台扫描任务：已更新已扫描的文件数 {total_files} 和总大小 {format_bytes(total_bytes)}")
                 except Exception as update_error:
                     logger.error(f"更新扫描进度失败: {str(update_error)}")
+            if backup_task and backup_task.id:
+                await self.backup_db.update_scan_status(backup_task.id, 'failed')
 

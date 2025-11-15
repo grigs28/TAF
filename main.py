@@ -28,6 +28,7 @@ from tape.tape_manager import TapeManager
 from backup.backup_engine import BackupEngine
 from recovery.recovery_engine import RecoveryEngine
 from utils.dingtalk_notifier import DingTalkNotifier
+from utils.opengauss.guard import get_opengauss_monitor
 
 
 def safe_print(message: str):
@@ -48,6 +49,7 @@ class TapeBackupSystem:
         self.backup_engine = BackupEngine()
         self.recovery_engine = RecoveryEngine()
         self.dingtalk_notifier = DingTalkNotifier()
+        self.opengauss_monitor = get_opengauss_monitor()
         self.web_app = None
 
     async def initialize(self):
@@ -144,11 +146,19 @@ class TapeBackupSystem:
                 step_time = time.time() - step_start
                 safe_print(f"   └─ 通知系统初始化完成 (耗时: {step_time:.2f}秒)\n")
                 logger.info("通知系统初始化完成")
+                if self.opengauss_monitor:
+                    self.opengauss_monitor.attach_notifier(self.dingtalk_notifier)
             except Exception as dingtalk_error:
                 step_time = time.time() - step_start
                 print(f"   └─ 警告: 通知系统初始化失败 (耗时: {step_time:.2f}秒)")
                 print(f"      错误: {str(dingtalk_error)}\n")
                 logger.warning(f"通知系统初始化失败: {str(dingtalk_error)}")
+
+            # 启动 openGauss 守护
+            try:
+                await self.opengauss_monitor.start()
+            except Exception as guard_error:
+                logger.warning(f"openGauss 守护启动失败: {guard_error}")
 
             # 绑定依赖（备份引擎需要磁带管理器与通知器）
             try:
@@ -161,10 +171,22 @@ class TapeBackupSystem:
             # 初始化Web应用
             safe_print("[6/7] 初始化Web应用...")
             step_start = time.time()
-            self.web_app = create_app(self)
-            step_time = time.time() - step_start
-            safe_print(f"   └─ Web应用初始化完成 (耗时: {step_time:.2f}秒)\n")
-            logger.info("Web应用初始化完成")
+            try:
+                self.web_app = create_app(self)
+                if self.web_app is None:
+                    raise ValueError("create_app() 返回了 None")
+                step_time = time.time() - step_start
+                safe_print(f"   └─ Web应用初始化完成 (耗时: {step_time:.2f}秒)\n")
+                logger.info("Web应用初始化完成")
+            except Exception as web_error:
+                step_time = time.time() - step_start
+                safe_print(f"   └─ 警告: Web应用初始化失败 (耗时: {step_time:.2f}秒)")
+                safe_print(f"      错误: {str(web_error)}\n")
+                logger.error(f"Web应用初始化失败: {str(web_error)}", exc_info=True)
+                # 创建一个基本的FastAPI应用作为后备
+                from fastapi import FastAPI
+                self.web_app = FastAPI(title="企业级磁带备份系统（初始化失败）")
+                logger.warning("使用后备FastAPI应用，部分功能可能不可用")
 
             # 初始化计划任务
             safe_print("[7/7] 初始化计划任务调度器...")
@@ -247,6 +269,12 @@ class TapeBackupSystem:
             
             logger.info(f"Web服务启动在端口 {self.settings.WEB_PORT}")
             logger.info(f"访问地址: http://localhost:{self.settings.WEB_PORT}")
+            logger.info(f"Web应用对象类型: {type(self.web_app)}")
+            logger.info(f"Web应用对象是否为None: {self.web_app is None}")
+
+            # 确保web_app不为None
+            if self.web_app is None:
+                raise ValueError("Web应用未初始化，无法启动服务器")
 
             # 如果提供了关闭事件，创建一个任务来监控它
             if shutdown_event:
@@ -288,9 +316,18 @@ class TapeBackupSystem:
             try:
                 from utils.scheduler.db_utils import is_opengauss, close_opengauss_pool
                 if is_opengauss():
+                    if self.opengauss_monitor:
+                        await self.opengauss_monitor.stop()
                     await close_opengauss_pool()
             except Exception as e:
                 logger.warning(f"关闭openGauss连接池失败: {str(e)}")
+
+            # 关闭备份引擎（停止文件移动队列管理器）
+            if self.backup_engine:
+                try:
+                    await self.backup_engine.shutdown()
+                except Exception as e:
+                    logger.warning(f"关闭备份引擎失败: {str(e)}")
 
             # 关闭数据库连接（后关闭数据库管理器）
             if self.db_manager:

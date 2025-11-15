@@ -9,7 +9,12 @@ import asyncio
 import logging
 import threading
 import time
+import os
+import subprocess
+import shutil
+import tarfile
 import py7zr
+import pgzip
 from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime
@@ -19,6 +24,532 @@ from utils.datetime_utils import now, format_datetime
 from backup.utils import format_bytes, calculate_file_checksum
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_size_to_bytes(size_str: Optional[str], default_bytes: int = 1024 * 1024 * 1024) -> int:
+    """解析带单位的块大小字符串为字节"""
+    if not size_str:
+        return default_bytes
+    value = str(size_str).strip().lower()
+    try:
+        if value.endswith('g'):
+            return int(float(value[:-1]) * (1024 ** 3))
+        if value.endswith('m'):
+            return int(float(value[:-1]) * (1024 ** 2))
+        if value.endswith('k'):
+            return int(float(value[:-1]) * 1024)
+        return int(float(value))
+    except ValueError:
+        logger.warning(f"无法解析块大小 {size_str}，使用默认 {default_bytes} 字节")
+        return default_bytes
+
+
+def _finalize_compression_progress(compress_progress: Dict, archive: Optional[Path] = None):
+    """统一更新压缩进度，避免调用方一直等待"""
+    archive_abs = None
+    try:
+        if archive is not None:
+            archive_abs = archive.absolute()
+    except Exception:
+        archive_abs = None
+    compress_progress['running'] = False
+    compress_progress['completed'] = True
+    if archive_abs and archive_abs.exists():
+        try:
+            compress_progress['bytes_written'] = archive_abs.stat().st_size
+        except Exception:
+            compress_progress['bytes_written'] = 0
+    else:
+        compress_progress['bytes_written'] = 0
+
+
+# 尝试导入psutil用于内存检查
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    logger.warning("psutil未安装，无法检查系统内存，将使用默认内存分配策略")
+
+
+def _compress_with_7zip_command(
+    archive_path: Path,
+    file_group: List[Dict],
+    backup_task: BackupTask,
+    compression_level: int,
+    compression_threads: int,
+    sevenzip_path: str,
+    compress_progress: Dict,
+    total_files: int,
+    base_processed_files: int,
+    dictionary_size: str = "1g",
+    memory_gb: int = 24,
+    temp_work_base_dir: Optional[Path] = None
+) -> Dict:
+    """使用7-Zip命令行工具压缩文件组
+    
+    Args:
+        archive_path: 压缩包路径
+        file_group: 文件组列表
+        backup_task: 备份任务对象
+        compression_level: 压缩级别 (0-9)
+        compression_threads: 线程数
+        sevenzip_path: 7-Zip程序路径
+        compress_progress: 进度跟踪字典
+        total_files: 总文件数
+        base_processed_files: 已处理文件数基数
+        
+    Returns:
+        压缩结果字典 {'successful_files': [], 'failed_files': [], 'successful_original_size': 0}
+    """
+    successful_files = []
+    failed_files = []
+    
+    # 验证7z.exe路径
+    sevenzip_exe = Path(sevenzip_path)
+    if not sevenzip_exe.exists():
+        logger.error(f"7-Zip程序不存在: {sevenzip_path}")
+        failed_files = [{'path': str(f['path']), 'reason': f'7-Zip程序不存在: {sevenzip_path}'} for f in file_group]
+        return {'successful_files': [], 'failed_files': failed_files, 'successful_original_size': 0}
+    
+  
+    try:
+        # 构建7z命令
+        # 注意：7-Zip不支持-mmem参数，内存分配由7-Zip根据字典大小和线程数自动计算
+        # 7z a -mmt<N> -mx<N> -md<D> archive.7z files...
+        # 字典大小由调用者计算并传入，内存大小仅用于日志记录
+        dict_size_str = str(dictionary_size).lower().strip()
+        cmd = [
+            str(sevenzip_exe.absolute()),
+            "a",  # Add files to archive
+            f"-mmt{compression_threads}",  # 设置线程数
+            f"-mx{compression_level}",  # 设置压缩级别
+            f"-md{dict_size_str}",  # 字典大小（7-Zip会根据字典大小和线程数自动分配内存）
+            str(archive_path.absolute()),
+        ]
+        
+        logger.info(f"7-Zip压缩参数: 字典={dict_size_str}, 线程={compression_threads}, 预计内存使用={memory_gb}GB (7-Zip自动分配)")
+        
+        # 添加所有文件路径
+        source_paths = getattr(backup_task, 'source_paths', None) or []
+        files_to_compress = []
+        
+        for file_info in file_group:
+            file_path = Path(file_info['path'])
+            if not file_path.exists():
+                logger.warning(f"文件不存在，跳过: {file_path}")
+                failed_files.append({'path': str(file_path), 'reason': '文件不存在'})
+                continue
+            
+            # 计算相对路径（保留目录结构）
+            try:
+                arcname = None
+                if source_paths:
+                    for src_path in source_paths:
+                        src = Path(src_path)
+                        try:
+                            if file_path.is_relative_to(src):
+                                arcname = str(file_path.relative_to(src))
+                                break
+                        except (ValueError, AttributeError):
+                            continue
+                
+                if arcname:
+                    # 7z需要使用源路径和目标路径的方式
+                    # 格式: 7z a archive.7z source\path\to\file -t7z
+                    # 使用 -spf 选项保留完整路径
+                    files_to_compress.append((file_path, arcname))
+                else:
+                    files_to_compress.append((file_path, file_path.name))
+                    
+            except Exception as e:
+                logger.warning(f"计算相对路径失败: {file_path}, 错误: {e}")
+                files_to_compress.append((file_path, file_path.name))
+        
+        if not files_to_compress:
+            logger.warning("没有可压缩的文件")
+            _finalize_compression_progress(compress_progress)
+            return {'successful_files': [], 'failed_files': failed_files, 'successful_original_size': 0}
+        
+        # 使用工作目录方式：创建一个临时目录结构
+        # 或者直接使用 -spf 选项保留路径
+        # 简单方式：将所有文件添加到压缩包，使用文件名作为归档名称
+        logger.info(f"使用7-Zip命令行压缩 {len(files_to_compress)} 个文件 (线程数: {compression_threads}, 级别: {compression_level})")
+        
+        # 方法1: 直接添加所有文件（简单但可能丢失路径结构）
+        # 先尝试使用工作目录方式
+        # 将临时工作目录创建在指定的temp目录中，而不是压缩包所在目录（避免在O盘创建临时文件）
+        if temp_work_base_dir is None:
+            # 如果没有指定，使用默认的temp目录
+            from config.settings import get_settings
+            settings = get_settings()
+            temp_work_base_dir = Path(settings.BACKUP_TEMP_DIR)
+        temp_work_base_dir.mkdir(parents=True, exist_ok=True)
+        temp_work_dir = temp_work_base_dir / f".7z_work_{archive_path.stem}"
+        try:
+            temp_work_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 创建符号链接或复制文件到临时目录（使用相对路径结构）
+            prepared_files = []
+            for file_path, arcname in files_to_compress:
+                target_file = temp_work_dir / arcname
+                try:
+                    target_file.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        if hasattr(os, 'symlink'):
+                            if target_file.exists():
+                                target_file.unlink()
+                            os.symlink(str(file_path.absolute()), str(target_file))
+                        else:
+                            shutil.copy2(file_path, target_file)
+                    except Exception:
+                        # 再尝试一次复制，若仍失败则跳过
+                        try:
+                            shutil.copy2(file_path, target_file)
+                        except Exception as copy_error:
+                            logger.warning(
+                                f"复制文件到压缩临时目录失败，跳过: {file_path} (错误: {copy_error})"
+                            )
+                            failed_files.append({'path': str(file_path), 'reason': f'复制失败: {copy_error}'})
+                            continue
+                    prepared_files.append((file_path, arcname))
+                except Exception as prepare_error:
+                    logger.warning(f"准备压缩文件失败，跳过: {file_path} (错误: {prepare_error})")
+                    failed_files.append({'path': str(file_path), 'reason': f'准备失败: {prepare_error}'})
+                    continue
+            
+            if not prepared_files:
+                logger.warning("所有文件在准备阶段失败，跳过该压缩批次")
+                _finalize_compression_progress(compress_progress)
+                return {'successful_files': [], 'failed_files': failed_files, 'successful_original_size': 0}
+            
+            files_to_compress = prepared_files
+            
+            # 在临时工作目录中执行7z命令
+            # 注意：7-Zip不支持-mmem参数，内存分配由7-Zip根据字典大小和线程数自动计算
+            dict_size_str = str(dictionary_size).lower().strip()
+            cmd_work = [
+                str(sevenzip_exe.absolute()),
+                "a",
+                f"-mmt{compression_threads}",
+                f"-mx{compression_level}",
+                f"-md{dict_size_str}",  # 字典大小（7-Zip会根据字典大小和线程数自动分配内存）
+                "-spf2",  # 支持长路径
+                "-sccUTF-8",  # 强制使用UTF-8，避免编码问题
+                "-y",  # 假设所有查询都回答"是"
+                str(archive_path.absolute()),
+                "*",  # 压缩当前目录下的所有文件
+            ]
+            
+            # 确保使用绝对路径
+            temp_work_dir_abs = temp_work_dir.absolute()
+            archive_path_abs = archive_path.absolute()
+            
+            # 记录完整命令（使用INFO级别，确保能看到）
+            logger.info(f"执行7z命令: {' '.join(cmd_work)}")
+            logger.info(f"工作目录（绝对路径）: {temp_work_dir_abs}")
+            logger.info(f"压缩包路径（绝对路径）: {archive_path_abs}")
+            
+            # 更新命令中的压缩包路径为绝对路径
+            cmd_work_abs = cmd_work.copy()
+            cmd_work_abs[-2] = str(archive_path_abs)  # 压缩包路径是倒数第二个参数
+            
+            def _decode_bytes(data: Optional[bytes]) -> str:
+                if not data:
+                    return ""
+                for encoding in ("utf-8", "gbk", "cp936", "latin-1"):
+                    try:
+                        return data.decode(encoding)
+                    except UnicodeDecodeError:
+                        continue
+                return data.decode("utf-8", errors="ignore")
+
+            # 执行命令
+            process = subprocess.run(
+                cmd_work_abs,
+                cwd=str(temp_work_dir_abs),
+                capture_output=True,
+                text=False,
+                stdin=subprocess.DEVNULL
+            )
+            stdout_text = _decode_bytes(process.stdout)
+            stderr_text = _decode_bytes(process.stderr)
+            
+            if process.returncode != 0:
+                # 7-Zip返回码说明：
+                # 0 = 成功
+                # 1 = 警告（某些文件无法处理）
+                # 2 = 致命错误
+                # 7 = 命令行错误
+                # 8 = 内存不足或用户中断
+                # 255 = 用户中断
+                return_code_meanings = {
+                    0: "成功",
+                    1: "警告（某些文件无法处理）",
+                    2: "致命错误",
+                    7: "命令行错误",
+                    8: "内存不足或用户中断",
+                    255: "用户中断"
+                }
+                meaning = return_code_meanings.get(process.returncode, "未知错误")
+                
+                logger.error(f"7z命令返回码: {process.returncode} ({meaning})")
+                logger.error(f"执行的命令: {' '.join(cmd_work_abs)}")
+                logger.error(f"工作目录（绝对路径）: {temp_work_dir_abs}")
+                logger.error(f"压缩包路径（绝对路径）: {archive_path_abs}")
+                
+                # 检查工作目录是否存在
+                if not temp_work_dir_abs.exists():
+                    logger.error(f"工作目录不存在: {temp_work_dir_abs}")
+                else:
+                    # 列出工作目录中的文件
+                    try:
+                        files_in_work_dir = list(temp_work_dir_abs.iterdir())
+                        logger.error(f"工作目录中的文件数: {len(files_in_work_dir)}")
+                        if len(files_in_work_dir) > 0:
+                            logger.error(f"工作目录中的前10个文件: {[str(f.name) for f in files_in_work_dir[:10]]}")
+                    except Exception as list_err:
+                        logger.error(f"无法列出工作目录内容: {str(list_err)}")
+                
+                # 输出完整的错误信息
+                if stderr_text:
+                    logger.error(f"错误输出:\n{stderr_text}")
+                else:
+                    logger.error("无错误输出（stderr为空）")
+                
+                # 输出标准输出（可能包含有用信息）
+                if stdout_text:
+                    logger.error(f"标准输出:\n{stdout_text}")
+                    # 分析标准输出，查找可能的错误原因
+                    stdout_lines = stdout_text.split('\n')
+                    for line in stdout_lines:
+                        if 'ERROR' in line.upper() or 'FAILED' in line.upper() or 'CANNOT' in line.upper():
+                            logger.error(f"标准输出中的错误信息: {line}")
+                
+                archive_exists = archive_path_abs.exists()
+                if archive_exists:
+                    logger.warning(f"虽然返回码非0，但压缩包文件存在: {archive_path_abs}")
+                    logger.warning(f"压缩包大小: {archive_path_abs.stat().st_size:,} 字节")
+                else:
+                    logger.error(f"压缩包文件不存在: {archive_path_abs}")
+                    if not archive_path_abs.parent.exists():
+                        logger.error(f"压缩包父目录不存在: {archive_path_abs.parent}")
+                    else:
+                        try:
+                            test_file = archive_path_abs.parent / "test_write.tmp"
+                            test_file.write_text("test")
+                            test_file.unlink()
+                            logger.info(f"压缩包父目录可写: {archive_path_abs.parent}")
+                        except Exception as write_err:
+                            logger.error(f"压缩包父目录不可写: {archive_path_abs.parent}, 错误: {str(write_err)}")
+                
+                if process.returncode == 8:
+                    logger.error("返回码8通常表示内存不足或用户中断")
+                    logger.error("建议：")
+                    logger.error(f"  1. 检查系统可用内存是否足够")
+                    logger.error(f"  2. 减小字典大小（当前: {dict_size_str}）")
+                    logger.error(f"  3. 减少线程数（当前: {compression_threads}）")
+                    logger.error(f"  4. 检查是否有足够的磁盘空间")
+                
+                if process.returncode not in (0, 1) and not archive_exists:
+                    for file_path, _ in files_to_compress:
+                        failed_files.append({'path': str(file_path), 'reason': f'7z命令失败: 返回码{process.returncode}'})
+                    _finalize_progress(archive_path_abs)
+                    return {'successful_files': [], 'failed_files': failed_files, 'successful_original_size': 0}
+                
+                if process.returncode == 1:
+                    logger.warning("7z返回警告（部分文件可能未压缩），继续使用已生成的压缩包")
+                else:
+                    logger.warning("7z返回非0但压缩包存在，将继续后续流程；相关文件标记为失败")
+                    for file_path, _ in files_to_compress:
+                        failed_files.append({'path': str(file_path), 'reason': f'7z返回码{process.returncode}'})
+            
+            # 命令成功，所有文件都成功
+            for file_path, _ in files_to_compress:
+                successful_files.append(str(file_path))
+                
+                # 更新进度
+                if total_files > 0:
+                    file_idx = len(successful_files) - 1
+                    current_processed = base_processed_files + file_idx + 1
+                    compress_progress_value = 10.0 + (current_processed / total_files) * 90.0
+                    compress_progress['bytes_written'] = archive_path.stat().st_size if archive_path.exists() else 0
+                    
+                    if backup_task and backup_task.id:
+                        backup_task.progress_percent = min(100.0, compress_progress_value)
+            
+            # 验证压缩包是否存在（使用绝对路径）
+            if archive_path_abs.exists():
+                archive_size = archive_path_abs.stat().st_size
+                logger.info(f"7-Zip命令行压缩完成: {len(files_to_compress)} 个文件成功候选，压缩包大小: {format_bytes(archive_size)}")
+            else:
+                logger.error(f"7-Zip命令行压缩完成，但压缩包文件不存在: {archive_path_abs}")
+                for file_path, _ in files_to_compress:
+                    if str(file_path) not in [f['path'] for f in failed_files]:
+                        failed_files.append({'path': str(file_path), 'reason': '压缩包文件不存在'})
+                _finalize_progress(archive_path_abs)
+                return {'successful_files': [], 'failed_files': failed_files, 'successful_original_size': 0}
+            
+        except Exception as work_dir_error:
+            logger.error(f"工作目录方式压缩失败: {str(work_dir_error)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            # 继续尝试其他方式或返回失败
+            for file_path, _ in files_to_compress:
+                failed_files.append({'path': str(file_path), 'reason': f'工作目录方式失败: {str(work_dir_error)}'})
+        finally:
+            # 清理临时工作目录
+            try:
+                import shutil
+                if temp_work_dir.exists():
+                    shutil.rmtree(temp_work_dir, ignore_errors=True)
+            except Exception as cleanup_error:
+                logger.warning(f"清理临时工作目录失败: {cleanup_error}")
+        
+        _finalize_progress(archive_path_abs)
+        
+        failed_paths = {f['path'] for f in failed_files}
+        successful_files = [
+            str(file_path)
+            for file_path, _ in files_to_compress
+            if str(file_path) not in failed_paths
+        ]
+        successful_original_size = sum(
+            f['size'] for f in file_group 
+            if str(f['path']) in successful_files
+        )
+        
+        return {
+            'successful_files': successful_files,
+            'failed_files': failed_files,
+            'successful_original_size': successful_original_size,
+            'archive_path': str(archive_path_abs)
+        }
+        
+    except subprocess.TimeoutExpired:
+        logger.error("7z命令执行超时")
+        for file_path, _ in files_to_compress:
+            failed_files.append({'path': str(file_path), 'reason': '7z命令执行超时'})
+        _finalize_compression_progress(compress_progress)
+        return {
+            'successful_files': [],
+            'failed_files': failed_files,
+            'successful_original_size': 0,
+            'archive_path': str(archive_path_abs)
+        }
+    except Exception as e:
+        logger.error(f"7-Zip命令行压缩失败: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        for file_path, _ in files_to_compress:
+            failed_files.append({'path': str(file_path), 'reason': str(e)})
+        _finalize_compression_progress(compress_progress)
+        return {
+            'successful_files': [],
+            'failed_files': failed_files,
+            'successful_original_size': 0,
+            'archive_path': str(archive_path_abs)
+        }
+
+
+def _compress_with_pgzip(
+    archive_path: Path,
+    file_group: List[Dict],
+    backup_task: BackupTask,
+    compression_level: int,
+    pgzip_threads: int,
+    block_size: str,
+    compress_progress: Dict,
+    total_files: int,
+    base_processed_files: int,
+) -> Dict:
+    """使用PGZip压缩文件"""
+    successful_files: List[str] = []
+    failed_files: List[Dict[str, str]] = []
+    archive_path_abs = archive_path.absolute()
+    archive_path_abs.parent.mkdir(parents=True, exist_ok=True)
+
+    block_size_bytes = _parse_size_to_bytes(block_size, 1024 * 1024 * 1024)
+    threads = max(1, min(pgzip_threads or 1, 64))
+    compresslevel = max(0, min(int(compression_level), 9))
+
+    source_paths = getattr(backup_task, 'source_paths', None) or []
+
+    try:
+        with pgzip.open(
+            archive_path_abs,
+            'wb',
+            thread=threads,
+            blocksize=block_size_bytes,
+            compresslevel=compresslevel or 5
+        ) as gz_source:
+            with tarfile.open(fileobj=gz_source, mode='w') as tar:
+                for file_idx, file_info in enumerate(file_group):
+                    file_path = Path(file_info['path'])
+                    if not file_path.exists():
+                        logger.warning(f"文件不存在，跳过: {file_path}")
+                        failed_files.append({'path': str(file_path), 'reason': '文件不存在'})
+                        continue
+
+                    arcname = file_path.name
+                    for src_path in source_paths:
+                        src = Path(src_path)
+                        try:
+                            if file_path.is_relative_to(src):
+                                arcname = str(file_path.relative_to(src))
+                                break
+                        except (ValueError, AttributeError):
+                            continue
+
+                    try:
+                        tar.add(file_path, arcname=arcname)
+                        successful_files.append(str(file_path))
+                        if total_files > 0:
+                            current_processed = base_processed_files + file_idx + 1
+                            compress_progress_value = 10.0 + (current_processed / total_files) * 90.0
+                            compress_progress['bytes_written'] = archive_path_abs.stat().st_size if archive_path_abs.exists() else 0
+                            backup_task.progress_percent = min(100.0, compress_progress_value)
+                    except Exception as add_error:
+                        logger.warning(f"添加文件到PGZip压缩包失败: {file_path}, 错误: {add_error}")
+                        failed_files.append({'path': str(file_path), 'reason': f'写入失败: {add_error}'})
+                        continue
+
+        if archive_path_abs.exists():
+            logger.info(
+                f"PGZip压缩完成: {len(successful_files)} 个文件成功, "
+                f"压缩包大小: {format_bytes(archive_path_abs.stat().st_size)}"
+            )
+            compress_progress['bytes_written'] = archive_path_abs.stat().st_size
+
+        # 标记压缩完成（关键修复）
+        _finalize_compression_progress(compress_progress, archive_path_abs)
+
+        successful_original_size = sum(
+            f['size'] for f in file_group if str(f['path']) in successful_files
+        )
+
+        return {
+            'successful_files': successful_files,
+            'failed_files': failed_files,
+            'successful_original_size': successful_original_size,
+            'archive_path': str(archive_path_abs)
+        }
+    except Exception as pgzip_error:
+        logger.error(f"PGZip压缩失败: {pgzip_error}")
+        import traceback
+        logger.error(traceback.format_exc())
+        for file_path in successful_files:
+            failed_files.append({'path': file_path, 'reason': 'PGZip压缩失败'})
+
+        # 标记压缩完成（即使失败也要标记，避免无限等待）
+        _finalize_compression_progress(compress_progress, archive_path_abs)
+
+        return {
+            'successful_files': [],
+            'failed_files': failed_files,
+            'successful_original_size': 0,
+            'archive_path': str(archive_path_abs)
+        }
 
 
 class Compressor:
@@ -165,13 +696,123 @@ class Compressor:
             compression_level = self.settings.COMPRESSION_LEVEL
             logger.debug(f"使用系统配置的压缩级别: {compression_level}")
             
+            # 从系统配置获取压缩方法
+            compression_method = getattr(self.settings, 'COMPRESSION_METHOD', 'pgzip')
+            if compression_method not in ['pgzip', 'py7zr', '7zip_command']:
+                logger.warning(f"无效的压缩方法: {compression_method}，使用默认值: pgzip")
+                compression_method = 'pgzip'
+            
             # 从系统配置获取线程数
             compression_threads = self.settings.COMPRESSION_THREADS
             
-            # 创建临时文件（直接写入磁带盘符，不创建临时文件）
+            # 从系统配置获取7-Zip命令行线程数
+            # 优先使用 COMPRESSION_COMMAND_THREADS，如果没有设置则使用 WEB_WORKERS，最后回退到 COMPRESSION_THREADS
+            # 注意：COMPRESSION_COMMAND_THREADS 和 WEB_WORKERS 统一协调，默认使用 WEB_WORKERS 的值
+            compression_command_threads = getattr(self.settings, 'COMPRESSION_COMMAND_THREADS', None)
+            config_source = 'COMPRESSION_COMMAND_THREADS'
+            if compression_command_threads is None:
+                # 如果 COMPRESSION_COMMAND_THREADS 未设置，使用 WEB_WORKERS
+                compression_command_threads = getattr(self.settings, 'WEB_WORKERS', compression_threads)
+                config_source = 'WEB_WORKERS'
+            
+            # 确保 compression_command_threads 是整数类型
+            try:
+                compression_command_threads = int(compression_command_threads)
+            except (ValueError, TypeError):
+                logger.warning(f"compression_command_threads 值无效: {compression_command_threads}，使用默认值 {compression_threads}")
+                compression_command_threads = int(compression_threads)
+            
+            logger.debug(f"使用7-Zip命令行线程数: {compression_command_threads} (来源: {config_source})")
+            
+            # 从系统配置获取7-Zip程序路径
+            sevenzip_path = getattr(self.settings, 'SEVENZIP_PATH', r"C:\Program Files\7-Zip\7z.exe")
+            
+            # 获取字典大小配置
+            dictionary_size = getattr(self.settings, 'COMPRESSION_DICTIONARY_SIZE', '1g')
+            dict_size_str = str(dictionary_size).lower().strip()
+
+            # PGZip配置
+            pgzip_block_size = getattr(self.settings, 'PGZIP_BLOCK_SIZE', '1G')
+            pgzip_threads = getattr(self.settings, 'PGZIP_THREADS', compression_threads)
+            try:
+                pgzip_threads = int(pgzip_threads)
+            except (ValueError, TypeError):
+                logger.warning(f"pgzip_threads 值无效: {pgzip_threads}，使用默认值 {compression_threads}")
+                pgzip_threads = int(compression_threads)
+            
+            # 计算内存需求：内存需求 ≈ 字典大小 × 线程数 × 1.5（安全系数）
+            # 解析字典大小（支持格式：64m, 128m, 512m, 1g, 2g等）
+            dict_size_gb = 1.0  # 默认1GB
+            try:
+                if dict_size_str.endswith('g'):
+                    dict_size_gb = float(dict_size_str[:-1])
+                elif dict_size_str.endswith('m'):
+                    dict_size_gb = float(dict_size_str[:-1]) / 1024.0
+                elif dict_size_str.endswith('k'):
+                    dict_size_gb = float(dict_size_str[:-1]) / (1024.0 * 1024.0)
+                else:
+                    # 纯数字，假设是MB
+                    dict_size_gb = float(dict_size_str) / 1024.0
+            except (ValueError, TypeError) as e:
+                logger.warning(f"解析字典大小失败: {dict_size_str}，使用默认值 1GB，错误: {str(e)}")
+                dict_size_gb = 1.0  # 解析失败，使用默认值
+            
+            # 确保 dict_size_gb 是浮点数类型
+            dict_size_gb = float(dict_size_gb)
+            
+            # 固定字典大小为384M，不再动态调整
+            # 计算内存需求：字典大小 × 线程数 × 1.5（安全系数）
+            calculated_memory_gb = dict_size_gb * compression_command_threads * 1.5
+            memory_gb = max(16, min(64, int(calculated_memory_gb)))
+            
+            # 记录内存信息（如果可用）
+            if PSUTIL_AVAILABLE:
+                try:
+                    mem = psutil.virtual_memory()
+                    total_memory_gb = mem.total / (1024 ** 3)
+                    available_memory_gb = mem.available / (1024 ** 3)
+                    logger.info(f"系统内存: 总计={total_memory_gb:.1f}GB, 可用={available_memory_gb:.1f}GB | "
+                               f"固定字典={dict_size_str} ({dict_size_gb:.3f}GB), "
+                               f"线程={compression_command_threads}, 预计内存={memory_gb}GB")
+                except Exception as e:
+                    logger.info(f"固定字典={dict_size_str}, 线程={compression_command_threads}, 预计内存={memory_gb}GB")
+            else:
+                logger.info(f"固定字典={dict_size_str}, 线程={compression_command_threads}, 预计内存={memory_gb}GB")
+            
+            # 根据配置决定压缩目标目录
+            # 如果启用直接压缩到磁带，则直接压缩到磁带盘符（O盘）
+            # 否则先压缩到temp目录，再移动到final目录
+            compress_directly_to_tape = getattr(self.settings, 'COMPRESS_DIRECTLY_TO_TAPE', True)
+            
+            # 生成时间戳（两种模式都需要）
             timestamp = format_datetime(now(), '%Y%m%d_%H%M%S')
-            tape_drive = self.settings.TAPE_DRIVE_LETTER.upper() + ":\\"
-            backup_dir = Path(tape_drive) / backup_set.set_id
+            
+            # 所有临时文件（包括7z工作目录）都统一放在 temp/compress/temp/{backup_set.set_id}/ 中
+            # 无论是否直接压缩到磁带，临时工作目录都不在O盘创建
+            compress_dir = Path(self.settings.BACKUP_COMPRESS_DIR)
+            compress_dir.mkdir(parents=True, exist_ok=True)
+            temp_dir = compress_dir / "temp" / backup_set.set_id
+            temp_dir.mkdir(parents=True, exist_ok=True)
+
+            await self._ensure_disk_space(temp_dir)
+            
+            if compress_directly_to_tape:
+                # 直接压缩到磁带机（O盘），但临时工作目录仍在temp目录中（不在O盘创建临时文件）
+                tape_drive = self.settings.TAPE_DRIVE_LETTER.upper() + ":\\"
+                backup_dir = Path(tape_drive) / backup_set.set_id
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"直接压缩到磁带机: {backup_dir}，临时工作目录: {temp_dir}")
+                # 直接压缩到磁带时，不需要final_dir
+                final_dir = None
+            else:
+                # 先压缩到temp目录，再移动到final目录（原有流程）
+                # final目录：压缩完成后移动到这里，等待移动到磁带机
+                final_dir = compress_dir / "final" / backup_set.set_id
+                final_dir.mkdir(parents=True, exist_ok=True)
+                
+                # 压缩时使用temp目录
+                backup_dir = temp_dir
+                logger.info(f"压缩到临时目录: {backup_dir}，完成后将移动到: {final_dir}")
             
             # 进度跟踪变量
             compress_progress = {'bytes_written': 0, 'running': True, 'completed': False}
@@ -187,123 +828,155 @@ class Compressor:
                     backup_dir.mkdir(parents=True, exist_ok=True)
                     
                     if compression_enabled:
-                        # 使用7z压缩，直接写入磁带盘符
-                        archive_path = backup_dir / f"backup_{backup_set.set_id}_{timestamp}.7z"
+                        # 根据压缩方法选择使用7z/PGZip
+                        archive_suffix = ".tar.gz" if compression_method == 'pgzip' else ".7z"
+                        archive_path = backup_dir / f"backup_{backup_set.set_id}_{timestamp}{archive_suffix}"
                         
-                        # 使用py7zr进行7z压缩，启用多进程（mp=True启用多进程压缩）
-                        # 注意：py7zr 使用 mp 参数启用多进程，而不是 threads
-                        with py7zr.SevenZipFile(
-                            archive_path,
-                            mode='w',
-                            filters=[{'id': py7zr.FILTER_LZMA2, 'preset': compression_level}],
-                            mp=True if compression_threads > 1 else False  # 启用多进程压缩（如果线程数>1）
-                        ) as archive:
-                            # 添加文件到压缩包
-                            successful_files = []
-                            failed_files = []
-                            
-                            for file_idx, file_info in enumerate(file_group):
-                                file_path = Path(file_info['path'])
-                                try:
-                                    if not file_path.exists():
-                                        logger.warning(f"文件不存在，跳过: {file_path}")
-                                        failed_files.append({'path': str(file_path), 'reason': '文件不存在'})
-                                        continue
-                                    
-                                    # 计算相对路径（保留目录结构）
-                                    try:
-                                        source_paths = backup_task.source_paths or []
-                                        if source_paths:
-                                            arcname = None
-                                            for src_path in source_paths:
-                                                src = Path(src_path)
-                                                try:
-                                                    if file_path.is_relative_to(src):
-                                                        arcname = str(file_path.relative_to(src))
-                                                        break
-                                                except (ValueError, AttributeError):
-                                                    continue
-                                            if arcname is None:
-                                                arcname = file_path.name
-                                        else:
-                                            arcname = file_path.name
-                                    except Exception:
-                                        arcname = file_path.name
-                                    
-                                    # 添加文件到压缩包
-                                    try:
-                                        archive.write(file_path, arcname=arcname)
-                                        successful_files.append(str(file_path))
-                                        
-                                        # 更新进度：基于已压缩的文件数量
-                                        if total_files > 0:
-                                            current_processed = base_processed_files + file_idx + 1
-                                            # 扫描阶段占10%，压缩阶段占90%
-                                            compress_progress_value = 10.0 + (current_processed / total_files) * 90.0
-                                            compress_progress['bytes_written'] = archive_path.stat().st_size if archive_path.exists() else 0
-                                            
-                                            # 更新任务进度（在后台线程中，需要异步更新）
-                                            if backup_task and backup_task.id:
-                                                backup_task.progress_percent = min(100.0, compress_progress_value)
-                                    except (PermissionError, OSError, FileNotFoundError, IOError) as write_error:
-                                        # 文件写入错误（权限、访问等），跳过该文件，继续处理其他文件
-                                        logger.warning(f"⚠️ 压缩时跳过无法访问的文件: {file_path} (错误: {str(write_error)})")
-                                        failed_files.append({'path': str(file_path), 'reason': str(write_error)})
-                                        continue
-                                    except Exception as write_error:
-                                        # 其他错误，也跳过该文件
-                                        logger.warning(f"⚠️ 压缩时跳过出错的文件: {file_path} (错误: {str(write_error)})")
-                                        failed_files.append({'path': str(file_path), 'reason': str(write_error)})
-                                        continue
-                                except Exception as file_error:
-                                    # 文件处理错误，跳过该文件
-                                    logger.warning(f"⚠️ 压缩时跳过出错的文件: {file_path} (错误: {str(file_error)})")
-                                    failed_files.append({'path': str(file_path), 'reason': str(file_error)})
-                                    continue
-                            
-                            # 压缩完成，等待文件大小稳定
-                            compress_progress['running'] = False
-                            
-                            # 等待文件大小稳定（最多等待10秒）
-                            max_wait_time = 10
-                            wait_interval = 0.1
-                            wait_count = 0
-                            last_size = archive_path.stat().st_size if archive_path.exists() else 0
-                            
-                            while wait_count < max_wait_time / wait_interval:
-                                time.sleep(wait_interval)  # 使用同步sleep，因为在线程中
-                                wait_count += 1
-                                if archive_path.exists():
-                                    current_size = archive_path.stat().st_size
-                                    if current_size == last_size:
-                                        # 文件大小稳定，压缩完成
-                                        break
-                                    last_size = current_size
-                            
-                            compress_progress['completed'] = True
-                            compress_progress['bytes_written'] = archive_path.stat().st_size if archive_path.exists() else 0
-                            
-                            # 存储成功和失败的文件信息
-                            compress_result['successful_files'] = successful_files
-                            compress_result['failed_files'] = failed_files
-                            compress_result['successful_original_size'] = sum(
-                                f['size'] for f in file_group 
-                                if str(f['path']) in successful_files
+                        if compression_method == '7zip_command':
+                            # 使用7-Zip命令行工具进行压缩
+                            logger.info(f"使用7-Zip命令行工具压缩 (路径: {sevenzip_path}, 线程数: {compression_command_threads})")
+                            compress_result_inner = _compress_with_7zip_command(
+                                archive_path, file_group, backup_task,
+                                compression_level, compression_command_threads, sevenzip_path,
+                                compress_progress, total_files, base_processed_files,
+                                dictionary_size=dict_size_str, memory_gb=memory_gb,
+                                temp_work_base_dir=temp_dir  # 所有临时工作目录都在temp/compress/temp/{backup_set.set_id}/中
                             )
-                            
-                            logger.info(f"7z压缩完成: {len(successful_files)} 个文件成功, {len(failed_files)} 个文件失败")
+                            # 将结果合并到外层compress_result
+                            compress_result['successful_files'] = compress_result_inner['successful_files']
+                            compress_result['failed_files'] = compress_result_inner['failed_files']
+                            compress_result['successful_original_size'] = compress_result_inner['successful_original_size']
+                            # 优先使用压缩函数返回的实际路径（绝对路径）
+                            compress_result['archive_path'] = compress_result_inner.get('archive_path') or str(archive_path.absolute())
+                        elif compression_method == 'pgzip':
+                            logger.info(f"使用PGZip压缩 (线程数: {pgzip_threads}, 块大小: {pgzip_block_size}, 等级: {compression_level})")
+                            compress_result_inner = _compress_with_pgzip(
+                                archive_path, file_group, backup_task,
+                                compression_level, pgzip_threads, pgzip_block_size,
+                                compress_progress, total_files, base_processed_files
+                            )
+                            compress_result['successful_files'] = compress_result_inner['successful_files']
+                            compress_result['failed_files'] = compress_result_inner['failed_files']
+                            compress_result['successful_original_size'] = compress_result_inner['successful_original_size']
+                            # 优先使用压缩函数返回的实际路径（绝对路径）
+                            compress_result['archive_path'] = compress_result_inner.get('archive_path') or str(archive_path.absolute())
+                        else:
+                            # 使用py7zr进行7z压缩，启用多进程（mp=True启用多进程压缩）
+                            # 注意：py7zr 使用 mp 参数启用多进程，而不是 threads
+                            logger.info(f"使用py7zr压缩 (线程数: {compression_threads}, mp={compression_threads > 1})")
+                            with py7zr.SevenZipFile(
+                                archive_path,
+                                mode='w',
+                                filters=[{'id': py7zr.FILTER_LZMA2, 'preset': compression_level}],
+                                mp=True if compression_threads > 1 else False  # 启用多进程压缩（如果线程数>1）
+                            ) as archive:
+                                # 添加文件到压缩包
+                                successful_files = []
+                                failed_files = []
+                                
+                                for file_idx, file_info in enumerate(file_group):
+                                    file_path = Path(file_info['path'])
+                                    try:
+                                        if not file_path.exists():
+                                            logger.warning(f"文件不存在，跳过: {file_path}")
+                                            failed_files.append({'path': str(file_path), 'reason': '文件不存在'})
+                                            continue
+                                        
+                                        # 计算相对路径（保留目录结构）
+                                        try:
+                                            source_paths = backup_task.source_paths or []
+                                            if source_paths:
+                                                arcname = None
+                                                for src_path in source_paths:
+                                                    src = Path(src_path)
+                                                    try:
+                                                        if file_path.is_relative_to(src):
+                                                            arcname = str(file_path.relative_to(src))
+                                                            break
+                                                    except (ValueError, AttributeError):
+                                                        continue
+                                                if arcname is None:
+                                                    arcname = file_path.name
+                                            else:
+                                                arcname = file_path.name
+                                        except Exception:
+                                            arcname = file_path.name
+                                        
+                                        # 添加文件到压缩包
+                                        try:
+                                            archive.write(file_path, arcname=arcname)
+                                            successful_files.append(str(file_path))
+                                            
+                                            # 更新进度：基于已压缩的文件数量
+                                            if total_files > 0:
+                                                current_processed = base_processed_files + file_idx + 1
+                                                # 扫描阶段占10%，压缩阶段占90%
+                                                compress_progress_value = 10.0 + (current_processed / total_files) * 90.0
+                                                compress_progress['bytes_written'] = archive_path.stat().st_size if archive_path.exists() else 0
+                                                
+                                                # 更新任务进度（在后台线程中，需要异步更新）
+                                                if backup_task and backup_task.id:
+                                                    backup_task.progress_percent = min(100.0, compress_progress_value)
+                                        except (PermissionError, OSError, FileNotFoundError, IOError) as write_error:
+                                            # 文件写入错误（权限、访问等），跳过该文件，继续处理其他文件
+                                            logger.warning(f"⚠️ 压缩时跳过无法访问的文件: {file_path} (错误: {str(write_error)})")
+                                            failed_files.append({'path': str(file_path), 'reason': str(write_error)})
+                                            continue
+                                        except Exception as write_error:
+                                            # 其他错误，也跳过该文件
+                                            logger.warning(f"⚠️ 压缩时跳过出错的文件: {file_path} (错误: {str(write_error)})")
+                                            failed_files.append({'path': str(file_path), 'reason': str(write_error)})
+                                            continue
+                                    except Exception as file_error:
+                                        # 文件处理错误，跳过该文件
+                                        logger.warning(f"⚠️ 压缩时跳过出错的文件: {file_path} (错误: {str(file_error)})")
+                                        failed_files.append({'path': str(file_path), 'reason': str(file_error)})
+                                        continue
+                                
+                                # 压缩完成，等待文件大小稳定
+                                compress_progress['running'] = False
+                                
+                                # 等待文件大小稳定（最多等待10秒）
+                                max_wait_time = 10
+                                wait_interval = 0.1
+                                wait_count = 0
+                                last_size = archive_path.stat().st_size if archive_path.exists() else 0
+                                
+                                while wait_count < max_wait_time / wait_interval:
+                                    time.sleep(wait_interval)  # 使用同步sleep，因为在线程中
+                                    wait_count += 1
+                                    if archive_path.exists():
+                                        current_size = archive_path.stat().st_size
+                                        if current_size == last_size:
+                                            # 文件大小稳定，压缩完成
+                                            break
+                                        last_size = current_size
+                                
+                                compress_progress['completed'] = True
+                                compress_progress['bytes_written'] = archive_path.stat().st_size if archive_path.exists() else 0
+                                
+                                # 存储成功和失败的文件信息
+                                compress_result['successful_files'] = successful_files
+                                compress_result['failed_files'] = failed_files
+                                compress_result['successful_original_size'] = sum(
+                                    f['size'] for f in file_group 
+                                    if str(f['path']) in successful_files
+                                )
+                                # py7zr直接使用预设路径，确保使用绝对路径
+                                compress_result['archive_path'] = str(archive_path.absolute())
+                                
+                                logger.info(f"py7zr压缩完成: {len(successful_files)} 个文件成功, {len(failed_files)} 个文件失败")
                             
                     else:
-                        # 不使用压缩，直接打包（tar格式）
-                        # 注意：当前实现使用7z，如果compression_enabled=False，仍然使用7z但压缩级别为0
+                        # 未启用压缩时，仍旧使用tar存储（TODO：实现真正的无压缩 tar 打包）
                         archive_path = backup_dir / f"backup_{backup_set.set_id}_{timestamp}.tar"
-                        logger.warning("当前实现不支持tar格式，使用7z格式（压缩级别为0）")
-                        # TODO: 实现tar格式打包
+                        logger.warning("当前未启用压缩，暂未实现tar打包，跳过压缩操作")
                         compress_progress['completed'] = True
                         compress_progress['bytes_written'] = 0
                         compress_result['successful_files'] = []
                         compress_result['failed_files'] = []
                         compress_result['successful_original_size'] = 0
+                        compress_result['archive_path'] = str(archive_path)
                         
                 except Exception as e:
                     logger.error(f"压缩操作失败: {str(e)}")
@@ -314,31 +987,91 @@ class Compressor:
             
             # 在线程池中执行压缩操作
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, _do_7z_compress)
+            compression_future = loop.run_in_executor(None, _do_7z_compress)
+
+            # 等待压缩完成，设置超时以避免无限等待
+            timeout_seconds = 3600  # 1小时超时
+            try:
+                # 等待压缩线程完成
+                await asyncio.wait_for(compression_future, timeout=timeout_seconds)
+
+                # 等待压缩进度标记完成（最多等待30秒）
+                max_progress_wait = 30
+                progress_wait_count = 0
+                while not compress_progress['completed'] and progress_wait_count < max_progress_wait:
+                    await asyncio.sleep(1)
+                    progress_wait_count += 1
+
+                if not compress_progress['completed']:
+                    logger.warning("压缩操作完成但进度标记未更新，强制继续")
+                    compress_progress['completed'] = True
+                    compress_progress['running'] = False
+
+            except asyncio.TimeoutError:
+                logger.error(f"压缩操作超时（{timeout_seconds}秒），强制继续")
+                compress_progress['completed'] = True
+                compress_progress['running'] = False
+            except Exception as compress_error:
+                logger.error(f"压缩操作发生异常: {str(compress_error)}")
+                compress_progress['completed'] = True
+                compress_progress['running'] = False
+                raise
             
-            # 等待压缩完成
-            max_wait = 300  # 最多等待5分钟
-            wait_count = 0
-            while not compress_progress['completed'] and wait_count < max_wait:
-                await asyncio.sleep(1)
-                wait_count += 1
-            
-            if not compress_progress['completed']:
-                logger.error("压缩操作超时")
-                return None
-            
-            # 检查压缩文件是否存在
-            if compression_enabled:
-                archive_path = backup_dir / f"backup_{backup_set.set_id}_{timestamp}.7z"
+            # 确定压缩文件的实际路径（使用压缩函数返回的完整路径）
+            archive_path_str = compress_result.get('archive_path')
+            if archive_path_str:
+                temp_archive_path = Path(archive_path_str)
+                logger.info(f"压缩函数返回的文件路径: {temp_archive_path}")
             else:
-                archive_path = backup_dir / f"backup_{backup_set.set_id}_{timestamp}.tar"
+                # 如果压缩函数没有返回路径，回退到预设路径
+                if compression_enabled:
+                    suffix = ".tar.gz" if compression_method == 'pgzip' else ".7z"
+                    temp_archive_path = backup_dir / f"backup_{backup_set.set_id}_{timestamp}{suffix}"
+                else:
+                    temp_archive_path = backup_dir / f"backup_{backup_set.set_id}_{timestamp}.tar"
+                logger.warning(f"压缩函数未返回路径，使用预设路径: {temp_archive_path}")
             
-            if not archive_path.exists():
-                logger.error(f"压缩文件不存在: {archive_path}")
+            if not temp_archive_path.exists():
+                logger.error(f"压缩文件不存在: {temp_archive_path} (绝对路径: {temp_archive_path.absolute()})")
                 return None
+            
+            logger.info(f"压缩文件存在，大小: {format_bytes(temp_archive_path.stat().st_size)}, 路径: {temp_archive_path}")
+            
+            # 根据配置决定是否需要移动文件
+            if compress_directly_to_tape:
+                # 直接压缩到磁带，不需要移动
+                final_archive_path = temp_archive_path
+                logger.info(f"文件已直接压缩到磁带机: {final_archive_path}")
+            else:
+                # 压缩完成，将文件从temp目录移动到final目录（异步执行，避免阻塞）
+                if final_dir is None:
+                    # 如果final_dir未定义，说明配置有问题，使用temp目录
+                    logger.warning("final_dir未定义，使用temp目录中的文件")
+                    final_archive_path = temp_archive_path
+                else:
+                    final_archive_path = final_dir / temp_archive_path.name
+                    try:
+                        logger.info(f"压缩完成，异步移动文件到正式目录: {temp_archive_path.name}")
+
+                        # 使用异步文件移动，避免阻塞压缩操作
+                        await loop.run_in_executor(None, lambda: shutil.move(str(temp_archive_path), str(final_archive_path)))
+                        logger.info(f"文件已异步移动到正式目录: {final_archive_path}")
+
+                        # 记录关键阶段：文件移动到final目录
+                        if backup_task:
+                            from backup.backup_db import BackupDB
+                            backup_db = BackupDB()
+                            backup_db._log_operation_stage_event(
+                                backup_task,
+                                f"[文件已移动到正式目录] {final_archive_path.name}，大小: {format_bytes(final_archive_path.stat().st_size)}"
+                            )
+                    except Exception as move_error:
+                        logger.error(f"异步移动文件到正式目录失败: {str(move_error)}")
+                        # 如果移动失败，使用temp目录中的文件路径
+                        final_archive_path = temp_archive_path
             
             # 获取压缩文件大小
-            compressed_size = archive_path.stat().st_size
+            compressed_size = final_archive_path.stat().st_size
             
             # 计算校验和（可选，性能考虑可以跳过）
             checksum = None
@@ -347,7 +1080,7 @@ class Compressor:
             successful_file_count = len(compress_result['successful_files'])
             
             compressed_info = {
-                'path': str(archive_path),
+                'path': str(final_archive_path.absolute()),  # 使用final目录中的绝对路径
                 'compressed_size': compressed_size,
                 'original_size': compress_result['successful_original_size'] or total_original_size,
                 'successful_files': successful_file_count,  # 成功压缩的文件数
@@ -357,6 +1090,8 @@ class Compressor:
                 'compression_level': compression_level if compression_enabled else None,
                 'compression_threads': compression_threads if compression_enabled else None
             }
+            
+            logger.info(f"压缩文件组完成，返回路径: {compressed_info['path']} (文件存在: {final_archive_path.exists()})")
 
             if compression_enabled:
                 compression_ratio = compressed_size / compressed_info['original_size'] if compressed_info['original_size'] > 0 else 0
@@ -376,4 +1111,37 @@ class Compressor:
             import traceback
             traceback.print_exc()
             return None
+
+    async def _ensure_disk_space(self, target_dir: Path):
+        """确保磁盘剩余空间满足 3 * MAX_FILE_SIZE 的要求"""
+        try:
+            max_file_size = int(getattr(self.settings, 'MAX_FILE_SIZE', 0))
+        except Exception:
+            max_file_size = 0
+
+        if max_file_size <= 0:
+            return
+
+        required_free = max_file_size * 3
+        check_interval = getattr(self.settings, 'DISK_CHECK_INTERVAL', 30)
+
+        while True:
+            try:
+                usage = shutil.disk_usage(str(target_dir))
+                free_bytes = usage.free
+            except Exception as disk_error:
+                logger.warning(f"无法获取磁盘剩余空间（{target_dir}），跳过空间检查: {disk_error}")
+                return
+
+            if free_bytes >= required_free:
+                logger.info(
+                    f"磁盘剩余空间充足：{format_bytes(free_bytes)} >= {format_bytes(required_free)}"
+                )
+                return
+
+            logger.warning(
+                f"磁盘剩余空间不足：{format_bytes(free_bytes)} < {format_bytes(required_free)}，"
+                f"暂停压缩，{check_interval} 秒后重试"
+            )
+            await asyncio.sleep(check_interval)
 

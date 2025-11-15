@@ -32,11 +32,56 @@ class DatabaseManager:
         self.SessionLocal = None
         self.AsyncSessionLocal = None
         self._initialized = False
+        self._is_opengauss_cache: Optional[bool] = None
+
+    def is_opengauss_database(self) -> bool:
+        """对外提供是否为 openGauss 的统一判断"""
+        if self._is_opengauss_cache is None:
+            self._is_opengauss_cache = self._detect_opengauss()
+        return bool(self._is_opengauss_cache)
+
+    def _detect_opengauss(self) -> bool:
+        """根据URL/显式配置/服务器版本自动识别openGauss"""
+        raw_url = (self.settings.DATABASE_URL or "").lower()
+        if "opengauss" in raw_url:
+            return True
+
+        flavor = getattr(self.settings, "DB_FLAVOR", None)
+        if flavor and "opengauss" in flavor.lower():
+            logger.info("通过 DB_FLAVOR 显式配置识别为 openGauss 数据库")
+            return True
+
+        try:
+            import psycopg2
+        except ImportError:
+            logger.debug("psycopg2 未安装，无法自动检测 openGauss，默认为非 openGauss")
+            return False
+
+        conn = None
+        try:
+            conn = psycopg2.connect(self._build_database_url())
+            with conn.cursor() as cur:
+                cur.execute("SELECT version()")
+                row = cur.fetchone()
+                version_str = row[0] if row else ""
+                if version_str and "opengauss" in version_str.lower():
+                    logger.info(f"自动检测到 openGauss 数据库: {version_str}")
+                    return True
+        except Exception as detect_error:
+            logger.debug(f"自动检测 openGauss 数据库失败: {detect_error}")
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        return False
 
     async def initialize(self):
         """初始化数据库连接"""
         try:
             # 构建数据库URL
+            raw_database_url = self.settings.DATABASE_URL
             database_url = self._build_database_url()
             async_database_url = self._build_async_database_url()
 
@@ -56,7 +101,7 @@ class DatabaseManager:
             else:
                 # PostgreSQL/openGauss支持连接池
                 # 对于openGauss，需要特殊处理以避免版本解析错误
-                is_opengauss = "opengauss" in database_url.lower() or "opengauss" in async_database_url.lower()
+                is_opengauss = self.is_opengauss_database()
                 
                 # 对于openGauss，完全不创建SQLAlchemy引擎，避免版本解析错误
                 if is_opengauss:
@@ -134,8 +179,7 @@ class DatabaseManager:
             import re
             
             # 对于openGauss，使用psycopg2直接创建表，避免版本检查问题
-            database_url = self.settings.DATABASE_URL
-            if "opengauss" in database_url.lower():
+            if self.is_opengauss_database():
                 logger.info("检测到openGauss数据库，使用psycopg2创建表...")
                 await self._create_tables_with_psycopg2()
             else:
@@ -143,6 +187,10 @@ class DatabaseManager:
                 with self.engine.begin() as conn:
                     Base.metadata.create_all(conn)
                 logger.info("数据库表创建完成")
+                
+                # 检查并添加缺失的字段（字段迁移）- 仅对PostgreSQL/openGauss
+                if not database_url.startswith("sqlite"):
+                    await self._migrate_missing_columns_postgresql()
 
         except Exception as e:
             logger.error(f"创建数据库表失败: {str(e)}")
@@ -277,6 +325,9 @@ class DatabaseManager:
                     logger.info(f"创建了 {len(created_tables)} 个新表: {', '.join(created_tables[:5])}{'...' if len(created_tables) > 5 else ''}")
                 if existing_tables:
                     logger.debug(f"跳过 {len(existing_tables)} 个已存在的表")
+                
+                # 检查并添加缺失的字段（字段迁移）
+                self._migrate_missing_columns(cur)
             
             conn.commit()
             logger.info("使用psycopg2成功创建数据库表")
@@ -285,6 +336,158 @@ class DatabaseManager:
             raise
         finally:
             conn.close()
+    
+    def _migrate_missing_columns(self, cur):
+        """检查并添加缺失的字段（字段迁移）
+        
+        Args:
+            cur: psycopg2 cursor对象
+        """
+        try:
+            from models.backup import BackupTask, BackupSet
+            from sqlalchemy.sql import sqltypes
+            
+            # 定义需要迁移的字段（表名 -> [(字段名, SQL类型, 默认值), ...]）
+            migrations = {
+                'backup_tasks': [
+                    ('compressed_bytes', 'BIGINT', '0', '压缩后字节数'),
+                    ('scan_status', 'VARCHAR(50)', "'pending'", '扫描状态'),
+                    ('scan_completed_at', 'TIMESTAMPTZ', 'NULL', '扫描完成时间'),
+                ],
+                'backup_sets': [
+                    ('compressed_bytes', 'BIGINT', '0', '压缩后字节数'),
+                    ('compression_ratio', 'REAL', 'NULL', '压缩比'),
+                ],
+                'backup_files': [
+                    ('directory_path', 'VARCHAR(1000)', 'NULL', '目录路径'),
+                    ('display_name', 'VARCHAR(255)', 'NULL', '展示名称'),
+                    ('is_copy_success', 'BOOLEAN', 'FALSE', '是否复制成功'),
+                    ('copy_status_at', 'TIMESTAMPTZ', 'NULL', '复制状态更新时间'),
+                ],
+            }
+            
+            added_columns = []
+            existing_columns = []
+            
+            for table_name, columns in migrations.items():
+                # 检查表是否存在
+                cur.execute("""
+                    SELECT 1 FROM information_schema.tables WHERE table_name = %s
+                """, (table_name,))
+                if not cur.fetchone():
+                    # 表不存在，跳过
+                    continue
+                
+                # 获取表中现有的所有列名
+                cur.execute("""
+                    SELECT column_name FROM information_schema.columns 
+                    WHERE table_name = %s
+                """, (table_name,))
+                existing_cols = {row[0] for row in cur.fetchall()}
+                
+                # 检查每个需要迁移的字段
+                for col_name, col_type, default_value, comment in columns:
+                    if col_name not in existing_cols:
+                        # 字段不存在，需要添加
+                        default_clause = f"DEFAULT {default_value}" if default_value != 'NULL' else ""
+                        comment_clause = f"COMMENT ON COLUMN {table_name}.{col_name} IS '{comment}'" if comment else ""
+                        
+                        alter_sql = f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type} {default_clause}"
+                        cur.execute(alter_sql)
+                        added_columns.append(f"{table_name}.{col_name}")
+                        
+                        # 添加注释（如果提供）
+                        if comment_clause:
+                            try:
+                                cur.execute(comment_clause)
+                            except Exception as comment_err:
+                                # 注释添加失败不影响主流程
+                                logger.debug(f"添加字段注释失败 {table_name}.{col_name}: {str(comment_err)}")
+                    else:
+                        existing_columns.append(f"{table_name}.{col_name}")
+            
+            # 汇总输出
+            if added_columns:
+                logger.info(f"添加了 {len(added_columns)} 个缺失字段: {', '.join(added_columns)}")
+            if existing_columns:
+                logger.debug(f"跳过 {len(existing_columns)} 个已存在的字段")
+                
+        except Exception as e:
+            logger.warning(f"字段迁移检查失败: {str(e)}，但不影响表创建流程")
+            # 不抛出异常，避免影响主流程
+    
+    async def _migrate_missing_columns_postgresql(self):
+        """检查并添加缺失的字段（字段迁移）- PostgreSQL/非openGauss数据库
+        
+        使用SQLAlchemy引擎执行迁移
+        """
+        try:
+            from sqlalchemy import text, inspect
+            from models.backup import BackupTask, BackupSet
+            
+            # 定义需要迁移的字段（表名 -> [(字段名, SQL类型, 默认值, 注释), ...]）
+            migrations = {
+                'backup_tasks': [
+                    ('compressed_bytes', 'BIGINT', '0', '压缩后字节数'),
+                    ('scan_status', 'VARCHAR(50)', "'pending'", '扫描状态'),
+                    ('scan_completed_at', 'TIMESTAMPTZ', None, '扫描完成时间'),
+                ],
+                'backup_sets': [
+                    ('compressed_bytes', 'BIGINT', '0', '压缩后字节数'),
+                    ('compression_ratio', 'REAL', None, '压缩比'),
+                ],
+                'backup_files': [
+                    ('directory_path', 'VARCHAR(1000)', None, '目录路径'),
+                    ('display_name', 'VARCHAR(255)', None, '展示名称'),
+                    ('is_copy_success', 'BOOLEAN', 'FALSE', '是否复制成功'),
+                    ('copy_status_at', 'TIMESTAMPTZ', None, '复制状态更新时间'),
+                ],
+            }
+            
+            if self.engine is None:
+                return
+            
+            inspector = inspect(self.engine)
+            added_columns = []
+            existing_columns = []
+            
+            async with self.async_engine.begin() as conn:
+                for table_name, columns in migrations.items():
+                    # 检查表是否存在
+                    if not inspector.has_table(table_name):
+                        continue
+                    
+                    # 获取表中现有的所有列名
+                    existing_cols = {col['name'] for col in inspector.get_columns(table_name)}
+                    
+                    # 检查每个需要迁移的字段
+                    for col_name, col_type, default_value, comment in columns:
+                        if col_name not in existing_cols:
+                            # 字段不存在，需要添加
+                            default_clause = f"DEFAULT {default_value}" if default_value is not None else ""
+                            alter_sql = f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type} {default_clause}"
+                            await conn.execute(text(alter_sql))
+                            added_columns.append(f"{table_name}.{col_name}")
+                            
+                            # 添加注释（如果提供且数据库支持）
+                            if comment and not self.settings.DATABASE_URL.startswith("sqlite"):
+                                try:
+                                    comment_sql = text(f"COMMENT ON COLUMN {table_name}.{col_name} IS '{comment}'")
+                                    await conn.execute(comment_sql)
+                                except Exception as comment_err:
+                                    logger.debug(f"添加字段注释失败 {table_name}.{col_name}: {str(comment_err)}")
+                        else:
+                            existing_columns.append(f"{table_name}.{col_name}")
+                
+                # 汇总输出
+                if added_columns:
+                    logger.info(f"添加了 {len(added_columns)} 个缺失字段: {', '.join(added_columns)}")
+                if existing_columns:
+                    logger.debug(f"跳过 {len(existing_columns)} 个已存在的字段")
+                    
+        except Exception as e:
+            logger.warning(f"字段迁移检查失败: {str(e)}，但不影响表创建流程")
+            # 不抛出异常，避免影响主流程
 
     def get_sync_session(self) -> Session:
         """获取同步数据库会话"""
@@ -332,38 +535,34 @@ class DatabaseManager:
     async def health_check(self) -> bool:
         """数据库健康检查"""
         try:
-            # 对于openGauss，使用psycopg2直接连接避免版本解析问题
-            database_url = self.settings.DATABASE_URL
-            if "opengauss" in database_url.lower():
-                import psycopg2
+            if self.is_opengauss_database():
+                import asyncpg
                 import re
-                
-                # 解析数据库URL
+
+                database_url = self.settings.DATABASE_URL
                 if database_url.startswith("opengauss://"):
                     database_url = database_url.replace("opengauss://", "postgresql://", 1)
-                
                 pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
                 match = re.match(pattern, database_url)
                 if not match:
                     return False
-                
                 username, password, host, port, database = match.groups()
-                
-                # 使用psycopg2直接连接测试
-                conn = psycopg2.connect(
+                conn = await asyncpg.connect(
                     host=host,
-                    port=port,
+                    port=int(port),
                     user=username,
                     password=password,
                     database=database,
-                    connect_timeout=5
+                    timeout=5
                 )
-                cur = conn.cursor()
-                cur.execute("SELECT 1")
-                cur.close()
-                conn.close()
+                try:
+                    await conn.execute("SELECT 1")
+                finally:
+                    await conn.close()
             else:
                 from sqlalchemy import text
+                if not self.async_engine:
+                    raise RuntimeError("异步引擎未初始化")
                 async with self.async_engine.begin() as conn:
                     await conn.execute(text("SELECT 1"))
             return True

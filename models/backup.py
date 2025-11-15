@@ -77,6 +77,8 @@ class BackupTask(BaseModel):
     progress_percent = Column(Float, default=0.0, comment="进度百分比")
     error_message = Column(Text, comment="错误信息")
     result_summary = Column(JSON, comment="结果摘要")
+    scan_status = Column(String(50), default="pending", comment="扫描状态")
+    scan_completed_at = Column(DateTime(timezone=True), comment="扫描完成时间")
 
     # 关联关系
     backup_sets = relationship("BackupSet", back_populates="backup_task", cascade="all, delete-orphan")
@@ -155,6 +157,8 @@ class BackupFile(BaseModel):
     # 文件信息
     file_path = Column(String(1000), nullable=False, comment="文件路径")
     file_name = Column(String(255), nullable=False, comment="文件名")
+    directory_path = Column(String(1000), comment="目录路径")
+    display_name = Column(String(255), comment="展示名称")
     file_type = Column(Enum(BackupFileType), nullable=False, comment="文件类型")
     file_size = Column(BigInteger, nullable=False, comment="文件大小")
     compressed_size = Column(BigInteger, comment="压缩后大小")
@@ -173,6 +177,8 @@ class BackupFile(BaseModel):
     compressed = Column(Boolean, default=False, comment="是否压缩")
     encrypted = Column(Boolean, default=False, comment="是否加密")
     checksum = Column(String(128), comment="文件校验和")
+    is_copy_success = Column(Boolean, default=False, comment="是否复制成功")
+    copy_status_at = Column(DateTime(timezone=True), comment="复制状态更新时间")
 
     # 备份信息
     backup_time = Column(DateTime(timezone=True), nullable=False, comment="备份时间")

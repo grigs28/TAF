@@ -1,254 +1,242 @@
 // 系统日志管理
+// System Logs Management
+
+let currentLogPage = 0;
+const logPageSize = 50;
+
+// 初始化系统日志
 document.addEventListener('DOMContentLoaded', function() {
-    const logContainer = document.getElementById('logContainer');
+    // 当系统日志标签页激活时加载日志
+    const logsTab = document.getElementById('logs-tab');
+    if (logsTab) {
+        logsTab.addEventListener('shown.bs.tab', function() {
+            loadSystemLogs();
+        });
+        
+        // 如果标签页已经激活，立即加载
+        if (logsTab.classList.contains('active')) {
+            loadSystemLogs();
+        }
+    }
+    
+    // 刷新日志按钮
     const refreshLogsBtn = document.getElementById('refreshLogsBtn');
+    if (refreshLogsBtn) {
+        refreshLogsBtn.addEventListener('click', function() {
+            loadSystemLogs();
+        });
+    }
+    
+    // 清空日志按钮
     const clearLogsBtn = document.getElementById('clearLogsBtn');
-    const logCategory = document.getElementById('logCategory');
-    const logLevel = document.getElementById('logLevel');
-    const logOperationType = document.getElementById('logOperationType');
-    const logPaginationInfo = document.getElementById('logPaginationInfo');
+    if (clearLogsBtn) {
+        clearLogsBtn.addEventListener('click', function() {
+            if (confirm('确定要清空系统日志吗？此操作不可恢复！')) {
+                clearSystemLogs();
+            }
+        });
+    }
+    
+    // 分页按钮
     const logPrevPage = document.getElementById('logPrevPage');
     const logNextPage = document.getElementById('logNextPage');
     
-    if (!logContainer) return;
-    
-    let currentPage = 0;
-    const pageSize = 50;
-    let totalLogs = 0;
-    let currentLogs = [];
-    
-    // 加载日志
-    async function loadLogs() {
-        try {
-            logContainer.innerHTML = '<div class="text-center text-muted py-5"><i class="bi bi-hourglass-split me-2"></i>加载中...</div>';
-            
-            const params = new URLSearchParams();
-            if (logCategory.value) params.append('category', logCategory.value);
-            if (logLevel.value) params.append('level', logLevel.value);
-            if (logOperationType.value) params.append('operation_type', logOperationType.value);
-            params.append('limit', pageSize);
-            params.append('offset', currentPage * pageSize);
-            
-            const response = await fetch(`/api/system/logs?${params.toString()}`);
-            const data = await response.json();
-            
-            if (data.success) {
-                currentLogs = data.logs || [];
-                totalLogs = data.total || 0;
-                renderLogs(currentLogs);
-                updatePagination();
-            } else {
-                logContainer.innerHTML = '<div class="text-center text-danger py-5"><i class="bi bi-exclamation-triangle me-2"></i>加载失败</div>';
-            }
-        } catch (error) {
-            console.error('加载日志失败:', error);
-            logContainer.innerHTML = '<div class="text-center text-danger py-5"><i class="bi bi-exclamation-triangle me-2"></i>加载失败: ' + error.message + '</div>';
-        }
-    }
-    
-    // 渲染日志
-    function renderLogs(logs) {
-        if (!logs || logs.length === 0) {
-            logContainer.innerHTML = '<div class="text-center text-muted py-5"><i class="bi bi-inbox me-2"></i>暂无日志</div>';
-            return;
-        }
-        
-        const logsHtml = logs.map(log => {
-            const timestamp = log.timestamp ? new Date(log.timestamp).toLocaleString('zh-CN') : '未知时间';
-            const levelClass = getLevelClass(log.level);
-            const levelIcon = getLevelIcon(log.level);
-            const barClass = getLevelBarClass(log.level);
-            const typeText = log.type === 'operation' ? '操作' : '系统';
-            
-            // 单行文本内容
-            const primaryText = log.type === 'operation'
-                ? (log.operation_name || log.operation_description || log.message || '未知操作')
-                : (log.message || '未知消息');
-            const resource = log.resource_name ? ` ${log.resource_name}` : '';
-            const userText = log.username ? ` ${log.username}` : '';
-            const successText = (log.success === true) ? ' 成功' : (log.success === false ? ' 失败' : '');
-            
-            return `
-                <div class="log-entry d-flex mb-2">
-                    <div class="log-bar ${barClass}"></div>
-                    <div class="content flex-grow-1">
-                        <div class="content-line">
-                            <span class="text-muted small">${typeText}</span>
-                            <span class="badge ${getCategoryBadgeClass(log.category)}">${getCategoryName(log.category)}</span>
-                            <span class="badge ${levelClass}"><i class="bi ${levelIcon} me-1"></i>${getLevelName(log.level)}</span>
-                            <span class="text-muted small">${timestamp}</span>
-                            <span class="message">${primaryText}${resource}${userText}${successText}</span>
-                        </div>
-                    </div>
-                </div>
-            `;
-        }).join('');
-        
-        logContainer.innerHTML = logsHtml;
-    }
-
-    // 左侧颜色条样式类
-    function getLevelBarClass(level) {
-        const map = {
-            'debug': 'bar-debug',
-            'info': 'bar-info',
-            'warning': 'bar-warning',
-            'error': 'bar-error',
-            'critical': 'bar-critical'
-        };
-        return map[level] || 'bar-debug';
-    }
-    
-    // 获取级别样式类
-    function getLevelClass(level) {
-        const levelMap = {
-            'debug': 'bg-secondary',
-            'info': 'bg-info',
-            'warning': 'bg-warning text-dark',
-            'error': 'bg-danger',
-            'critical': 'bg-dark text-danger'
-        };
-        return levelMap[level] || 'bg-secondary';
-    }
-    
-    // 获取级别图标
-    function getLevelIcon(level) {
-        const iconMap = {
-            'debug': 'bi-bug',
-            'info': 'bi-info-circle',
-            'warning': 'bi-exclamation-triangle',
-            'error': 'bi-x-circle',
-            'critical': 'bi-exclamation-octagon'
-        };
-        return iconMap[level] || 'bi-circle';
-    }
-    
-    // 获取级别名称
-    function getLevelName(level) {
-        const nameMap = {
-            'debug': '调试',
-            'info': '信息',
-            'warning': '警告',
-            'error': '错误',
-            'critical': '严重'
-        };
-        return nameMap[level] || level;
-    }
-    
-    // 获取分类徽章样式
-    function getCategoryBadgeClass(category) {
-        const categoryMap = {
-            'system': 'bg-primary',
-            'tape': 'bg-success',
-            'backup': 'bg-info',
-            'recovery': 'bg-warning text-dark',
-            'user': 'bg-secondary',
-            'security': 'bg-danger',
-            'scheduler': 'bg-dark',
-            'api': 'bg-purple',
-            'database': 'bg-indigo'
-        };
-        return categoryMap[category] || 'bg-secondary';
-    }
-    
-    // 获取分类名称
-    function getCategoryName(category) {
-        const nameMap = {
-            'system': '系统',
-            'tape': '磁带',
-            'backup': '备份',
-            'recovery': '恢复',
-            'user': '用户',
-            'security': '安全',
-            'scheduler': '计划任务',
-            'api': 'API',
-            'database': '数据库'
-        };
-        return nameMap[category] || category;
-    }
-    
-    // 更新分页信息
-    function updatePagination() {
-        const start = currentPage * pageSize + 1;
-        const end = Math.min((currentPage + 1) * pageSize, totalLogs);
-        logPaginationInfo.textContent = `显示 ${start}-${end} 条，共 ${totalLogs} 条`;
-        
-        logPrevPage.disabled = currentPage === 0;
-        logNextPage.disabled = end >= totalLogs;
-    }
-    
-    // 事件监听
-    if (refreshLogsBtn) {
-        refreshLogsBtn.addEventListener('click', () => {
-            currentPage = 0;
-            loadLogs();
-        });
-    }
-    
-    if (clearLogsBtn) {
-        clearLogsBtn.addEventListener('click', () => {
-            if (confirm('确定要清空日志显示吗？')) {
-                logContainer.innerHTML = '<div class="text-center text-muted py-5"><i class="bi bi-inbox me-2"></i>暂无日志</div>';
-                currentLogs = [];
-                totalLogs = 0;
-                currentPage = 0;
-                updatePagination();
-            }
-        });
-    }
-    
-    if (logCategory) {
-        logCategory.addEventListener('change', () => {
-            currentPage = 0;
-            loadLogs();
-        });
-    }
-    
-    if (logLevel) {
-        logLevel.addEventListener('change', () => {
-            currentPage = 0;
-            loadLogs();
-        });
-    }
-    
-    if (logOperationType) {
-        logOperationType.addEventListener('change', () => {
-            currentPage = 0;
-            loadLogs();
-        });
-    }
-    
     if (logPrevPage) {
-        logPrevPage.addEventListener('click', () => {
-            if (currentPage > 0) {
-                currentPage--;
-                loadLogs();
+        logPrevPage.addEventListener('click', function() {
+            if (currentLogPage > 0) {
+                currentLogPage--;
+                loadSystemLogs();
             }
         });
     }
     
     if (logNextPage) {
-        logNextPage.addEventListener('click', () => {
-            const maxPage = Math.ceil(totalLogs / pageSize) - 1;
-            if (currentPage < maxPage) {
-                currentPage++;
-                loadLogs();
-            }
+        logNextPage.addEventListener('click', function() {
+            currentLogPage++;
+            loadSystemLogs();
         });
-    }
-    
-    // 当切换到日志标签页时自动加载
-    const logsTab = document.querySelector('#logs-tab');
-    if (logsTab) {
-        logsTab.addEventListener('shown.bs.tab', () => {
-            loadLogs();
-        });
-    }
-    
-    // 如果当前在日志标签页，自动加载
-    const activeTab = document.querySelector('#logs.active');
-    if (activeTab) {
-        loadLogs();
     }
 });
 
+// 加载系统日志
+async function loadSystemLogs() {
+    const logContainer = document.getElementById('logContainer');
+    if (!logContainer) return;
+    
+    // 显示加载中
+    logContainer.innerHTML = '<div class="text-center text-muted py-5"><i class="bi bi-hourglass-split me-2"></i>加载中...</div>';
+    
+    try {
+        // 获取筛选条件
+        const category = document.getElementById('logCategory')?.value || '';
+        const level = document.getElementById('logLevel')?.value || '';
+        const operationType = document.getElementById('logOperationType')?.value || '';
+        
+        // 构建查询参数
+        const params = new URLSearchParams({
+            limit: logPageSize.toString(),
+            offset: (currentLogPage * logPageSize).toString()
+        });
+        
+        if (category) params.append('category', category);
+        if (level) params.append('level', level);
+        if (operationType) params.append('operation_type', operationType);
+        
+        const response = await fetch(`/api/system/logs?${params.toString()}`);
+        
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            const logs = result.logs || [];
+            const total = result.total !== undefined ? result.total : logs.length;
+            displaySystemLogs(logs, total);
+            updateLogPagination(total);
+        } else {
+            logContainer.innerHTML = `<div class="text-center text-danger py-5">
+                <i class="bi bi-exclamation-triangle me-2"></i>加载失败：${result.message || result.detail || '未知错误'}
+            </div>`;
+        }
+    } catch (error) {
+        console.error('加载系统日志失败:', error);
+        logContainer.innerHTML = `<div class="text-center text-danger py-5">
+            <i class="bi bi-exclamation-triangle me-2"></i>加载失败：${error.message}
+        </div>`;
+    }
+}
+
+// 显示系统日志
+function displaySystemLogs(logs, total) {
+    const logContainer = document.getElementById('logContainer');
+    if (!logContainer) return;
+    
+    if (logs.length === 0) {
+        logContainer.innerHTML = '<div class="text-center text-muted py-5"><i class="bi bi-inbox me-2"></i>暂无日志</div>';
+        return;
+    }
+    
+    let html = '';
+    logs.forEach(log => {
+        const timestamp = log.timestamp ? new Date(log.timestamp).toLocaleString('zh-CN') : '未知时间';
+        const level = log.level || 'info';
+        const levelClass = `bar-${level}`;
+        const levelBadge = getLevelBadge(level);
+        const category = log.category || 'system';
+        const categoryBadge = getCategoryBadge(category);
+        
+        // 根据日志类型显示不同内容
+        if (log.type === 'operation') {
+            // 操作日志
+            const operationName = log.operation_name || log.operation_type || '未知操作';
+            const success = log.success !== false;
+            const successBadge = success 
+                ? '<span class="badge bg-success">成功</span>' 
+                : '<span class="badge bg-danger">失败</span>';
+            
+            html += `
+                <div class="log-entry mb-2 d-flex">
+                    <div class="log-bar ${levelClass}"></div>
+                    <div class="content flex-grow-1">
+                        <div class="content-line d-flex align-items-center flex-wrap">
+                            ${levelBadge}
+                            ${categoryBadge}
+                            ${successBadge}
+                            <span class="message">${operationName}</span>
+                            <small class="text-muted ms-auto">${timestamp}</small>
+                        </div>
+                        ${log.operation_description ? `<div class="text-muted small mt-1">${log.operation_description}</div>` : ''}
+                        ${log.error_message ? `<div class="text-danger small mt-1">错误：${log.error_message}</div>` : ''}
+                        ${log.result_message ? `<div class="text-success small mt-1">${log.result_message}</div>` : ''}
+                    </div>
+                </div>
+            `;
+        } else {
+            // 系统日志
+            const message = log.message || '无消息';
+            const module = log.module || '';
+            const functionName = log.function || '';
+            
+            html += `
+                <div class="log-entry mb-2 d-flex">
+                    <div class="log-bar ${levelClass}"></div>
+                    <div class="content flex-grow-1">
+                        <div class="content-line d-flex align-items-center flex-wrap">
+                            ${levelBadge}
+                            ${categoryBadge}
+                            <span class="message">${message}</span>
+                            <small class="text-muted ms-auto">${timestamp}</small>
+                        </div>
+                        ${module || functionName ? `<div class="text-muted small mt-1">${module}${functionName ? '.' + functionName : ''}</div>` : ''}
+                        ${log.stack_trace ? `<div class="text-danger small mt-1" style="white-space: pre-wrap; font-family: monospace;">${log.stack_trace}</div>` : ''}
+                    </div>
+                </div>
+            `;
+        }
+    });
+    
+    logContainer.innerHTML = html;
+}
+
+// 获取级别徽章
+function getLevelBadge(level) {
+    const badges = {
+        'debug': '<span class="badge bg-secondary">调试</span>',
+        'info': '<span class="badge bg-info">信息</span>',
+        'warning': '<span class="badge bg-warning text-dark">警告</span>',
+        'error': '<span class="badge bg-danger">错误</span>',
+        'critical': '<span class="badge bg-dark">严重</span>'
+    };
+    return badges[level] || badges['info'];
+}
+
+// 获取分类徽章
+function getCategoryBadge(category) {
+    const badges = {
+        'system': '<span class="badge bg-primary">系统</span>',
+        'backup': '<span class="badge bg-success">备份</span>',
+        'recovery': '<span class="badge bg-info">恢复</span>',
+        'tape': '<span class="badge bg-warning text-dark">磁带</span>',
+        'user': '<span class="badge bg-secondary">用户</span>',
+        'security': '<span class="badge bg-danger">安全</span>',
+        'scheduler': '<span class="badge bg-purple">计划任务</span>',
+        'api': '<span class="badge bg-cyan">API</span>',
+        'database': '<span class="badge bg-orange">数据库</span>'
+    };
+    return badges[category] || '<span class="badge bg-secondary">' + category + '</span>';
+}
+
+// 更新日志分页信息
+function updateLogPagination(total) {
+    const paginationInfo = document.getElementById('logPaginationInfo');
+    const logPrevPage = document.getElementById('logPrevPage');
+    const logNextPage = document.getElementById('logNextPage');
+    
+    if (paginationInfo) {
+        const start = currentLogPage * logPageSize + 1;
+        const end = Math.min((currentLogPage + 1) * logPageSize, total);
+        paginationInfo.textContent = `显示 ${start}-${end} 条，共 ${total} 条`;
+    }
+    
+    if (logPrevPage) {
+        logPrevPage.disabled = currentLogPage === 0;
+    }
+    
+    if (logNextPage) {
+        logNextPage.disabled = (currentLogPage + 1) * logPageSize >= total;
+    }
+}
+
+// 清空系统日志
+async function clearSystemLogs() {
+    try {
+        // 注意：这里需要后端提供清空日志的API
+        // 目前先提示用户
+        alert('清空日志功能需要后端API支持，请联系管理员');
+    } catch (error) {
+        console.error('清空系统日志失败:', error);
+        alert('清空失败：' + error.message);
+    }
+}

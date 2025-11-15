@@ -8,7 +8,7 @@ System Management API Module
 from fastapi import APIRouter
 
 # 导入所有子模块
-from . import info, config, logs, statistics, database, tape_config, notification, file_system
+from . import info, config, logs, statistics, database, tape_config, notification, file_system, env_config, compression_config
 
 # 创建主路由器
 router = APIRouter()
@@ -22,6 +22,8 @@ router.include_router(database.router, tags=["数据库配置"])
 router.include_router(tape_config.router, tags=["磁带配置"])
 router.include_router(notification.router, tags=["通知配置"])
 router.include_router(file_system.router, tags=["文件系统"])
+router.include_router(env_config.router, tags=["环境配置"])
+router.include_router(compression_config.router, tags=["压缩配置"])
 
 __all__ = ['router']
 

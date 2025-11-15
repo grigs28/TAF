@@ -21,6 +21,7 @@ aiofiles==23.2.1
 
 # 压缩
 py7zr==0.20.8
+pgzip==0.3.5
 # lzma 已内置在Python标准库中，无需单独安装
 
 # 加密

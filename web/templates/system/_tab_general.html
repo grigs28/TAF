@@ -7,23 +7,11 @@
                     <h6 class="card-title">应用信息</h6>
                     <div class="mb-3">
                         <label class="form-label">应用名称</label>
-                        <input type="text" class="form-control" value="{{ app_name }}">
+                        <input type="text" class="form-control" id="appName" value="{{ app_name }}">
                     </div>
                     <div class="mb-3">
                         <label class="form-label">版本号</label>
                         <input type="text" class="form-control" value="{{ version }}" readonly>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">运行环境</label>
-                        <select class="form-select">
-                            <option value="production" selected>生产环境</option>
-                            <option value="development">开发环境</option>
-                            <option value="testing">测试环境</option>
-                        </select>
-                    </div>
-                    <div class="form-check form-switch">
-                        <input class="form-check-input" type="checkbox" id="debugMode">
-                        <label class="form-check-label" for="debugMode">调试模式</label>
                     </div>
                 </div>
             </div>
@@ -34,19 +22,36 @@
                     <h6 class="card-title">Web服务</h6>
                     <div class="mb-3">
                         <label class="form-label">监听地址</label>
-                        <input type="text" class="form-control" value="0.0.0.0">
+                        <input type="text" class="form-control" id="webHost" value="0.0.0.0">
                     </div>
                     <div class="mb-3">
                         <label class="form-label">监听端口</label>
-                        <input type="number" class="form-control" value="8080">
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">工作进程数</label>
-                        <input type="number" class="form-control" value="4" min="1" max="16">
+                        <input type="number" class="form-control" id="webPort" value="8080">
                     </div>
                     <div class="form-check form-switch">
-                        <input class="form-check-input" type="checkbox" id="enableCors" checked>
+                        <input class="form-check-input" type="checkbox" id="enableCors">
                         <label class="form-check-label" for="enableCors">启用CORS</label>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-6">
+            <div class="setting-card service-card mb-3">
+                <div class="card-body">
+                    <h6 class="card-title">日志配置</h6>
+                    <div class="mb-3">
+                        <label class="form-label">日志级别</label>
+                        <select class="form-select" id="logLevel">
+                            <option value="DEBUG">DEBUG</option>
+                            <option value="INFO">INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR">ERROR</option>
+                            <option value="CRITICAL">CRITICAL</option>
+                        </select>
+                        <small class="form-text text-secondary">
+                            影响写入 <code>logs/application.log</code> 与系统日志的最低级别，保存后需重启服务生效。
+                        </small>
                     </div>
                 </div>
             </div>
@@ -74,7 +79,7 @@
                     </div>
                     <div class="mb-3">
                         <label class="form-label">磁带设备路径</label>
-                        <input type="text" class="form-control" id="tapeDevicePath" 
+                        <input type="text" class="form-control" id="itdtDevicePath" 
                                placeholder="Windows: \\.\Tape0">
                         <small class="form-text text-secondary">Windows磁带设备路径</small>
                     </div>

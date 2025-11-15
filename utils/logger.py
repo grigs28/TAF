@@ -47,25 +47,23 @@ def setup_logging():
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
 
-    # 文件处理器（按日期轮转）
-    file_handler = logging.handlers.TimedRotatingFileHandler(
+    # 文件处理器（按大小轮转，最大10MB，保留30个备份文件）
+    file_handler = logging.handlers.RotatingFileHandler(
         filename=settings.LOG_FILE,
-        when='midnight',
-        interval=1,
-        backupCount=30,
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=30,  # 保留30个备份文件
         encoding='utf-8'
     )
     file_handler.setLevel(getattr(logging, settings.LOG_LEVEL.upper()))
     file_handler.setFormatter(formatter)
     root_logger.addHandler(file_handler)
 
-    # 错误日志文件处理器
+    # 错误日志文件处理器（按大小轮转，最大10MB，保留30个备份文件）
     error_log_file = log_dir / 'error.log'
-    error_handler = logging.handlers.TimedRotatingFileHandler(
+    error_handler = logging.handlers.RotatingFileHandler(
         filename=error_log_file,
-        when='midnight',
-        interval=1,
-        backupCount=30,
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=30,  # 保留30个备份文件
         encoding='utf-8'
     )
     error_handler.setLevel(logging.ERROR)
@@ -75,6 +73,19 @@ def setup_logging():
     # 设置错误日志格式，包含异常堆栈
     error_handler.formatter = detailed_formatter
 
+    # 获取logger（在添加处理器之前先定义）
+    logger = logging.getLogger(__name__)
+    
+    # 添加系统日志处理器（将备份相关的警告及以上级别日志写入系统日志表）
+    try:
+        from utils.system_log_handler import SystemLogHandler
+        system_log_handler = SystemLogHandler()
+        system_log_handler.setFormatter(formatter)
+        root_logger.addHandler(system_log_handler)
+        logger.info("系统日志处理器已添加（备份相关警告及以上级别日志将自动写入系统日志表）")
+    except Exception as e:
+        logger.warning(f"添加系统日志处理器失败: {str(e)}")
+
     # 设置第三方库日志级别
     logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
     logging.getLogger('sqlalchemy.pool').setLevel(logging.WARNING)
@@ -82,7 +93,6 @@ def setup_logging():
     logging.getLogger('websockets').setLevel(logging.WARNING)
 
     # 记录启动日志
-    logger = logging.getLogger(__name__)
     logger.info("=" * 60)
     logger.info("企业级磁带备份系统 - 日志系统初始化完成")
     logger.info(f"日志级别: {settings.LOG_LEVEL}")

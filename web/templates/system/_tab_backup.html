@@ -7,11 +7,11 @@
                     <h6 class="card-title">保留策略</h6>
                     <div class="mb-3">
                         <label class="form-label">默认保留月数</label>
-                        <input type="number" class="form-control" value="6" min="1" max="36">
+                        <input type="number" class="form-control" id="defaultRetentionMonths" value="6" min="1" max="36">
                         <small class="text-muted">磁带数据保留时间（月）</small>
                     </div>
                     <div class="form-check form-switch">
-                        <input class="form-check-input" type="checkbox" id="autoEraseExpired" checked>
+                        <input class="form-check-input" type="checkbox" id="autoEraseExpired">
                         <label class="form-check-label" for="autoEraseExpired">自动擦除过期磁带</label>
                     </div>
                 </div>
@@ -22,21 +22,27 @@
                 <div class="card-body">
                     <h6 class="card-title">压缩设置</h6>
                     <div class="mb-3">
-                        <label class="form-label">压缩级别</label>
-                        <select class="form-select">
-                            <option value="9" selected>最高 (9)</option>
-                            <option value="6">标准 (6)</option>
-                            <option value="3">快速 (3)</option>
-                            <option value="0">无压缩 (0)</option>
-                        </select>
+                        <label class="form-label">最大文件大小 (GB)</label>
+                        <input type="number" class="form-control" id="maxFileSizeGB" value="3" min="1" step="0.1">
+                        <small class="text-muted">单个压缩包的最大大小（GB）</small>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label">最大文件大小</label>
-                        <input type="text" class="form-control" value="3GB">
-                        <small class="text-muted">单个压缩包的最大大小</small>
+                        <label class="form-label">扫描批次大小（文件数）</label>
+                        <input type="number" class="form-control" id="scanBatchSize" value="180000" min="1000" step="1000">
+                        <small class="text-muted">扫描到多少文件后开始压缩（默认180000个文件）</small>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">扫描批次大小（GB）</label>
+                        <input type="number" class="form-control" id="scanBatchSizeBytesGB" value="18" min="1" step="1">
+                        <small class="text-muted">扫描到多少字节后开始压缩（默认18GB）</small>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">压缩临时目录</label>
+                        <input type="text" class="form-control" id="backupCompressDir" value="temp/compress">
+                        <small class="text-muted">压缩文件临时目录（先压缩到这里，再移动到磁带机）</small>
                     </div>
                     <div class="form-check form-switch">
-                        <input class="form-check-input" type="checkbox" id="enableVerification" checked>
+                        <input class="form-check-input" type="checkbox" id="enableVerification">
                         <label class="form-check-label" for="enableVerification">备份验证</label>
                     </div>
                 </div>

@@ -13,10 +13,21 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional
 
-from models.backup import BackupTask, BackupSet, BackupFile, BackupTaskStatus, BackupFileType
+from models.backup import BackupTask, BackupSet, BackupFile, BackupTaskStatus, BackupFileType, BackupSetStatus
 from utils.datetime_utils import now, format_datetime
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_enum(enum_cls, value, default=None):
+    if value is None:
+        return default
+    try:
+        if isinstance(value, enum_cls):
+            return value
+        return enum_cls(value) if isinstance(value, str) else enum_cls(value.value)  # type: ignore[arg-type]
+    except Exception:
+        return default
 
 
 class BackupDB:
@@ -24,7 +35,32 @@ class BackupDB:
     
     def __init__(self):
         """初始化数据库操作类"""
-        pass
+        self._last_operation_status: Dict[int, str] = {}
+
+    def _log_operation_stage_event(self, backup_task: Optional[BackupTask], operation_status: str):
+        """记录关键阶段日志（即使全局日志级别较高也能看到）"""
+        try:
+            if not backup_task or not getattr(backup_task, 'id', None):
+                return
+
+            normalized = (operation_status or '').strip()
+            if not normalized:
+                return
+
+            task_id = backup_task.id
+            previous = self._last_operation_status.get(task_id)
+            if previous == normalized:
+                return
+
+            self._last_operation_status[task_id] = normalized
+            task_name = getattr(backup_task, 'task_name', '') or ''
+            stage_label = normalized.strip('[]') or normalized
+            logger.warning(f"[关键阶段] 任务 {task_name or task_id}: {stage_label}")
+
+            if any(keyword in stage_label for keyword in ("完成", "成功", "失败", "终止", "结束")):
+                self._last_operation_status.pop(task_id, None)
+        except Exception:
+            logger.debug("记录关键阶段日志失败", exc_info=True)
     
     async def create_backup_set(self, backup_task: BackupTask, tape) -> BackupSet:
         """创建备份集
@@ -282,52 +318,15 @@ class BackupDB:
                     # 批量插入文件记录（使用事务）
                     success_count = 0
                     failed_count = 0
-                    for processed_file in valid_processed_files:
-                        try:
-                            file_stat = processed_file['file_stat']
-                            await conn.execute(
-                                """
-                                INSERT INTO backup_files (
-                                    backup_set_id, file_path, file_name, file_type, file_size,
-                                    compressed_size, file_permissions, created_time, modified_time,
-                                    accessed_time, compressed, checksum, backup_time, chunk_number,
-                                    tape_block_start, file_metadata
-                                ) VALUES (
-                                    $1, $2, $3, $4::backupfiletype, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::json
-                                )
-                                """,
-                                backup_set_db_id,
-                                processed_file['file_path'],
-                                processed_file['file_name'],
-                                processed_file['file_type'],
-                                processed_file['file_size'],
-                                compressed_file.get('compressed_size', 0) // len(file_group) if file_group else 0,  # 平均分配压缩后大小
-                                processed_file['file_permissions'],
-                                datetime.fromtimestamp(file_stat.st_ctime) if file_stat else None,
-                                datetime.fromtimestamp(file_stat.st_mtime) if file_stat else None,
-                                datetime.fromtimestamp(file_stat.st_atime) if file_stat else None,
-                                compressed_file.get('compression_enabled', False),
-                                processed_file['file_checksum'],
-                                backup_time,
-                                chunk_number,
-                                0,  # tape_block_start（文件系统操作，暂时设为0）
-                                json.dumps({
-                                    'tape_file_path': tape_file_path,
-                                    'chunk_number': chunk_number,
-                                    'original_path': processed_file['file_path'],
-                                    'relative_path': str(Path(processed_file['file_path']).relative_to(Path(processed_file['file_path']).anchor)) if Path(processed_file['file_path']).is_absolute() else processed_file['file_path']
-                                })  # file_metadata 需要序列化为 JSON 字符串
-                            )
-                            success_count += 1
-                        except Exception as insert_error:
-                            failed_count += 1
-                            logger.warning(f"⚠️ 插入文件记录失败: {processed_file.get('file_path', 'unknown')} (错误: {str(insert_error)})")
-                            continue
-                    
-                    if success_count > 0:
-                        logger.debug(f"已保存 {success_count} 个文件信息到数据库（chunk {chunk_number}）")
-                    if failed_count > 0:
-                        logger.warning(f"⚠️ 保存文件信息到数据库时，{failed_count} 个文件失败，但备份流程继续")
+                    await self._mark_files_as_copied(
+                        conn=conn,
+                        backup_set_db_id=backup_set_db_id,
+                        processed_files=valid_processed_files,
+                        compressed_file=compressed_file,
+                        tape_file_path=tape_file_path,
+                        chunk_number=chunk_number,
+                        backup_time=backup_time
+                    )
                         
                 except Exception as db_conn_error:
                     logger.warning(f"⚠️ 数据库连接或查询失败，跳过保存文件信息: {str(db_conn_error)}")
@@ -338,7 +337,413 @@ class BackupDB:
             import traceback
             logger.debug(f"错误堆栈:\n{traceback.format_exc()}")
             # 不抛出异常，因为文件已经写入磁带，数据库记录失败不应该影响备份流程
-    
+
+    async def mark_files_as_copied(
+        self,
+        backup_set: BackupSet,
+        file_group: List[Dict],
+        compressed_file: Dict,
+        tape_file_path: str,
+        chunk_number: int
+    ):
+        """标记文件为复制成功"""
+        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+        if not is_opengauss():
+            return
+
+        backup_set_db_id = getattr(backup_set, 'id', None)
+        if not backup_set_db_id:
+            async with get_opengauss_connection() as conn:
+                row = await conn.fetchrow(
+                    "SELECT id FROM backup_sets WHERE set_id = $1",
+                    backup_set.set_id
+                )
+            if not row:
+                logger.warning(f"找不到备份集: {backup_set.set_id}，无法标记文件成功")
+                return
+            backup_set_db_id = row['id']
+
+        async with get_opengauss_connection() as conn:
+            await self._mark_files_as_copied(
+                conn=conn,
+                backup_set_db_id=backup_set_db_id,
+                processed_files=file_group,
+                compressed_file=compressed_file,
+                tape_file_path=tape_file_path,
+                chunk_number=chunk_number,
+                backup_time=datetime.now()
+            )
+
+    async def get_backup_set_by_set_id(self, set_id: str) -> Optional[BackupSet]:
+        """根据 set_id 获取备份集"""
+        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+        if not set_id:
+            return None
+        
+        if is_opengauss():
+            async with get_opengauss_connection() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, set_id, set_name, backup_group, status, backup_task_id,
+                           tape_id, backup_type, backup_time, total_files, total_bytes,
+                           compressed_bytes, compression_ratio, chunk_count, created_at,
+                           updated_at
+                    FROM backup_sets
+                    WHERE set_id = $1
+                    """,
+                    set_id
+                )
+        else:
+            async with db_manager.AsyncSessionLocal() as session:
+                stmt = select(BackupSet).where(BackupSet.set_id == set_id)
+                result = await session.execute(stmt)
+                backup_set = result.scalar_one_or_none()
+                return backup_set
+        
+        if not row:
+            return None
+        
+        backup_set_obj = BackupSet(
+            set_id=row['set_id'],
+            set_name=row['set_name'],
+            backup_group=row['backup_group'],
+            backup_type=_parse_enum(BackupTaskType, row.get('backup_type'), BackupTaskType.FULL),
+            backup_time=row['backup_time'],
+            total_files=row['total_files'],
+            total_bytes=row['total_bytes'],
+            compressed_bytes=row['compressed_bytes'],
+            compression_ratio=row['compression_ratio'],
+            chunk_count=row['chunk_count']
+        )
+        backup_set_obj.id = row['id']
+        backup_set_obj.status = _parse_enum(BackupSetStatus, row.get('status'), BackupSetStatus.ACTIVE)
+        backup_set_obj.backup_task_id = row['backup_task_id']
+        backup_set_obj.tape_id = row['tape_id']
+        backup_set_obj.created_at = row['created_at']
+        backup_set_obj.updated_at = row['updated_at']
+        return backup_set_obj
+
+    async def clear_backup_files_for_set(self, backup_set_db_id: int):
+        """清理指定备份集的文件记录"""
+        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+        if not is_opengauss():
+            return
+        async with get_opengauss_connection() as conn:
+            await conn.execute(
+                "DELETE FROM backup_files WHERE backup_set_id = $1",
+                backup_set_db_id
+            )
+
+    async def upsert_scanned_file_record(self, backup_set_db_id: int, file_info: Dict):
+        """保存扫描阶段的文件/目录信息"""
+        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+        if not is_opengauss():
+            return
+        
+        file_path = file_info.get('path') or file_info.get('file_path')
+        if not file_path:
+            return
+
+        directory_path = str(Path(file_path).parent) if Path(file_path).parent else None
+        display_name = file_info.get('name') or file_info.get('file_name') or Path(file_path).name
+        file_size = file_info.get('size') or file_info.get('file_size') or 0
+        file_permissions = file_info.get('permissions') or file_info.get('file_permissions')
+        modified_time = file_info.get('modified_time')
+        accessed_time = file_info.get('accessed_time')
+        created_time = file_info.get('created_time') or modified_time
+
+        if isinstance(modified_time, str):
+            modified_time = datetime.fromisoformat(modified_time)
+        if isinstance(accessed_time, str):
+            accessed_time = datetime.fromisoformat(accessed_time)
+        if isinstance(created_time, str):
+            created_time = datetime.fromisoformat(created_time)
+
+        if file_info.get('is_dir'):
+            file_type = BackupFileType.DIRECTORY.value
+        elif file_info.get('is_symlink'):
+            file_type = BackupFileType.SYMLINK.value if hasattr(BackupFileType, 'SYMLINK') else BackupFileType.FILE.value
+        else:
+            file_type = BackupFileType.FILE.value
+
+        async with get_opengauss_connection() as conn:
+            existing = await conn.fetchrow(
+                """
+                SELECT id, is_copy_success 
+                FROM backup_files 
+                WHERE backup_set_id = $1 AND file_path = $2
+                """,
+                backup_set_db_id,
+                file_path
+            )
+
+            metadata = file_info.get('file_metadata') or {}
+            metadata.update({'scanned_at': datetime.now().isoformat()})
+
+            if existing and existing['is_copy_success']:
+                # 已复制成功的文件不覆盖
+                return
+
+            if existing:
+                await conn.execute(
+                    """
+                    UPDATE backup_files
+                    SET file_name = $3,
+                        directory_path = $4,
+                        display_name = $5,
+                        file_type = $6::backupfiletype,
+                        file_size = $7,
+                        file_permissions = $8,
+                        created_time = $9,
+                        modified_time = $10,
+                        accessed_time = $11,
+                        file_metadata = $12::json
+                    WHERE id = $13
+                    """,
+                    backup_set_db_id,
+                    file_path,
+                    display_name,
+                    directory_path,
+                    display_name,
+                    file_type,
+                    file_size,
+                    file_permissions,
+                    created_time,
+                    modified_time,
+                    accessed_time,
+                    json.dumps(metadata),
+                    existing['id']
+                )
+            else:
+                await conn.execute(
+                    """
+                    INSERT INTO backup_files (
+                        backup_set_id, file_path, file_name, directory_path, display_name,
+                        file_type, file_size, compressed_size, file_permissions,
+                        created_time, modified_time, accessed_time, compressed,
+                        checksum, backup_time, chunk_number, tape_block_start,
+                        file_metadata, is_copy_success, copy_status_at
+                    ) VALUES (
+                        $1, $2, $3, $4, $5,
+                        $6::backupfiletype, $7, $8, $9,
+                        $10, $11, $12, $13,
+                        $14, $15, $16, $17,
+                        $18::json, FALSE, NULL
+                    )
+                    """,
+                    backup_set_db_id,
+                    file_path,
+                    display_name,
+                    directory_path,
+                    display_name,
+                    file_type,
+                    file_size,
+                    0,
+                    file_permissions,
+                    created_time,
+                    modified_time,
+                    accessed_time,
+                    False,
+                    None,
+                    datetime.now(),
+                    0,
+                    0,
+                    json.dumps(metadata)
+                )
+
+    async def fetch_pending_backup_files(self, backup_set_db_id: int, limit: int = 500) -> List[Dict]:
+        """获取待复制的文件列表"""
+        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+        if not is_opengauss():
+            return []
+        
+        async with get_opengauss_connection() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, file_path, file_name, directory_path, display_name, file_type,
+                       file_size, file_permissions, modified_time, accessed_time
+                FROM backup_files
+                WHERE backup_set_id = $1
+                  AND (is_copy_success = FALSE OR is_copy_success IS NULL)
+                  AND file_type = 'file'::backupfiletype
+                ORDER BY id
+                LIMIT $2
+                """,
+                backup_set_db_id,
+                limit
+            )
+        
+        pending_files = []
+        for row in rows:
+            file_type = row['file_type']
+            pending_files.append({
+                'id': row['id'],
+                'path': row['file_path'],
+                'file_path': row['file_path'],
+                'name': row['file_name'],
+                'file_name': row['file_name'],
+                'directory_path': row['directory_path'],
+                'display_name': row['display_name'],
+                'size': row['file_size'] or 0,
+                'permissions': row['file_permissions'],
+                'modified_time': row['modified_time'],
+                'accessed_time': row['accessed_time'],
+                'is_dir': str(file_type).lower() == 'directory',
+                'is_file': str(file_type).lower() == 'file',
+                'is_symlink': str(file_type).lower() == 'symlink'
+            })
+        return pending_files
+
+    async def get_scan_status(self, backup_task_id: int) -> Optional[str]:
+        """获取扫描状态"""
+        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+        if not is_opengauss():
+            return None
+        async with get_opengauss_connection() as conn:
+            row = await conn.fetchrow(
+                "SELECT scan_status FROM backup_tasks WHERE id = $1",
+                backup_task_id
+            )
+        return row['scan_status'] if row else None
+
+    async def update_scan_status(self, backup_task_id: int, status: str):
+        """更新扫描状态"""
+        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+        if not is_opengauss():
+            return
+        current_time = datetime.now()
+        async with get_opengauss_connection() as conn:
+            if status == 'completed':
+                await conn.execute(
+                    """
+                    UPDATE backup_tasks
+                    SET scan_status = $1,
+                        scan_completed_at = $2,
+                        updated_at = $2
+                    WHERE id = $3
+                    """,
+                    status,
+                    current_time,
+                    backup_task_id
+                )
+            else:
+                await conn.execute(
+                    """
+                    UPDATE backup_tasks
+                    SET scan_status = $1,
+                        updated_at = $2
+                    WHERE id = $3
+                    """,
+                    status,
+                    current_time,
+                    backup_task_id
+                )
+
+    async def _mark_files_as_copied(
+        self,
+        conn,
+        backup_set_db_id: int,
+        processed_files: List[Dict],
+        compressed_file: Dict,
+        tape_file_path: str,
+        chunk_number: int,
+        backup_time: datetime
+    ):
+        """Mark files as copied in the database"""
+        success_count = 0
+        failed_count = 0
+        per_file_compressed_size = compressed_file.get('compressed_size', 0)
+        per_file_compressed_size = per_file_compressed_size // len(processed_files) if processed_files else 0
+        is_compressed = compressed_file.get('compression_enabled', True)
+        checksum = compressed_file.get('checksum')
+        copy_time = datetime.now()
+
+        for processed_file in processed_files:
+            try:
+                file_path = processed_file.get('file_path')
+                file_stat = processed_file.get('file_stat')
+                metadata = processed_file.get('file_metadata') or {}
+                metadata.update({
+                    'tape_file_path': tape_file_path,
+                    'chunk_number': chunk_number,
+                    'original_path': file_path
+                })
+
+                result = await conn.execute(
+                    """
+                    UPDATE backup_files
+                    SET compressed_size = $3,
+                        compressed = $4,
+                        checksum = $5,
+                        backup_time = $6,
+                        chunk_number = $7,
+                        tape_block_start = $8,
+                        file_metadata = $9::json,
+                        is_copy_success = TRUE,
+                        copy_status_at = $10
+                    WHERE backup_set_id = $1 AND file_path = $2
+                    """,
+                    backup_set_db_id,
+                    file_path,
+                    per_file_compressed_size,
+                    is_compressed,
+                    checksum,
+                    backup_time,
+                    chunk_number,
+                    0,
+                    json.dumps(metadata),
+                    copy_time
+                )
+
+                if result and result.startswith('UPDATE 0'):
+                    await conn.execute(
+                        """
+                        INSERT INTO backup_files (
+                            backup_set_id, file_path, file_name, file_type, file_size,
+                            compressed_size, file_permissions, created_time, modified_time,
+                            accessed_time, compressed, checksum, backup_time, chunk_number,
+                            tape_block_start, file_metadata, is_copy_success, copy_status_at
+                        ) VALUES (
+                            $1, $2, $3, $4::backupfiletype, $5,
+                            $6, $7, $8, $9,
+                            $10, $11, $12, $13, $14,
+                            $15, $16::json, TRUE, $17
+                        )
+                        """,
+                        backup_set_db_id,
+                        file_path,
+                        processed_file.get('file_name', Path(file_path).name),
+                        processed_file.get('file_type', BackupFileType.FILE.value),
+                        processed_file.get('file_size', 0),
+                        per_file_compressed_size,
+                        processed_file.get('file_permissions'),
+                        datetime.fromtimestamp(file_stat.st_ctime) if file_stat else None,
+                        datetime.fromtimestamp(file_stat.st_mtime) if file_stat else None,
+                        datetime.fromtimestamp(file_stat.st_atime) if file_stat else None,
+                        is_compressed,
+                        checksum,
+                        backup_time,
+                        chunk_number,
+                        0,
+                        json.dumps(metadata),
+                        copy_time
+                    )
+
+                success_count += 1
+            except Exception as insert_error:
+                failed_count += 1
+                logger.warning(
+                    f"[mark_files_as_copied] Failed to update {processed_file.get('file_path', 'unknown')}: {insert_error}"
+                )
+                continue
+
+        if success_count > 0:
+            logger.debug(f"[mark_files_as_copied] Updated {success_count} files as copied")
+        if failed_count > 0:
+            logger.warning(
+                f"[mark_files_as_copied] {failed_count} files failed to update, continuing backup flow"
+            )
+
     async def update_scan_progress(
         self, 
         backup_task: BackupTask, 
@@ -357,6 +762,11 @@ class BackupDB:
         try:
             if not backup_task or not backup_task.id:
                 return
+            
+            normalized_status = operation_status.strip() if isinstance(operation_status, str) else operation_status
+            if normalized_status:
+                self._log_operation_stage_event(backup_task, normalized_status)
+                operation_status = normalized_status
             
             from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             if is_opengauss():
@@ -578,7 +988,87 @@ class BackupDB:
                     await db.commit()
         except Exception as e:
             logger.error(f"更新任务状态失败: {str(e)}")
-    
+
+    def update_task_stage(self, backup_task: BackupTask, stage_code: str):
+        """更新任务的操作阶段（同步方法）
+
+        Args:
+            backup_task: 备份任务对象
+            stage_code: 阶段代码（scan/compress/copy/finalize）
+        """
+        try:
+            if not backup_task or not getattr(backup_task, 'id', None):
+                logger.warning("无效的任务对象，无法更新阶段")
+                return
+
+            task_id = backup_task.id
+
+            # 使用原生 openGauss SQL
+            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+
+            current_time = datetime.now()
+
+            if is_opengauss():
+                # openGauss 数据库更新
+                async def _update_opengauss():
+                    conn = await get_opengauss_connection()
+                    try:
+                        await conn.execute("""
+                            UPDATE backup_tasks
+                            SET operation_stage = $1,
+                                updated_at = $2
+                            WHERE id = $3
+                        """, stage_code, current_time, task_id)
+                    finally:
+                        await conn.close()
+
+                # 在新的事件循环中运行
+                loop = None
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+
+                if loop.is_running():
+                    # 如果循环正在运行，创建任务
+                    asyncio.create_task(_update_opengauss())
+                else:
+                    # 如果循环没有运行，直接运行
+                    loop.run_until_complete(_update_opengauss())
+            else:
+                # 非 openGauss 数据库更新（同步方式）
+                import asyncio
+                async def _update_sqlalchemy():
+                    from config.database import get_db
+                    async for db in get_db():
+                        # 这里假设模型有operation_stage字段
+                        if hasattr(backup_task, 'operation_stage'):
+                            backup_task.operation_stage = stage_code
+                        backup_task.updated_at = current_time
+                        await db.commit()
+                        break
+
+                # 在新的事件循环中运行
+                loop = None
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+
+                if loop.is_running():
+                    # 如果循环正在运行，创建任务
+                    asyncio.create_task(_update_sqlalchemy())
+                else:
+                    # 如果循环没有运行，直接运行
+                    loop.run_until_complete(_update_sqlalchemy())
+
+            logger.info(f"任务 {task_id} 阶段更新为: {stage_code}")
+
+        except Exception as e:
+            logger.error(f"更新任务阶段失败: {str(e)}")
+
     async def update_task_fields(self, backup_task: BackupTask, **fields):
         """更新任务的特定字段
         

@@ -9,7 +9,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, Optional
 
 from models.scheduled_task import ScheduledTask, ScheduledTaskLog, ScheduledTaskStatus, TaskActionType
 from models.system_log import OperationType, LogLevel, LogCategory
@@ -24,7 +24,12 @@ from .db_utils import is_opengauss, get_opengauss_connection
 logger = logging.getLogger(__name__)
 
 
-def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_run: bool = False) -> Callable:
+def create_task_executor(
+    scheduled_task: ScheduledTask,
+    system_instance,
+    manual_run: bool = False,
+    run_options: Optional[Dict[str, Any]] = None
+) -> Callable:
     """创建任务执行函数
     
     Args:
@@ -136,9 +141,20 @@ def create_task_executor(scheduled_task: ScheduledTask, system_instance, manual_
             # 根据动作类型执行
             if action_type == TaskActionType.BACKUP:
                 # 备份动作需要传递backup_task_id参数和manual_run参数
-                result = await handler.execute(action_config, backup_task_id=backup_task_id, scheduled_task=scheduled_task, manual_run=manual_run)
+                result = await handler.execute(
+                    action_config,
+                    backup_task_id=backup_task_id,
+                    scheduled_task=scheduled_task,
+                    manual_run=manual_run,
+                    run_options=run_options
+                )
             else:
-                result = await handler.execute(action_config, scheduled_task=scheduled_task, manual_run=manual_run)
+                result = await handler.execute(
+                    action_config,
+                    scheduled_task=scheduled_task,
+                    manual_run=manual_run,
+                    run_options=run_options
+                )
             
             end_time = datetime.now()
             duration = int((end_time - start_time).total_seconds() * 1000)  # 转换为毫秒

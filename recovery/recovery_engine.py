@@ -6,6 +6,10 @@ Recovery Engine Module
 """
 
 import os
+import io
+import gzip
+import zipfile
+import tarfile
 import asyncio
 import logging
 import hashlib
@@ -204,11 +208,13 @@ class RecoveryEngine:
 
                     # 查询该备份集的所有文件
                     sql = """
-                        SELECT id, file_path, file_name, file_type, file_size, compressed_size,
+                        SELECT id, file_path, file_name, directory_path, display_name,
+                               file_type, file_size, compressed_size,
                                file_permissions, created_time, modified_time, accessed_time,
                                compressed, checksum, backup_time, chunk_number
                         FROM backup_files
                         WHERE backup_set_id = $1
+                          AND is_copy_success = TRUE
                         ORDER BY file_path ASC
                     """
                     rows = await conn.fetch(sql, backup_set_db_id)
@@ -219,6 +225,8 @@ class RecoveryEngine:
                             'id': row['id'],
                             'file_path': row['file_path'],
                             'file_name': row['file_name'],
+                            'directory_path': row['directory_path'],
+                            'display_name': row['display_name'],
                             'file_type': row['file_type'].value if hasattr(row['file_type'], 'value') else str(row['file_type']),
                             'file_size': row['file_size'] or 0,
                             'compressed_size': row['compressed_size'] or 0,
@@ -245,7 +253,14 @@ class RecoveryEngine:
                         return []
 
                     # 查询该备份集的所有文件
-                    stmt = select(BackupFile).where(BackupFile.backup_set_id == backup_set.id).order_by(BackupFile.file_path)
+                    stmt = (
+                        select(BackupFile)
+                        .where(
+                            BackupFile.backup_set_id == backup_set.id,
+                            BackupFile.is_copy_success.is_(True)
+                        )
+                        .order_by(BackupFile.file_path)
+                    )
                     result = await session.execute(stmt)
                     backup_files = result.scalars().all()
 
@@ -255,6 +270,8 @@ class RecoveryEngine:
                             'id': file.id,
                             'file_path': file.file_path,
                             'file_name': file.file_name,
+                            'directory_path': file.directory_path,
+                            'display_name': file.display_name,
                             'file_type': file.file_type.value if hasattr(file.file_type, 'value') else str(file.file_type),
                             'file_size': file.file_size or 0,
                             'compressed_size': file.compressed_size or 0,
@@ -322,6 +339,7 @@ class RecoveryEngine:
                                 REPLACE(file_path, '\\', '/') as normalized_path
                             FROM backup_files
                             WHERE backup_set_id = $1
+                              AND is_copy_success = TRUE
                         ),
                         first_levels AS (
                             SELECT 
@@ -367,6 +385,7 @@ class RecoveryEngine:
                                        compressed, checksum, backup_time, chunk_number
                                 FROM backup_files
                                 WHERE backup_set_id = $1 AND file_path = $2
+                                  AND is_copy_success = TRUE
                                 LIMIT 1
                                 """,
                                 backup_set_db_id,
@@ -378,6 +397,8 @@ class RecoveryEngine:
                                     'id': file_row['id'],
                                     'file_path': file_row['file_path'],
                                     'file_name': file_row['file_name'],
+                                    'directory_path': file_row['directory_path'],
+                                    'display_name': file_row['display_name'],
                                     'file_type': file_row['file_type'].value if hasattr(file_row['file_type'], 'value') else str(file_row['file_type']),
                                     'file_size': file_row['file_size'] or 0,
                                     'compressed_size': file_row['compressed_size'] or 0,
@@ -408,6 +429,7 @@ class RecoveryEngine:
                                       OR REPLACE(file_path, '\\', '/') LIKE $3
                                   )
                                   AND REPLACE(file_path, '\\', '/') != $4
+                                  AND is_copy_success = TRUE
                             """
                             like_pattern1 = first_level + '/%'
                             like_pattern2 = first_level + '\\%'
@@ -442,6 +464,7 @@ class RecoveryEngine:
                                 REPLACE(file_path, '\\', '/') as normalized_path
                             FROM backup_files
                             WHERE backup_set_id = :backup_set_id
+                              AND is_copy_success = TRUE
                         ),
                         first_levels AS (
                             SELECT 
@@ -481,10 +504,15 @@ class RecoveryEngine:
                         
                         if item_type == 'file':
                             # 顶层文件，查询文件信息
-                            file_stmt = select(BackupFile).where(
-                                BackupFile.backup_set_id == backup_set.id,
-                                BackupFile.file_path == sample_path
-                            ).limit(1)
+                            file_stmt = (
+                                select(BackupFile)
+                                .where(
+                                    BackupFile.backup_set_id == backup_set.id,
+                                    BackupFile.file_path == sample_path,
+                                    BackupFile.is_copy_success.is_(True)
+                                )
+                                .limit(1)
+                            )
                             file_result = await session.execute(file_stmt)
                             backup_file = file_result.scalar_one_or_none()
                             
@@ -493,6 +521,8 @@ class RecoveryEngine:
                                     'id': backup_file.id,
                                     'file_path': backup_file.file_path,
                                     'file_name': backup_file.file_name,
+                                    'directory_path': backup_file.directory_path,
+                                    'display_name': backup_file.display_name,
                                     'file_type': backup_file.file_type.value if hasattr(backup_file.file_type, 'value') else str(backup_file.file_type),
                                     'file_size': backup_file.file_size or 0,
                                     'compressed_size': backup_file.compressed_size or 0,
@@ -514,13 +544,17 @@ class RecoveryEngine:
                                 })
                         else:
                             # 顶层目录，检查是否有子项
-                            child_stmt = select(func.count(BackupFile.id)).where(
-                                BackupFile.backup_set_id == backup_set.id,
-                                or_(
-                                    func.replace(BackupFile.file_path, '\\', '/').like(first_level + '/%'),
-                                    func.replace(BackupFile.file_path, '\\', '/').like(first_level + '\\%')
-                                ),
-                                func.replace(BackupFile.file_path, '\\', '/') != first_level
+                            child_stmt = (
+                                select(func.count(BackupFile.id))
+                                .where(
+                                    BackupFile.backup_set_id == backup_set.id,
+                                    or_(
+                                        func.replace(BackupFile.file_path, '\\', '/').like(first_level + '/%'),
+                                        func.replace(BackupFile.file_path, '\\', '/').like(first_level + '\\%')
+                                    ),
+                                    func.replace(BackupFile.file_path, '\\', '/') != first_level,
+                                    BackupFile.is_copy_success.is_(True)
+                                )
                             )
                             child_result = await session.execute(child_stmt)
                             has_children = child_result.scalar() > 0
@@ -595,11 +629,13 @@ class RecoveryEngine:
                         # 构建匹配模式：支持 D:/ 和 D:\ 两种格式
                         # 使用 REPLACE 规范化路径后再匹配
                         sql = """
-                            SELECT id, file_path, file_name, file_type, file_size, compressed_size,
+                            SELECT id, file_path, file_name, directory_path, display_name,
+                                   file_type, file_size, compressed_size,
                                    file_permissions, created_time, modified_time, accessed_time,
                                    compressed, checksum, backup_time, chunk_number
                             FROM backup_files
                             WHERE backup_set_id = $1
+                              AND is_copy_success = TRUE
                               AND (
                                   REPLACE(file_path, '\\', '/') = $2
                                   OR REPLACE(file_path, '\\', '/') LIKE $3
@@ -614,11 +650,13 @@ class RecoveryEngine:
                     else:
                         # 根目录
                         sql = """
-                            SELECT id, file_path, file_name, file_type, file_size, compressed_size,
+                            SELECT id, file_path, file_name, directory_path, display_name,
+                                   file_type, file_size, compressed_size,
                                    file_permissions, created_time, modified_time, accessed_time,
                                    compressed, checksum, backup_time, chunk_number
                             FROM backup_files
                             WHERE backup_set_id = $1
+                              AND is_copy_success = TRUE
                             ORDER BY file_path ASC
                         """
                         rows = await conn.fetch(sql, backup_set_db_id)
@@ -668,6 +706,8 @@ class RecoveryEngine:
                                 'id': row['id'],
                                 'file_path': row['file_path'],
                                 'file_name': row['file_name'],
+                                'directory_path': row['directory_path'],
+                                'display_name': row['display_name'],
                                 'file_type': row['file_type'].value if hasattr(row['file_type'], 'value') else str(row['file_type']),
                                 'file_size': row['file_size'] or 0,
                                 'compressed_size': row['compressed_size'] or 0,
@@ -724,7 +764,8 @@ class RecoveryEngine:
                         normalized_dir = directory_path.replace('\\', '/')
                         # 使用 func.replace 规范化路径后再匹配
                         stmt = select(BackupFile).where(
-                            BackupFile.backup_set_id == backup_set.id
+                            BackupFile.backup_set_id == backup_set.id,
+                            BackupFile.is_copy_success.is_(True)
                         ).where(
                             or_(
                                 func.replace(BackupFile.file_path, '\\', '/') == normalized_dir,
@@ -734,7 +775,8 @@ class RecoveryEngine:
                         ).order_by(BackupFile.file_path)
                     else:
                         stmt = select(BackupFile).where(
-                            BackupFile.backup_set_id == backup_set.id
+                            BackupFile.backup_set_id == backup_set.id,
+                            BackupFile.is_copy_success.is_(True)
                         ).order_by(BackupFile.file_path)
                     
                     result = await session.execute(stmt)
@@ -785,6 +827,8 @@ class RecoveryEngine:
                                 'id': file.id,
                                 'file_path': file.file_path,
                                 'file_name': file.file_name,
+                                'directory_path': file.directory_path,
+                                'display_name': file.display_name,
                                 'file_type': file.file_type.value if hasattr(file.file_type, 'value') else str(file.file_type),
                                 'file_size': file.file_size or 0,
                                 'compressed_size': file.compressed_size or 0,
@@ -1111,13 +1155,82 @@ class RecoveryEngine:
             return None
 
     async def _decompress_file_data(self, compressed_data: bytes, file_info: Dict) -> bytes:
-        """解压文件数据"""
-        try:
-            # 这里应该根据压缩算法解压数据
-            # 暂时直接返回原数据
+        """根据文件后缀自动选择解压方式"""
+        if not compressed_data:
             return compressed_data
+
+        metadata = file_info.get('file_metadata') or {}
+        archive_hint = metadata.get('tape_file_path') or file_info.get('file_path') or file_info.get('file_name') or ''
+        archive_hint = archive_hint.lower()
+        target_name = metadata.get('original_path') or file_info.get('file_path') or file_info.get('file_name') or ''
+        target_name = Path(target_name).name
+
+        try:
+            if archive_hint.endswith(('.tar.gz', '.tgz')):
+                return self._extract_from_tar_archive(compressed_data, target_name, mode='r:gz')
+            if archive_hint.endswith('.tar'):
+                return self._extract_from_tar_archive(compressed_data, target_name, mode='r:')
+            if archive_hint.endswith('.zip'):
+                return self._extract_from_zip_archive(compressed_data, target_name)
+            if archive_hint.endswith('.7z'):
+                return self._extract_from_7z_archive(compressed_data, target_name)
+            if archive_hint.endswith('.gz'):
+                # 普通单文件GZip
+                return gzip.decompress(compressed_data)
         except Exception as e:
-            logger.error(f"解压文件数据失败: {str(e)}")
+            logger.error(f"根据后缀解压失败: {str(e)}", exc_info=True)
+            return compressed_data
+
+        # 未匹配到已知后缀，直接返回原数据
+        return compressed_data
+
+    def _select_archive_entry(self, candidate_names: List[str], target_name: str) -> Optional[str]:
+        """优先匹配目标文件名，找不到时返回第一个条目"""
+        if not candidate_names:
+            return None
+        normalized_target = (target_name or '').replace('\\', '/').lower()
+        if normalized_target:
+            for name in candidate_names:
+                normalized = name.replace('\\', '/').lower()
+                if normalized == normalized_target or normalized.endswith('/' + normalized_target):
+                    return name
+        return candidate_names[0]
+
+    def _extract_from_tar_archive(self, compressed_data: bytes, target_name: str, mode: str) -> bytes:
+        with tarfile.open(fileobj=io.BytesIO(compressed_data), mode=mode) as tar:
+            members = [m for m in tar.getmembers() if m.isfile()]
+            if not members:
+                return compressed_data
+            selected_name = self._select_archive_entry([m.name for m in members], target_name)
+            member = next((m for m in members if m.name == selected_name), None)
+            if not member:
+                return compressed_data
+            extracted = tar.extractfile(member)
+            if not extracted:
+                return compressed_data
+            return extracted.read()
+
+    def _extract_from_zip_archive(self, compressed_data: bytes, target_name: str) -> bytes:
+        with zipfile.ZipFile(io.BytesIO(compressed_data)) as zf:
+            names = zf.namelist()
+            if not names:
+                return compressed_data
+            selected_name = self._select_archive_entry(names, target_name)
+            with zf.open(selected_name) as fh:
+                return fh.read()
+
+    def _extract_from_7z_archive(self, compressed_data: bytes, target_name: str) -> bytes:
+        with py7zr.SevenZipFile(io.BytesIO(compressed_data)) as archive:
+            names = archive.getnames()
+            if not names:
+                return compressed_data
+            selected_name = self._select_archive_entry(names, target_name)
+            data_map = archive.read([selected_name])
+            stream = data_map.get(selected_name)
+            if hasattr(stream, 'read'):
+                return stream.read()
+            if isinstance(stream, bytes):
+                return stream
             return compressed_data
 
     async def _verify_file_integrity(self, file_path: Path, file_info: Dict) -> bool:

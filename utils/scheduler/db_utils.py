@@ -10,6 +10,7 @@ import logging
 from typing import Optional
 from contextlib import asynccontextmanager
 from config.database import db_manager
+from utils.opengauss.guard import get_opengauss_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +21,13 @@ _pool_lock = asyncio.Lock()
 
 def is_opengauss() -> bool:
     """检查当前数据库是否为openGauss"""
+    if hasattr(db_manager, "is_opengauss_database"):
+        try:
+            return db_manager.is_opengauss_database()
+        except Exception:
+            pass
     database_url = db_manager.settings.DATABASE_URL
-    return "opengauss" in database_url.lower()
+    return "opengauss" in str(database_url).lower()
 
 
 async def _create_opengauss_pool():
@@ -46,6 +52,8 @@ async def _create_opengauss_pool():
     min_size = max(1, pool_size // 2)  # 最小连接数
     max_size = pool_size + max_overflow  # 最大连接数
     
+    monitor = get_opengauss_monitor()
+
     try:
         pool = await asyncpg.create_pool(
             host=host,
@@ -61,6 +69,16 @@ async def _create_opengauss_pool():
             max_inactive_connection_lifetime=300.0,  # 非活跃连接的最大生命周期（秒）
         )
         logger.info(f"openGauss连接池创建成功: min_size={min_size}, max_size={max_size}, timeout={pool_timeout}s, command_timeout={command_timeout}s")
+        if monitor.enabled:
+            logger.debug(
+                "openGauss 连接池参数: host=%s port=%s db=%s min=%s max=%s",
+                host,
+                port,
+                database,
+                min_size,
+                max_size,
+            )
+            monitor.ensure_running()
         return pool
     except Exception as e:
         logger.error(f"创建openGauss连接池失败: {str(e)}", exc_info=True)
@@ -120,6 +138,7 @@ async def _acquire_connection():
     import asyncpg
     
     pool = await get_opengauss_pool()
+    monitor = get_opengauss_monitor()
     conn = None
     retry_count = 0
     max_retries = 3
@@ -130,7 +149,18 @@ async def _acquire_connection():
     while retry_count < max_retries:
         try:
             # 从连接池获取连接
-            conn = await pool.acquire(timeout=acquire_timeout)  # 获取连接的超时时间
+            acquire_coro = pool.acquire(timeout=acquire_timeout)
+            if monitor.enabled:
+                monitor.ensure_running()
+                conn = await monitor.watch(
+                    acquire_coro,
+                    operation="pool.acquire",
+                    timeout=acquire_timeout + 1,
+                    metadata={"retry": retry_count},
+                    critical=True,
+                )
+            else:
+                conn = await acquire_coro
             return pool, conn
         except asyncio.TimeoutError:
             retry_count += 1
@@ -176,7 +206,15 @@ async def get_opengauss_connection():
         yield conn
     finally:
         try:
-            await pool.release(conn)
+            monitor = get_opengauss_monitor()
+            if monitor.enabled:
+                await monitor.watch(
+                    pool.release(conn),
+                    operation="pool.release",
+                    timeout=5.0,
+                )
+            else:
+                await pool.release(conn)
         except Exception as e:
             # openGauss 不支持 UNLISTEN 语句，这是 asyncpg 在释放连接时尝试执行的
             # 可以安全忽略这个错误，不影响连接释放

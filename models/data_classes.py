@@ -158,6 +158,8 @@ class BackupTask:
     progress_percent: float = 0.0
     error_message: str = ""
     result_summary: Dict[str, Any] = field(default_factory=dict)
+    scan_status: str = "pending"
+    scan_completed_at: Optional[datetime] = None
 
     # 系统字段
     created_by: str = ""
@@ -195,6 +197,8 @@ class BackupTask:
             'progress_percent': self.progress_percent,
             'error_message': self.error_message,
             'result_summary': self.result_summary,
+            'scan_status': self.scan_status,
+            'scan_completed_at': self.scan_completed_at.isoformat() if self.scan_completed_at else None,
             'created_by': self.created_by,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
@@ -232,6 +236,8 @@ class BackupTask:
             progress_percent=data.get('progress_percent', 0.0),
             error_message=data.get('error_message', ''),
             result_summary=data.get('result_summary', {}),
+            scan_status=data.get('scan_status', 'pending'),
+            scan_completed_at=datetime.fromisoformat(data['scan_completed_at']) if data.get('scan_completed_at') else None,
             created_by=data.get('created_by', ''),
             created_at=datetime.fromisoformat(data['created_at']) if data.get('created_at') else None,
             updated_at=datetime.fromisoformat(data['updated_at']) if data.get('updated_at') else None

@@ -162,7 +162,7 @@ class BackupTaskManager:
                     row = await conn.fetchrow(
                         """
                         SELECT id, task_name, task_type, status, progress_percent, 
-                               total_files, total_bytes, processed_files, processed_bytes,
+                               total_files, total_bytes, processed_files, processed_bytes, compressed_bytes,
                                started_at, completed_at, error_message, result_summary,
                                source_paths, tape_device, tape_id, description
                         FROM backup_tasks
@@ -183,6 +183,11 @@ class BackupTaskManager:
                             except:
                                 source_paths = None
                         
+                        # 计算压缩率
+                        compression_ratio = 0.0
+                        if row['processed_bytes'] and row['processed_bytes'] > 0 and row['compressed_bytes']:
+                            compression_ratio = float(row['compressed_bytes']) / float(row['processed_bytes'])
+                        
                         return {
                             'id': row['id'],
                             'task_name': row['task_name'],
@@ -193,6 +198,8 @@ class BackupTaskManager:
                             'total_bytes': row['total_bytes'],
                             'processed_files': row['processed_files'],
                             'processed_bytes': row['processed_bytes'],
+                            'compressed_bytes': row['compressed_bytes'] or 0,
+                            'compression_ratio': compression_ratio,
                             'started_at': row['started_at'],
                             'completed_at': row['completed_at'],
                             'error_message': row['error_message'],
@@ -218,6 +225,11 @@ class BackupTaskManager:
                             except:
                                 source_paths = None
                         
+                        # 计算压缩率
+                        compression_ratio = 0.0
+                        if backup_task.processed_bytes and backup_task.processed_bytes > 0 and backup_task.compressed_bytes:
+                            compression_ratio = float(backup_task.compressed_bytes) / float(backup_task.processed_bytes)
+                        
                         return {
                             'id': backup_task.id,
                             'task_name': backup_task.task_name,
@@ -228,6 +240,8 @@ class BackupTaskManager:
                             'total_bytes': backup_task.total_bytes,
                             'processed_files': backup_task.processed_files,
                             'processed_bytes': backup_task.processed_bytes,
+                            'compressed_bytes': backup_task.compressed_bytes or 0,
+                            'compression_ratio': compression_ratio,
                             'started_at': backup_task.started_at,
                             'completed_at': backup_task.completed_at,
                             'error_message': backup_task.error_message,

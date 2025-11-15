@@ -29,9 +29,11 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # 启动时执行
     logger.info("Web应用启动中...")
-    yield
-    # 关闭时执行
-    logger.info("Web应用关闭中...")
+    try:
+        yield
+    finally:
+        # 关闭时执行
+        logger.info("Web应用关闭中...")
 
 
 def create_app(system_instance=None) -> FastAPI:

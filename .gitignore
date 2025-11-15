@@ -76,6 +76,7 @@ web/static/LOGO.png
 # Documentation
 docs/_build/
 site/
+CLAUDE.md
 
 # Static files - CSS
 web/static/css/*
