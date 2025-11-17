@@ -771,7 +771,8 @@ class TapeOperations:
                     proc = await asyncio.create_subprocess_shell(
                         f"fsutil fsinfo volumeinfo {drive_with_colon}",
                         stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
+                        stderr=asyncio.subprocess.PIPE,
+                        stdin=asyncio.subprocess.DEVNULL  # 防止子进程等待输入导致阻塞
                     )
                     
                     # 添加超时处理，避免阻塞
@@ -856,7 +857,8 @@ class TapeOperations:
                     proc = await asyncio.create_subprocess_shell(
                         f'echo {label}| label {drive_with_colon}',
                         stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
+                        stderr=asyncio.subprocess.PIPE,
+                        stdin=asyncio.subprocess.DEVNULL  # 防止子进程等待输入导致阻塞
                     )
                     
                     # 添加超时处理，避免阻塞

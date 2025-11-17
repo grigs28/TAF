@@ -17,9 +17,11 @@
                             <option value="pgzip">PGZip (多线程GZip，默认)</option>
                             <option value="py7zr">py7zr (Python库，不支持多线程)</option>
                             <option value="7zip_command">7-Zip命令行 (支持多线程，推荐)</option>
+                            <option value="tar">tar (仅打包，不压缩)</option>
+                            <option value="zstd">Zstandard (高压缩效率)</option>
                         </select>
                         <small class="form-text text-muted">
-                            选择压缩方法。PGZip默认开启，可在需要更高压缩率时切换到7-Zip。
+                            选择压缩方法。PGZip默认开启，可在需要更高压缩率时切换到7-Zip或Zstandard。
                         </small>
                     </div>
                     
@@ -59,6 +61,18 @@
                         </small>
                     </div>
 
+                    <!-- zstd线程数 -->
+                    <div class="mb-3" id="zstdThreadsGroup" style="display: none;">
+                        <label for="zstdThreads" class="form-label">
+                            Zstandard线程数
+                        </label>
+                        <input type="number" class="form-control bg-dark text-light" id="zstdThreads"
+                               name="zstd_threads" min="1" max="64" value="4">
+                        <small class="form-text text-muted">
+                            用于 Zstandard 压缩模式，控制压缩线程数。
+                        </small>
+                    </div>
+                    
                     <!-- PGZip块大小 -->
                     <div class="mb-3" id="pgzipBlockSizeGroup">
                         <label for="pgzipBlockSize" class="form-label">
@@ -279,6 +293,9 @@ async function loadCompressionConfig() {
         if (config.pgzip_block_size) {
             document.getElementById('pgzipBlockSize').value = config.pgzip_block_size;
         }
+        if (config.zstd_threads !== undefined) {
+            document.getElementById('zstdThreads').value = config.zstd_threads;
+        }
         
         // 自动检查7-Zip路径
         if (config.sevenzip_path) {
@@ -297,6 +314,7 @@ function updateCompressionMethodUI(method) {
     const compressionThreadsGroup = document.getElementById('compressionThreadsGroup');
     const compressionCommandThreadsGroup = document.getElementById('compressionCommandThreadsGroup');
     const pgzipBlockSizeGroup = document.getElementById('pgzipBlockSizeGroup');
+    const zstdThreadsGroup = document.getElementById('zstdThreadsGroup');
     method = method || 'pgzip';
 
     if (method === '7zip_command') {
@@ -304,6 +322,7 @@ function updateCompressionMethodUI(method) {
         compressionCommandThreadsGroup.style.display = 'block';
         compressionThreadsGroup.style.display = 'none';
         pgzipBlockSizeGroup.style.display = 'none';
+        zstdThreadsGroup.style.display = 'none';
         document.getElementById('sevenzipPath').required = true;
         document.getElementById('compressionCommandThreads').required = true;
     } else if (method === 'pgzip') {
@@ -311,6 +330,23 @@ function updateCompressionMethodUI(method) {
         compressionCommandThreadsGroup.style.display = 'none';
         compressionThreadsGroup.style.display = 'block';
         pgzipBlockSizeGroup.style.display = 'block';
+        zstdThreadsGroup.style.display = 'none';
+        document.getElementById('sevenzipPath').required = false;
+        document.getElementById('compressionCommandThreads').required = false;
+    } else if (method === 'tar') {
+        sevenzipPathGroup.style.display = 'none';
+        compressionCommandThreadsGroup.style.display = 'none';
+        compressionThreadsGroup.style.display = 'none';
+        pgzipBlockSizeGroup.style.display = 'none';
+        zstdThreadsGroup.style.display = 'none';
+        document.getElementById('sevenzipPath').required = false;
+        document.getElementById('compressionCommandThreads').required = false;
+    } else if (method === 'zstd') {
+        sevenzipPathGroup.style.display = 'none';
+        compressionCommandThreadsGroup.style.display = 'none';
+        compressionThreadsGroup.style.display = 'none';
+        pgzipBlockSizeGroup.style.display = 'none';
+        zstdThreadsGroup.style.display = 'block';
         document.getElementById('sevenzipPath').required = false;
         document.getElementById('compressionCommandThreads').required = false;
     } else {
@@ -318,6 +354,7 @@ function updateCompressionMethodUI(method) {
         compressionCommandThreadsGroup.style.display = 'none';
         compressionThreadsGroup.style.display = 'block';
         pgzipBlockSizeGroup.style.display = 'none';
+        zstdThreadsGroup.style.display = 'none';
         document.getElementById('sevenzipPath').required = false;
         document.getElementById('compressionCommandThreads').required = false;
     }
@@ -382,6 +419,7 @@ async function saveCompressionConfig(options = {}) {
         compress_directly_to_tape: document.getElementById('compressDirectlyToTape').checked,
         pgzip_block_size: formData.get('pgzip_block_size') || undefined,
         pgzip_threads: parseInt(formData.get('compression_threads')) || undefined,
+        zstd_threads: parseInt(formData.get('zstd_threads')) || undefined,
     };
     
     try {

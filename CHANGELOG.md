@@ -1,5 +1,61 @@
 # 更新日志
 
+## [0.1.18] - 2025-11-17
+
+### 改进
+
+#### 压缩循环和文件移动架构重构
+- ✅ 将压缩循环逻辑分离到独立的 `CompressionWorker` 类
+  - 创建 `backup/compression_worker.py`，包含完整的压缩循环逻辑
+  - 严格按照流程顺序执行：检索文件 → 压缩 → 更新数据库 → 循环
+  - 检索所有非 `is_copy_success` 的文件，超阈值的跳过不修改 `is_copy_success`
+  - 压缩完成后立即更新 `is_copy_success`，确保数据一致性
+  - 所有参数、日志、错误处理等细节与原始逻辑完全一致
+  - 独立的后台线程，不阻塞主流程
+  - 支持压缩进度实时更新和任务取消
+
+- ✅ 将文件移动逻辑分离到独立的 `FileMoveWorker` 类
+  - 创建 `backup/file_move_worker.py`，包含文件移动逻辑
+  - 独立的后台线程，与压缩线程互不影响、互不阻塞
+  - 支持多个文件分次提交，正确排队顺序处理
+  - 顺序执行：temp → final → 磁带（不能并行移动）
+  - 即使第二个文件提交时第一个文件还在移动中，也能正确排队处理
+  - 使用 `asyncio.Queue` 实现任务队列，确保顺序执行
+
+- ✅ 重构 `backup_engine.py`
+  - 删除原有的压缩循环代码（约 500 行）
+  - 简化为创建和启动两个 worker，等待压缩完成
+  - 从 worker 获取统计信息（`processed_files`, `total_size`）
+  - 代码结构更清晰，职责分离更明确
+  - 异常处理时也能正确获取已处理的统计信息
+
+- ✅ 增强 `compressor.py` 返回信息
+  - 添加 `temp_path` 和 `final_path` 字段（Path 对象）
+  - 添加 `compression_method` 字段，标识使用的压缩方法（`pgzip`, `7zip_command`, `py7zr`, `tar`, `zstd`）
+  - 便于文件移动 worker 正确处理文件路径
+  - 恢复引擎可根据 `compression_method` 和文件扩展名自动选择解压方式
+
+### 技术细节
+
+- 压缩循环流程（严格按照顺序）：
+  1. 检索所有非 `is_copy_success` 的文件，超阈值的跳过不修改 `is_copy_success`
+  2. 压缩文件组（使用配置的压缩方法：pgzip/7zip/tar/zstd）
+  3. 修改数据库 `is_copy_success`
+  4. 循环到步骤 1
+
+- 文件移动流程（顺序执行）：
+  1. 从队列获取文件移动任务
+  2. 将文件从 `temp` 目录移动到 `final` 目录（等待完成）
+  3. 将文件加入磁带移动队列（顺序执行，一个完成后再处理下一个）
+  4. 循环到步骤 1
+
+- 压缩方法选择机制：
+  - 通过 `COMPRESSION_METHOD` 配置项选择（`.env` 或 UI 设置）
+  - 支持的方法：`pgzip` (默认) → `.tar.gz`, `7zip_command`/`py7zr` → `.7z`, `tar` → `.tar`, `zstd` → `.tar.zst`
+  - 恢复时根据文件扩展名自动识别解压方法
+
+## [0.1.17] - 2025-11-17
+
 ## [0.1.16] - 2025-11-17
 
 ### 改进

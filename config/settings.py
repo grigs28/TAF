@@ -131,11 +131,12 @@ class Settings(BaseSettings):
     BACKUP_COMPRESS_DIR: str = "temp/compress"  # 压缩文件临时目录（先压缩到这里，再移动到磁带机）
     COMPRESSION_THREADS: int = 4  # Python压缩线程数（py7zr/PGZip）
     # 压缩方法配置
-    COMPRESSION_METHOD: str = "pgzip"  # 压缩方法: "pgzip"、"py7zr" 或 "7zip_command"
+    COMPRESSION_METHOD: str = "pgzip"  # 压缩方法: "pgzip"、"py7zr"、"7zip_command"、"tar" 或 "zstd"
     SEVENZIP_PATH: str = r"C:\Program Files\7-Zip\7z.exe"  # 7-Zip程序路径
     # 注意：COMPRESSION_COMMAND_THREADS 默认使用 WEB_WORKERS 的值，在代码中动态获取
     PGZIP_BLOCK_SIZE: str = "1M"  # PGZip块大小（默认1M，可通过.env中的PGZIP_BLOCK_SIZE覆盖）
     PGZIP_THREADS: int = 4  # PGZip线程数
+    ZSTD_THREADS: int = 4  # Zstandard压缩线程数
 
     # 扫描进度更新配置
     SCAN_UPDATE_INTERVAL: int = 500  # 后台扫描每处理多少个文件更新一次数据库（total_files/total_bytes）

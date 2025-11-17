@@ -23,7 +23,7 @@ router = APIRouter()
 
 class CompressionConfigRequest(BaseModel):
     """压缩配置请求"""
-    compression_method: Optional[str] = Field(None, description="压缩方法: pgzip、py7zr 或 7zip_command")
+    compression_method: Optional[str] = Field(None, description="压缩方法: pgzip、py7zr、7zip_command、tar 或 zstd")
     sevenzip_path: Optional[str] = Field(None, description="7-Zip程序路径")
     compression_threads: Optional[int] = Field(None, description="py7zr线程数")
     compression_command_threads: Optional[int] = Field(None, description="7-Zip命令行线程数")
@@ -31,6 +31,7 @@ class CompressionConfigRequest(BaseModel):
     compress_directly_to_tape: Optional[bool] = Field(None, description="是否直接压缩到磁带机")
     pgzip_block_size: Optional[str] = Field(None, description="PGZip块大小（如 512M、1G）")
     pgzip_threads: Optional[int] = Field(None, description="PGZip线程数")
+    zstd_threads: Optional[int] = Field(None, description="zstd线程数")
 
 
 @router.get("/compression")
@@ -64,6 +65,8 @@ async def get_compression_config():
         else:
             compress_directly_to_tape = getattr(settings, 'COMPRESS_DIRECTLY_TO_TAPE', True)
         
+        zstd_threads = int(env_values.get("ZSTD_THREADS", env_values.get("COMPRESSION_THREADS", settings.ZSTD_THREADS)))
+
         return {
             "compression_method": env_values.get("COMPRESSION_METHOD", settings.COMPRESSION_METHOD),
             "sevenzip_path": env_values.get("SEVENZIP_PATH", settings.SEVENZIP_PATH),
@@ -73,8 +76,9 @@ async def get_compression_config():
             "compress_directly_to_tape": compress_directly_to_tape,
             "pgzip_block_size": pgzip_block_size,
             "pgzip_threads": pgzip_threads,
+            "zstd_threads": zstd_threads,
             # 额外的信息
-            "available_methods": ["pgzip", "py7zr", "7zip_command"],
+            "available_methods": ["pgzip", "py7zr", "7zip_command", "tar", "zstd"],
             "default_sevenzip_paths": [
                 r"C:\Program Files\7-Zip\7z.exe",
                 r"C:\Program Files (x86)\7-Zip\7z.exe"
@@ -97,10 +101,10 @@ async def update_compression_config(config: CompressionConfigRequest, request: R
         updates = {}
         
         if config.compression_method is not None:
-            if config.compression_method not in ["pgzip", "py7zr", "7zip_command"]:
+            if config.compression_method not in ["pgzip", "py7zr", "7zip_command", "tar", "zstd"]:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"无效的压缩方法: {config.compression_method}，必须是 'pgzip'、'py7zr' 或 '7zip_command'"
+                    detail=f"无效的压缩方法: {config.compression_method}，必须是 'pgzip'、'py7zr'、'7zip_command'、'tar' 或 'zstd'"
                 )
             updates["COMPRESSION_METHOD"] = config.compression_method
         
@@ -168,6 +172,14 @@ async def update_compression_config(config: CompressionConfigRequest, request: R
                     detail="pgzip_block_size 格式不正确，应为数字加可选单位（K/M/G）"
                 )
             updates["PGZIP_BLOCK_SIZE"] = block_value.upper()
+
+        if config.zstd_threads is not None:
+            if config.zstd_threads < 1 or config.zstd_threads > 64:
+                raise HTTPException(
+                    status_code=400,
+                    detail="zstd_threads 必须在 1-64 之间"
+                )
+            updates["ZSTD_THREADS"] = str(config.zstd_threads)
         
         # 如果没有提供sevenzip_path，但选择了7zip_command方法，尝试自动查找
         if config.compression_method == "7zip_command" and config.sevenzip_path is None:

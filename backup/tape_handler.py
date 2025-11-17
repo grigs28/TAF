@@ -167,8 +167,14 @@ class TapeHandler:
             target_file = tape_backup_dir / source_file.name
             
             # 步骤1: 复制文件到磁带机（LTFS挂载的盘符）
+            # 使用异步方式执行文件复制，避免阻塞事件循环
             logger.info(f"正在复制文件到磁带机: {source_file} -> {target_file}")
-            shutil.copy2(str(source_file), str(target_file))
+            import asyncio
+            try:
+                await asyncio.to_thread(shutil.copy2, str(source_file), str(target_file))
+            except asyncio.CancelledError:
+                logger.warning(f"文件复制任务被取消（Ctrl+C）")
+                raise
             
             # 步骤2: 验证复制成功（检查文件是否存在且大小匹配）
             if not target_file.exists():
@@ -188,7 +194,12 @@ class TapeHandler:
             # 步骤3: 验证成功，删除源文件
             logger.info(f"文件复制成功，验证通过（大小: {target_size} 字节），删除源文件")
             try:
-                source_file.unlink()
+                # 删除操作也使用异步方式
+                try:
+                    await asyncio.to_thread(source_file.unlink)
+                except asyncio.CancelledError:
+                    logger.warning(f"文件删除任务被取消（Ctrl+C）")
+                    raise
                 logger.info(f"源文件已删除: {source_file}")
             except Exception as del_error:
                 logger.warning(f"删除源文件失败（可稍后手动删除）: {del_error}")

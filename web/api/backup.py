@@ -69,8 +69,18 @@ def _build_stage_info(description: Optional[str], scan_status: Optional[str], st
     desc = description or ""
     matches = OP_STATUS_PATTERN.findall(desc)
     operation_status = matches[-1] if matches else None
+    
+    # 提取完整的操作状态，包括方括号后的进度信息
+    # 例如: "[压缩文件中...] 814/1637 个文件 (49.7%)" -> "压缩文件中 814/1637 个文件 (49.7%)"
     if operation_status:
         operation_status = operation_status.replace("...", "")
+        # 检查方括号后是否有进度信息
+        last_bracket_pos = desc.rfind(']')
+        if last_bracket_pos >= 0 and last_bracket_pos + 1 < len(desc):
+            remaining_text = desc[last_bracket_pos + 1:].strip()
+            if remaining_text:
+                # 如果方括号后有文本，将其追加到 operation_status
+                operation_status = operation_status + " " + remaining_text
 
     stage_code = None
     if operation_status:

@@ -1025,39 +1025,8 @@ class BackupDB:
                 f"原因：{reason}"
             )
 
-        # 收集所有文件分组
-        all_groups = []
-        remaining_files = sorted_files.copy()
-
-        # 继续分组直到没有剩余文件
-        while remaining_files:
-            # 取最大的文件作为新组的基准
-            max_file = remaining_files[0]
-            max_file_size = max_file['size']
-
-            tolerance = max_file_size * 0.05  # 5% tolerance
-            min_group_size = max_file_size - tolerance
-            max_group_size = max_file_size + tolerance
-
-            # 创建新组
-            current_group = []
-            files_to_remove = []
-
-            # 将符合条件的文件加入当前组
-            for file in remaining_files:
-                file_size = file['size']
-                if min_group_size <= file_size <= max_group_size:
-                    current_group.append(file)
-                    files_to_remove.append(file)
-
-            # 从剩余文件列表中移除已分组的文件
-            for file in files_to_remove:
-                remaining_files.remove(file)
-
-            # 添加到结果列表
-            all_groups.append(current_group)
-
-        return all_groups
+        # 返回当前文件组（新策略：每次只返回一个组）
+        return [current_group]
 
     async def get_scan_status(self, backup_task_id: int) -> Optional[str]:
         """获取扫描状态"""
@@ -1114,7 +1083,10 @@ class BackupDB:
         chunk_number: int,
         backup_time: datetime
     ):
-        """Mark files as copied in the database"""
+        """Mark files as copied in the database (使用批量更新优化性能)"""
+        if not processed_files:
+            return
+        
         success_count = 0
         failed_count = 0
         per_file_compressed_size = compressed_file.get('compressed_size', 0)
@@ -1123,9 +1095,38 @@ class BackupDB:
         checksum = compressed_file.get('checksum')
         copy_time = datetime.now()
 
+        # 批量查询已存在的文件
+        file_paths = [f.get('file_path') for f in processed_files if f.get('file_path')]
+        if not file_paths:
+            logger.warning(f"[mark_files_as_copied] 没有有效的文件路径，processed_files 数量: {len(processed_files)}")
+            if processed_files:
+                # 调试：打印第一个文件的结构
+                first_file = processed_files[0]
+                logger.warning(f"[mark_files_as_copied] 第一个文件的结构: {list(first_file.keys())}")
+            return
+        
+        logger.info(f"[mark_files_as_copied] 准备更新 {len(file_paths)} 个文件的 is_copy_success 状态")
+        
+        existing_files = await conn.fetch(
+            """
+            SELECT id, file_path, is_copy_success
+            FROM backup_files
+            WHERE backup_set_id = $1 AND file_path = ANY($2)
+            """,
+            backup_set_db_id, file_paths
+        )
+        existing_map = {row['file_path']: row for row in existing_files}
+        
+        # 准备批量更新和插入的数据
+        update_data = []
+        insert_data = []
+        
         for processed_file in processed_files:
             try:
                 file_path = processed_file.get('file_path')
+                if not file_path:
+                    continue
+                
                 file_stat = processed_file.get('file_stat')
                 metadata = processed_file.get('file_metadata') or {}
                 metadata.update({
@@ -1133,90 +1134,109 @@ class BackupDB:
                     'chunk_number': chunk_number,
                     'original_path': file_path
                 })
-
-                result = await conn.execute(
-                    """
-                    UPDATE backup_files
-                    SET compressed_size = $3,
-                        compressed = $4,
-                        checksum = $5,
-                        backup_time = $6,
-                        chunk_number = $7,
-                        tape_block_start = $8,
-                        file_metadata = $9::json,
-                        is_copy_success = TRUE,
-                        copy_status_at = $10
-                    WHERE backup_set_id = $1 AND file_path = $2
-                    """,
-                    backup_set_db_id,
-                    file_path,
-                    per_file_compressed_size,
-                    is_compressed,
-                    checksum,
-                    backup_time,
-                    chunk_number,
-                    0,
-                    json.dumps(metadata),
-                    copy_time
-                )
-
-                if result and result.startswith('UPDATE 0'):
-                    # UPDATE 0 表示没有匹配的记录，需要插入新记录
-                    try:
-                        await conn.execute(
-                            """
-                            INSERT INTO backup_files (
-                                backup_set_id, file_path, file_name, file_type, file_size,
-                                compressed_size, file_permissions, created_time, modified_time,
-                                accessed_time, compressed, checksum, backup_time, chunk_number,
-                                tape_block_start, file_metadata, is_copy_success, copy_status_at
-                            ) VALUES (
-                                $1, $2, $3, $4::backupfiletype, $5,
-                                $6, $7, $8, $9,
-                                $10, $11, $12, $13, $14,
-                                $15, $16::json, TRUE, $17
-                            )
-                            """,
-                            backup_set_db_id,
-                            file_path,
-                            processed_file.get('file_name', Path(file_path).name),
-                            processed_file.get('file_type', BackupFileType.FILE.value),
-                            processed_file.get('file_size', 0),
-                            per_file_compressed_size,
-                            processed_file.get('file_permissions'),
-                            datetime.fromtimestamp(file_stat.st_ctime) if file_stat else None,
-                            datetime.fromtimestamp(file_stat.st_mtime) if file_stat else None,
-                            datetime.fromtimestamp(file_stat.st_atime) if file_stat else None,
-                            is_compressed,
-                            checksum,
-                            backup_time,
-                            chunk_number,
-                            0,
-                            json.dumps(metadata),
-                            copy_time
-                        )
-                        success_count += 1
-                    except Exception as insert_error:
-                        failed_count += 1
-                        logger.warning(
-                            f"[mark_files_as_copied] Failed to insert {processed_file.get('file_path', 'unknown')}: {insert_error}"
-                        )
+                
+                metadata_json = json.dumps(metadata)
+                
+                if file_path in existing_map:
+                    # 批量更新
+                    file_id = existing_map[file_path]['id']
+                    update_data.append((
+                        file_id,
+                        per_file_compressed_size,
+                        is_compressed,
+                        checksum,
+                        backup_time,
+                        chunk_number,
+                        0,
+                        metadata_json,
+                        copy_time
+                    ))
                 else:
-                    # UPDATE 成功
-                    success_count += 1
+                    # 批量插入
+                    insert_data.append((
+                        backup_set_db_id,
+                        file_path,
+                        processed_file.get('file_name', Path(file_path).name),
+                        processed_file.get('file_type', BackupFileType.FILE.value),
+                        processed_file.get('file_size', 0),
+                        per_file_compressed_size,
+                        processed_file.get('file_permissions'),
+                        datetime.fromtimestamp(file_stat.st_ctime) if file_stat else None,
+                        datetime.fromtimestamp(file_stat.st_mtime) if file_stat else None,
+                        datetime.fromtimestamp(file_stat.st_atime) if file_stat else None,
+                        is_compressed,
+                        checksum,
+                        backup_time,
+                        chunk_number,
+                        0,
+                        metadata_json,
+                        copy_time
+                    ))
             except Exception as e:
                 failed_count += 1
                 logger.warning(
-                    f"[mark_files_as_copied] Failed to update {processed_file.get('file_path', 'unknown')}: {e}"
+                    f"[mark_files_as_copied] Failed to prepare {processed_file.get('file_path', 'unknown')}: {e}"
                 )
                 continue
         
+        # 执行批量更新
+        if update_data:
+            try:
+                await conn.executemany(
+                    """
+                    UPDATE backup_files
+                    SET compressed_size = $2,
+                        compressed = $3,
+                        checksum = $4,
+                        backup_time = $5,
+                        chunk_number = $6,
+                        tape_block_start = $7,
+                        file_metadata = $8::json,
+                        is_copy_success = TRUE,
+                        copy_status_at = $9
+                    WHERE id = $1
+                    """,
+                    update_data
+                )
+                success_count += len(update_data)
+                logger.debug(f"[mark_files_as_copied] 批量更新 {len(update_data)} 个文件")
+            except Exception as update_error:
+                failed_count += len(update_data)
+                logger.error(f"[mark_files_as_copied] 批量更新失败: {update_error}")
+        
+        # 执行批量插入
+        if insert_data:
+            try:
+                await conn.executemany(
+                    """
+                    INSERT INTO backup_files (
+                        backup_set_id, file_path, file_name, file_type, file_size,
+                        compressed_size, file_permissions, created_time, modified_time,
+                        accessed_time, compressed, checksum, backup_time, chunk_number,
+                        tape_block_start, file_metadata, is_copy_success, copy_status_at
+                    ) VALUES (
+                        $1, $2, $3, $4::backupfiletype, $5,
+                        $6, $7, $8, $9,
+                        $10, $11, $12, $13, $14,
+                        $15, $16::json, TRUE, $17
+                    )
+                    """,
+                    insert_data
+                )
+                success_count += len(insert_data)
+                logger.debug(f"[mark_files_as_copied] 批量插入 {len(insert_data)} 个文件")
+            except Exception as insert_error:
+                failed_count += len(insert_data)
+                logger.error(f"[mark_files_as_copied] 批量插入失败: {insert_error}")
+        
         if success_count > 0:
-            logger.debug(f"[mark_files_as_copied] Updated {success_count} files as copied")
+            logger.info(f"[mark_files_as_copied] 成功更新 {success_count} 个文件的 is_copy_success=TRUE（批量操作：更新 {len(update_data)} 个，插入 {len(insert_data)} 个）")
         if failed_count > 0:
             logger.warning(
-                f"[mark_files_as_copied] {failed_count} files failed to update, continuing backup flow"
+                f"[mark_files_as_copied] {failed_count} 个文件更新失败，继续备份流程"
             )
+        if success_count == 0 and failed_count == 0:
+            logger.warning(f"[mark_files_as_copied] 没有文件被更新（update_data={len(update_data)}, insert_data={len(insert_data)}）")
     
     async def update_scan_progress(
         self, 
@@ -1285,8 +1305,12 @@ class BackupDB:
                             new_desc = cleaned_desc + ' ' + operation_status if cleaned_desc else operation_status
                         
                         # 获取compressed_bytes和processed_bytes用于更新
-                        compressed_bytes = getattr(backup_task, 'compressed_bytes', 0) or 0
-                        processed_bytes = getattr(backup_task, 'processed_bytes', 0) or 0
+                        compressed_bytes = getattr(backup_task, 'compressed_bytes', None)
+                        if compressed_bytes is None:
+                            compressed_bytes = 0
+                        processed_bytes = getattr(backup_task, 'processed_bytes', None)
+                        if processed_bytes is None:
+                            processed_bytes = 0
                         
                         # 重要：不从 backup_task 对象读取 total_bytes 和 total_bytes_actual
                         # 这些字段由独立的后台扫描任务 _scan_for_progress_update 负责更新
@@ -1301,6 +1325,7 @@ class BackupDB:
                         # 将result_summary转换为JSON字符串
                         result_summary_json = json.dumps(result_summary) if result_summary else None
                         
+                        logger.debug(f"[update_scan_progress] 更新任务 {backup_task.id} 的进度：processed_files={scanned_count}, processed_bytes={processed_bytes}, compressed_bytes={compressed_bytes}")
                         await conn.execute(
                             """
                             UPDATE backup_tasks
@@ -1324,6 +1349,7 @@ class BackupDB:
                             datetime.now(),
                             backup_task.id
                         )
+                        logger.debug(f"[update_scan_progress] 数据库更新完成：任务 {backup_task.id} 的 processed_files 和 processed_bytes 已更新")
                         # 注意：total_bytes 字段不更新，由后台扫描任务负责更新
                     else:
                         # 没有操作状态，只更新进度和字节数
@@ -1347,8 +1373,12 @@ class BackupDB:
                             result_summary = {}
                         
                         # 获取compressed_bytes和processed_bytes用于更新
-                        compressed_bytes = getattr(backup_task, 'compressed_bytes', 0) or 0
-                        processed_bytes = getattr(backup_task, 'processed_bytes', 0) or 0
+                        compressed_bytes = getattr(backup_task, 'compressed_bytes', None)
+                        if compressed_bytes is None:
+                            compressed_bytes = 0
+                        processed_bytes = getattr(backup_task, 'processed_bytes', None)
+                        if processed_bytes is None:
+                            processed_bytes = 0
                         
                         # 重要：不从 backup_task 对象读取 total_bytes 和 total_bytes_actual
                         # 这些字段由独立的后台扫描任务 _scan_for_progress_update 负责更新

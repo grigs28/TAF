@@ -281,7 +281,16 @@ class TapeBackupSystem:
             if shutdown_event:
                 async def shutdown_monitor():
                     await shutdown_event.wait()
-                    logger.info("收到关闭信号，准备关闭服务...")
+                    logger.warning("收到关闭信号（Ctrl+C），准备强制关闭服务...")
+                    # 取消所有正在运行的任务
+                    try:
+                        loop = asyncio.get_running_loop()
+                        for task in asyncio.all_tasks(loop):
+                            if task != asyncio.current_task():
+                                task.cancel()
+                                logger.info(f"已取消任务: {task.get_name()}")
+                    except Exception as cancel_error:
+                        logger.warning(f"取消任务时出错: {str(cancel_error)}")
                     await self.shutdown()
                 
                 asyncio.create_task(shutdown_monitor())
@@ -368,9 +377,23 @@ def setup_signal_handlers(system):
     def signal_handler(signum, frame):
         """处理信号"""
         logger = logging.getLogger(__name__)
-        logger.info(f"收到信号 {signum}，准备关闭系统...")
+        logger.warning(f"收到信号 {signum}（Ctrl+C），准备强制关闭系统...")
         # 设置关闭事件
         shutdown_event.set()
+        
+        # 在 Windows 上，尝试取消所有正在运行的任务
+        try:
+            loop = asyncio.get_running_loop()
+            # 取消所有正在运行的任务（除了当前任务）
+            for task in asyncio.all_tasks(loop):
+                if task != asyncio.current_task():
+                    task.cancel()
+                    logger.info(f"已取消任务: {task.get_name()}")
+        except RuntimeError:
+            # 如果没有运行中的事件循环，忽略
+            pass
+        except Exception as e:
+            logger.warning(f"取消任务时出错: {str(e)}")
     
     # 注册信号处理器
     signal.signal(signal.SIGINT, signal_handler)

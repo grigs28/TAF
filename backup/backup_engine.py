@@ -49,6 +49,8 @@ from backup.backup_notifier import BackupNotifier
 from backup.backup_scanner import BackupScanner
 from backup.backup_task_manager import BackupTaskManager
 from backup.tape_file_mover import TapeFileMover
+from backup.compression_worker import CompressionWorker
+from backup.file_move_worker import FileMoveWorker
 
 logger = logging.getLogger(__name__)
 
@@ -1036,14 +1038,6 @@ class BackupEngine:
             logger.info("开始流式处理：扫描和压缩循环执行...")
             logger.info(f"压缩配置：最大文件大小={format_bytes(self.settings.MAX_FILE_SIZE)}")
             
-            processed_files = 0
-            total_size = 0  # 压缩后的总大小
-            total_original_size = 0  # 原始文件的总大小（未压缩）
-            # 注意：不再使用 total_scanned_files 变量
-            # 总文件数和总字节数由独立的后台扫描任务 _scan_for_progress_update 负责更新
-            estimated_archive_count = 0  # 预计的压缩包总数（估算值）
-            group_idx = 0
-            
             scan_status = getattr(backup_task, 'scan_status', 'pending') or 'pending'
             force_rescan = getattr(backup_task, 'force_rescan', False)
             should_run_scanner = force_rescan or scan_status != 'completed'
@@ -1093,366 +1087,47 @@ class BackupEngine:
                 "[准备压缩] 正在构建文件组..."
             )
 
-            idle_checks = 0
-            max_idle_checks = 12  # 约1分钟
-            wait_retry_count = 0
-            max_wait_retries = 6  # 最多循环6次等待文件
+            # ========== 创建文件移动后台任务（独立线程，顺序执行） ==========
+            file_move_worker = FileMoveWorker(tape_file_mover=self.tape_file_mover)
+            file_move_worker.start()
+            
+            # ========== 创建压缩循环后台任务（独立线程，顺序执行） ==========
+            compression_worker = CompressionWorker(
+                backup_db=self.backup_db,
+                compressor=self.compressor,
+                backup_set=backup_set,
+                backup_task=backup_task,
+                settings=self.settings,
+                file_move_worker=file_move_worker,
+                backup_notifier=self.backup_notifier,
+                tape_file_mover=self.tape_file_mover
+            )
+            compression_worker.start()
+
+            # ========== 等待压缩循环完成 ==========
+            processed_files = 0
+            total_size = 0
             try:
-                while True:
-                    try:
-                        current_task = asyncio.current_task()
-                        if current_task and current_task.cancelled():
-                            logger.warning("压缩循环：检测到任务已被取消")
-                            break
-                    except RuntimeError:
-                        logger.warning("压缩循环：检测到任务可能已被取消")
-                        break
-
-                    # 新策略：调用数据库函数获取压缩组
-                    # 数据库函数内部已处理6次重试机制
-                    file_groups = await self.backup_db.fetch_pending_files_grouped_by_size(
-                        backup_set.id,
-                        self.settings.MAX_FILE_SIZE,
-                        backup_task.id,
-                        should_wait_if_small=(wait_retry_count < max_wait_retries)
-                    )
-                    
-                    if not file_groups:
-                        # 新策略：返回空列表说明没有待压缩文件或需要等待
-                        # 数据库函数已处理6次重试逻辑，这里只需检查最终状态
-                        scan_status = await self.backup_db.get_scan_status(backup_task.id)
-                        total_files_from_db = await self.backup_db.get_total_files_from_db(backup_task.id)
-
-                        logger.info(
-                            f"[新策略] 文件组为空，扫描状态={scan_status}, "
-                            f"已处理={processed_files}, 总文件={total_files_from_db}"
-                        )
-
-                        if scan_status == 'completed' or processed_files >= total_files_from_db:
-                            # 扫描完成或已处理所有文件，退出循环
-                            logger.info("所有文件已压缩完毕，退出压缩循环")
-                            break
-
-                        # 否则等待更多文件
-                        idle_checks += 1
-                        if idle_checks >= max_idle_checks:
-                            logger.warning(
-                                f"等待压缩文件超时，扫描状态={scan_status}，"
-                                f"已等待 {idle_checks * 5} 秒，继续等待..."
-                            )
-
-                        await asyncio.sleep(5)
-                        continue
-
-                    # 成功获取到文件组，重置等待计数
-                    idle_checks = 0
-                    
-                    # file_groups 现在只包含一个文件组（每次调用只返回一个组）
-                    file_group = file_groups[0]
-                    total_files_in_group = len(file_group)
-                    total_size_in_group = sum(f.get('size', 0) or 0 for f in file_group)
-                    
-                    logger.info(
-                        f"构建文件组完成：{total_files_in_group} 个文件，"
-                        f"总大小 {format_bytes(total_size_in_group)}"
-                    )
-                    
-                    total_files_from_db = await self.backup_db.get_total_files_from_db(backup_task.id)
-                    if total_files_from_db > 0 and total_original_size > 0 and processed_files > 0:
-                        avg_file_size = total_original_size / processed_files if processed_files > 0 else 0
-                        if avg_file_size > 0:
-                            files_per_archive = min(self.settings.MAX_FILE_SIZE / avg_file_size, total_files_from_db)
-                            if files_per_archive > 0:
-                                estimated_archive_count = max(group_idx + 1, int(total_files_from_db / files_per_archive))
-                        else:
-                            estimated_archive_count = max(group_idx + 1, int(total_files_from_db / 1000))
-                    elif total_files_from_db > 0:
-                        estimated_archive_count = max(group_idx + 1, int(total_files_from_db / 1000))
-                    else:
-                        estimated_archive_count = max(group_idx + 1, 1)
-                    
-                    await self.backup_db.update_scan_progress(
-                        backup_task,
-                        processed_files,
-                        processed_files + total_files_in_group,
-                        "[压缩文件中...]"
-                    )
-                    
-                    # 记录关键阶段：开始压缩（附带当前压缩参数）
-                    compression_method = getattr(self.settings, 'COMPRESSION_METHOD', 'pgzip')
-                    compression_level = getattr(self.settings, 'COMPRESSION_LEVEL', 9)
-                    compression_threads = getattr(self.settings, 'COMPRESSION_THREADS', 4)
-                    # PGZip 专用参数
-                    pgzip_block_size = getattr(self.settings, 'PGZIP_BLOCK_SIZE', '1G')
-                    pgzip_threads = getattr(self.settings, 'PGZIP_THREADS', compression_threads)
-                    try:
-                        pgzip_threads = int(pgzip_threads)
-                    except (ValueError, TypeError):
-                        pgzip_threads = int(compression_threads)
-                    
-                    # 7-Zip 命令行线程数（用于非 pgzip 场景）
-                    compression_command_threads = getattr(self.settings, 'COMPRESSION_COMMAND_THREADS', None)
-                    if compression_command_threads is None:
-                        compression_command_threads = getattr(self.settings, 'WEB_WORKERS', compression_threads)
-                    try:
-                        compression_command_threads = int(compression_command_threads)
-                    except (ValueError, TypeError):
-                        compression_command_threads = int(compression_threads)
-                    
-                    if compression_method == 'pgzip':
-                        compression_params = (
-                            f"(压缩: 方法=pgzip, 等级={compression_level}, "
-                            f"线程={pgzip_threads}, 块大小={pgzip_block_size})"
-                        )
-                    elif compression_method == '7zip_command':
-                        compression_params = (
-                            f"(压缩: 方法=7zip_command, 等级={compression_level}, "
-                            f"线程={compression_command_threads})"
-                        )
-                    else:
-                        # py7zr 或其他方法，使用通用描述
-                        compression_params = (
-                            f"(压缩: 方法={compression_method}, 等级={compression_level}, "
-                            f"线程={compression_threads})"
-                        )
-                    
-                    self.backup_db._log_operation_stage_event(
-                        backup_task,
-                        f"[开始压缩] 文件组包含 {total_files_in_group} 个文件，总大小 {format_bytes(total_size_in_group)} {compression_params}"
-                    )
-                    # 处理这个文件组（只有一个组）
-                    current_group_idx = group_idx
-                    logger.info(f"处理文件组 {current_group_idx + 1}，包含 {total_files_in_group} 个文件")
-
-                    # 更新operation_stage和description
-                    await self.backup_db.update_task_stage_with_description(
-                        backup_task,
-                        "compress",
-                        f"[开始压缩] 文件组 {current_group_idx + 1}：{total_files_in_group} 个文件，{format_bytes(total_size_in_group)}"
-                    )
-                    
-                    try:
-                        compressed_file = await self.compressor.compress_file_group(
-                            file_group,
-                            backup_set,
-                            backup_task,
-                            base_processed_files=processed_files,
-                            total_files=total_files_from_db
-                        )
-                        if not compressed_file:
-                            logger.warning(f"文件组 {current_group_idx + 1} 压缩失败，跳过该组")
-                            continue
-
-                        # 检查是否直接压缩到磁带
-                        compress_directly_to_tape = getattr(self.settings, 'COMPRESS_DIRECTLY_TO_TAPE', True)
-                        
-                        logger.info(f"压缩完成，文件路径: {compressed_file['path']}, 直接压缩到磁带: {compress_directly_to_tape}")
-                        
-                        # 记录关键阶段：压缩完成
-                        self.backup_db._log_operation_stage_event(
-                            backup_task,
-                            f"[压缩完成] 文件组 {current_group_idx + 1}，大小: {format_bytes(compressed_file['compressed_size'])}"
-                        )
-                        # 更新operation_stage和description
-                        await self.backup_db.update_task_stage_with_description(
-                            backup_task,
-                            "compress",
-                            f"[压缩完成] 文件组 {current_group_idx + 1}：{format_bytes(compressed_file['compressed_size'])}"
-                        )
-                        
-                        if compress_directly_to_tape:
-                            # 直接压缩到磁带，不需要移动队列，但仍需要更新状态
-                            logger.info(f"文件已直接压缩到磁带机: {compressed_file['path']}")
-                            tape_file_path = compressed_file['path']
-
-                            # 记录关键阶段：开始写入磁带（直接压缩时）
-                            self.backup_db._log_operation_stage_event(
-                                backup_task,
-                                f"[写入磁带中...] 文件组 {current_group_idx + 1}（直接压缩）"
-                            )
-                            # 更新operation_stage和description
-                            await self.backup_db.update_task_stage_with_description(
-                                backup_task,
-                                "copy",
-                                f"[写入磁带中] 文件组 {current_group_idx + 1}：{os.path.basename(compressed_file['path'])}"
-                            )
-
-                            # 记录关键阶段：文件已写入磁带机（直接压缩时）
-                            self.backup_db._log_operation_stage_event(
-                                backup_task,
-                                f"[文件已移动到磁带机] {os.path.basename(compressed_file['path'])} (文件组 {current_group_idx + 1}，直接压缩)"
-                            )
-                            # 更新为完成状态
-                            await self.backup_db.update_task_stage_with_description(
-                                backup_task,
-                                "finalize",
-                                f"[写入完成] 文件组 {current_group_idx + 1}：{os.path.basename(compressed_file['path'])}"
-                            )
-                        else:
-                            # 将文件加入移动队列，由后台线程顺序移动到磁带机
-                            # 定义回调函数，在移动完成后记录日志（数据库已在保存时记录）
-                            def move_callback(source_path: str, tape_file_path: Optional[str], success: bool, error: Optional[str]):
-                                """文件移动完成后的回调函数"""
-                                if success and tape_file_path:
-                                    logger.info(f"文件已成功移动到磁带机: {tape_file_path}")
-                                    # 记录关键阶段：文件已移动到磁带机（统一格式）
-                                    self.backup_db._log_operation_stage_event(
-                                        backup_task,
-                                        f"[文件已移动到磁带机] {os.path.basename(tape_file_path)} (文件组 {current_group_idx + 1})"
-                                    )
-                                elif not success:
-                                    logger.error(f"文件移动到磁带机失败: {source_path}, 错误: {error}")
-                                    # 记录关键阶段：移动失败
-                                    self.backup_db._log_operation_stage_event(
-                                        backup_task,
-                                        f"[移动到磁带机失败] 文件组 {current_group_idx + 1}，错误: {error}"
-                                    )
-                            
-                            # 将文件加入移动队列
-                            if self.tape_file_mover:
-                                file_path = compressed_file['path']
-                                logger.info(f"准备将文件加入移动队列: {compressed_file['path']} (存在: {os.path.exists(file_path)})")
-
-                                # 记录关键阶段：开始写入磁带
-                                self.backup_db._log_operation_stage_event(
-                                    backup_task,
-                                    f"[写入磁带中...] 文件组 {current_group_idx + 1}"
-                                )
-                                # 更新operation_stage和description
-                                await self.backup_db.update_task_stage_with_description(
-                                    backup_task,
-                                    "copy",
-                                    f"[写入磁带中] 文件组 {current_group_idx + 1}：{os.path.basename(compressed_file['path'])}"
-                                )
-
-                                added = self.tape_file_mover.add_file(
-                                    compressed_file['path'],
-                                    backup_set,
-                                    current_group_idx,
-                                    callback=move_callback,
-                                    backup_task=backup_task
-                                )
-                                if added:
-                                    logger.info(f"文件已成功加入移动队列: {compressed_file['path']}")
-                                    # 记录关键阶段：文件加入移动队列
-                                    self.backup_db._log_operation_stage_event(
-                                        backup_task,
-                                        f"[加入移动队列] 文件组 {current_group_idx + 1}，等待移动到磁带机"
-                                    )
-                                else:
-                                    logger.error(f"文件加入移动队列失败: {compressed_file['path']} (文件存在: {file_path_check.exists()})")
-                                
-                                # 暂时使用源路径作为磁带路径（移动完成后会更新）
-                                tape_file_path = compressed_file['path']
-                            else:
-                                logger.error("文件移动队列管理器未初始化，无法将文件加入队列！")
-                                tape_file_path = compressed_file['path']
-
-                        try:
-                            await self.backup_db.mark_files_as_copied(
-                                backup_set=backup_set,
-                                file_group=file_group,
-                                compressed_file=compressed_file,
-                                tape_file_path=tape_file_path or compressed_file['path'],
-                                chunk_number=current_group_idx
-                            )
-                        except Exception as db_error:
-                            logger.warning(f"⚠️ 更新文件复制状态失败: {str(db_error)}，继续执行")
-
-                        # 更新进度
-                        processed_files += len(file_group)
-                        total_size += compressed_file['compressed_size']  # 压缩后的总大小
-                        total_original_size += compressed_file['original_size']  # 原始文件的总大小
-                        backup_task.processed_files = processed_files
-                        backup_task.processed_bytes = total_original_size  # 原始文件的总大小（未压缩）
-                        backup_task.compressed_bytes = total_size  # 压缩后的总大小
-                        
-                        # 注意：不再更新 total_files 字段（压缩包数量）
-                        # 压缩包数量存储在 result_summary.estimated_archive_count 中
-                        # total_files 字段由后台扫描任务更新（总文件数）
-                        
-                        # 从数据库读取总文件数（由后台扫描任务更新）
-                        total_files_from_db = await self.backup_db.get_total_files_from_db(backup_task.id)
-                        
-                        # 重新估算预计的压缩包总数（基于已处理的文件数和平均文件大小）
-                        if processed_files > 0 and total_original_size > 0 and total_files_from_db > 0:
-                            avg_file_size = total_original_size / processed_files
-                            if avg_file_size > 0:
-                                # 计算每个压缩包能容纳的文件数（基于MAX_FILE_SIZE）
-                                files_per_archive = min(self.settings.MAX_FILE_SIZE / avg_file_size, total_files_from_db)
-                                if files_per_archive > 0:
-                                    # 基于总扫描文件数估算压缩包总数
-                                    estimated_archive_count = max(current_group_idx + 1, int(total_files_from_db / files_per_archive))
-                                else:
-                                    # 如果文件很大，每个压缩包只能容纳很少文件，使用保守估算
-                                    estimated_archive_count = max(current_group_idx + 1, int(total_files_from_db / 100))
-                            else:
-                                # 无法计算平均文件大小，使用保守估算
-                                estimated_archive_count = max(current_group_idx + 1, int(total_files_from_db / 1000))
-                        elif total_files_from_db > 0:
-                            # 如果还没有处理文件，但已扫描了文件，使用保守估算
-                            estimated_archive_count = max(current_group_idx + 1, int(total_files_from_db / 1000))
-                        else:
-                            # 如果还没有扫描文件，使用已生成的压缩包数
-                            estimated_archive_count = max(current_group_idx + 1, 1)
-                        
-                        logger.debug(f"预计压缩包总数更新: {estimated_archive_count} (已生成: {current_group_idx + 1}, 总扫描文件: {total_files_from_db}, 已处理文件: {processed_files})")
-                        
-                        # 将预计的压缩包总数存储到 result_summary（JSON字段）
-                        if not hasattr(backup_task, 'result_summary') or backup_task.result_summary is None:
-                            backup_task.result_summary = {}
-                        if isinstance(backup_task.result_summary, dict):
-                            backup_task.result_summary['estimated_archive_count'] = estimated_archive_count
-                        else:
-                            import json
-                            backup_task.result_summary = {'estimated_archive_count': estimated_archive_count}
-                        
-                        # 更新进度百分比
-                        # 进度百分比基于：已处理文件数 / 总扫描文件数（从数据库读取）
-                        # 扫描阶段占10%，压缩阶段占90%，当文件处理完成时进度为100%
-                        # 注意：使用之前读取的 total_files_from_db（避免重复读取）
-                        if total_files_from_db > 0:
-                            # 基于已处理文件数和总扫描文件数计算进度
-                            file_progress_ratio = processed_files / total_files_from_db
-                            # 扫描阶段占10%，压缩阶段占90%
-                            backup_task.progress_percent = min(100.0, 10.0 + (file_progress_ratio * 90.0))
-                        elif processed_files > 0:
-                            # 如果还没有扫描完，但已处理了一些文件，使用估算进度
-                            # 估算：假设已处理的文件占总文件的很小一部分
-                            backup_task.progress_percent = min(95.0, 10.0 + (processed_files / max(processed_files * 100, 1)) * 85.0)
-                        else:
-                            # 还没有处理任何文件，进度为10%（扫描阶段）
-                            backup_task.progress_percent = 10.0
-                        
-                        await self.backup_db.update_scan_progress(backup_task, processed_files, backup_task.total_files, "[压缩文件中...]")
-                        # 通知进度更新
-                        await self.backup_notifier.notify_progress(backup_task)
-                    
-                    except Exception as group_error:
-                        # 文件组处理失败，记录错误但继续处理下一个文件组
-                        logger.error(f"⚠️ 处理文件组 {current_group_idx + 1} 时发生错误: {str(group_error)}，跳过该文件组，继续处理下一个文件组")
-                        import traceback
-                        logger.error(f"错误堆栈:\n{traceback.format_exc()}")
-                    
-                    # 更新文件组索引（每次只处理一个文件组）
-                    group_idx += 1
-                    if hasattr(backup_task, 'result_summary') and isinstance(backup_task.result_summary, dict):
-                        estimated_count = backup_task.result_summary.get('estimated_archive_count', 'N/A')
-                        logger.info(f"文件组处理完成，estimated_archive_count={estimated_count}")
-                    await self.backup_db.update_scan_progress(
-                        backup_task,
-                        processed_files,
-                        processed_files,
-                        "[等待下一批文件...]"
-                    )
-                
+                await compression_worker.compression_task
+                # 压缩完成，获取统计信息
+                processed_files = compression_worker.processed_files
+                total_size = compression_worker.total_size
             except (KeyboardInterrupt, asyncio.CancelledError):
                 logger.warning("========== 压缩循环被中止 ==========")
                 logger.warning(f"任务ID: {backup_task.id if backup_task else 'N/A'}")
-                logger.warning(f"已处理文件组: {group_idx}")
+                # 即使被中断，也尝试获取已处理的统计信息
+                try:
+                    processed_files = compression_worker.processed_files
+                    total_size = compression_worker.total_size
+                except:
+                    pass
                 raise
+            finally:
+                # 停止压缩循环和文件移动任务
+                await compression_worker.stop()
+                await file_move_worker.stop()
             
-            logger.info(f"========== 数据库压缩完成，共处理 {group_idx} 个文件组 ==========")
+            logger.info(f"========== 数据库压缩完成，共处理 {compression_worker.group_idx} 个文件组 ==========")
 
             # 5. 完成备份集
             await self.backup_db.finalize_backup_set(backup_set, processed_files, total_size)

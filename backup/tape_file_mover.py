@@ -207,20 +207,13 @@ class TapeFileMover:
             # 使用tape_handler的write_to_tape_drive方法移动文件
             # 注意：这个方法会复制文件到磁带机，然后删除源文件
             # 由于是异步方法，我们需要在线程中运行事件循环
-            loop = None
+            # 在工作线程中运行异步操作
+            # 由于我们在工作线程中，需要创建新的事件循环
+            # 注意：不能使用主事件循环，因为它在主线程中运行
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
             try:
-                # 尝试获取当前事件循环，如果没有则创建新的
-                try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                
-                # 如果循环已关闭，创建新的
-                if loop.is_closed():
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                
                 tape_file_path = loop.run_until_complete(
                     self.tape_handler.write_to_tape_drive(
                         task.source_path,
@@ -228,54 +221,58 @@ class TapeFileMover:
                         task.group_idx
                     )
                 )
-                
-                elapsed = (datetime.now() - start_time).total_seconds()
-                
-                if tape_file_path:
-                    logger.info(f"文件移动成功: {source_file.name} -> {tape_file_path} (耗时: {elapsed:.2f}秒)")
-
-                    # 更新任务状态为"完成"
-                    if task.backup_task:
-                        try:
-                            from backup.backup_db import BackupDB
-                            backup_db = BackupDB()
-                            # 使用主事件循环更新状态（如果可用）
-                            backup_db.update_task_stage(
-                                task.backup_task,
-                                "finalize",
-                                main_loop=self._main_loop,
-                                description=f"[写入完成] 文件已写入磁带：{source_file.name}"
-                            )
-                            logger.info(f"任务 {task.backup_task.task_name} 状态更新为: 完成备份")
-                        except Exception as stage_error:
-                            logger.warning(f"更新任务状态失败: {str(stage_error)}")
-
-                    # 调用回调函数（如果提供）- 回调函数中会记录关键阶段
-                    if task.callback:
-                        try:
-                            task.callback(task.source_path, tape_file_path, True, None)
-                        except Exception as callback_error:
-                            logger.warning(f"回调函数执行失败: {str(callback_error)}")
-                else:
-                    logger.error(f"文件移动失败: {source_file.name}")
-                    
-                    # 调用回调函数（如果提供）
-                    if task.callback:
-                        try:
-                            task.callback(task.source_path, None, False, "移动失败")
-                        except Exception as callback_error:
-                            logger.warning(f"回调函数执行失败: {str(callback_error)}")
-                            
             finally:
-                # 只有在创建了新循环时才关闭
-                if loop:
+                # 确保关闭事件循环，释放资源
+                try:
+                    # 取消所有未完成的任务
+                    pending = asyncio.all_tasks(loop)
+                    for task_obj in pending:
+                        task_obj.cancel()
+                    # 等待所有任务完成
+                    if pending:
+                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                except Exception:
+                    pass
+                finally:
+                    loop.close()
+                    asyncio.set_event_loop(None)
+            
+            elapsed = (datetime.now() - start_time).total_seconds()
+            
+            if tape_file_path:
+                logger.info(f"文件移动成功: {source_file.name} -> {tape_file_path} (耗时: {elapsed:.2f}秒)")
+
+                # 更新任务状态为"完成"
+                if task.backup_task:
                     try:
-                        current_loop = asyncio.get_event_loop()
-                        if current_loop is loop and not current_loop.is_running():
-                            loop.close()
-                    except RuntimeError:
-                        # 没有事件循环，不需要关闭
-                        pass
+                        from backup.backup_db import BackupDB
+                        backup_db = BackupDB()
+                        # 使用主事件循环更新状态（如果可用）
+                        backup_db.update_task_stage(
+                            task.backup_task,
+                            "finalize",
+                            main_loop=self._main_loop,
+                            description=f"[写入完成] 文件已写入磁带：{source_file.name}"
+                        )
+                        logger.info(f"任务 {task.backup_task.task_name} 状态更新为: 完成备份")
+                    except Exception as stage_error:
+                        logger.warning(f"更新任务状态失败: {str(stage_error)}")
+
+                # 调用回调函数（如果提供）- 回调函数中会记录关键阶段
+                if task.callback:
+                    try:
+                        task.callback(task.source_path, tape_file_path, True, None)
+                    except Exception as callback_error:
+                        logger.warning(f"回调函数执行失败: {str(callback_error)}")
+            else:
+                logger.error(f"文件移动失败: {source_file.name}")
+                
+                # 调用回调函数（如果提供）
+                if task.callback:
+                    try:
+                        task.callback(task.source_path, None, False, "移动失败")
+                    except Exception as callback_error:
+                        logger.warning(f"回调函数执行失败: {str(callback_error)}")
                 
         except Exception as e:
             elapsed = (datetime.now() - start_time).total_seconds()

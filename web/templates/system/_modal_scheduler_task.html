@@ -1,15 +1,27 @@
 <!-- 计划任务管理模态框 -->
 <div class="modal fade" id="scheduledTaskModal" tabindex="-1" aria-labelledby="scheduledTaskModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-lg">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title" id="scheduledTaskModalLabel">
+        <div class="modal-content" style="background: rgba(13, 22, 38, 0.95); border: 1px solid rgba(255, 255, 255, 0.1);">
+            <div class="modal-header" style="background: rgba(13, 22, 38, 0.95); border-bottom: 1px solid rgba(255, 255, 255, 0.1);">
+                <h5 class="modal-title text-light" id="scheduledTaskModalLabel" style="color: #ffffff !important;">
                     <i class="bi bi-clock me-2"></i>计划任务
                 </h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
-            <div class="modal-body">
+            <div class="modal-body" style="background: rgba(13, 22, 38, 0.95); color: #ffffff;">
                 <form id="scheduledTaskForm">
+                    <style>
+                        #scheduledTaskModal .form-label,
+                        #scheduledTaskModal label {
+                            color: #ffffff !important;
+                        }
+                        #scheduledTaskModal .text-muted {
+                            color: #adb5bd !important;
+                        }
+                        #scheduledTaskModal small {
+                            color: #adb5bd !important;
+                        }
+                    </style>
                     <div class="row">
                         <div class="col-md-4 mb-3">
                             <label for="taskName" class="form-label">任务名称 <span class="text-danger">*</span></label>
@@ -331,7 +343,7 @@ $*</textarea>
                     
                 </form>
             </div>
-            <div class="modal-footer">
+            <div class="modal-footer" style="background: rgba(13, 22, 38, 0.95); border-top: 1px solid rgba(255, 255, 255, 0.1);">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
                 <button type="button" class="btn btn-primary" onclick="SchedulerManager.saveTask()">
                     <i class="bi bi-check-circle me-1"></i>保存

@@ -29,6 +29,11 @@ from sqlalchemy import select, and_, or_, func
 from datetime import datetime, timedelta
 import json
 
+try:
+    import zstandard as zstd
+except ImportError:
+    zstd = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -1168,6 +1173,8 @@ class RecoveryEngine:
         try:
             if archive_hint.endswith(('.tar.gz', '.tgz')):
                 return self._extract_from_tar_archive(compressed_data, target_name, mode='r:gz')
+            if archive_hint.endswith(('.tar.zst', '.tzst')):
+                return self._extract_from_tar_zst_archive(compressed_data, target_name)
             if archive_hint.endswith('.tar'):
                 return self._extract_from_tar_archive(compressed_data, target_name, mode='r:')
             if archive_hint.endswith('.zip'):
@@ -1177,6 +1184,8 @@ class RecoveryEngine:
             if archive_hint.endswith('.gz'):
                 # 普通单文件GZip
                 return gzip.decompress(compressed_data)
+            if archive_hint.endswith('.zst'):
+                return self._decompress_zstd_blob(compressed_data)
         except Exception as e:
             logger.error(f"根据后缀解压失败: {str(e)}", exc_info=True)
             return compressed_data
@@ -1210,6 +1219,17 @@ class RecoveryEngine:
                 return compressed_data
             return extracted.read()
 
+    def _extract_from_tar_zst_archive(self, compressed_data: bytes, target_name: str) -> bytes:
+        if zstd is None:
+            logger.warning("无法解压 .tar.zst 文件，因为未安装 zstandard 库")
+            return compressed_data
+        try:
+            decompressed = self._decompress_zstd_blob(compressed_data)
+            return self._extract_from_tar_archive(decompressed, target_name, mode='r:')
+        except Exception as e:
+            logger.error(f"解压 .tar.zst 文件失败: {e}", exc_info=True)
+            return compressed_data
+
     def _extract_from_zip_archive(self, compressed_data: bytes, target_name: str) -> bytes:
         with zipfile.ZipFile(io.BytesIO(compressed_data)) as zf:
             names = zf.namelist()
@@ -1231,6 +1251,17 @@ class RecoveryEngine:
                 return stream.read()
             if isinstance(stream, bytes):
                 return stream
+            return compressed_data
+
+    def _decompress_zstd_blob(self, compressed_data: bytes) -> bytes:
+        if zstd is None:
+            logger.warning("无法解压 .zst 文件，因为未安装 zstandard 库")
+            return compressed_data
+        try:
+            dctx = zstd.ZstdDecompressor()
+            return dctx.decompress(compressed_data)
+        except Exception as e:
+            logger.error(f"Zstandard 解压失败: {e}", exc_info=True)
             return compressed_data
 
     async def _verify_file_integrity(self, file_path: Path, file_info: Dict) -> bool:

@@ -346,7 +346,7 @@ class MemoryDBWriter:
             return
 
         self._last_trigger_time = current_time
-        logger.info(f"触发同步到openGauss (原因: {reason})")
+        logger.debug(f"触发同步到openGauss (原因: {reason})")
         await self._sync_to_opengauss()
 
     async def _sync_loop(self):
@@ -393,7 +393,7 @@ class MemoryDBWriter:
                 logger.debug("没有文件需要同步")
                 return
 
-            logger.info(f"开始同步 {len(files_to_sync)} 个文件到openGauss (原因: {reason})")
+            logger.debug(f"开始同步 {len(files_to_sync)} 个文件到openGauss (原因: {reason})")
 
             # 批量同步到openGauss
             synced_count = await self._batch_sync_to_opengauss(files_to_sync)
