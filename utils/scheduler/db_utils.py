@@ -136,6 +136,7 @@ class ConnectionWrapper:
 async def _acquire_connection():
     """从连接池获取连接（内部函数）"""
     import asyncpg
+    global _opengauss_pool
     
     pool = await get_opengauss_pool()
     monitor = get_opengauss_monitor()
@@ -169,6 +170,22 @@ async def _acquire_connection():
                 raise
             logger.warning(f"获取数据库连接超时，重试 {retry_count}/{max_retries}")
             await asyncio.sleep(0.5 * retry_count)  # 指数退避
+        except (ConnectionError, OSError) as e:
+            # 连接丢失或网络错误，重置连接池并重试
+            retry_count += 1
+            error_msg = str(e)
+            if retry_count >= max_retries:
+                logger.error(f"数据库连接丢失，已重试{retry_count}次: {error_msg}")
+                raise
+            logger.warning(f"数据库连接丢失，重置连接池并重试 {retry_count}/{max_retries}: {error_msg}")
+            async with _pool_lock:
+                try:
+                    if _opengauss_pool and not _opengauss_pool.is_closing():
+                        await _opengauss_pool.close()
+                except Exception:
+                    pass
+                _opengauss_pool = None
+            await asyncio.sleep(1.0 * retry_count)  # 等待后重试
         except asyncpg.exceptions.ConnectionDoesNotExistError:
             # 连接不存在，可能需要重新创建连接池
             retry_count += 1
@@ -176,7 +193,6 @@ async def _acquire_connection():
                 logger.error(f"数据库连接不存在，已重试{retry_count}次")
                 raise
             logger.warning(f"数据库连接不存在，重新创建连接池，重试 {retry_count}/{max_retries}")
-            global _opengauss_pool
             async with _pool_lock:
                 try:
                     if _opengauss_pool and not _opengauss_pool.is_closing():
@@ -186,8 +202,26 @@ async def _acquire_connection():
                 _opengauss_pool = None
             await asyncio.sleep(1.0 * retry_count)
         except Exception as e:
-            logger.error(f"获取数据库连接失败: {str(e)}", exc_info=True)
-            raise
+            # 其他异常，记录并重新抛出
+            error_msg = str(e)
+            # 检查是否是 connection_lost 相关错误
+            if "connection_lost" in error_msg.lower() or "unexpected connection" in error_msg.lower():
+                retry_count += 1
+                if retry_count >= max_retries:
+                    logger.error(f"数据库连接异常，已重试{retry_count}次: {error_msg}")
+                    raise
+                logger.warning(f"数据库连接异常，重置连接池并重试 {retry_count}/{max_retries}: {error_msg}")
+                async with _pool_lock:
+                    try:
+                        if _opengauss_pool and not _opengauss_pool.is_closing():
+                            await _opengauss_pool.close()
+                    except Exception:
+                        pass
+                    _opengauss_pool = None
+                await asyncio.sleep(1.0 * retry_count)
+            else:
+                logger.error(f"获取数据库连接失败: {error_msg}", exc_info=True)
+                raise
 
 
 @asynccontextmanager

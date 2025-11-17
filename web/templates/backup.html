@@ -28,12 +28,33 @@
     font-size: 0.8rem;
 }
 
-/* 写入磁带徽章的脉冲动画 */
+/* 不同阶段的徽章脉冲动画 */
 .pulse-badge {
     animation: pulse-badge 1.5s ease-in-out infinite;
 }
 
-@keyframes pulse-badge {
+/* 扫描文件阶段 - 蓝色脉冲 */
+.pulse-badge.bg-info {
+    animation: pulse-scan 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-scan {
+    0%, 100% {
+        opacity: 1;
+        box-shadow: 0 0 0 0 rgba(23, 162, 184, 0.7);
+    }
+    50% {
+        opacity: 0.9;
+        box-shadow: 0 0 0 8px rgba(23, 162, 184, 0);
+    }
+}
+
+/* 压缩文件阶段 - 黄色脉冲 */
+.pulse-badge.bg-warning {
+    animation: pulse-compress 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-compress {
     0%, 100% {
         opacity: 1;
         box-shadow: 0 0 0 0 rgba(255, 193, 7, 0.7);
@@ -41,6 +62,34 @@
     50% {
         opacity: 0.9;
         box-shadow: 0 0 0 8px rgba(255, 193, 7, 0);
+    }
+}
+
+/* 写入磁带阶段 - 红色脉冲 */
+.pulse-badge.bg-danger {
+    animation: pulse-copy 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-copy {
+    0%, 100% {
+        opacity: 1;
+        box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.7);
+    }
+    50% {
+        opacity: 0.9;
+        box-shadow: 0 0 0 8px rgba(220, 53, 69, 0);
+    }
+}
+
+/* 默认脉冲动画 */
+@keyframes pulse-badge {
+    0%, 100% {
+        opacity: 1;
+        box-shadow: 0 0 0 0 rgba(0, 123, 255, 0.7);
+    }
+    50% {
+        opacity: 0.9;
+        box-shadow: 0 0 0 8px rgba(0, 123, 255, 0);
     }
 }
 </style>

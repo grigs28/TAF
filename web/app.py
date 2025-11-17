@@ -156,7 +156,7 @@ def create_app(system_instance=None) -> FastAPI:
     @app.get("/scheduler", response_class=HTMLResponse)
     async def scheduler_page(request: Request):
         """计划任务管理页面"""
-        logger.info(f"访问计划任务页面: {request.url.path}")
+        logger.debug(f"访问计划任务页面: {request.url.path}")
         try:
             return templates.TemplateResponse("scheduler.html", {
                 "request": request,

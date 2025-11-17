@@ -24,17 +24,17 @@
                     <div class="mb-3">
                         <label class="form-label">最大文件大小 (GB)</label>
                         <input type="number" class="form-control" id="maxFileSizeGB" value="3" min="1" step="0.1">
-                        <small class="text-muted">单个压缩包的最大大小（GB）</small>
+                        <small class="text-muted">单个压缩包的最大大小（GB），系统会自动按此大小从数据库检索并分组未压缩文件</small>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label">扫描批次大小（文件数）</label>
-                        <input type="number" class="form-control" id="scanBatchSize" value="180000" min="1000" step="1000">
-                        <small class="text-muted">扫描到多少文件后开始压缩（默认180000个文件）</small>
+                        <label class="form-label">后台扫描进度更新间隔（文件数）</label>
+                        <input type="number" class="form-control" id="scanUpdateInterval" value="500" min="1" step="1">
+                        <small class="text-muted">后台扫描每处理多少个文件就更新一次数据库中的总文件数和总字节数</small>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label">扫描批次大小（GB）</label>
-                        <input type="number" class="form-control" id="scanBatchSizeBytesGB" value="18" min="1" step="1">
-                        <small class="text-muted">扫描到多少字节后开始压缩（默认18GB）</small>
+                        <label class="form-label">后台扫描进度统计间隔（秒）</label>
+                        <input type="number" class="form-control" id="scanLogIntervalSeconds" value="60" min="1" step="1">
+                        <small class="text-muted">控制“后台扫描任务：已扫描 N 个文件...”这类日志和速度统计的输出时间间隔</small>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">压缩临时目录</label>

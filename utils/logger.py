@@ -41,9 +41,9 @@ def setup_logging():
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
-    # 控制台处理器
+    # 控制台处理器：与系统日志级别保持一致，保证屏幕与日志文件输出一致
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(getattr(logging, settings.LOG_LEVEL.upper()))
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
 

@@ -29,6 +29,7 @@ from backup.backup_engine import BackupEngine
 from recovery.recovery_engine import RecoveryEngine
 from utils.dingtalk_notifier import DingTalkNotifier
 from utils.opengauss.guard import get_opengauss_monitor
+from utils.production_guard import ProductionGuard, install_production_guard
 
 
 def safe_print(message: str):
@@ -298,6 +299,13 @@ class TapeBackupSystem:
             logger = logging.getLogger(__name__)
             logger.info("正在关闭系统服务...")
 
+            # 设置正在关闭标志，防止系统日志记录
+            try:
+                from utils.log_utils import set_shutting_down
+                set_shutting_down()
+            except Exception as e:
+                logger.warning(f"设置关闭标志失败: {str(e)}")
+
             # 释放所有活跃的任务锁
             try:
                 from utils.scheduler.task_storage import release_all_active_locks
@@ -375,6 +383,18 @@ def setup_signal_handlers(system):
 
 async def main():
     """主函数"""
+    # 设置asyncio异常处理器（在事件循环运行后）
+    setup_asyncio_exception_handler()
+
+    # 安装生产环境保护器
+    install_production_guard()
+
+    # 生产环境检查
+    if ProductionGuard.is_production():
+        safe_print("🛡️  生产环境保护器已激活 - 交互式输入已被阻止")
+    if ProductionGuard.is_unattended_mode():
+        safe_print("🤖 无人值守模式已激活")
+
     system = TapeBackupSystem()
     
     # 设置信号处理器
@@ -406,6 +426,35 @@ async def main():
             pass
 
 
+def setup_asyncio_exception_handler():
+    """设置asyncio异常处理器，确保Future异常不会阻塞"""
+    def exception_handler(loop, context):
+        """自定义异常处理器，记录异常但不阻塞"""
+        exception = context.get('exception')
+        message = context.get('message', '')
+        
+        # 记录异常
+        logger = logging.getLogger(__name__)
+        
+        # 如果是Future异常，记录但不阻塞（避免需要回车）
+        if exception and isinstance(exception, (ConnectionError, OSError)):
+            if 'connection_lost' in str(exception).lower() or 'unexpected connection' in str(exception).lower():
+                logger.warning(f"[asyncio异常] {message}: {exception} (已自动处理，无需手动干预)")
+                return  # 不阻塞，直接返回
+        
+        # 其他异常正常记录
+        logger.error(f"[asyncio异常] {message}", exc_info=exception)
+    
+    # 获取当前事件循环并设置异常处理器
+    try:
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(exception_handler)
+    except RuntimeError:
+        # 如果没有运行中的事件循环，在事件循环创建后设置
+        # 这会在 asyncio.run() 创建事件循环后调用
+        pass
+
+
 if __name__ == "__main__":
     # 检查Python版本
     if sys.version_info < (3, 8):
@@ -416,5 +465,5 @@ if __name__ == "__main__":
     safe_print("\nPython 版本: " + sys.version.split()[0])
     safe_print("工作目录: " + os.getcwd())
     
-    # 运行主程序
+    # 运行主程序（异常处理器在 main() 函数中设置）
     asyncio.run(main())

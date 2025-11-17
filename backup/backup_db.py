@@ -19,6 +19,261 @@ from utils.datetime_utils import now, format_datetime
 logger = logging.getLogger(__name__)
 
 
+class BatchDBWriter:
+    """批量数据库写入器 - 保持所有原有字段，提升写入性能"""
+
+    def __init__(self, backup_set_db_id: int, batch_size: int = 1000, max_queue_size: int = 5000, timeout: int = 5):
+        self.backup_set_db_id = backup_set_db_id
+        self.batch_size = batch_size
+        self.max_queue_size = max_queue_size
+        self.timeout = timeout
+
+        # 使用限制大小的队列，防止内存溢出
+        self.file_queue = asyncio.Queue(maxsize=max_queue_size)
+        self._batch_buffer = []
+        self._is_running = False
+        self._worker_task = None
+        self._stats = {
+            'total_files': 0,
+            'batch_count': 0,
+            'total_time': 0
+        }
+
+    async def start(self):
+        """启动批量写入器"""
+        if self._is_running:
+            return
+
+        self._is_running = True
+        self._worker_task = asyncio.create_task(self._batch_worker())
+        logger.info(f"批量数据库写入器已启动 (batch_size={self.batch_size}, max_queue={self.max_queue_size})")
+
+    async def add_file(self, file_info: Dict):
+        """添加文件到批量写入队列（可阻塞）"""
+        if not self._is_running:
+            await self.start()
+
+        try:
+            # 等待队列有空位，这里会产生背压
+            await asyncio.wait_for(self.file_queue.put(file_info), timeout=self.timeout)
+            self._stats['total_files'] += 1
+        except asyncio.TimeoutError:
+            logger.warning(f"批量写入队列已满，丢弃文件: {file_info.get('path', 'unknown')}")
+            raise
+
+    async def _batch_worker(self):
+        """批量写入worker"""
+        from utils.scheduler.db_utils import get_opengauss_connection, is_opengauss
+        from utils.datetime_utils import now
+
+        start_time = now()
+
+        try:
+            while self._is_running or not self.file_queue.empty():
+                batch = []
+
+                # 收集批次数据
+                try:
+                    # 等待第一个文件
+                    first_file = await asyncio.wait_for(
+                        self.file_queue.get(), timeout=1.0
+                    )
+                    batch.append(first_file)
+                    self.file_queue.task_done()
+
+                    # 快速收集更多文件（非阻塞）
+                    while len(batch) < self.batch_size:
+                        try:
+                            file_info = self.file_queue.get_nowait()
+                            batch.append(file_info)
+                            self.file_queue.task_done()
+                        except asyncio.QueueEmpty:
+                            break
+
+                except asyncio.TimeoutError:
+                    # 超时但没有文件，检查是否应该退出
+                    if not self._is_running:
+                        break
+                    continue
+
+                # 处理批次
+                if batch:
+                    batch_start = now()
+                    await self._process_batch(batch)
+                    batch_time = (now() - batch_start).total_seconds()
+                    self._stats['batch_count'] += 1
+
+                    logger.debug(f"批量处理 {len(batch)} 个文件，耗时 {batch_time:.2f}s")
+
+        except Exception as e:
+            logger.error(f"批量写入worker异常: {e}")
+            raise
+        finally:
+            total_time = (now() - start_time).total_seconds()
+            self._stats['total_time'] = total_time
+            logger.info(f"批量写入器停止，处理了 {self._stats['total_files']} 个文件，"
+                       f"完成 {self._stats['batch_count']} 个批次，总耗时 {total_time:.1f}s")
+
+    async def _process_batch(self, file_batch: List[Dict]):
+        """处理一个文件批次"""
+        from utils.scheduler.db_utils import get_opengauss_connection, is_opengauss
+        from utils.datetime_utils import now
+        from datetime import timezone
+
+        if not file_batch:
+            return
+
+        async with get_opengauss_connection() as conn:
+            # 准备数据分类
+            insert_data = []
+            update_data = []
+
+            # 提取文件路径用于查询
+            file_paths = [f.get('path', '') for f in file_batch]
+
+            # 批量查询已存在的文件
+            if file_paths:
+                existing_files = await conn.fetch(
+                    """
+                    SELECT id, file_path, is_copy_success
+                    FROM backup_files
+                    WHERE backup_set_id = $1 AND file_path = ANY($2)
+                    """,
+                    self.backup_set_db_id, file_paths
+                )
+                existing_map = {row['file_path']: row for row in existing_files}
+            else:
+                existing_map = {}
+
+            # 分类处理文件
+            for file_info in file_batch:
+                file_path = file_info.get('path', '')
+
+                if file_path in existing_map:
+                    existing = existing_map[file_path]
+                    if existing['is_copy_success']:
+                        continue  # 跳过已成功复制的文件
+
+                    # 准备更新参数
+                    update_params = self._prepare_update_params(file_info, existing['id'])
+                    update_data.append(update_params)
+                else:
+                    # 准备插入参数
+                    insert_params = self._prepare_insert_params(file_info)
+                    insert_data.append(insert_params)
+
+            # 执行批量操作
+            if insert_data:
+                await self._batch_insert(conn, insert_data)
+
+            if update_data:
+                await self._batch_update(conn, update_data)
+
+    def _prepare_insert_params(self, file_info: Dict) -> tuple:
+        """准备插入参数（保持所有原有字段）"""
+        from datetime import timezone
+
+        file_path = file_info.get('path', '')
+        file_stat = file_info.get('file_stat')
+        file_name = file_info.get('name') or Path(file_path).name
+        directory_path = str(Path(file_path).parent) if file_path else None
+
+        # 保持所有原有的元数据处理逻辑
+        metadata = file_info.get('file_metadata') or {}
+        metadata.update({'scanned_at': datetime.now().isoformat()})
+
+        current_time = datetime.now()
+        current_time_tz = current_time.replace(tzinfo=timezone.utc)
+
+        # 完整的18个字段参数（与原upsert_scanned_file_record保持一致）
+        return (
+            self.backup_set_db_id,                                      # $1 backup_set_id
+            file_path,                                                  # $2 file_path
+            file_name,                                                  # $3 file_name
+            'file',                                                     # $4 file_type (as enum)
+            file_stat.st_size if file_stat else 0,                      # $5 file_size
+            None,                                                       # $6 compressed_size
+            oct(file_stat.st_mode)[-3:] if file_stat else None,         # $7 file_permissions
+            datetime.fromtimestamp(file_stat.st_ctime, tz=timezone.utc) if file_stat else None,  # $8 created_time
+            datetime.fromtimestamp(file_stat.st_mtime, tz=timezone.utc) if file_stat else None,  # $9 modified_time
+            datetime.fromtimestamp(file_stat.st_atime, tz=timezone.utc) if file_stat else None,  # $10 accessed_time
+            False,                                                      # $11 compressed
+            None,                                                       # $12 checksum
+            current_time_tz,                                           # $13 backup_time
+            None,                                                       # $14 chunk_number
+            None,                                                       # $15 tape_block_start
+            json.dumps(metadata),                                      # $16 file_metadata (JSON)
+            False,                                                      # $17 is_copy_success
+            None                                                        # $18 copy_status_at
+        )
+
+    def _prepare_update_params(self, file_info: Dict, existing_id: int) -> tuple:
+        """准备更新参数（保持所有原有字段）"""
+        # 获取插入参数，但替换ID用于WHERE条件
+        insert_params = self._prepare_insert_params(file_info)
+        return (existing_id, *insert_params[1:])  # id + 其他17个字段
+
+    async def _batch_insert(self, conn, insert_data: List[tuple]):
+        """批量插入文件记录"""
+        await conn.executemany(
+            """
+            INSERT INTO backup_files (
+                backup_set_id, file_path, file_name, file_type, file_size,
+                compressed_size, file_permissions, created_time, modified_time,
+                accessed_time, compressed, checksum, backup_time, chunk_number,
+                tape_block_start, file_metadata, is_copy_success, copy_status_at
+            ) VALUES (
+                $1, $2, $3, $4::backupfiletype, $5, $6, $7, $8, $9,
+                $10, $11, $12, $13, $14, $15, $16::json, $17, $18
+            )
+            """,
+            insert_data
+        )
+        logger.debug(f"批量插入 {len(insert_data)} 个文件记录")
+
+    async def _batch_update(self, conn, update_data: List[tuple]):
+        """批量更新文件记录"""
+        await conn.executemany(
+            """
+            UPDATE backup_files
+            SET file_name = $2, directory_path = $3, file_type = $4::backupfiletype,
+                file_size = $5, compressed_size = $6, file_permissions = $7,
+                created_time = $8, modified_time = $9, accessed_time = $10,
+                compressed = $11, checksum = $12, backup_time = $13, chunk_number = $14,
+                tape_block_start = $15, file_metadata = $16::json, copy_status_at = $17,
+                updated_at = $18
+            WHERE id = $1
+            """,
+            update_data
+        )
+        logger.debug(f"批量更新 {len(update_data)} 个文件记录")
+
+    async def stop(self):
+        """停止批量写入器"""
+        self._is_running = False
+
+        if self._worker_task:
+            # 等待worker完成
+            await self._worker_task
+            self._worker_task = None
+
+        logger.info("批量数据库写入器已停止")
+
+    async def flush(self):
+        """强制刷新剩余文件"""
+        # 等待队列清空
+        while not self.file_queue.empty():
+            await asyncio.sleep(0.1)
+
+        # 等待最后一个批次完成
+        if self._worker_task:
+            await asyncio.sleep(0.1)
+
+    def get_stats(self) -> Dict:
+        """获取统计信息"""
+        return self._stats.copy()
+
+
 def _parse_enum(enum_cls, value, default=None):
     if value is None:
         return default
@@ -552,7 +807,7 @@ class BackupDB:
                 )
 
     async def fetch_pending_backup_files(self, backup_set_db_id: int, limit: int = 500) -> List[Dict]:
-        """获取待复制的文件列表"""
+        """获取待复制的文件列表（保留以兼容旧代码，但不再使用）"""
         from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
         if not is_opengauss():
             return []
@@ -593,6 +848,216 @@ class BackupDB:
                 'is_symlink': str(file_type).lower() == 'symlink'
             })
         return pending_files
+    
+    async def fetch_pending_files_grouped_by_size(
+        self,
+        backup_set_db_id: int,
+        max_file_size: int,
+        backup_task_id: int = None,
+        should_wait_if_small: bool = True
+    ) -> List[List[Dict]]:
+        """
+        新策略：从数据库检索所有未压缩文件，构建压缩组
+
+        策略说明：
+        1. 每次检索所有 is_copy_success = FALSE 的文件
+        2. 累积文件直到达到 max_file_size 阈值
+        3. 超过阈值的文件跳过（保持 FALSE 状态，下次仍可检索）
+        4. 如果一轮达不到阈值，最多重试6次后强制压缩
+        5. 超大文件（超过容差上限）单独成组
+
+        Args:
+            backup_set_db_id: 备份集数据库ID
+            max_file_size: 单个文件组的最大大小（字节）
+            backup_task_id: 夀份任务ID，用于获取重试计数
+            should_wait_if_small: 是否在组大小不足时等待
+
+        Returns:
+            List[List[Dict]]: 包含一个文件组的列表，空列表表示等待或无文件
+        """
+        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+        from backup.utils import format_bytes
+
+        if not is_opengauss():
+            return []
+
+        # 获取重试计数（如果没有backup_task_id则使用0）
+        retry_count = 0
+        max_retries = 6
+        if backup_task_id:
+            # 从备份引擎获取重试计数（需要通过外部传递或数据库存储）
+            # 这里简化处理，通过should_wait_if_small判断是否应该继续等待
+            retry_count = 0 if should_wait_if_small else max_retries
+
+        # 从数据库检索所有未压缩的文件
+        async with get_opengauss_connection() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, file_path, file_name, directory_path, display_name, file_type,
+                       file_size, file_permissions, modified_time, accessed_time
+                FROM backup_files
+                WHERE backup_set_id = $1
+                  AND (is_copy_success = FALSE OR is_copy_success IS NULL)
+                  AND file_type = 'file'::backupfiletype
+                ORDER BY id
+                """,
+                backup_set_db_id
+            )
+        
+        if not rows:
+            return []
+
+        # 转换为文件信息字典
+        all_files = []
+        for row in rows:
+            file_type = row['file_type']
+            all_files.append({
+                'id': row['id'],
+                'path': row['file_path'],
+                'file_path': row['file_path'],
+                'name': row['file_name'],
+                'file_name': row['file_name'],
+                'directory_path': row['directory_path'],
+                'display_name': row['display_name'],
+                'size': row['file_size'] or 0,
+                'permissions': row['file_permissions'],
+                'modified_time': row['modified_time'],
+                'accessed_time': row['accessed_time'],
+                'is_dir': str(file_type).lower() == 'directory',
+                'is_file': str(file_type).lower() == 'file',
+                'is_symlink': str(file_type).lower() == 'symlink'
+            })
+
+        # 新策略参数：使用容差范围
+        tolerance = max_file_size * 0.05  # 5% 容差
+        min_group_size = max_file_size - tolerance  # 最小目标大小
+        max_group_size = max_file_size + tolerance  # 超大文件阈值（含容差）
+
+        current_group = []
+        current_group_size = 0
+        skipped_files = []  # 超过容差上限的文件，保持FALSE状态
+
+        logger.info(
+            f"[新策略] 检索到 {len(all_files)} 个未压缩文件，"
+            f"目标范围：{format_bytes(min_group_size)} - {format_bytes(max_file_size)} "
+            f"(含容差上限：{format_bytes(max_group_size)})，"
+            f"重试次数：{retry_count}/{max_retries}"
+        )
+
+        # 按顺序处理所有文件
+        for file_info in all_files:
+            file_size = file_info['size']
+
+            # 处理超大文件：超过容差上限，单独成组
+            if file_size > max_group_size:
+                # 如果当前组已有文件，先返回当前组
+                if current_group:
+                    logger.info(
+                        f"[新策略] 返回当前组：{len(current_group)} 个文件，"
+                        f"总大小 {format_bytes(current_group_size)}，"
+                        f"发现超大文件将单独处理"
+                    )
+                    return [current_group]
+
+                # 超大文件单独成组（特殊文件处理方式）
+                logger.warning(
+                    f"[新策略] 发现超大文件单独成组：{format_bytes(file_size)} "
+                    f"(超过最大大小 {format_bytes(max_file_size)} 含容差)"
+                )
+                return [[file_info]]
+
+            # 检查加入当前组是否会超过最大大小（不含容差）
+            new_group_size = current_group_size + file_size
+
+            if new_group_size > max_file_size:
+                # 超过最大大小，跳过此文件（保持FALSE状态）
+                skipped_files.append(file_info)
+                logger.debug(
+                    f"[新策略] 跳过文件（超过最大大小）：{file_info['name']} "
+                    f"({format_bytes(file_size)})，当前组：{format_bytes(current_group_size)}"
+                )
+                continue
+
+            # 加入当前组
+            current_group.append(file_info)
+            current_group_size = new_group_size
+
+        # 处理最终的文件组
+        if not current_group:
+            # 没有文件加入当前组
+            if skipped_files:
+                logger.warning(
+                    f"[新策略] 所有文件都超过最大大小，跳过了 {len(skipped_files)} 个文件"
+                )
+            else:
+                logger.info("[新策略] 没有待压缩文件")
+            return []
+
+        # 检查当前组大小是否在容差范围内
+        size_ratio = current_group_size / max_file_size if max_file_size > 0 else 0
+        scan_status = await self.get_scan_status(backup_task_id) if backup_task_id else None
+
+        if current_group_size < min_group_size and scan_status != 'completed' and retry_count < max_retries:
+            # 组大小低于容差下限且扫描未完成，继续等待
+            logger.warning(
+                f"[新策略] 文件组大小低于容差下限：{format_bytes(current_group_size)} "
+                f"(需要 ≥ {format_bytes(min_group_size)} = {size_ratio*100:.1f}% of 目标)，"
+                f"扫描状态：{scan_status}，等待更多文件...（重试 {retry_count}/{max_retries}）"
+            )
+            return []
+
+        # 压缩条件：
+        # 1. 达到或超过最小目标大小（在容差范围内）
+        # 2. 扫描已完成（即使未达到最小大小）
+        # 3. 达到重试上限（强制压缩）
+        if current_group_size >= min_group_size:
+            logger.info(
+                f"[新策略] 达到容差范围内：{format_bytes(current_group_size)} "
+                f"({size_ratio*100:.1f}% of 目标，≥ {format_bytes(min_group_size)})，"
+                f"跳过了 {len(skipped_files)} 个文件"
+            )
+        else:
+            # 强制压缩情况
+            reason = '扫描已完成' if scan_status == 'completed' else '达到重试上限'
+            logger.warning(
+                f"[新策略] 强制压缩：文件组大小 {format_bytes(current_group_size)} "
+                f"({size_ratio*100:.1f}% of 目标，< {format_bytes(min_group_size)})，"
+                f"原因：{reason}"
+            )
+
+        # 收集所有文件分组
+        all_groups = []
+        remaining_files = sorted_files.copy()
+
+        # 继续分组直到没有剩余文件
+        while remaining_files:
+            # 取最大的文件作为新组的基准
+            max_file = remaining_files[0]
+            max_file_size = max_file['size']
+
+            tolerance = max_file_size * 0.05  # 5% tolerance
+            min_group_size = max_file_size - tolerance
+            max_group_size = max_file_size + tolerance
+
+            # 创建新组
+            current_group = []
+            files_to_remove = []
+
+            # 将符合条件的文件加入当前组
+            for file in remaining_files:
+                file_size = file['size']
+                if min_group_size <= file_size <= max_group_size:
+                    current_group.append(file)
+                    files_to_remove.append(file)
+
+            # 从剩余文件列表中移除已分组的文件
+            for file in files_to_remove:
+                remaining_files.remove(file)
+
+            # 添加到结果列表
+            all_groups.append(current_group)
+
+        return all_groups
 
     async def get_scan_status(self, backup_task_id: int) -> Optional[str]:
         """获取扫描状态"""
@@ -696,54 +1161,63 @@ class BackupDB:
                 )
 
                 if result and result.startswith('UPDATE 0'):
-                    await conn.execute(
-                        """
-                        INSERT INTO backup_files (
-                            backup_set_id, file_path, file_name, file_type, file_size,
-                            compressed_size, file_permissions, created_time, modified_time,
-                            accessed_time, compressed, checksum, backup_time, chunk_number,
-                            tape_block_start, file_metadata, is_copy_success, copy_status_at
-                        ) VALUES (
-                            $1, $2, $3, $4::backupfiletype, $5,
-                            $6, $7, $8, $9,
-                            $10, $11, $12, $13, $14,
-                            $15, $16::json, TRUE, $17
+                    # UPDATE 0 表示没有匹配的记录，需要插入新记录
+                    try:
+                        await conn.execute(
+                            """
+                            INSERT INTO backup_files (
+                                backup_set_id, file_path, file_name, file_type, file_size,
+                                compressed_size, file_permissions, created_time, modified_time,
+                                accessed_time, compressed, checksum, backup_time, chunk_number,
+                                tape_block_start, file_metadata, is_copy_success, copy_status_at
+                            ) VALUES (
+                                $1, $2, $3, $4::backupfiletype, $5,
+                                $6, $7, $8, $9,
+                                $10, $11, $12, $13, $14,
+                                $15, $16::json, TRUE, $17
+                            )
+                            """,
+                            backup_set_db_id,
+                            file_path,
+                            processed_file.get('file_name', Path(file_path).name),
+                            processed_file.get('file_type', BackupFileType.FILE.value),
+                            processed_file.get('file_size', 0),
+                            per_file_compressed_size,
+                            processed_file.get('file_permissions'),
+                            datetime.fromtimestamp(file_stat.st_ctime) if file_stat else None,
+                            datetime.fromtimestamp(file_stat.st_mtime) if file_stat else None,
+                            datetime.fromtimestamp(file_stat.st_atime) if file_stat else None,
+                            is_compressed,
+                            checksum,
+                            backup_time,
+                            chunk_number,
+                            0,
+                            json.dumps(metadata),
+                            copy_time
                         )
-                        """,
-                        backup_set_db_id,
-                        file_path,
-                        processed_file.get('file_name', Path(file_path).name),
-                        processed_file.get('file_type', BackupFileType.FILE.value),
-                        processed_file.get('file_size', 0),
-                        per_file_compressed_size,
-                        processed_file.get('file_permissions'),
-                        datetime.fromtimestamp(file_stat.st_ctime) if file_stat else None,
-                        datetime.fromtimestamp(file_stat.st_mtime) if file_stat else None,
-                        datetime.fromtimestamp(file_stat.st_atime) if file_stat else None,
-                        is_compressed,
-                        checksum,
-                        backup_time,
-                        chunk_number,
-                        0,
-                        json.dumps(metadata),
-                        copy_time
-                    )
-
-                success_count += 1
-            except Exception as insert_error:
+                        success_count += 1
+                    except Exception as insert_error:
+                        failed_count += 1
+                        logger.warning(
+                            f"[mark_files_as_copied] Failed to insert {processed_file.get('file_path', 'unknown')}: {insert_error}"
+                        )
+                else:
+                    # UPDATE 成功
+                    success_count += 1
+            except Exception as e:
                 failed_count += 1
                 logger.warning(
-                    f"[mark_files_as_copied] Failed to update {processed_file.get('file_path', 'unknown')}: {insert_error}"
+                    f"[mark_files_as_copied] Failed to update {processed_file.get('file_path', 'unknown')}: {e}"
                 )
                 continue
-
+        
         if success_count > 0:
             logger.debug(f"[mark_files_as_copied] Updated {success_count} files as copied")
         if failed_count > 0:
             logger.warning(
                 f"[mark_files_as_copied] {failed_count} files failed to update, continuing backup flow"
             )
-
+    
     async def update_scan_progress(
         self, 
         backup_task: BackupTask, 
@@ -988,13 +1462,14 @@ class BackupDB:
                     await db.commit()
         except Exception as e:
             logger.error(f"更新任务状态失败: {str(e)}")
-
-    async def update_task_stage_async(self, backup_task: BackupTask, stage_code: str):
+    
+    async def update_task_stage_async(self, backup_task: BackupTask, stage_code: str, description: str = None):
         """更新任务的操作阶段（异步方法）
 
         Args:
             backup_task: 备份任务对象
             stage_code: 阶段代码（scan/compress/copy/finalize）
+            description: 可选的阶段描述，如果提供则同时更新description字段
         """
         try:
             if not backup_task or not getattr(backup_task, 'id', None):
@@ -1010,12 +1485,23 @@ class BackupDB:
 
             if is_opengauss():
                 async with get_opengauss_connection() as conn:
-                    await conn.execute("""
-                        UPDATE backup_tasks
-                        SET operation_stage = $1,
-                            updated_at = $2
-                        WHERE id = $3
-                    """, stage_code, current_time, task_id)
+                    if description:
+                        # 同时更新operation_stage和description
+                        await conn.execute("""
+                            UPDATE backup_tasks
+                            SET operation_stage = $1,
+                                description = $2,
+                                updated_at = $3
+                            WHERE id = $4
+                        """, stage_code, description, current_time, task_id)
+                    else:
+                        # 只更新operation_stage
+                        await conn.execute("""
+                            UPDATE backup_tasks
+                            SET operation_stage = $1,
+                                updated_at = $2
+                            WHERE id = $3
+                        """, stage_code, current_time, task_id)
             else:
                 # 非 openGauss 数据库更新
                 from config.database import get_db
@@ -1023,22 +1509,35 @@ class BackupDB:
                     # 这里假设模型有operation_stage字段
                     if hasattr(backup_task, 'operation_stage'):
                         backup_task.operation_stage = stage_code
+                    if description and hasattr(backup_task, 'description'):
+                        backup_task.description = description
                     backup_task.updated_at = current_time
                     await db.commit()
                     break
 
-            logger.info(f"任务 {task_id} 阶段更新为: {stage_code}")
+            logger.info(f"任务 {task_id} 阶段更新为: {stage_code}" + (f", 描述: {description}" if description else ""))
 
         except Exception as e:
             logger.error(f"更新任务阶段失败: {str(e)}")
 
-    def update_task_stage(self, backup_task: BackupTask, stage_code: str, main_loop=None):
+    async def update_task_stage_with_description(self, backup_task: BackupTask, stage_code: str, description: str):
+        """更新任务阶段和描述的便捷方法
+
+        Args:
+            backup_task: 备份任务对象
+            stage_code: 阶段代码（scan/compress/copy/finalize）
+            description: 阶段描述
+        """
+        await self.update_task_stage_async(backup_task, stage_code, description)
+
+    def update_task_stage(self, backup_task: BackupTask, stage_code: str, main_loop=None, description: str = None):
         """更新任务的操作阶段（同步方法，在线程中调用时需要使用主事件循环）
 
         Args:
             backup_task: 备份任务对象
             stage_code: 阶段代码（scan/compress/copy/finalize）
             main_loop: 主事件循环（如果在线程中调用，必须提供）
+            description: 可选的阶段描述，如果提供则同时更新description字段
         """
         try:
             if not backup_task or not getattr(backup_task, 'id', None):
@@ -1051,7 +1550,7 @@ class BackupDB:
             if main_loop:
                 try:
                     future = asyncio.run_coroutine_threadsafe(
-                        self.update_task_stage_async(backup_task, stage_code),
+                        self.update_task_stage_async(backup_task, stage_code, description),
                         main_loop
                     )
                     # 等待完成（设置超时避免阻塞）
@@ -1064,18 +1563,18 @@ class BackupDB:
             try:
                 loop = asyncio.get_running_loop()
                 # 如果事件循环正在运行，创建任务
-                loop.create_task(self.update_task_stage_async(backup_task, stage_code))
+                loop.create_task(self.update_task_stage_async(backup_task, stage_code, description))
             except RuntimeError:
                 # 没有运行的事件循环，创建新的
                 loop = asyncio.new_event_loop()
                 try:
-                    loop.run_until_complete(self.update_task_stage_async(backup_task, stage_code))
+                    loop.run_until_complete(self.update_task_stage_async(backup_task, stage_code, description))
                 finally:
                     loop.close()
 
         except Exception as e:
             logger.error(f"更新任务阶段失败: {str(e)}")
-
+    
     async def update_task_fields(self, backup_task: BackupTask, **fields):
         """更新任务的特定字段
         

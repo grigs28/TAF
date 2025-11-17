@@ -67,6 +67,12 @@ class BackupScanner:
             
             # 记录关键阶段：扫描文件开始
             self.backup_db._log_operation_stage_event(backup_task, "[扫描文件中...]")
+            # 更新operation_stage和description
+            await self.backup_db.update_task_stage_with_description(
+                backup_task,
+                "scan",
+                "[扫描文件中] 正在扫描源文件系统..."
+            )
             
             logger.info("========== 后台扫描任务启动：专门更新卡片中的总文件数和总字节数 ==========")
             logger.info(f"任务ID: {backup_task.id if backup_task else 'N/A'}")
@@ -85,11 +91,55 @@ class BackupScanner:
                 logger.info("========== 后台扫描任务完成：没有源路径 ==========")
                 return
             
+            # 使用流式扫描模式：一边扫描一边通过队列提交文件信息，由专门的后台worker写入 backup_files，并按间隔更新统计
+            # 非流式分支仅用于兼容旧逻辑（只统计、不写入文件列表）
             use_streaming = True
             if use_streaming:
                 total_files = 0
                 total_bytes = 0
-                update_interval = 500
+                # 从配置读取扫描进度更新间隔（.env 中可通过 SCAN_UPDATE_INTERVAL 覆盖）
+                update_interval = self.settings.SCAN_UPDATE_INTERVAL
+                # 进度日志时间间隔（秒），控制“后台扫描任务：已扫描 N 个文件...”的输出频率
+                log_interval_seconds = getattr(self.settings, 'SCAN_LOG_INTERVAL_SECONDS', 60)
+                # 统计用时间基准（用于计算扫描速度）
+                scan_start_time = time.time()
+                last_log_time = scan_start_time
+                last_log_files = 0
+
+                # 使用批量数据库写入器提升写入性能
+
+                if backup_set_db_id:
+                    # 使用内存数据库写入器，实现极速写入 + 异步同步
+                    # 从配置读取内存数据库参数
+                    use_memory_db = getattr(self.settings, 'USE_MEMORY_DB', True)
+
+                    if use_memory_db:
+                        sync_batch_size = getattr(self.settings, 'MEMORY_DB_SYNC_BATCH_SIZE', 5000)
+                        sync_interval = getattr(self.settings, 'MEMORY_DB_SYNC_INTERVAL', 30)
+                        max_memory_files = getattr(self.settings, 'MEMORY_DB_MAX_FILES', 100000)
+
+                        from backup.memory_db_writer import MemoryDBWriter
+                        memory_writer = MemoryDBWriter(
+                            backup_set_db_id=backup_set_db_id,
+                            sync_batch_size=sync_batch_size,
+                            sync_interval=sync_interval,
+                            max_memory_files=max_memory_files
+                        )
+                        await memory_writer.initialize()
+                        logger.info(f"内存数据库写入器已启动 (sync_batch={sync_batch_size}, interval={sync_interval}s)")
+                    else:
+                        # 回退到批量写入器
+                        batch_size = getattr(self.settings, 'DB_BATCH_SIZE', 1000)
+                        max_queue_size = getattr(self.settings, 'DB_QUEUE_MAX_SIZE', 5000)
+
+                        from backup.backup_db import BatchDBWriter
+                        batch_writer = BatchDBWriter(
+                            backup_set_db_id=backup_set_db_id,
+                            batch_size=batch_size,
+                            max_queue_size=max_queue_size
+                        )
+                        await batch_writer.start()  # 启动批量写入器
+                        logger.info(f"批量写入器已启动 (batch_size={batch_size}, max_queue={max_queue_size})")
                 
                 async for file_batch in self.file_scanner.scan_source_files_streaming(
                     source_paths,
@@ -102,18 +152,90 @@ class BackupScanner:
                         total_files += 1
                         total_bytes += file_size
                         
+                        # 扫描线程将文件信息提交到内存数据库或批量写入器
                         if backup_set_db_id:
-                            await self.backup_db.upsert_scanned_file_record(backup_set_db_id, file_info)
+                            try:
+                                if use_memory_db and 'memory_writer' in locals():
+                                    # 写入内存数据库（极速）
+                                    await memory_writer.add_file(file_info)
+                                else:
+                                    # 写入批量写入器
+                                    await batch_writer.add_file(file_info)
+                            except asyncio.TimeoutError:
+                                # 队列已满，记录警告但继续扫描
+                                logger.warning(f"写入队列已满，跳过文件: {file_info.get('path', 'unknown')}")
+                            except Exception as e:
+                                # 其他错误，记录但不中断扫描
+                                logger.error(f"写入文件失败: {e}, 文件: {file_info.get('path', 'unknown')}")
                         
                         if total_files % update_interval == 0:
+                            # 先更新数据库中的统计字段
                             await self.backup_db.update_scan_progress_only(backup_task, total_files, total_bytes)
-                            logger.info(f"后台扫描任务：已扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)}")
+                            # 再根据时间间隔决定是否输出一条统计日志
+                            now = time.time()
+                            elapsed_since_last_log = now - last_log_time
+                            if elapsed_since_last_log >= log_interval_seconds:
+                                elapsed_total = max(now - scan_start_time, 0.001)
+                                elapsed_window = max(elapsed_since_last_log, 0.001)
+                                files_total_rate = total_files / elapsed_total
+                                files_window = total_files - last_log_files
+                                files_window_rate = files_window / elapsed_window if files_window > 0 else 0.0
+                                logger.info(
+                                    f"后台扫描任务：已扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)}，"
+                                    f"平均速度 {files_total_rate:.1f} 个文件/秒，"
+                                    f"最近 {files_window} 个文件用时 {elapsed_window:.1f} 秒，速度 {files_window_rate:.1f} 个文件/秒"
+                                )
+                                last_log_time = now
+                                last_log_files = total_files
+
+                # 等待写入器完成所有文件写入
+                if backup_set_db_id:
+                    try:
+                        if use_memory_db and 'memory_writer' in locals():
+                            # 停止内存数据库写入器（会自动完成最终同步）
+                            stats = memory_writer.get_stats()
+                            sync_status = await memory_writer.get_sync_status()
+
+                            logger.info(f"内存数据库统计: 处理 {stats['total_files']} 个文件，"
+                                       f"已同步 {stats['synced_files']} 个文件，同步进度 {stats['sync_progress']:.1f}%")
+
+                            logger.info(f"同步状态: 总计 {sync_status['total_files']}, "
+                                       f"已同步 {sync_status['synced_files']}, "
+                                       f"待同步 {sync_status['pending_files']}, "
+                                       f"错误 {sync_status['error_files']}")
+
+                            await memory_writer.stop()
+
+                        elif 'batch_writer' in locals():
+                            # 停止批量写入器
+                            stats = batch_writer.get_stats()
+                            logger.info(f"批量写入统计: 处理 {stats['total_files']} 个文件，"
+                                       f"完成 {stats['batch_count']} 个批次，耗时 {stats['total_time']:.1f}s")
+
+                            await batch_writer.stop()
+
+                    except Exception as e:
+                        logger.error(f"后台扫描任务：停止写入器时出错: {str(e)}", exc_info=True)
                 
+                # 扫描完成后做最后一次进度更新
                 await self.backup_db.update_scan_progress_only(backup_task, total_files, total_bytes)
-                logger.info(f"后台扫描任务完成，共扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)}")
+                # 结束时再输出一次总平均速度
+                end_time = time.time()
+                elapsed_total = max(end_time - scan_start_time, 0.001)
+                files_total_rate = total_files / elapsed_total
+                logger.info(
+                    f"后台扫描任务完成，共扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)}，"
+                    f"平均速度 {files_total_rate:.1f} 个文件/秒"
+                )
                 
                 # 记录关键阶段：扫描完成
                 self.backup_db._log_operation_stage_event(backup_task, f"[扫描完成] 共 {total_files} 个文件，总大小 {format_bytes(total_bytes)}")
+                # 更新operation_stage和description
+                await self.backup_db.update_task_stage_with_description(
+                    backup_task,
+                    "scan",
+                    f"[扫描完成] 共 {total_files} 个文件，总大小 {format_bytes(total_bytes)}"
+                )
                 
                 if backup_task and backup_task.id:
                     await self.backup_db.update_scan_status(backup_task.id, 'completed')
@@ -121,7 +243,8 @@ class BackupScanner:
             
             total_files = 0  # 总文件数
             total_bytes = 0  # 总字节数
-            update_interval = 500  # 每100个文件更新一次数据库
+            # 从配置读取扫描进度更新间隔（.env 中可通过 SCAN_UPDATE_INTERVAL 覆盖）
+            update_interval = self.settings.SCAN_UPDATE_INTERVAL
             
             # 处理网络路径（UNC路径）
             from utils.network_path import is_unc_path, normalize_unc_path

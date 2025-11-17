@@ -135,9 +135,21 @@ class OpenGaussMonitor:
             duration = time.perf_counter() - started
             await self._record_failure(operation, duration, "timeout", metadata, critical=True)
             raise exc
+        except (ConnectionError, OSError) as exc:
+            # 连接丢失或网络错误，记录但不阻塞
+            duration = time.perf_counter() - started
+            error_msg = str(exc)
+            await self._record_failure(operation, duration, error_msg, metadata, critical=critical)
+            # 记录警告但不阻塞
+            logger.warning(f"openGauss 连接错误（已自动处理）: {operation} - {error_msg}")
+            raise exc
         except Exception as exc:  # noqa: BLE001
             duration = time.perf_counter() - started
-            await self._record_failure(operation, duration, str(exc), metadata, critical=critical)
+            error_msg = str(exc)
+            # 检查是否是 connection_lost 相关错误
+            if "connection_lost" in error_msg.lower() or "unexpected connection" in error_msg.lower():
+                logger.warning(f"openGauss 连接丢失（已自动处理）: {operation} - {error_msg}")
+            await self._record_failure(operation, duration, error_msg, metadata, critical=critical)
             raise
 
     async def _record_success(self, operation: str, duration: float, metadata: Optional[Dict[str, Any]]) -> None:

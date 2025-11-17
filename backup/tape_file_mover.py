@@ -191,7 +191,12 @@ class TapeFileMover:
                 from backup.backup_db import BackupDB
                 backup_db = BackupDB()
                 # 使用主事件循环更新状态（如果可用）
-                backup_db.update_task_stage(task.backup_task, "copy", main_loop=self._main_loop)
+                backup_db.update_task_stage(
+                    task.backup_task,
+                    "copy",
+                    main_loop=self._main_loop,
+                    description=f"[写入磁带中] 正在写入文件：{source_file.name}"
+                )
                 logger.info(f"任务 {task.backup_task.task_name} 状态更新为: 写入磁带")
             except Exception as stage_error:
                 logger.warning(f"更新任务状态失败: {str(stage_error)}")
@@ -235,7 +240,12 @@ class TapeFileMover:
                             from backup.backup_db import BackupDB
                             backup_db = BackupDB()
                             # 使用主事件循环更新状态（如果可用）
-                            backup_db.update_task_stage(task.backup_task, "finalize", main_loop=self._main_loop)
+                            backup_db.update_task_stage(
+                                task.backup_task,
+                                "finalize",
+                                main_loop=self._main_loop,
+                                description=f"[写入完成] 文件已写入磁带：{source_file.name}"
+                            )
                             logger.info(f"任务 {task.backup_task.task_name} 状态更新为: 完成备份")
                         except Exception as stage_error:
                             logger.warning(f"更新任务状态失败: {str(stage_error)}")

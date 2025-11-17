@@ -4,7 +4,7 @@ import sys
 from datetime import datetime
 
 class FileScanner:
-    def __init__(self, search_directory):
+    def __init__(self, search_directory, summary_interval=1000):
         self.search_directory = os.path.normpath(search_directory)
         self.scan_results = []
         self.start_time = None
@@ -13,10 +13,39 @@ class FileScanner:
         self.total_size = 0
         self.last_update_time = 0
         self.update_interval = 1.0  # 每秒更新一次进度
+        self.summary_interval = summary_interval  # 每多少个文件小结一次
+        self.last_summary_count = 0  # 上次小结时的文件数量
+        self.last_summary_size = 0  # 上次小结时的大小
+        self.summary_lines = 8  # 小结信息占用的行数
         
     def clear_line(self):
         """清除当前行"""
         sys.stdout.write('\r' + ' ' * 100 + '\r')
+        sys.stdout.flush()
+        
+    def move_cursor_up(self, lines=1):
+        """将光标向上移动指定行数"""
+        sys.stdout.write(f"\033[{lines}A")
+        sys.stdout.flush()
+        
+    def move_cursor_down(self, lines=1):
+        """将光标向下移动指定行数"""
+        sys.stdout.write(f"\033[{lines}B")
+        sys.stdout.flush()
+        
+    def save_cursor_position(self):
+        """保存光标位置"""
+        sys.stdout.write("\033[s")
+        sys.stdout.flush()
+        
+    def restore_cursor_position(self):
+        """恢复光标位置"""
+        sys.stdout.write("\033[u")
+        sys.stdout.flush()
+        
+    def clear_from_cursor_to_end(self):
+        """从光标位置清除到屏幕末尾"""
+        sys.stdout.write("\033[J")
         sys.stdout.flush()
         
     def print_progress(self, force=False):
@@ -63,6 +92,34 @@ class FileScanner:
               f"大小: {file_info['size_mb']:.2f} MB | "
               f"路径: {file_info['path'][:80]}...")
         
+    def print_summary(self):
+        """打印阶段性小结 - 固定在底部"""
+        elapsed_time = time.time() - self.start_time
+        files_since_last = self.file_count - self.last_summary_count
+        
+        if elapsed_time > 0:
+            speed_since_last = files_since_last / elapsed_time
+        else:
+            speed_since_last = 0
+            
+        size_gb = self.total_size / (1024**3)
+        size_since_last = (self.total_size - self.last_summary_size) / (1024**3)
+        
+        # 打印小结信息
+        print(f"\n{'='*60}")
+        print(f"阶段性小结 (每 {self.summary_interval} 个文件)")
+        print(f"{'='*60}")
+        print(f"已扫描文件: {self.file_count} 个")
+        print(f"已扫描目录: {self.dir_count} 个")
+        print(f"总大小: {size_gb:.2f} GB (本阶段增加: {size_since_last:.2f} GB)")
+        print(f"扫描用时: {elapsed_time:.1f} 秒")
+        print(f"平均速度: {speed_since_last:.1f} 文件/秒")
+        print(f"{'='*60}")
+        
+        # 更新上次小结的计数和大小
+        self.last_summary_count = self.file_count
+        self.last_summary_size = self.total_size
+        
     def scan_directory(self):
         """
         主扫描函数 - 使用栈实现非递归DFS遍历
@@ -70,10 +127,13 @@ class FileScanner:
         print("=" * 100)
         print(f"开始扫描目录: {self.search_directory}")
         print(f"开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"小结间隔: 每 {self.summary_interval} 个文件")
         print("=" * 100)
         
         self.start_time = time.time()
         self.last_update_time = self.start_time
+        self.last_summary_count = 0
+        self.last_summary_size = 0
         
         # 使用栈代替递归，避免栈溢出
         dir_stack = [self.search_directory]
@@ -115,6 +175,10 @@ class FileScanner:
                                     if (file_info['size_mb'] > 10 or 
                                         file_info['extension'] in ['.exe', '.dll', '.zip', '.rar', '.7z']):
                                         self.print_file_info(file_info)
+                                    
+                                    # 每扫描指定数量的文件，进行一次小结
+                                    if self.file_count % self.summary_interval == 0:
+                                        self.print_summary()
                                     
                                     # 更新进度显示
                                     self.print_progress()
@@ -221,9 +285,24 @@ class FileScanner:
 
 def main():
     """主函数"""
-    # 设置要扫描的目录
-    #search_directory = r"D:\备份\天正协同备份\tbmdata\data\ftpdata"
+    # 解析命令行参数
     search_directory = r"D:"
+    summary_interval = 1000  # 默认每1000个文件小结一次
+    
+    if len(sys.argv) > 1:
+        search_directory = sys.argv[1]
+        print(f"使用命令行参数指定的目录: {search_directory}")
+        
+        # 检查是否有第二个参数（小结间隔）
+        if len(sys.argv) > 2:
+            try:
+                summary_interval = int(sys.argv[2])
+                print(f"使用指定的小结间隔: 每 {summary_interval} 个文件小结一次")
+            except ValueError:
+                print(f"错误: 第二个参数 '{sys.argv[2]}' 不是有效的数字，使用默认间隔: 1000")
+    else:
+        print(f"未指定目录，使用默认目录: {search_directory}")
+    
     # 检查目录是否存在
     if not os.path.exists(search_directory):
         print(f"错误: 目录不存在 - {search_directory}")
@@ -238,7 +317,7 @@ def main():
             return
     
     # 创建扫描器
-    scanner = FileScanner(search_directory)
+    scanner = FileScanner(search_directory, summary_interval)
     
     # 开始扫描
     try:

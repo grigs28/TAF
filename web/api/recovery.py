@@ -29,7 +29,7 @@ class RecoveryRequest(BaseModel):
 async def get_top_level_directories(backup_set_id: str, request: Request):
     """获取备份集的顶层目录结构（优化性能，避免一次性加载所有文件）"""
     try:
-        logger.info(f"收到获取顶层目录请求: backup_set_id={backup_set_id}")
+        logger.debug(f"收到获取顶层目录请求: backup_set_id={backup_set_id}")
         system = request.app.state.system
         if not system:
             logger.error("系统未初始化")

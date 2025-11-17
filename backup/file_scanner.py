@@ -443,16 +443,7 @@ class FileScanner:
                                                                     last_batch_submit_time = current_time
                                                                 
                                                                 # 每10000个路径或每1分钟输出一次进度日志（大型目录结构时每30秒输出一次）
-                                                                elapsed_since_last_progress = current_time - last_progress_log_time
-                                                                progress_log_interval = 30.0 if is_large_dir_structure else PROGRESS_LOG_INTERVAL
-                                                                if total_paths_scanned - last_log_count >= 10000 or elapsed_since_last_progress >= progress_log_interval:
-                                                                    elapsed = current_time - start_time if start_time else 0
-                                                                    rate = (total_paths_scanned - last_log_count) / elapsed_since_last_progress if elapsed_since_last_progress > 0 else 0
-                                                                    current_dir_display = format_path_for_log(current_dir) if current_dir else "未知"
-                                                                    logger.info(f"{context_prefix}流式扫描：已扫描 {total_paths_scanned} 个路径（包含目录），{dir_count} 个目录，待扫描目录: {len(dirs_to_scan)}，批次阈值: {batch_threshold}，当前批次 {len(batch)} 个路径，耗时 {elapsed:.1f} 秒，速度 {rate:.0f} 路径/秒，距上次提交 {elapsed_since_last_batch:.1f} 秒，当前目录: {current_dir_display}，权限错误: {permission_error_count}，路径过长: {path_too_long_count}（线程运行中）")
-                                                                    last_log_count = total_paths_scanned
-                                                                    last_progress_log_time = current_time
-                                                                    
+                                                                # 该进度日志仅用于调试，当前已停用（详见 backup_scanner 中的统计日志）
                                                             except (PermissionError, OSError) as entry_err:
                                                                 # 路径权限错误：记录详细路径信息
                                                                 permission_error_count += 1

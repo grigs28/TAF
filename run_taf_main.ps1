@@ -1,3 +1,3 @@
-d:
-cd D:\APP\TAF
+E:
+cd E:\APP\TAF
 conda activate taf ; python main.py

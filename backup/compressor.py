@@ -1065,6 +1065,12 @@ class Compressor:
                                 backup_task,
                                 f"[文件已移动到正式目录] {final_archive_path.name}，大小: {format_bytes(final_archive_path.stat().st_size)}"
                             )
+                            # 同时更新operation_stage和description
+                            await backup_db.update_task_stage_with_description(
+                                backup_task,
+                                "compress",
+                                f"[移动完成] 压缩文件已移动：{final_archive_path.name}"
+                            )
                     except Exception as move_error:
                         logger.error(f"异步移动文件到正式目录失败: {str(move_error)}")
                         # 如果移动失败，使用temp目录中的文件路径
@@ -1124,8 +1130,10 @@ class Compressor:
 
         required_free = max_file_size * 3
         check_interval = getattr(self.settings, 'DISK_CHECK_INTERVAL', 30)
+        max_retries = getattr(self.settings, 'DISK_CHECK_MAX_RETRIES', 20)  # 最多重试20次
+        retry_count = 0
 
-        while True:
+        while retry_count < max_retries:
             try:
                 usage = shutil.disk_usage(str(target_dir))
                 free_bytes = usage.free
@@ -1139,9 +1147,25 @@ class Compressor:
                 )
                 return
 
+            retry_count += 1
+            total_wait_time = retry_count * check_interval
+            max_total_wait = max_retries * check_interval
+
             logger.warning(
                 f"磁盘剩余空间不足：{format_bytes(free_bytes)} < {format_bytes(required_free)}，"
-                f"暂停压缩，{check_interval} 秒后重试"
+                f"暂停压缩，{check_interval} 秒后重试 ({retry_count}/{max_retries}, "
+                f"已等待 {total_wait_time}/{max_total_wait} 秒)"
             )
+
+            if retry_count >= max_retries:
+                # 达到最大重试次数，抛出异常
+                error_msg = (
+                    f"磁盘空间持续不足超过 {max_total_wait} 秒。"
+                    f"需要空间: {format_bytes(required_free)}, "
+                    f"当前可用: {format_bytes(free_bytes)}"
+                )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
+
             await asyncio.sleep(check_interval)
 

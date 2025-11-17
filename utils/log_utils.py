@@ -18,6 +18,14 @@ from .scheduler.db_utils import is_opengauss, get_opengauss_connection
 
 logger = logging.getLogger(__name__)
 
+# 全局标志，防止应用关闭时记录系统日志
+_shutting_down = False
+
+def set_shutting_down():
+    """设置应用正在关闭标志"""
+    global _shutting_down
+    _shutting_down = True
+
 
 async def log_operation(
     operation_type: OperationType,
@@ -190,11 +198,16 @@ async def log_system(
     Returns:
         是否成功记录日志
     """
+    # 检查应用是否正在关闭
+    global _shutting_down
+    if _shutting_down:
+        return False
+
     try:
         log_time = datetime.now()
-        
+
         if is_opengauss():
-            # 使用原生SQL插入系统日志
+            # 使用原生SQL插入系统日志，严禁SQLAlchemy解析openGauss
             # 使用连接池
             async with get_opengauss_connection() as conn:
                 # 构建SQL语句
@@ -257,6 +270,14 @@ async def log_system(
                 return True
                 
     except Exception as e:
+        # 忽略关闭期间的连接错误和异步生成器错误
+        error_msg = str(e).lower()
+        if any(keyword in error_msg for keyword in [
+            "shutting down", "connection_lost", "asynchronous generator",
+            "cancellederror", "connection closed"
+        ]):
+            return False
+
         logger.error(f"记录系统日志失败: {str(e)}")
         logger.error(f"错误详情:\n{traceback.format_exc()}")
         return False

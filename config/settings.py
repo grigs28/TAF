@@ -103,7 +103,7 @@ class Settings(BaseSettings):
     # 压缩配置
     COMPRESSION_LEVEL: int = 9
     SOLID_BLOCK_SIZE: int = 67108864  # 64MB
-    MAX_FILE_SIZE: int = 12 * 1024 * 1024 * 1024  # 3GB
+    MAX_FILE_SIZE: int = 12 * 1024 * 1024 * 1024  # 12GB (默认值，可通过.env中的MAX_FILE_SIZE覆盖)
     COMPRESSION_DICTIONARY_SIZE: str = "256m"  # 7-Zip字典大小（固定256M）
     COMPRESS_DIRECTLY_TO_TAPE: bool = True  # 是否直接压缩到磁带机（默认True，跳过temp/final目录）
 
@@ -134,10 +134,12 @@ class Settings(BaseSettings):
     COMPRESSION_METHOD: str = "pgzip"  # 压缩方法: "pgzip"、"py7zr" 或 "7zip_command"
     SEVENZIP_PATH: str = r"C:\Program Files\7-Zip\7z.exe"  # 7-Zip程序路径
     # 注意：COMPRESSION_COMMAND_THREADS 默认使用 WEB_WORKERS 的值，在代码中动态获取
-    PGZIP_BLOCK_SIZE: str = "1G"  # PGZip块大小
+    PGZIP_BLOCK_SIZE: str = "1M"  # PGZip块大小（默认1M，可通过.env中的PGZIP_BLOCK_SIZE覆盖）
     PGZIP_THREADS: int = 4  # PGZip线程数
-    SCAN_BATCH_SIZE: int = 180000  # 扫描批次大小（文件数）：扫描到多少文件后开始压缩（默认30000个文件）
-    SCAN_BATCH_SIZE_BYTES: int = 18* 1024 * 1024 * 1024  # 扫描批次大小（字节）：扫描到多少字节后开始压缩（默认6GB = 6 * 1024 * 1024 * 1024）
+
+    # 扫描进度更新配置
+    SCAN_UPDATE_INTERVAL: int = 500  # 后台扫描每处理多少个文件更新一次数据库（total_files/total_bytes）
+    SCAN_LOG_INTERVAL_SECONDS: int = 60  # 后台扫描进度日志输出的时间间隔（秒）
 
     # 磁带管理配置
     TAPE_POOL_SIZE: int = 12  # 磁带池大小
