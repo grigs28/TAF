@@ -1087,6 +1087,29 @@ class BackupEngine:
                 "[准备压缩] 正在构建文件组..."
             )
 
+            # ========== 设置压缩和移动线程的专属日志处理器 ==========
+            try:
+                from utils.worker_log_handler import WorkerLogHandler, ScheduleType
+                worker_log_handler = WorkerLogHandler()
+                
+                # 从 scheduled_task 中获取调度类型
+                schedule_type = ScheduleType.UNKNOWN
+                if scheduled_task and hasattr(scheduled_task, 'schedule_type'):
+                    schedule_type_str = str(scheduled_task.schedule_type).lower()
+                    if 'daily' in schedule_type_str:
+                        schedule_type = ScheduleType.DAILY
+                    elif 'monthly' in schedule_type_str:
+                        schedule_type = ScheduleType.MONTHLY
+                else:
+                    # 尝试从 backup_task 推断
+                    schedule_type = WorkerLogHandler.get_schedule_type_from_task(backup_task)
+                
+                # 设置专属日志处理器
+                worker_log_handler.setup_worker_loggers(schedule_type)
+                logger.info(f"已设置压缩和移动线程专属日志处理器（备份周期: {schedule_type.value}）")
+            except Exception as log_setup_error:
+                logger.warning(f"设置专属日志处理器失败: {str(log_setup_error)}，将使用默认日志")
+            
             # ========== 创建文件移动后台任务（独立线程，顺序执行） ==========
             file_move_worker = FileMoveWorker(tape_file_mover=self.tape_file_mover)
             file_move_worker.start()
