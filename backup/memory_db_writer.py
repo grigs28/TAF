@@ -356,16 +356,16 @@ class MemoryDBWriter:
 
         # 防抖动：避免1秒内频繁触发同步
         if current_time - self._last_trigger_time < 1.0:
-            logger.debug(f"同步触发过于频繁，跳过 (原因: {reason})")
+            logger.info(f"同步触发过于频繁，跳过 (原因: {reason})")
             return
 
         if self._is_syncing:
-            logger.debug(f"同步已在进行中，跳过触发 (原因: {reason})")
+            logger.info(f"同步已在进行中，跳过触发 (原因: {reason})")
             return
 
         self._last_trigger_time = current_time
-        logger.debug(f"触发同步到openGauss (原因: {reason})")
-        await self._sync_to_opengauss()
+        logger.info(f"触发同步到openGauss (原因: {reason})")
+        await self._sync_to_opengauss(reason)
 
     async def _sync_loop(self):
         """定期同步循环"""
@@ -432,7 +432,12 @@ class MemoryDBWriter:
             self._stats['sync_time'] += sync_time
             self._last_sync_time = time.time()
 
-            logger.info(f"同步完成: {synced_count}/{len(files_to_sync)} 个文件，耗时 {sync_time:.2f}s")
+            logger.info(f"✅ 同步完成: {synced_count}/{len(files_to_sync)} 个文件已成功同步到openGauss，耗时 {sync_time:.2f}秒")
+            
+            # 如果还有未同步的文件，记录警告
+            if synced_count < len(files_to_sync):
+                remaining = len(files_to_sync) - synced_count
+                logger.warning(f"⚠️ 还有 {remaining} 个文件未同步，将在下次同步时重试")
 
         except Exception as e:
             logger.error(f"同步到openGauss失败: {e}", exc_info=True)
@@ -488,6 +493,7 @@ class MemoryDBWriter:
         if not files:
             return 0
 
+        logger.info(f"正在批量同步 {len(files)} 个文件到openGauss...")
         synced_count = 0
         async with get_opengauss_connection() as conn:
             for file_record in files:
