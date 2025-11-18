@@ -311,6 +311,10 @@ class MemoryDBWriter:
 
     async def _check_sync_need(self):
         """检查是否需要同步 - 增加超时机制处理剩余少量文件"""
+        # 如果同步正在进行中，直接返回，避免重复触发和产生大量日志
+        if self._is_syncing:
+            return
+        
         current_time = time.time()
         pending_files = await self._get_pending_sync_count()
 
@@ -362,11 +366,12 @@ class MemoryDBWriter:
 
         # 防抖动：避免1秒内频繁触发同步
         if current_time - self._last_trigger_time < 1.0:
-            logger.info(f"同步触发过于频繁，跳过 (原因: {reason})")
+            logger.debug(f"同步触发过于频繁，跳过 (原因: {reason})")
             return
 
         if self._is_syncing:
-            logger.info(f"同步已在进行中，跳过触发 (原因: {reason})")
+            # 降低日志级别，避免同步进行时产生大量重复日志
+            logger.debug(f"同步已在进行中，跳过触发 (原因: {reason})")
             return
 
         self._last_trigger_time = current_time
