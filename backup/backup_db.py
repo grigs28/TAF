@@ -293,7 +293,10 @@ class BackupDB:
         self._last_operation_status: Dict[int, str] = {}
 
     def _log_operation_stage_event(self, backup_task: Optional[BackupTask], operation_status: str):
-        """记录关键阶段日志（即使全局日志级别较高也能看到）"""
+        """记录关键阶段日志（即使全局日志级别较高也能看到）
+        
+        注意：只记录阶段名称，不包含进度信息（如 "15401/21961 个文件 (70.1%)"）
+        """
         try:
             if not backup_task or not getattr(backup_task, 'id', None):
                 return
@@ -302,14 +305,24 @@ class BackupDB:
             if not normalized:
                 return
 
+            # 提取阶段名称，移除进度信息（如 "15401/21961 个文件 (70.1%)"）
+            # 只保留方括号内的阶段名称部分
+            import re
+            # 匹配 "[阶段名称...]" 或 "[阶段名称...] 其他内容"
+            stage_match = re.match(r'^(\[[^\]]+\])', normalized)
+            if stage_match:
+                stage_only = stage_match.group(1)  # 只取 "[阶段名称...]"
+            else:
+                stage_only = normalized  # 如果没有方括号，使用原字符串
+            
             task_id = backup_task.id
             previous = self._last_operation_status.get(task_id)
-            if previous == normalized:
+            if previous == stage_only:
                 return
 
-            self._last_operation_status[task_id] = normalized
+            self._last_operation_status[task_id] = stage_only
             task_name = getattr(backup_task, 'task_name', '') or ''
-            stage_label = normalized.strip('[]') or normalized
+            stage_label = stage_only.strip('[]') or stage_only
             logger.warning(f"[关键阶段] 任务 {task_name or task_id}: {stage_label}")
 
             if any(keyword in stage_label for keyword in ("完成", "成功", "失败", "终止", "结束")):
@@ -770,23 +783,23 @@ class BackupDB:
                     existing['id']
                 )
             else:
-                await conn.execute(
-                    """
-                    INSERT INTO backup_files (
+                            await conn.execute(
+                                """
+                                INSERT INTO backup_files (
                         backup_set_id, file_path, file_name, directory_path, display_name,
                         file_type, file_size, compressed_size, file_permissions,
                         created_time, modified_time, accessed_time, compressed,
                         checksum, backup_time, chunk_number, tape_block_start,
                         file_metadata, is_copy_success, copy_status_at
-                    ) VALUES (
+                                ) VALUES (
                         $1, $2, $3, $4, $5,
                         $6::backupfiletype, $7, $8, $9,
                         $10, $11, $12, $13,
                         $14, $15, $16, $17,
                         $18::json, FALSE, NULL
-                    )
-                    """,
-                    backup_set_db_id,
+                                )
+                                """,
+                                backup_set_db_id,
                     file_path,
                     display_name,
                     directory_path,
@@ -1107,15 +1120,46 @@ class BackupDB:
         
         logger.info(f"[mark_files_as_copied] 准备更新 {len(file_paths)} 个文件的 is_copy_success 状态")
         
-        existing_files = await conn.fetch(
-            """
-            SELECT id, file_path, is_copy_success
-            FROM backup_files
-            WHERE backup_set_id = $1 AND file_path = ANY($2)
-            """,
-            backup_set_db_id, file_paths
-        )
-        existing_map = {row['file_path']: row for row in existing_files}
+        # 分批查询已存在的文件，避免单次查询过多文件导致超时
+        # 批次大小：5000 个文件一批（可根据实际情况调整）
+        batch_size = 5000
+        existing_map = {}
+        
+        if len(file_paths) > batch_size:
+            logger.info(f"[mark_files_as_copied] 文件数量较多（{len(file_paths)} 个），将分批查询（每批 {batch_size} 个）")
+            for i in range(0, len(file_paths), batch_size):
+                batch_paths = file_paths[i:i + batch_size]
+                try:
+                    batch_existing = await conn.fetch(
+                        """
+                        SELECT id, file_path, is_copy_success
+                        FROM backup_files
+                        WHERE backup_set_id = $1 AND file_path = ANY($2)
+                        """,
+                        backup_set_db_id, batch_paths
+                    )
+                    for row in batch_existing:
+                        existing_map[row['file_path']] = row
+                    logger.debug(f"[mark_files_as_copied] 已查询批次 {i // batch_size + 1}/{(len(file_paths) + batch_size - 1) // batch_size}，找到 {len(batch_existing)} 个已存在文件")
+                except Exception as batch_error:
+                    logger.error(f"[mark_files_as_copied] 批次查询失败（批次 {i // batch_size + 1}）: {batch_error}")
+                    # 继续处理下一批次
+                    continue
+        else:
+            # 文件数量较少，直接查询
+            try:
+                existing_files = await conn.fetch(
+                    """
+                    SELECT id, file_path, is_copy_success
+                    FROM backup_files
+                    WHERE backup_set_id = $1 AND file_path = ANY($2)
+                    """,
+                    backup_set_db_id, file_paths
+                )
+                existing_map = {row['file_path']: row for row in existing_files}
+            except Exception as query_error:
+                logger.error(f"[mark_files_as_copied] 查询已存在文件失败: {query_error}")
+                raise
         
         # 准备批量更新和插入的数据
         update_data = []
@@ -1179,55 +1223,111 @@ class BackupDB:
                 )
                 continue
         
-        # 执行批量更新
+        # 执行批量更新（分批处理，避免单次操作过多数据）
         if update_data:
-            try:
-                await conn.executemany(
-                    """
-                    UPDATE backup_files
-                    SET compressed_size = $2,
-                        compressed = $3,
-                        checksum = $4,
-                        backup_time = $5,
-                        chunk_number = $6,
-                        tape_block_start = $7,
-                        file_metadata = $8::json,
-                        is_copy_success = TRUE,
-                        copy_status_at = $9
-                    WHERE id = $1
-                    """,
-                    update_data
-                )
-                success_count += len(update_data)
-                logger.debug(f"[mark_files_as_copied] 批量更新 {len(update_data)} 个文件")
-            except Exception as update_error:
-                failed_count += len(update_data)
-                logger.error(f"[mark_files_as_copied] 批量更新失败: {update_error}")
-        
-        # 执行批量插入
-        if insert_data:
-            try:
-                await conn.executemany(
-                    """
-                    INSERT INTO backup_files (
-                        backup_set_id, file_path, file_name, file_type, file_size,
-                        compressed_size, file_permissions, created_time, modified_time,
-                        accessed_time, compressed, checksum, backup_time, chunk_number,
-                        tape_block_start, file_metadata, is_copy_success, copy_status_at
-                    ) VALUES (
-                        $1, $2, $3, $4::backupfiletype, $5,
-                        $6, $7, $8, $9,
-                        $10, $11, $12, $13, $14,
-                        $15, $16::json, TRUE, $17
+            update_batch_size = 5000
+            if len(update_data) > update_batch_size:
+                logger.info(f"[mark_files_as_copied] 更新数据较多（{len(update_data)} 条），将分批更新（每批 {update_batch_size} 条）")
+                for i in range(0, len(update_data), update_batch_size):
+                    batch_update = update_data[i:i + update_batch_size]
+                    try:
+                        await conn.executemany(
+                            """
+                            UPDATE backup_files
+                            SET compressed_size = $2,
+                                compressed = $3,
+                                checksum = $4,
+                                backup_time = $5,
+                                chunk_number = $6,
+                                tape_block_start = $7,
+                                file_metadata = $8::json,
+                                is_copy_success = TRUE,
+                                copy_status_at = $9
+                            WHERE id = $1
+                            """,
+                            batch_update
+                        )
+                        success_count += len(batch_update)
+                        logger.debug(f"[mark_files_as_copied] 已更新批次 {i // update_batch_size + 1}/{(len(update_data) + update_batch_size - 1) // update_batch_size}，{len(batch_update)} 个文件")
+                    except Exception as batch_update_error:
+                        failed_count += len(batch_update)
+                        logger.error(f"[mark_files_as_copied] 批次更新失败（批次 {i // update_batch_size + 1}）: {batch_update_error}")
+            else:
+                try:
+                    await conn.executemany(
+                        """
+                        UPDATE backup_files
+                        SET compressed_size = $2,
+                            compressed = $3,
+                            checksum = $4,
+                            backup_time = $5,
+                            chunk_number = $6,
+                            tape_block_start = $7,
+                            file_metadata = $8::json,
+                            is_copy_success = TRUE,
+                            copy_status_at = $9
+                        WHERE id = $1
+                        """,
+                        update_data
                     )
-                    """,
-                    insert_data
-                )
-                success_count += len(insert_data)
-                logger.debug(f"[mark_files_as_copied] 批量插入 {len(insert_data)} 个文件")
-            except Exception as insert_error:
-                failed_count += len(insert_data)
-                logger.error(f"[mark_files_as_copied] 批量插入失败: {insert_error}")
+                    success_count += len(update_data)
+                    logger.debug(f"[mark_files_as_copied] 批量更新 {len(update_data)} 个文件")
+                except Exception as update_error:
+                    failed_count += len(update_data)
+                    logger.error(f"[mark_files_as_copied] 批量更新失败: {update_error}")
+        
+        # 执行批量插入（分批处理，避免单次操作过多数据）
+        if insert_data:
+            insert_batch_size = 5000
+            if len(insert_data) > insert_batch_size:
+                logger.info(f"[mark_files_as_copied] 插入数据较多（{len(insert_data)} 条），将分批插入（每批 {insert_batch_size} 条）")
+                for i in range(0, len(insert_data), insert_batch_size):
+                    batch_insert = insert_data[i:i + insert_batch_size]
+                    try:
+                        await conn.executemany(
+                            """
+                            INSERT INTO backup_files (
+                                backup_set_id, file_path, file_name, file_type, file_size,
+                                compressed_size, file_permissions, created_time, modified_time,
+                                accessed_time, compressed, checksum, backup_time, chunk_number,
+                                tape_block_start, file_metadata, is_copy_success, copy_status_at
+                            ) VALUES (
+                                $1, $2, $3, $4::backupfiletype, $5,
+                                $6, $7, $8, $9,
+                                $10, $11, $12, $13, $14,
+                                $15, $16::json, TRUE, $17
+                            )
+                            """,
+                            batch_insert
+                        )
+                        success_count += len(batch_insert)
+                        logger.debug(f"[mark_files_as_copied] 已插入批次 {i // insert_batch_size + 1}/{(len(insert_data) + insert_batch_size - 1) // insert_batch_size}，{len(batch_insert)} 个文件")
+                    except Exception as batch_insert_error:
+                        failed_count += len(batch_insert)
+                        logger.error(f"[mark_files_as_copied] 批次插入失败（批次 {i // insert_batch_size + 1}）: {batch_insert_error}")
+            else:
+                try:
+                    await conn.executemany(
+                        """
+                        INSERT INTO backup_files (
+                            backup_set_id, file_path, file_name, file_type, file_size,
+                            compressed_size, file_permissions, created_time, modified_time,
+                            accessed_time, compressed, checksum, backup_time, chunk_number,
+                            tape_block_start, file_metadata, is_copy_success, copy_status_at
+                        ) VALUES (
+                            $1, $2, $3, $4::backupfiletype, $5,
+                            $6, $7, $8, $9,
+                            $10, $11, $12, $13, $14,
+                            $15, $16::json, TRUE, $17
+                        )
+                        """,
+                        insert_data
+                    )
+                    success_count += len(insert_data)
+                    logger.debug(f"[mark_files_as_copied] 批量插入 {len(insert_data)} 个文件")
+                except Exception as insert_error:
+                    failed_count += len(insert_data)
+                    logger.error(f"[mark_files_as_copied] 批量插入失败: {insert_error}")
         
         if success_count > 0:
             logger.info(f"[mark_files_as_copied] 成功更新 {success_count} 个文件的 is_copy_success=TRUE（批量操作：更新 {len(update_data)} 个，插入 {len(insert_data)} 个）")
@@ -1259,7 +1359,8 @@ class BackupDB:
             
             normalized_status = operation_status.strip() if isinstance(operation_status, str) else operation_status
             if normalized_status:
-                self._log_operation_stage_event(backup_task, normalized_status)
+                # 注意：不再调用 _log_operation_stage_event，避免进度更新时重复记录关键阶段日志
+                # 关键阶段日志应该只在阶段开始时调用一次（如压缩循环开始时）
                 operation_status = normalized_status
             
             from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection

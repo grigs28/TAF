@@ -191,6 +191,8 @@ class DatabaseManager:
                 # 检查并添加缺失的字段（字段迁移）- 仅对PostgreSQL/openGauss
                 if not database_url.startswith("sqlite"):
                     await self._migrate_missing_columns_postgresql()
+                    # 修改现有字段的长度（字段长度迁移）
+                    await self._migrate_column_lengths_postgresql()
 
         except Exception as e:
             logger.error(f"创建数据库表失败: {str(e)}")
@@ -328,6 +330,9 @@ class DatabaseManager:
                 
                 # 检查并添加缺失的字段（字段迁移）
                 self._migrate_missing_columns(cur)
+                
+                # 修改现有字段的长度（字段长度迁移）
+                self._migrate_column_lengths(cur)
             
             conn.commit()
             logger.info("使用psycopg2成功创建数据库表")
@@ -489,6 +494,146 @@ class DatabaseManager:
                     
         except Exception as e:
             logger.warning(f"字段迁移检查失败: {str(e)}，但不影响表创建流程")
+            # 不抛出异常，避免影响主流程
+    
+    def _migrate_column_lengths(self, cur):
+        """修改现有字段的长度（字段长度迁移）- openGauss
+        
+        Args:
+            cur: psycopg2 cursor对象
+        """
+        try:
+            # 定义需要修改长度的字段（表名 -> [(字段名, 目标长度), ...]）
+            length_migrations = {
+                'backup_files': [
+                    ('file_name', 2048, '文件名'),
+                ],
+            }
+            
+            modified_columns = []
+            skipped_columns = []
+            
+            for table_name, columns in length_migrations.items():
+                # 检查表是否存在
+                cur.execute("""
+                    SELECT 1 FROM information_schema.tables WHERE table_name = %s
+                """, (table_name,))
+                if not cur.fetchone():
+                    # 表不存在，跳过
+                    continue
+                
+                # 获取表中现有字段的长度信息
+                cur.execute("""
+                    SELECT column_name, character_maximum_length 
+                    FROM information_schema.columns 
+                    WHERE table_name = %s AND data_type = 'character varying'
+                """, (table_name,))
+                existing_cols = {row[0]: row[1] for row in cur.fetchall()}
+                
+                # 检查每个需要修改长度的字段
+                for col_name, target_length, comment in columns:
+                    if col_name not in existing_cols:
+                        # 字段不存在，跳过
+                        continue
+                    
+                    current_length = existing_cols[col_name]
+                    if current_length is None or current_length < target_length:
+                        # 需要修改长度
+                        try:
+                            alter_sql = f"ALTER TABLE {table_name} ALTER COLUMN {col_name} TYPE VARCHAR({target_length})"
+                            cur.execute(alter_sql)
+                            modified_columns.append(f"{table_name}.{col_name} ({current_length} -> {target_length})")
+                            
+                            # 更新注释（如果提供）
+                            if comment:
+                                try:
+                                    comment_sql = f"COMMENT ON COLUMN {table_name}.{col_name} IS '{comment}'"
+                                    cur.execute(comment_sql)
+                                except Exception as comment_err:
+                                    logger.debug(f"更新字段注释失败 {table_name}.{col_name}: {str(comment_err)}")
+                        except Exception as alter_err:
+                            logger.warning(f"修改字段长度失败 {table_name}.{col_name}: {str(alter_err)}")
+                    else:
+                        skipped_columns.append(f"{table_name}.{col_name} (已为 {current_length})")
+            
+            # 汇总输出
+            if modified_columns:
+                logger.info(f"修改了 {len(modified_columns)} 个字段长度: {', '.join(modified_columns)}")
+            if skipped_columns:
+                logger.debug(f"跳过 {len(skipped_columns)} 个已满足长度要求的字段")
+                
+        except Exception as e:
+            logger.warning(f"字段长度迁移检查失败: {str(e)}，但不影响表创建流程")
+            # 不抛出异常，避免影响主流程
+    
+    async def _migrate_column_lengths_postgresql(self):
+        """修改现有字段的长度（字段长度迁移）- PostgreSQL/非openGauss数据库
+        
+        使用SQLAlchemy引擎执行迁移
+        """
+        try:
+            from sqlalchemy import text, inspect
+            
+            # 定义需要修改长度的字段（表名 -> [(字段名, 目标长度, 注释), ...]）
+            length_migrations = {
+                'backup_files': [
+                    ('file_name', 2048, '文件名'),
+                ],
+            }
+            
+            if self.engine is None:
+                return
+            
+            inspector = inspect(self.engine)
+            modified_columns = []
+            skipped_columns = []
+            
+            async with self.async_engine.begin() as conn:
+                for table_name, columns in length_migrations.items():
+                    # 检查表是否存在
+                    if not inspector.has_table(table_name):
+                        continue
+                    
+                    # 获取表中现有字段的长度信息
+                    existing_cols = {}
+                    for col in inspector.get_columns(table_name):
+                        if col['type'].__class__.__name__ == 'VARCHAR':
+                            existing_cols[col['name']] = col['type'].length
+                    
+                    # 检查每个需要修改长度的字段
+                    for col_name, target_length, comment in columns:
+                        if col_name not in existing_cols:
+                            # 字段不存在，跳过
+                            continue
+                        
+                        current_length = existing_cols[col_name]
+                        if current_length is None or current_length < target_length:
+                            # 需要修改长度
+                            try:
+                                alter_sql = text(f"ALTER TABLE {table_name} ALTER COLUMN {col_name} TYPE VARCHAR({target_length})")
+                                await conn.execute(alter_sql)
+                                modified_columns.append(f"{table_name}.{col_name} ({current_length} -> {target_length})")
+                                
+                                # 更新注释（如果提供且数据库支持）
+                                if comment and not self.settings.DATABASE_URL.startswith("sqlite"):
+                                    try:
+                                        comment_sql = text(f"COMMENT ON COLUMN {table_name}.{col_name} IS '{comment}'")
+                                        await conn.execute(comment_sql)
+                                    except Exception as comment_err:
+                                        logger.debug(f"更新字段注释失败 {table_name}.{col_name}: {str(comment_err)}")
+                            except Exception as alter_err:
+                                logger.warning(f"修改字段长度失败 {table_name}.{col_name}: {str(alter_err)}")
+                        else:
+                            skipped_columns.append(f"{table_name}.{col_name} (已为 {current_length})")
+                
+                # 汇总输出
+                if modified_columns:
+                    logger.info(f"修改了 {len(modified_columns)} 个字段长度: {', '.join(modified_columns)}")
+                if skipped_columns:
+                    logger.debug(f"跳过 {len(skipped_columns)} 个已满足长度要求的字段")
+                    
+        except Exception as e:
+            logger.warning(f"字段长度迁移检查失败: {str(e)}，但不影响表创建流程")
             # 不抛出异常，避免影响主流程
 
     def get_sync_session(self) -> Session:

@@ -491,17 +491,17 @@ def _compress_with_pgzip(
             with tarfile.open(fileobj=gz_source, mode='w') as tar:
                 total_files_in_group = len(file_group)
                 last_log_time = time.time()
-                log_interval = 5.0  # 每5秒输出一次进度
+                log_interval = 10.0  # 每10秒输出一次进度
                 
                 for file_idx, file_info in enumerate(file_group):
                     file_path = Path(file_info['path'])
                     
-                    # 每100个文件或每5秒输出一次进度
+                    # 每10秒输出一次进度（不再按文件数量）
                     current_time = time.time()
-                    if file_idx % 100 == 0 or (current_time - last_log_time) >= log_interval:
+                    if (current_time - last_log_time) >= log_interval:
                         current_progress = file_idx + 1
                         progress_percent = (current_progress / total_files_in_group * 100) if total_files_in_group > 0 else 0
-                        logger.info(f"[PGZip] 压缩进度: {current_progress}/{total_files_in_group} 个文件 ({progress_percent:.1f}%)")
+                        logger.debug(f"[PGZip] 压缩进度: {current_progress}/{total_files_in_group} 个文件 ({progress_percent:.1f}%)")
                         # 将压缩进度信息存储到 compress_progress 和 backup_task 中
                         compress_progress['current_file_index'] = current_progress
                         compress_progress['total_files_in_group'] = total_files_in_group
@@ -778,7 +778,7 @@ def _compress_with_zstd(
                         if file_idx % 100 == 0 or (current_time - last_log_time) >= log_interval:
                             current_progress = file_idx + 1
                             progress_percent = (current_progress / max(total_files_in_group, 1) * 100) if total_files_in_group > 0 else 0
-                            logger.info(f"[zstd] 压缩进度: {current_progress}/{total_files_in_group} 个文件 ({progress_percent:.1f}%)")
+                            logger.debug(f"[zstd] 压缩进度: {current_progress}/{total_files_in_group} 个文件 ({progress_percent:.1f}%)")
                             # 将压缩进度信息存储到 compress_progress 和 backup_task 中
                             compress_progress['current_file_index'] = current_progress
                             compress_progress['total_files_in_group'] = total_files_in_group
@@ -1321,7 +1321,7 @@ class Compressor:
             logger.info(f"[压缩] 压缩任务已提交到线程池，等待完成...")
 
             # 等待压缩完成，设置超时以避免无限等待
-            timeout_seconds = 3600  # 1小时超时
+            timeout_seconds = 1200  # 20分钟超时
             try:
                 # 等待压缩线程完成（支持取消）
                 logger.info(f"[压缩] 开始等待压缩线程完成（超时: {timeout_seconds}秒）")

@@ -9,7 +9,6 @@ import asyncio
 import logging
 import json
 import sqlite3
-import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +38,11 @@ class MemoryDBWriter:
         self.checkpoint_interval = checkpoint_interval
         self.checkpoint_retention_hours = checkpoint_retention_hours
 
+        # 检查点目录：使用项目根目录下的 temp/checkpoints 目录
+        project_root = Path(__file__).parent.parent  # backup -> 项目根目录
+        self.checkpoint_dir = project_root / "temp" / "checkpoints"
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
         # 内存数据库
         self.memory_db = None
         self.db_connection = None
@@ -51,7 +55,7 @@ class MemoryDBWriter:
         self._last_checkpoint_time = 0
         self._last_trigger_time = 0  # 防止频繁触发同步
         self._last_file_added_time = time.time()  # 记录最后添加文件的时间
-        self._checkpoint_files = []  # 记录创建的检查点文件列表
+        self._checkpoint_files = []  # 记录创建的检查点文件列表 [(文件路径, 创建时间, 最大未同步文件ID), ...]
 
         # 统计信息
         self._stats = {
@@ -65,6 +69,8 @@ class MemoryDBWriter:
 
     async def initialize(self):
         """初始化内存数据库和同步任务"""
+        # 启动时清理过期的检查点文件
+        await self._cleanup_old_checkpoints_on_startup()
         await self._setup_memory_database()
         await self._start_sync_tasks()
         logger.info(f"内存数据库写入器已初始化 (backup_set_id={self.backup_set_db_id})")
@@ -552,6 +558,9 @@ class MemoryDBWriter:
             file_ids
         )
         await self.memory_db.commit()
+        
+        # 同步成功后，清理已完全同步的检查点文件
+        await self._cleanup_synced_checkpoints()
 
     async def _mark_sync_error(self, files: List[Tuple], error_message: str):
         """标记同步错误"""
@@ -567,9 +576,15 @@ class MemoryDBWriter:
     async def _create_checkpoint(self):
         """创建检查点 - 持久化保护"""
         try:
-            # 导出内存数据库到临时文件
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.sql', delete=False, encoding='utf-8') as f:
-                checkpoint_file = f.name
+            # 确保检查点目录存在
+            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 获取创建检查点时的最大未同步文件ID
+            max_unsynced_id = await self._get_max_unsynced_file_id()
+            
+            # 在项目目录下的 temp/checkpoints 目录中创建检查点文件
+            checkpoint_filename = f"tmp{int(time.time() * 1000)}.sql"
+            checkpoint_file = str(self.checkpoint_dir / checkpoint_filename)
 
             # 备份内存数据库
             with open(checkpoint_file, 'w', encoding='utf-8') as f:
@@ -577,8 +592,9 @@ class MemoryDBWriter:
                     f.write(f"{line}\n")
 
             self._last_checkpoint_time = time.time()
-            self._checkpoint_files.append((checkpoint_file, self._last_checkpoint_time))
-            logger.info(f"检查点已创建: {checkpoint_file}")
+            # 记录检查点文件：(文件路径, 创建时间, 最大未同步文件ID)
+            self._checkpoint_files.append((checkpoint_file, self._last_checkpoint_time, max_unsynced_id))
+            logger.info(f"检查点已创建: {checkpoint_file} (最大未同步文件ID: {max_unsynced_id})")
             
             # 清理过期的检查点文件
             await self._cleanup_old_checkpoints()
@@ -586,22 +602,116 @@ class MemoryDBWriter:
         except Exception as e:
             logger.error(f"创建检查点失败: {e}")
     
-    async def _cleanup_old_checkpoints(self):
-        """清理过期的检查点文件"""
+    async def _get_max_unsynced_file_id(self) -> int:
+        """获取当前最大未同步文件ID"""
+        try:
+            async with self.memory_db.execute("""
+                SELECT MAX(id) FROM backup_files WHERE synced_to_opengauss = FALSE
+            """) as cursor:
+                result = await cursor.fetchone()
+                return result[0] if result and result[0] is not None else 0
+        except Exception as e:
+            logger.debug(f"获取最大未同步文件ID失败: {e}")
+            return 0
+    
+    async def _cleanup_old_checkpoints_on_startup(self):
+        """启动时清理所有过期的检查点文件"""
         try:
             import os
             current_time = time.time()
             retention_seconds = self.checkpoint_retention_hours * 3600
             
-            # 清理记录列表中的过期文件
+            # 清理检查点目录中的所有过期文件
+            if self.checkpoint_dir.exists():
+                import glob
+                pattern = str(self.checkpoint_dir / 'tmp*.sql')
+                cleaned_count = 0
+                for old_file in glob.glob(pattern):
+                    try:
+                        file_stat = os.stat(old_file)
+                        file_age = current_time - file_stat.st_mtime
+                        if file_age > retention_seconds:
+                            os.remove(old_file)
+                            cleaned_count += 1
+                            logger.debug(f"启动时已删除过期检查点文件: {old_file}")
+                    except Exception as e:
+                        logger.debug(f"清理检查点文件时出错（忽略）: {old_file}, {e}")
+                
+                if cleaned_count > 0:
+                    logger.info(f"启动时已清理 {cleaned_count} 个过期检查点文件")
+            else:
+                # 如果目录不存在，创建它
+                self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                
+        except Exception as e:
+            logger.warning(f"启动时清理检查点文件失败: {e}")
+    
+    async def _cleanup_synced_checkpoints(self):
+        """清理已完全同步到openGauss的检查点文件"""
+        try:
+            import os
+            # 获取当前已同步的最大文件ID
+            async with self.memory_db.execute("""
+                SELECT MAX(id) FROM backup_files WHERE synced_to_opengauss = TRUE
+            """) as cursor:
+                result = await cursor.fetchone()
+                max_synced_id = result[0] if result and result[0] is not None else 0
+            
+            if max_synced_id <= 0:
+                return  # 还没有同步任何文件
+            
+            # 清理所有已完全同步的检查点文件
+            # 如果检查点创建时的最大未同步文件ID <= 当前已同步的最大文件ID，说明该检查点的所有数据都已同步
             files_to_remove = []
-            for checkpoint_file, create_time in self._checkpoint_files[:]:
+            for checkpoint_info in self._checkpoint_files[:]:
+                if len(checkpoint_info) >= 3:
+                    checkpoint_file, create_time, max_unsynced_id = checkpoint_info
+                    # 如果检查点创建时的最大未同步文件ID <= 当前已同步的最大文件ID，说明该检查点的所有数据都已同步
+                    if max_unsynced_id <= max_synced_id:
+                        try:
+                            if os.path.exists(checkpoint_file):
+                                os.remove(checkpoint_file)
+                                logger.info(f"检查点文件已完全同步到openGauss，已删除: {checkpoint_file} (检查点最大未同步ID: {max_unsynced_id}, 当前已同步最大ID: {max_synced_id})")
+                            files_to_remove.append(checkpoint_info)
+                        except Exception as e:
+                            logger.warning(f"删除已同步的检查点文件失败: {checkpoint_file}, 错误: {e}")
+                else:
+                    # 兼容旧格式：(文件路径, 创建时间)
+                    checkpoint_file, create_time = checkpoint_info
+                    # 旧格式的检查点文件无法判断是否已完全同步，跳过
+                    pass
+            
+            # 从列表中移除已删除的文件
+            for item in files_to_remove:
+                if item in self._checkpoint_files:
+                    self._checkpoint_files.remove(item)
+                    
+        except Exception as e:
+            logger.warning(f"清理已同步的检查点文件失败: {e}")
+    
+    async def _cleanup_old_checkpoints(self):
+        """清理过期的检查点文件（定期调用）"""
+        try:
+            import os
+            current_time = time.time()
+            retention_seconds = self.checkpoint_retention_hours * 3600
+            
+            # 清理记录列表中的过期文件（仅清理未同步的过期文件）
+            files_to_remove = []
+            for checkpoint_info in self._checkpoint_files[:]:
+                if len(checkpoint_info) >= 3:
+                    checkpoint_file, create_time, max_unsynced_id = checkpoint_info
+                else:
+                    # 兼容旧格式：(文件路径, 创建时间)
+                    checkpoint_file, create_time = checkpoint_info
+                    max_unsynced_id = None
+                
                 if current_time - create_time > retention_seconds:
                     try:
                         if os.path.exists(checkpoint_file):
                             os.remove(checkpoint_file)
                             logger.debug(f"已删除过期检查点文件: {checkpoint_file}")
-                        files_to_remove.append((checkpoint_file, create_time))
+                        files_to_remove.append(checkpoint_info)
                     except Exception as e:
                         logger.warning(f"删除检查点文件失败: {checkpoint_file}, 错误: {e}")
             
@@ -610,22 +720,25 @@ class MemoryDBWriter:
                 if item in self._checkpoint_files:
                     self._checkpoint_files.remove(item)
             
-            # 同时清理临时目录中可能遗留的检查点文件（通过文件名模式匹配）
+            # 同时清理检查点目录中可能遗留的过期文件（通过文件名模式匹配）
             try:
                 import glob
-                temp_dir = tempfile.gettempdir()
-                pattern = os.path.join(temp_dir, 'tmp*.sql')
-                for old_file in glob.glob(pattern):
-                    try:
-                        file_stat = os.stat(old_file)
-                        file_age = current_time - file_stat.st_mtime
-                        if file_age > retention_seconds:
-                            os.remove(old_file)
-                            logger.debug(f"已删除临时目录中的过期检查点文件: {old_file}")
-                    except Exception as e:
-                        logger.debug(f"清理临时文件时出错（忽略）: {old_file}, {e}")
+                if self.checkpoint_dir.exists():
+                    pattern = str(self.checkpoint_dir / 'tmp*.sql')
+                    for old_file in glob.glob(pattern):
+                        try:
+                            # 如果文件不在记录列表中，检查是否过期
+                            file_in_list = any(old_file == (cf[0] if isinstance(cf, tuple) else cf) for cf in self._checkpoint_files)
+                            if not file_in_list:
+                                file_stat = os.stat(old_file)
+                                file_age = current_time - file_stat.st_mtime
+                                if file_age > retention_seconds:
+                                    os.remove(old_file)
+                                    logger.debug(f"已删除检查点目录中的过期文件: {old_file}")
+                        except Exception as e:
+                            logger.debug(f"清理检查点文件时出错（忽略）: {old_file}, {e}")
             except Exception as e:
-                logger.debug(f"清理临时目录检查点文件失败（忽略）: {e}")
+                logger.debug(f"清理检查点目录文件失败（忽略）: {e}")
                 
         except Exception as e:
             logger.warning(f"清理过期检查点文件失败: {e}")
@@ -634,7 +747,13 @@ class MemoryDBWriter:
         """清理所有检查点文件（停止时调用）"""
         try:
             import os
-            for checkpoint_file, _ in self._checkpoint_files[:]:
+            for checkpoint_info in self._checkpoint_files[:]:
+                # 兼容新旧格式
+                if len(checkpoint_info) >= 3:
+                    checkpoint_file = checkpoint_info[0]
+                else:
+                    checkpoint_file = checkpoint_info[0]
+                
                 try:
                     if os.path.exists(checkpoint_file):
                         os.remove(checkpoint_file)

@@ -239,7 +239,6 @@ class FileScanner:
                                 BATCH_FORCE_INTERVAL = 1200.0  # 强制提交批次的时间间隔（秒）- 20分钟
                                 PROGRESS_LOG_INTERVAL = 60.0  # 进度日志输出间隔（秒）- 1分钟
                                 DIR_LOG_INTERVAL = 120.0  # 目录日志输出间隔（秒）- 2分钟
-                                MAX_PATH_LENGTH = 260  # Windows路径最大长度（字符）
                                 MAX_PATH_DISPLAY = 200  # 日志中显示的最大路径长度（字符）
                                 
                                 def get_batch_threshold(dir_count: int) -> int:
@@ -267,7 +266,6 @@ class FileScanner:
                                 # 统计变量
                                 dir_count = 0  # 目录计数
                                 permission_error_count = 0  # 权限错误计数
-                                path_too_long_count = 0  # 路径过长错误计数
                                 last_batch_submit_time = None  # 上次提交批次的时间
                                 last_progress_log_time = None  # 上次输出进度日志的时间
                                 last_dir_log_time = None  # 上次输出目录日志的时间
@@ -283,12 +281,8 @@ class FileScanner:
                                     return f"{path_str[:prefix_len]}...{path_str[-(max_len-prefix_len-3):]}"
                                 
                                 def format_path_for_log(path_str: str) -> str:
-                                    """格式化路径以便在日志中显示，考虑长度限制"""
+                                    """格式化路径以便在日志中显示"""
                                     try:
-                                        # 检查路径长度
-                                        path_len = len(path_str)
-                                        if path_len > MAX_PATH_LENGTH:
-                                            return f"{truncate_path(path_str)} (路径长度: {path_len} 字符，超过Windows限制 {MAX_PATH_LENGTH} 字符)"
                                         return truncate_path(path_str)
                                     except Exception:
                                         return str(path_str)[:MAX_PATH_DISPLAY]
@@ -355,7 +349,30 @@ class FileScanner:
                                                 
                                                 try:
                                                     # 使用 os.scandir() 扫描当前目录
-                                                    with os.scandir(current_scan_dir_str) as entries:
+                                                    # 捕获所有错误（权限错误、IO错误等），记录日志后跳过
+                                                    try:
+                                                        entries = os.scandir(current_scan_dir_str)
+                                                    except (PermissionError, OSError, FileNotFoundError, IOError) as scandir_err:
+                                                        # 目录无法打开（权限不足、不存在等）：记录并跳过
+                                                        permission_error_count += 1
+                                                        try:
+                                                            path_display = format_path_for_log(current_scan_dir_str)
+                                                            if permission_error_count <= 20:
+                                                                logger.warning(f"{context_prefix}流式扫描：无法打开目录（目录 #{permission_error_count}）: {path_display}，错误: {str(scandir_err)}")
+                                                        except Exception:
+                                                            logger.warning(f"{context_prefix}流式扫描：无法打开目录（目录 #{permission_error_count}）: 无法获取路径，错误: {str(scandir_err)}")
+                                                        continue
+                                                    except Exception as scandir_err:
+                                                        # 其他错误：记录并跳过
+                                                        permission_error_count += 1
+                                                        try:
+                                                            path_display = format_path_for_log(current_scan_dir_str)
+                                                            logger.warning(f"{context_prefix}流式扫描：扫描目录时出错（目录 #{permission_error_count}）: {path_display}，错误: {str(scandir_err)}")
+                                                        except Exception:
+                                                            logger.warning(f"{context_prefix}流式扫描：扫描目录时出错（目录 #{permission_error_count}）: 无法获取路径，错误: {str(scandir_err)}")
+                                                        continue
+                                                    
+                                                    with entries:
                                                         for entry in entries:
                                                             try:
                                                                 # 检查是否被取消
@@ -366,14 +383,6 @@ class FileScanner:
                                                                 try:
                                                                     entry_path = Path(entry.path)
                                                                     current_path_str = str(entry_path)
-                                                                    path_len = len(current_path_str)
-                                                                    
-                                                                    # 检查路径长度
-                                                                    if path_len > MAX_PATH_LENGTH:
-                                                                        path_too_long_count += 1
-                                                                        if path_too_long_count <= 10:  # 只记录前10个路径过长的情况
-                                                                            logger.warning(f"{context_prefix}流式扫描：路径过长（{path_len} 字符 > {MAX_PATH_LENGTH} 字符）: {format_path_for_log(current_path_str)}")
-                                                                        continue
                                                                 except Exception as path_str_err:
                                                                     # 路径字符串化失败（可能是编码问题）
                                                                     logger.debug(f"{context_prefix}流式扫描：路径字符串化失败: {str(path_str_err)}")
@@ -444,49 +453,51 @@ class FileScanner:
                                                                 
                                                                 # 每10000个路径或每1分钟输出一次进度日志（大型目录结构时每30秒输出一次）
                                                                 # 该进度日志仅用于调试，当前已停用（详见 backup_scanner 中的统计日志）
-                                                            except (PermissionError, OSError) as entry_err:
-                                                                # 路径权限错误：记录详细路径信息
+                                                            except (PermissionError, OSError, FileNotFoundError, IOError) as entry_err:
+                                                                # 路径权限错误、不存在或IO错误：记录详细路径信息并跳过
                                                                 permission_error_count += 1
                                                                 try:
                                                                     path_str = str(entry.path) if hasattr(entry, 'path') else "未知路径"
                                                                     path_display = format_path_for_log(path_str)
                                                                     if permission_error_count <= 20:  # 只记录前20个权限错误
-                                                                        logger.warning(f"{context_prefix}流式扫描：路径权限错误（路径 #{permission_error_count}）: {path_display}，错误: {str(entry_err)}")
+                                                                        logger.warning(f"{context_prefix}流式扫描：路径错误（路径 #{permission_error_count}）: {path_display}，错误: {str(entry_err)}")
                                                                 except Exception:
-                                                                    logger.warning(f"{context_prefix}流式扫描：路径权限错误（路径 #{permission_error_count}）: 无法获取路径，错误: {str(entry_err)}")
-                                                                continue
-                                                            except (FileNotFoundError, IOError) as entry_err:
-                                                                # 路径不存在或IO错误：跳过
+                                                                    if permission_error_count <= 20:
+                                                                        logger.warning(f"{context_prefix}流式扫描：路径错误（路径 #{permission_error_count}）: 无法获取路径，错误: {str(entry_err)}")
                                                                 continue
                                                             except Exception as entry_err:
-                                                                # 记录路径错误但继续扫描
+                                                                # 记录路径错误但继续扫描（不中止）
+                                                                permission_error_count += 1
                                                                 try:
                                                                     path_str = str(entry.path) if hasattr(entry, 'path') else "未知路径"
                                                                     path_display = format_path_for_log(path_str)
-                                                                    logger.debug(f"{context_prefix}流式扫描：跳过路径错误 {path_display}: {str(entry_err)}")
+                                                                    if permission_error_count <= 20:
+                                                                        logger.warning(f"{context_prefix}流式扫描：跳过路径错误（路径 #{permission_error_count}）: {path_display}，错误: {str(entry_err)}")
                                                                 except Exception:
-                                                                    logger.debug(f"{context_prefix}流式扫描：跳过路径错误: {str(entry_err)}")
+                                                                    if permission_error_count <= 20:
+                                                                        logger.warning(f"{context_prefix}流式扫描：跳过路径错误（路径 #{permission_error_count}）: 无法获取路径，错误: {str(entry_err)}")
                                                                 continue
-                                                except (PermissionError, OSError) as scan_dir_err:
-                                                    # 目录权限错误：记录并跳过该目录
+                                                except (PermissionError, OSError, FileNotFoundError, IOError) as scan_dir_err:
+                                                    # 目录权限错误、不存在或IO错误：记录并跳过该目录（不中止）
                                                     permission_error_count += 1
                                                     try:
                                                         path_display = format_path_for_log(current_scan_dir_str)
                                                         if permission_error_count <= 20:  # 只记录前20个权限错误
-                                                            logger.warning(f"{context_prefix}流式扫描：目录权限错误（目录 #{permission_error_count}）: {path_display}，错误: {str(scan_dir_err)}")
+                                                            logger.warning(f"{context_prefix}流式扫描：目录错误（目录 #{permission_error_count}）: {path_display}，错误: {str(scan_dir_err)}")
                                                     except Exception:
-                                                        logger.warning(f"{context_prefix}流式扫描：目录权限错误（目录 #{permission_error_count}）: 无法获取路径，错误: {str(scan_dir_err)}")
-                                                    continue
-                                                except (FileNotFoundError, IOError) as scan_dir_err:
-                                                    # 目录不存在或IO错误：跳过
+                                                        if permission_error_count <= 20:
+                                                            logger.warning(f"{context_prefix}流式扫描：目录错误（目录 #{permission_error_count}）: 无法获取路径，错误: {str(scan_dir_err)}")
                                                     continue
                                                 except Exception as scan_dir_err:
-                                                    # 记录目录错误但继续扫描
+                                                    # 记录目录错误但继续扫描（不中止）
+                                                    permission_error_count += 1
                                                     try:
                                                         path_display = format_path_for_log(current_scan_dir_str)
-                                                        logger.debug(f"{context_prefix}流式扫描：跳过目录错误 {path_display}: {str(scan_dir_err)}")
+                                                        if permission_error_count <= 20:
+                                                            logger.warning(f"{context_prefix}流式扫描：跳过目录错误（目录 #{permission_error_count}）: {path_display}，错误: {str(scan_dir_err)}")
                                                     except Exception:
-                                                        logger.debug(f"{context_prefix}流式扫描：跳过目录错误: {str(scan_dir_err)}")
+                                                        if permission_error_count <= 20:
+                                                            logger.warning(f"{context_prefix}流式扫描：跳过目录错误（目录 #{permission_error_count}）: 无法获取路径，错误: {str(scan_dir_err)}")
                                                     continue
                                                 
                                                 # 检查是否被取消
@@ -501,8 +512,15 @@ class FileScanner:
                                                 logger.warning(f"{context_prefix}流式扫描：遍历目录被中断 {path}，已扫描 {total_paths_scanned} 个路径，{dir_count} 个目录")
                                                 break
                                             except Exception as dir_scan_err:
-                                                # 目录扫描错误：记录但继续
-                                                logger.debug(f"{context_prefix}流式扫描：目录扫描错误: {str(dir_scan_err)}")
+                                                # 目录扫描错误：记录但继续（不中止）
+                                                permission_error_count += 1
+                                                try:
+                                                    path_display = format_path_for_log(current_scan_dir_str) if current_scan_dir_str else "未知目录"
+                                                    if permission_error_count <= 20:
+                                                        logger.warning(f"{context_prefix}流式扫描：目录扫描错误（目录 #{permission_error_count}）: {path_display}，错误: {str(dir_scan_err)}")
+                                                except Exception:
+                                                    if permission_error_count <= 20:
+                                                        logger.warning(f"{context_prefix}流式扫描：目录扫描错误（目录 #{permission_error_count}）: 无法获取路径，错误: {str(dir_scan_err)}")
                                                 continue
                                         
                                         # 如果还有待扫描的目录，记录警告
@@ -516,9 +534,15 @@ class FileScanner:
                                         scan_error_info = "用户中断（KeyboardInterrupt）"
                                         logger.warning(f"{context_prefix}流式扫描：遍历目录被中断 {path}，已扫描 {total_paths_scanned} 个路径，{dir_count} 个目录")
                                     except Exception as scan_err:
-                                        # 扫描过程出错
+                                        # 扫描过程出错：记录但继续（不中止）
                                         scan_error_info = str(scan_err)
-                                        logger.error(f"{context_prefix}流式扫描：扫描目录失败 {path}，已扫描 {total_paths_scanned} 个路径，{dir_count} 个目录: {scan_error_info}", exc_info=True)
+                                        permission_error_count += 1
+                                        try:
+                                            path_display = format_path_for_log(path)
+                                            logger.warning(f"{context_prefix}流式扫描：扫描目录失败（目录 #{permission_error_count}）: {path_display}，已扫描 {total_paths_scanned} 个路径，{dir_count} 个目录，错误: {scan_error_info}")
+                                        except Exception:
+                                            logger.warning(f"{context_prefix}流式扫描：扫描目录失败（目录 #{permission_error_count}）: {path}，已扫描 {total_paths_scanned} 个路径，{dir_count} 个目录，错误: {scan_error_info}")
+                                        # 继续执行，不中止
                                     
                                     # 放入剩余的路径
                                     if batch:
@@ -536,9 +560,9 @@ class FileScanner:
                                     
                                     total_time = time.time() - start_time
                                     if scan_cancelled:
-                                        logger.warning(f"{context_prefix}流式扫描：目录遍历被中断 {path}，共扫描 {total_paths_scanned} 个路径，{dir_count} 个目录，权限错误: {permission_error_count} 个，路径过长: {path_too_long_count} 个，总耗时 {total_time:.1f} 秒")
+                                        logger.warning(f"{context_prefix}流式扫描：目录遍历被中断 {path}，共扫描 {total_paths_scanned} 个路径，{dir_count} 个目录，权限错误: {permission_error_count} 个，总耗时 {total_time:.1f} 秒")
                                     else:
-                                        logger.info(f"{context_prefix}流式扫描：目录树遍历完成，共扫描 {total_paths_scanned} 个路径，{dir_count} 个目录，权限错误: {permission_error_count} 个，路径过长: {path_too_long_count} 个，总耗时 {total_time:.1f} 秒")
+                                        logger.info(f"{context_prefix}流式扫描：目录树遍历完成，共扫描 {total_paths_scanned} 个路径，{dir_count} 个目录，权限错误: {permission_error_count} 个，总耗时 {total_time:.1f} 秒")
                                 except KeyboardInterrupt:
                                     # 线程级别的 KeyboardInterrupt（很少发生，因为主线程会先捕获）
                                     scan_cancelled = True
@@ -802,29 +826,23 @@ class FileScanner:
                                                     current_batch = []
                                             else:
                                                 excluded_count += 1
-                                    except (PermissionError, OSError) as file_error:
-                                        # 文件权限错误：记录详细路径信息
+                                    except (PermissionError, OSError, FileNotFoundError, IOError) as file_error:
+                                        # 文件权限错误、不存在或IO错误：记录详细路径信息并跳过（不中止）
                                         permission_error_count += 1
                                         error_count += 1
                                         path_display = format_path_for_log(file_path_str) if file_path_str else "未知路径"
                                         if permission_error_count <= 20:  # 只记录前20个权限错误
-                                            logger.warning(f"压缩扫描：权限错误（文件 #{permission_error_count}）: {path_display}，错误: {str(file_error)}")
-                                        if len(error_paths) < 50:  # 只记录前50个错误路径
-                                            error_paths.append(file_path_str if file_path_str else str(file_path))
-                                        continue
-                                    except (FileNotFoundError, IOError) as file_error:
-                                        # 文件不存在或IO错误：跳过该文件，继续扫描
-                                        error_count += 1
-                                        path_display = format_path_for_log(file_path_str) if file_path_str else "未知路径"
-                                        logger.debug(f"压缩扫描：文件不存在或IO错误: {path_display}，错误: {str(file_error)}")
+                                            logger.warning(f"压缩扫描：文件错误（文件 #{permission_error_count}）: {path_display}，错误: {str(file_error)}")
                                         if len(error_paths) < 50:  # 只记录前50个错误路径
                                             error_paths.append(file_path_str if file_path_str else str(file_path))
                                         continue
                                     except Exception as file_error:
-                                        # 其他错误，也跳过该文件
+                                        # 其他错误：记录并跳过该文件（不中止）
+                                        permission_error_count += 1
                                         error_count += 1
                                         path_display = format_path_for_log(file_path_str) if file_path_str else "未知路径"
-                                        logger.warning(f"压缩扫描：跳过出错的文件: {path_display}，错误: {str(file_error)}")
+                                        if permission_error_count <= 20:
+                                            logger.warning(f"压缩扫描：跳过出错的文件（文件 #{permission_error_count}）: {path_display}，错误: {str(file_error)}")
                                         if len(error_paths) < 50:  # 只记录前50个错误路径
                                             error_paths.append(file_path_str if file_path_str else str(file_path))
                                         continue
@@ -835,50 +853,38 @@ class FileScanner:
                                             skipped_dirs += 1
                                             # 跳过该目录下的所有文件（rglob会继续，但我们在文件检查时会跳过）
                                             continue
-                                    except (PermissionError, OSError) as dir_error:
-                                        # 目录权限错误：记录详细路径信息
+                                    except (PermissionError, OSError, FileNotFoundError, IOError) as dir_error:
+                                        # 目录权限错误、不存在或IO错误：记录详细路径信息并跳过（不中止）
                                         permission_error_count += 1
                                         error_count += 1
                                         path_display = format_path_for_log(file_path_str) if file_path_str else "未知路径"
                                         if permission_error_count <= 20:  # 只记录前20个权限错误
-                                            logger.warning(f"压缩扫描：目录权限错误（目录 #{permission_error_count}）: {path_display}，错误: {str(dir_error)}")
+                                            logger.warning(f"压缩扫描：目录错误（目录 #{permission_error_count}）: {path_display}，错误: {str(dir_error)}")
                                         if len(error_paths) < 50:  # 只记录前50个错误路径
                                             error_paths.append(file_path_str if file_path_str else str(file_path))
                                         continue
-                                    except (FileNotFoundError, IOError) as dir_error:
-                                        # 目录不存在或IO错误：跳过该目录
+                                    except Exception as dir_error:
+                                        # 其他错误：记录并跳过该目录（不中止）
+                                        permission_error_count += 1
                                         error_count += 1
                                         path_display = format_path_for_log(file_path_str) if file_path_str else "未知路径"
-                                        logger.debug(f"压缩扫描：目录不存在或IO错误: {path_display}，错误: {str(dir_error)}")
+                                        if permission_error_count <= 20:
+                                            logger.warning(f"压缩扫描：跳过出错的目录（目录 #{permission_error_count}）: {path_display}，错误: {str(dir_error)}")
                                         if len(error_paths) < 50:  # 只记录前50个错误路径
                                             error_paths.append(file_path_str if file_path_str else str(file_path))
                                         continue
-                            except (PermissionError, OSError) as path_error:
-                                # 路径权限错误：记录详细路径信息
+                            except (PermissionError, OSError, FileNotFoundError, IOError) as path_error:
+                                # 路径权限错误、不存在或IO错误：记录详细路径信息并跳过（不中止）
                                 permission_error_count += 1
                                 error_count += 1
                                 try:
                                     path_str = str(file_path) if 'file_path' in locals() else "未知路径"
                                     path_display = format_path_for_log(path_str)
                                     if permission_error_count <= 20:  # 只记录前20个权限错误
-                                        logger.warning(f"压缩扫描：路径权限错误（路径 #{permission_error_count}）: {path_display}，错误: {str(path_error)}")
+                                        logger.warning(f"压缩扫描：路径错误（路径 #{permission_error_count}）: {path_display}，错误: {str(path_error)}")
                                 except Exception:
-                                    logger.warning(f"压缩扫描：路径权限错误（路径 #{permission_error_count}）: 无法获取路径，错误: {str(path_error)}")
-                                if len(error_paths) < 50:  # 只记录前50个错误路径
-                                    try:
-                                        error_paths.append(str(file_path) if 'file_path' in locals() else "未知路径")
-                                    except Exception:
-                                        pass
-                                continue
-                            except (FileNotFoundError, IOError) as path_error:
-                                # 路径不存在或IO错误：跳过该路径
-                                error_count += 1
-                                try:
-                                    path_str = str(file_path) if 'file_path' in locals() else "未知路径"
-                                    path_display = format_path_for_log(path_str)
-                                    logger.debug(f"压缩扫描：路径不存在或IO错误: {path_display}，错误: {str(path_error)}")
-                                except Exception:
-                                    logger.debug(f"压缩扫描：路径不存在或IO错误: 无法获取路径，错误: {str(path_error)}")
+                                    if permission_error_count <= 20:
+                                        logger.warning(f"压缩扫描：路径错误（路径 #{permission_error_count}）: 无法获取路径，错误: {str(path_error)}")
                                 if len(error_paths) < 50:  # 只记录前50个错误路径
                                     try:
                                         error_paths.append(str(file_path) if 'file_path' in locals() else "未知路径")
@@ -886,14 +892,17 @@ class FileScanner:
                                         pass
                                 continue
                             except Exception as path_error:
-                                # 其他错误，也跳过该路径
+                                # 其他错误：记录并跳过该路径（不中止）
+                                permission_error_count += 1
                                 error_count += 1
                                 try:
                                     path_str = str(file_path) if 'file_path' in locals() else "未知路径"
                                     path_display = format_path_for_log(path_str)
-                                    logger.warning(f"压缩扫描：跳过出错的路径: {path_display}，错误: {str(path_error)}")
+                                    if permission_error_count <= 20:
+                                        logger.warning(f"压缩扫描：跳过出错的路径（路径 #{permission_error_count}）: {path_display}，错误: {str(path_error)}")
                                 except Exception:
-                                    logger.warning(f"压缩扫描：跳过出错的路径: 无法获取路径，错误: {str(path_error)}")
+                                    if permission_error_count <= 20:
+                                        logger.warning(f"压缩扫描：跳过出错的路径（路径 #{permission_error_count}）: 无法获取路径，错误: {str(path_error)}")
                                 if len(error_paths) < 50:  # 只记录前50个错误路径
                                     try:
                                         error_paths.append(str(file_path) if 'file_path' in locals() else "未知路径")
@@ -1084,7 +1093,35 @@ class FileScanner:
                                 
                                 try:
                                     # 使用 os.scandir() 扫描当前目录
-                                    with os.scandir(current_scan_dir_str) as entries:
+                                    # 捕获所有错误（权限错误、IO错误等），记录日志后跳过
+                                    try:
+                                        entries = os.scandir(current_scan_dir_str)
+                                    except (PermissionError, OSError, FileNotFoundError, IOError) as scandir_err:
+                                        # 目录无法打开（权限不足、不存在等）：记录并跳过
+                                        error_count += 1
+                                        permission_error_count += 1
+                                        try:
+                                            path_display = format_path_for_log(current_scan_dir_str)
+                                            if permission_error_count <= 20:
+                                                logger.warning(f"扫描：无法打开目录（目录 #{permission_error_count}）: {path_display}，错误: {str(scandir_err)}")
+                                        except Exception:
+                                            if permission_error_count <= 20:
+                                                logger.warning(f"扫描：无法打开目录（目录 #{permission_error_count}）: 无法获取路径，错误: {str(scandir_err)}")
+                                        continue
+                                    except Exception as scandir_err:
+                                        # 其他错误：记录并跳过
+                                        error_count += 1
+                                        permission_error_count += 1
+                                        try:
+                                            path_display = format_path_for_log(current_scan_dir_str)
+                                            if permission_error_count <= 20:
+                                                logger.warning(f"扫描：扫描目录时出错（目录 #{permission_error_count}）: {path_display}，错误: {str(scandir_err)}")
+                                        except Exception:
+                                            if permission_error_count <= 20:
+                                                logger.warning(f"扫描：扫描目录时出错（目录 #{permission_error_count}）: 无法获取路径，错误: {str(scandir_err)}")
+                                        continue
+                                    
+                                    with entries:
                                         for entry in entries:
                                             try:
                                                 # 获取路径
@@ -1169,45 +1206,66 @@ class FileScanner:
                                                             logger.debug(f"扫描：无法访问路径: {format_path_for_log(current_path_str)}，错误: {str(entry_err)}")
                                                         continue
                                                     
-                                            except (PermissionError, OSError) as entry_err:
+                                            except (PermissionError, OSError, FileNotFoundError, IOError) as entry_err:
+                                                # 路径权限错误、不存在或IO错误：记录并跳过（不中止）
                                                 error_count += 1
                                                 try:
                                                     path_str = str(entry.path) if hasattr(entry, 'path') else "未知路径"
                                                     if error_count <= 20:
-                                                        logger.warning(f"扫描：路径权限错误（路径 #{error_count}）: {format_path_for_log(path_str)}，错误: {str(entry_err)}")
+                                                        logger.warning(f"扫描：路径错误（路径 #{error_count}）: {format_path_for_log(path_str)}，错误: {str(entry_err)}")
                                                 except Exception:
                                                     if error_count <= 20:
-                                                        logger.warning(f"扫描：路径权限错误（路径 #{error_count}）: 无法获取路径，错误: {str(entry_err)}")
-                                                continue
-                                            except (FileNotFoundError, IOError) as entry_err:
+                                                        logger.warning(f"扫描：路径错误（路径 #{error_count}）: 无法获取路径，错误: {str(entry_err)}")
                                                 continue
                                             except Exception as entry_err:
+                                                # 其他错误：记录并跳过（不中止）
                                                 error_count += 1
                                                 try:
                                                     path_str = str(entry.path) if hasattr(entry, 'path') else "未知路径"
                                                     if error_count <= 20:
-                                                        logger.debug(f"扫描：跳过路径错误 {format_path_for_log(path_str)}: {str(entry_err)}")
+                                                        logger.warning(f"扫描：跳过路径错误（路径 #{error_count}）: {format_path_for_log(path_str)}，错误: {str(entry_err)}")
                                                 except Exception:
-                                                    pass
+                                                    if error_count <= 20:
+                                                        logger.warning(f"扫描：跳过路径错误（路径 #{error_count}）: 无法获取路径，错误: {str(entry_err)}")
                                                 continue
-                                except (PermissionError, OSError) as scan_dir_err:
-                                    # 目录权限错误：记录并跳过该目录
+                                except (PermissionError, OSError, FileNotFoundError, IOError) as scan_dir_err:
+                                    # 目录权限错误、不存在或IO错误：记录并跳过该目录（不中止）
                                     error_count += 1
+                                    permission_error_count += 1
                                     error_paths.append(current_scan_dir_str)
-                                    if error_count <= 20:
-                                        logger.warning(f"扫描：目录权限错误（目录 #{error_count}）: {format_path_for_log(current_scan_dir_str)}，错误: {str(scan_dir_err)}")
-                                    continue
-                                except (FileNotFoundError, IOError) as scan_dir_err:
+                                    try:
+                                        path_display = format_path_for_log(current_scan_dir_str)
+                                        if permission_error_count <= 20:
+                                            logger.warning(f"扫描：目录错误（目录 #{permission_error_count}）: {path_display}，错误: {str(scan_dir_err)}")
+                                    except Exception:
+                                        if permission_error_count <= 20:
+                                            logger.warning(f"扫描：目录错误（目录 #{permission_error_count}）: 无法获取路径，错误: {str(scan_dir_err)}")
                                     continue
                                 except Exception as scan_dir_err:
+                                    # 其他错误：记录并跳过（不中止）
                                     error_count += 1
+                                    permission_error_count += 1
                                     error_paths.append(current_scan_dir_str)
-                                    if error_count <= 20:
-                                        logger.debug(f"扫描：跳过目录错误 {format_path_for_log(current_scan_dir_str)}: {str(scan_dir_err)}")
+                                    try:
+                                        path_display = format_path_for_log(current_scan_dir_str)
+                                        if permission_error_count <= 20:
+                                            logger.warning(f"扫描：跳过目录错误（目录 #{permission_error_count}）: {path_display}，错误: {str(scan_dir_err)}")
+                                    except Exception:
+                                        if permission_error_count <= 20:
+                                            logger.warning(f"扫描：跳过目录错误（目录 #{permission_error_count}）: 无法获取路径，错误: {str(scan_dir_err)}")
                                     continue
                                     
                             except Exception as dir_scan_err:
-                                logger.debug(f"扫描：目录扫描错误: {str(dir_scan_err)}")
+                                # 其他目录扫描错误：记录但继续（不中止）
+                                error_count += 1
+                                permission_error_count += 1
+                                try:
+                                    path_display = format_path_for_log(current_scan_dir_str) if current_scan_dir_str else "未知目录"
+                                    if permission_error_count <= 20:
+                                        logger.warning(f"扫描：目录扫描错误（目录 #{permission_error_count}）: {path_display}，错误: {str(dir_scan_err)}")
+                                except Exception:
+                                    if permission_error_count <= 20:
+                                        logger.warning(f"扫描：目录扫描错误（目录 #{permission_error_count}）: 无法获取路径，错误: {str(dir_scan_err)}")
                                 continue
                                 
                     except (PermissionError, OSError, FileNotFoundError, IOError) as scan_error:

@@ -884,7 +884,8 @@ class TapeToolsManager:
         proc = await asyncio.create_subprocess_shell(
             cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL  # 防止子进程等待输入导致阻塞
         )
         
         try:

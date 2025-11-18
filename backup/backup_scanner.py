@@ -326,7 +326,6 @@ class BackupScanner:
                             file_count = 0  # 文件计数（在finally中使用）
                             dir_count = 0  # 目录计数
                             permission_error_count = 0  # 权限错误计数
-                            path_too_long_count = 0  # 路径过长错误计数
                             BATCH_FORCE_INTERVAL = 1200.0  # 强制提交批次的时间间隔（秒）- 20分钟
                             PROGRESS_LOG_INTERVAL = 60.0  # 进度日志输出间隔（秒）- 1分钟
                             DIR_LOG_INTERVAL = 120.0  # 目录日志输出间隔（秒）- 2分钟
@@ -360,7 +359,6 @@ class BackupScanner:
                             
                             # 获取批次字节数阈值（与压缩扫描使用相同的参数）
                             batch_bytes_threshold = self.settings.SCAN_BATCH_SIZE_BYTES
-                            MAX_PATH_LENGTH = 260  # Windows路径最大长度（字符）
                             MAX_PATH_DISPLAY = 200  # 日志中显示的最大路径长度（字符）
                             
                             def truncate_path(path_str: str, max_len: int = MAX_PATH_DISPLAY) -> str:
@@ -372,12 +370,8 @@ class BackupScanner:
                                 return f"{path_str[:prefix_len]}...{path_str[-(max_len-prefix_len-3):]}"
                             
                             def format_path_for_log(path_str: str) -> str:
-                                """格式化路径以便在日志中显示，考虑长度限制"""
+                                """格式化路径以便在日志中显示"""
                                 try:
-                                    # 检查路径长度
-                                    path_len = len(path_str)
-                                    if path_len > MAX_PATH_LENGTH:
-                                        return f"{truncate_path(path_str)} (路径长度: {path_len} 字符，超过Windows限制 {MAX_PATH_LENGTH} 字符)"
                                     return truncate_path(path_str)
                                 except Exception:
                                     return str(path_str)[:MAX_PATH_DISPLAY]
@@ -464,14 +458,6 @@ class BackupScanner:
                                                             try:
                                                                 entry_path = Path(entry.path)
                                                                 current_path_str = str(entry_path)
-                                                                path_len = len(current_path_str)
-                                                                
-                                                                # 检查路径长度
-                                                                if path_len > MAX_PATH_LENGTH:
-                                                                    path_too_long_count += 1
-                                                                    if path_too_long_count <= 10:  # 只记录前10个路径过长的情况
-                                                                        logger.warning(f"后台扫描任务：路径过长（{path_len} 字符 > {MAX_PATH_LENGTH} 字符）: {format_path_for_log(current_path_str)}")
-                                                                    continue
                                                             except Exception as path_str_err:
                                                                 # 路径字符串化失败（可能是编码问题）
                                                                 logger.debug(f"后台扫描任务：路径字符串化失败: {str(path_str_err)}")
@@ -496,7 +482,8 @@ class BackupScanner:
                                                                     
                                                                     # 文件：统计文件大小
                                                                     try:
-                                                                        stat = entry_path.stat()
+                                                                        # 使用 entry.stat() 而不是 entry_path.stat()，因为 entry 已经缓存了 stat 信息
+                                                                        stat = entry.stat(follow_symlinks=False)
                                                                         file_size = stat.st_size
                                                                         
                                                                         # 在线程中统计（本地变量，线程安全）
@@ -565,7 +552,7 @@ class BackupScanner:
                                                                             elapsed = current_time - last_log_time if last_log_time else 0
                                                                             rate = (file_count - last_log_count) / elapsed_since_last_progress if elapsed_since_last_progress > 0 else 0
                                                                             current_dir_display = format_path_for_log(current_dir) if current_dir else "未知"
-                                                                            logger.info(f"后台扫描任务：正在扫描目录 {source_path_str}，已扫描 {file_count} 个文件，{dir_count} 个目录，待扫描目录: {len(dirs_to_scan)}，批次阈值: {batch_threshold}，当前批次 {batch_files} 个文件 {format_bytes(batch_bytes)}，耗时 {elapsed:.1f} 秒，速度 {rate:.0f} 文件/秒，距上次提交 {elapsed_since_last_batch:.1f} 秒，当前目录: {current_dir_display}，权限错误: {permission_error_count}，路径过长: {path_too_long_count}（线程运行中）")
+                                                                            logger.info(f"后台扫描任务：正在扫描目录 {source_path_str}，已扫描 {file_count} 个文件，{dir_count} 个目录，待扫描目录: {len(dirs_to_scan)}，批次阈值: {batch_threshold}，当前批次 {batch_files} 个文件 {format_bytes(batch_bytes)}，耗时 {elapsed:.1f} 秒，速度 {rate:.0f} 文件/秒，距上次提交 {elapsed_since_last_batch:.1f} 秒，当前目录: {current_dir_display}，权限错误: {permission_error_count}（线程运行中）")
                                                                             last_log_count = file_count
                                                                             last_log_time = current_time
                                                                             last_progress_log_time = current_time
@@ -595,7 +582,8 @@ class BackupScanner:
                                                                 # 无法判断类型，尝试作为文件处理
                                                                 try:
                                                                     if entry_path.is_file():
-                                                                        stat = entry_path.stat()
+                                                                        # 使用 entry.stat() 而不是 entry_path.stat()，因为 entry 已经缓存了 stat 信息
+                                                                        stat = entry.stat(follow_symlinks=False)
                                                                         file_size = stat.st_size
                                                                         batch_files += 1
                                                                         batch_bytes += file_size
@@ -668,7 +656,7 @@ class BackupScanner:
                                         logger.warning(f"后台扫描任务：还有 {len(dirs_to_scan)} 个目录待扫描，但主循环已退出（目录: {source_path_str}）")
                                     
                                     total_time = time.time() - start_time
-                                    logger.info(f"后台扫描任务：目录遍历完成 {source_path_str}，共扫描 {file_count} 个文件，{dir_count} 个目录，权限错误: {permission_error_count} 个，路径过长: {path_too_long_count} 个，总耗时 {total_time:.1f} 秒")
+                                    logger.info(f"后台扫描任务：目录遍历完成 {source_path_str}，共扫描 {file_count} 个文件，{dir_count} 个目录，权限错误: {permission_error_count} 个，总耗时 {total_time:.1f} 秒")
                                 except KeyboardInterrupt:
                                     logger.warning(f"后台扫描任务：遍历目录被中断 {source_path_str}，已扫描 {file_count} 个文件，{dir_count} 个目录")
                                     scan_failed = True
