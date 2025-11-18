@@ -185,7 +185,13 @@ class MemoryDBWriter:
             await self._check_sync_need()
 
         except Exception as e:
-            logger.error(f"添加文件到内存数据库失败: {e}, 文件: {file_info.get('path')}")
+            file_path = file_info.get('path', 'unknown')
+            logger.error(
+                f"添加文件到内存数据库失败: {e}, "
+                f"文件路径: {file_path[:200]}, "
+                f"file_info键: {list(file_info.keys())}, "
+                f"file_info值: {dict((k, type(v).__name__ if not isinstance(v, (str, int, bool, type(None))) else v) for k, v in file_info.items())}"
+            )
             raise
 
     def _prepare_insert_data_from_scanner(self, file_info: Dict) -> tuple:

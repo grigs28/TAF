@@ -251,10 +251,21 @@ class ESScanner:
                                         file_path = parts[0].strip()
                                         file_size_str = parts[1].strip()
                                         
+                                        # 验证文件路径
+                                        if not file_path:
+                                            logger.warning(f"{log_context} 文件路径为空，跳过该行: {repr(line[:100])}")
+                                            continue
+                                        
+                                        # 验证文件大小字符串
+                                        if not file_size_str:
+                                            logger.warning(f"{log_context} 文件大小为空，路径: {file_path[:100]}")
+                                            file_size_str = "0"
+                                        
                                         # 解析文件大小（字节）
                                         try:
                                             file_size = int(file_size_str)
                                         except ValueError:
+                                            logger.warning(f"{log_context} 文件大小解析失败: {file_size_str}，路径: {file_path[:100]}")
                                             file_size = 0
                                         
                                         # 解析修改日期（ISO-8601格式，如果有）
@@ -290,6 +301,11 @@ class ESScanner:
                                         #                      'is_file': bool, 'is_dir': bool, 'is_symlink': bool}
                                         file_name = os.path.basename(file_path)
                                         
+                                        # 验证文件名不为空
+                                        if not file_name:
+                                            logger.warning(f"{log_context} 文件名解析失败，路径: {file_path[:100]}")
+                                            file_name = os.path.basename(file_path) or "unknown"
+                                        
                                         # ES扫描器默认都是文件（因为已经用-a-d参数过滤了目录）
                                         file_info = {
                                             'path': file_path,
@@ -303,9 +319,14 @@ class ESScanner:
                                             # 注意：不添加任何额外字段，只保留file_scanner格式中的字段
                                         }
                                         
+                                        # 验证file_info关键字段
+                                        if not file_info.get('path'):
+                                            logger.error(f"{log_context} file_info缺少path字段: {file_info}")
+                                            continue
+                                        
                                         batch.append(file_info)
                                 except Exception as e:
-                                    logger.warning(f"{log_context} 解析文件信息失败: {line}, 错误: {str(e)}")
+                                    logger.warning(f"{log_context} 解析文件信息失败: {repr(line[:200])}, 错误: {str(e)}", exc_info=True)
                                     continue
                             
                             if batch:
