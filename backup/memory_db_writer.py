@@ -408,47 +408,70 @@ class MemoryDBWriter:
                 await asyncio.sleep(30)  # 错误后等待更长时间
 
     async def _sync_to_opengauss(self, reason: str = "manual"):
-        """同步文件到openGauss - 使用原生SQL，严禁SQLAlchemy解析openGauss"""
+        """同步文件到openGauss - 使用原生SQL，严禁SQLAlchemy解析openGauss
+        
+        每次同步时，循环处理所有未同步的文件，直到全部同步完成（分批处理）
+        """
         if self._is_syncing:
             return
 
         self._is_syncing = True
         sync_start_time = time.time()
+        total_synced_count = 0
+        batch_number = 0
 
         try:
-            # 获取待同步的文件批次
-            files_to_sync = await self._get_files_to_sync()
+            # 循环同步，直到所有未同步的文件都处理完成
+            while True:
+                # 获取待同步的文件批次（每次获取一批）
+                files_to_sync = await self._get_files_to_sync()
 
-            if not files_to_sync:
-                logger.info("内存数据库中没有文件需要同步到openGauss")
-                return
+                if not files_to_sync:
+                    # 没有更多文件需要同步
+                    if batch_number == 0:
+                        logger.info("内存数据库中没有文件需要同步到openGauss")
+                    break
 
-            logger.info(f"开始同步 {len(files_to_sync)} 个文件到openGauss (原因: {reason})")
+                batch_number += 1
+                logger.info(f"[批次 {batch_number}] 开始同步 {len(files_to_sync)} 个文件到openGauss (原因: {reason})")
 
-            # 批量同步到openGauss
-            synced_count = await self._batch_sync_to_opengauss(files_to_sync)
+                # 批量同步到openGauss
+                synced_count = await self._batch_sync_to_opengauss(files_to_sync)
 
-            # 更新同步状态
-            await self._mark_files_synced([f[0] for f in files_to_sync[:synced_count]])
+                # 更新同步状态（只标记成功同步的文件）
+                if synced_count > 0:
+                    await self._mark_files_synced([f[0] for f in files_to_sync[:synced_count]])
 
-            # 更新统计
-            sync_time = time.time() - sync_start_time
-            self._stats['synced_files'] += synced_count
-            self._stats['sync_batches'] += 1
-            self._stats['sync_time'] += sync_time
-            self._last_sync_time = time.time()
+                # 更新统计
+                total_synced_count += synced_count
+                self._stats['synced_files'] += synced_count
+                self._stats['sync_batches'] += 1
 
-            logger.info(f"✅ 同步完成: {synced_count}/{len(files_to_sync)} 个文件已成功同步到openGauss，耗时 {sync_time:.2f}秒")
-            
-            # 如果还有未同步的文件，记录警告
-            if synced_count < len(files_to_sync):
-                remaining = len(files_to_sync) - synced_count
-                logger.warning(f"⚠️ 还有 {remaining} 个文件未同步，将在下次同步时重试")
+                logger.info(f"[批次 {batch_number}] ✅ 同步完成: {synced_count}/{len(files_to_sync)} 个文件已成功同步到openGauss")
+                
+                # 如果当前批次中还有未同步的文件，记录警告
+                if synced_count < len(files_to_sync):
+                    remaining = len(files_to_sync) - synced_count
+                    logger.warning(f"[批次 {batch_number}] ⚠️ 还有 {remaining} 个文件同步失败，将在下次同步时重试")
+
+            # 所有批次同步完成
+            if batch_number > 0:
+                sync_time = time.time() - sync_start_time
+                self._stats['sync_time'] += sync_time
+                self._last_sync_time = time.time()
+                
+                logger.info(f"✅ 全部同步完成: 共 {batch_number} 个批次，成功同步 {total_synced_count} 个文件到openGauss，总耗时 {sync_time:.2f}秒")
+                
+                # 检查是否还有未同步的文件
+                pending_count = await self._get_pending_sync_count()
+                if pending_count > 0:
+                    logger.warning(f"⚠️ 仍有 {pending_count} 个文件未同步，将在下次同步时重试")
 
         except Exception as e:
             logger.error(f"同步到openGauss失败: {e}", exc_info=True)
-            # 记录同步错误
-            await self._mark_sync_error(files_to_sync, str(e))
+            # 记录同步错误（如果有）
+            if 'files_to_sync' in locals() and files_to_sync:
+                await self._mark_sync_error(files_to_sync, str(e))
 
         finally:
             self._is_syncing = False
