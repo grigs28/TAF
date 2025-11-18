@@ -34,12 +34,19 @@ async def get_database_config():
             "max_overflow": settings.DB_MAX_OVERFLOW
         }
         
-        # 尝试解析数据库类型和参数
-        if db_url.startswith("sqlite"):
+        # 优先使用 DB_FLAVOR 配置获取数据库类型
+        if settings.DB_FLAVOR:
+            db_info["db_type"] = settings.DB_FLAVOR
+        # 否则从 DATABASE_URL 推断数据库类型
+        elif db_url.startswith("sqlite"):
             db_info["db_type"] = "sqlite"
-            db_info["db_path"] = db_url.replace("sqlite:///", "")
         elif db_url.startswith("postgresql://") or db_url.startswith("opengauss://"):
             db_info["db_type"] = "opengauss" if db_url.startswith("opengauss") else "postgresql"
+        
+        # 根据数据库类型设置相应参数
+        if db_info["db_type"] == "sqlite":
+            db_info["db_path"] = db_url.replace("sqlite:///", "")
+        else:
             # 提取连接参数
             db_info["db_host"] = settings.DB_HOST
             db_info["db_port"] = settings.DB_PORT
@@ -193,6 +200,7 @@ async def update_database_config(config: DatabaseConfig, request: Request):
         # 更新或添加数据库配置
         config_keys = {
             "DATABASE_URL": db_url,
+            "DB_FLAVOR": config.db_type,  # 保存数据库类型
             "DB_HOST": config.db_host or "",
             "DB_PORT": str(config.db_port or ""),
             "DB_USER": config.db_user or "",
