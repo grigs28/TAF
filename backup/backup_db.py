@@ -1130,31 +1130,48 @@ class BackupDB:
             for i in range(0, len(file_paths), batch_size):
                 batch_paths = file_paths[i:i + batch_size]
                 try:
-                    batch_existing = await conn.fetch(
-                        """
-                        SELECT id, file_path, is_copy_success
-                        FROM backup_files
-                        WHERE backup_set_id = $1 AND file_path = ANY($2)
-                        """,
-                        backup_set_db_id, batch_paths
+                    # 添加超时设置，防止查询阻塞（60秒超时）
+                    import asyncio
+                    batch_existing = await asyncio.wait_for(
+                        conn.fetch(
+                            """
+                            SELECT id, file_path, is_copy_success
+                            FROM backup_files
+                            WHERE backup_set_id = $1 AND file_path = ANY($2)
+                            """,
+                            backup_set_db_id, batch_paths
+                        ),
+                        timeout=60.0  # 60秒超时
                     )
                     for row in batch_existing:
                         existing_map[row['file_path']] = row
                     logger.debug(f"[mark_files_as_copied] 已查询批次 {i // batch_size + 1}/{(len(file_paths) + batch_size - 1) // batch_size}，找到 {len(batch_existing)} 个已存在文件")
                 except Exception as batch_error:
-                    logger.error(f"[mark_files_as_copied] 批次查询失败（批次 {i // batch_size + 1}）: {batch_error}")
+                    # 记录详细的错误信息，包括错误类型和消息
+                    error_type = type(batch_error).__name__
+                    error_msg = str(batch_error) if batch_error else "未知错误"
+                    logger.error(
+                        f"[mark_files_as_copied] 批次查询失败（批次 {i // batch_size + 1}）: "
+                        f"错误类型: {error_type}, 错误信息: {error_msg}",
+                        exc_info=True  # 包含完整的堆栈跟踪
+                    )
                     # 继续处理下一批次
                     continue
         else:
             # 文件数量较少，直接查询
             try:
-                existing_files = await conn.fetch(
-                    """
-                    SELECT id, file_path, is_copy_success
-                    FROM backup_files
-                    WHERE backup_set_id = $1 AND file_path = ANY($2)
-                    """,
-                    backup_set_db_id, file_paths
+                # 添加超时设置，防止查询阻塞（60秒超时）
+                import asyncio
+                existing_files = await asyncio.wait_for(
+                    conn.fetch(
+                        """
+                        SELECT id, file_path, is_copy_success
+                        FROM backup_files
+                        WHERE backup_set_id = $1 AND file_path = ANY($2)
+                        """,
+                        backup_set_db_id, file_paths
+                    ),
+                    timeout=60.0  # 60秒超时
                 )
                 existing_map = {row['file_path']: row for row in existing_files}
             except Exception as query_error:
@@ -1426,7 +1443,7 @@ class BackupDB:
                         # 将result_summary转换为JSON字符串
                         result_summary_json = json.dumps(result_summary) if result_summary else None
                         
-                        logger.debug(f"[update_scan_progress] 更新任务 {backup_task.id} 的进度：processed_files={scanned_count}, processed_bytes={processed_bytes}, compressed_bytes={compressed_bytes}")
+                        logger.info(f"[update_scan_progress] 更新任务 {backup_task.id} 的进度：processed_files={scanned_count}, processed_bytes={processed_bytes}, compressed_bytes={compressed_bytes}")
                         await conn.execute(
                             """
                             UPDATE backup_tasks
@@ -1520,7 +1537,7 @@ class BackupDB:
                 # 非 openGauss 使用 SQLAlchemy（但当前项目仅支持 openGauss）
                 logger.warning("非 openGauss 数据库，跳过进度更新")
         except Exception as e:
-            logger.debug(f"更新扫描进度失败（忽略继续）: {str(e)}")
+            logger.warning(f"更新扫描进度失败（忽略继续）: {str(e)}")
     
     async def update_task_status(self, backup_task: BackupTask, status: BackupTaskStatus):
         """更新任务状态
@@ -1934,5 +1951,5 @@ class BackupDB:
                         backup_task.id
                     )
         except Exception as e:
-            logger.debug(f"更新扫描进度失败（忽略继续）: {str(e)}")
+            logger.warning(f"更新扫描进度失败（忽略继续）: {str(e)}")
 

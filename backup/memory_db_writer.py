@@ -438,7 +438,7 @@ class MemoryDBWriter:
                     break
 
                 batch_number += 1
-                logger.debug(f"[批次 {batch_number}] 开始同步 {len(files_to_sync)} 个文件到openGauss (原因: {reason})")
+                logger.info(f"[批次 {batch_number}] 开始同步 {len(files_to_sync)} 个文件到openGauss (原因: {reason})")
 
                 # 批量同步到openGauss
                 synced_count = await self._batch_sync_to_opengauss(files_to_sync)
@@ -452,7 +452,7 @@ class MemoryDBWriter:
                 self._stats['synced_files'] += synced_count
                 self._stats['sync_batches'] += 1
 
-                logger.debug(f"[批次 {batch_number}] ✅ 同步完成: {synced_count}/{len(files_to_sync)} 个文件已成功同步到openGauss")
+                logger.info(f"[批次 {batch_number}] ✅ 同步完成: {synced_count}/{len(files_to_sync)} 个文件已成功同步到openGauss")
                 
                 # 如果当前批次中还有未同步的文件，记录警告
                 if synced_count < len(files_to_sync):
