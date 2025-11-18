@@ -527,7 +527,7 @@ class MemoryDBWriter:
         if not files:
             return 0
 
-        logger.debug(f"正在批量同步 {len(files)} 个文件到openGauss...")
+        logger.info(f"正在批量同步 {len(files)} 个文件到openGauss...")
         synced_count = 0
         async with get_opengauss_connection() as conn:
             for file_record in files:
