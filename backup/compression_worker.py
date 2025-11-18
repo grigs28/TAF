@@ -377,16 +377,18 @@ class CompressionWorker:
                             temp_archive_path = compressed_file.get('temp_path')
                             final_archive_path = compressed_file.get('final_path')
                             
-                            # 将文件加入文件移动worker队列（非阻塞）
-                            await self.file_move_worker.add_file_move_task(
-                                temp_path=temp_archive_path,
-                                final_path=final_archive_path,
-                                backup_set=self.backup_set,
-                                chunk_number=current_group_idx,
-                                callback=move_callback,
-                                backup_task=self.backup_task
+                            # 将文件加入文件移动worker队列（非阻塞，使用create_task确保不等待）
+                            asyncio.create_task(
+                                self.file_move_worker.add_file_move_task(
+                                    temp_path=temp_archive_path,
+                                    final_path=final_archive_path,
+                                    backup_set=self.backup_set,
+                                    chunk_number=current_group_idx,
+                                    callback=move_callback,
+                                    backup_task=self.backup_task
+                                )
                             )
-                            logger.info(f"[文件移动] 文件移动任务已提交到队列，压缩循环继续执行")
+                            logger.debug(f"[文件移动] 文件移动任务已提交到队列（异步，不阻塞压缩循环）")
                             
                             # 暂时使用源路径作为磁带路径（移动完成后会更新）
                             tape_file_path = compressed_file['path']

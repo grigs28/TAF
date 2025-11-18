@@ -194,7 +194,7 @@ class ESScanner:
             log_context: 日志上下文前缀
             
         Yields:
-            文件信息批次（每批最多1000个文件）
+            文件信息批次（每批文件数由 SCAN_UPDATE_INTERVAL 配置决定）
         """
         if exclude_patterns is None:
             exclude_patterns = []
@@ -203,6 +203,11 @@ class ESScanner:
         if not self._check_es_tool():
             logger.error(f"{log_context} ES工具不存在: {self.es_exe_path}，无法使用ES扫描")
             raise FileNotFoundError(f"ES工具不存在: {self.es_exe_path}")
+        
+        # 从配置中获取后台扫描进度更新间隔（文件数），作为ES分页的limit
+        from config.settings import get_settings
+        settings = get_settings()
+        limit = getattr(settings, 'SCAN_UPDATE_INTERVAL', 500)  # 默认500，与后台扫描更新间隔一致
         
         total_files_scanned = 0
         
@@ -216,7 +221,6 @@ class ESScanner:
             
             page = 1
             offset = 0
-            limit = 1000
             
             while True:
                 try:
