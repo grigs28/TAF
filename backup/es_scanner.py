@@ -257,33 +257,28 @@ class ESScanner:
                                         
                                         # 构建文件信息字典（必须与file_scanner格式完全一致）
                                         # file_scanner返回格式：{'path': str, 'name': str, 'size': int, 
-                                        #                      'modified_time': datetime, 'permissions': str,
+                                        #                      'modified_time': datetime（naive，不带时区）, 'permissions': str,
                                         #                      'is_file': bool, 'is_dir': bool, 'is_symlink': bool}
                                         file_name = os.path.basename(file_path)
                                         
-                                        # ES扫描器无法直接获取文件修改时间，使用当前时间作为默认值
-                                        # 但会在后续同步时被openGauss中的实际值覆盖（如果文件已存在）
-                                        from datetime import datetime, timezone
-                                        modified_time = datetime.now(timezone.utc)
+                                        # ES扫描器无法直接获取文件修改时间
+                                        # file_scanner使用 datetime.fromtimestamp(stat.st_mtime) 返回 naive datetime（不带时区）
+                                        # memory_db_writer会为其添加UTC时区，所以这里也应该返回 naive datetime
+                                        # 使用当前时间作为默认值（后续同步时会被openGauss中的实际值覆盖，如果文件已存在）
+                                        from datetime import datetime
+                                        modified_time = datetime.now()  # naive datetime，不带时区，与file_scanner一致
                                         
                                         # ES扫描器默认都是文件（因为已经用-a-d参数过滤了目录）
                                         file_info = {
                                             'path': file_path,
-                                            'name': file_name,  # 注意：必须是'name'，不是'file_name'
-                                            'size': file_size,
-                                            'modified_time': modified_time,  # 必须提供modified_time
-                                            'permissions': None,  # ES扫描不提供权限信息
+                                            'name': file_name,  # 注意：必须是'name'，不是'file_name'，与file_scanner完全一致
+                                            'size': file_size,  # int类型，字节数
+                                            'modified_time': modified_time,  # naive datetime对象，不带时区
+                                            'permissions': None,  # ES扫描不提供权限信息，None与file_scanner的字符串不同，但memory_db_writer可以处理
                                             'is_file': True,  # ES扫描只返回文件
                                             'is_dir': False,
-                                            'is_symlink': False,
-                                            # 以下字段是为了兼容性添加的，但不是必需的
-                                            'file_name': file_name,  # 保留用于向后兼容
-                                            'file_type': 'FILE',
-                                            'file_permissions': None,
-                                            'file_stat': None,  # ES扫描不提供stat信息
-                                            'file_metadata': {
-                                                'scanned_by': 'es_scanner'
-                                            }
+                                            'is_symlink': False
+                                            # 注意：不添加任何额外字段，只保留file_scanner格式中的字段
                                         }
                                         
                                         batch.append(file_info)
