@@ -161,36 +161,47 @@ class BackupScanner:
                             logger.info(f"批量写入器已启动 (batch_size={batch_size}, max_queue={max_queue_size})")
                     
                     # 使用ES扫描器进行流式扫描
+                    # 批量提交缓冲区：累积文件到 update_interval 后再批量提交
+                    file_buffer = []
+                    
                     async for file_batch in es_scanner.scan_files_streaming(
                         source_paths,
                         exclude_patterns,
                         backup_task,
                         log_context="[后台扫描-ES]"
                     ):
-                        # 处理文件批次（与原有逻辑相同）
+                        # 处理文件批次
                         for file_info in file_batch:
                             file_size = file_info.get('size', 0) or 0
                             total_files += 1
                             total_bytes += file_size
                             
-                            # 扫描线程将文件信息提交到内存数据库或批量写入器
-                            if backup_set_db_id:
-                                try:
-                                    if use_memory_db and 'memory_writer' in locals():
-                                        # 写入内存数据库（极速）
-                                        await memory_writer.add_file(file_info)
-                                    else:
-                                        # 写入批量写入器
-                                        await batch_writer.add_file(file_info)
-                                except asyncio.TimeoutError:
-                                    # 队列已满，记录警告但继续扫描
-                                    logger.warning(f"写入队列已满，跳过文件: {file_info.get('path', 'unknown')}")
-                                except Exception as e:
-                                    # 其他错误，记录但不中断扫描
-                                    logger.error(f"写入文件失败: {e}, 文件: {file_info.get('path', 'unknown')}")
+                            # 将文件添加到缓冲区（不立即提交到数据库）
+                            file_buffer.append(file_info)
                             
-                            if total_files % update_interval == 0:
-                                # 先更新数据库中的统计字段
+                            # 当缓冲区达到 update_interval 时，批量提交到内存数据库
+                            if len(file_buffer) >= update_interval:
+                                if backup_set_db_id:
+                                    try:
+                                        if use_memory_db and 'memory_writer' in locals():
+                                            # 批量写入内存数据库（极速）
+                                            for buffered_file in file_buffer:
+                                                await memory_writer.add_file(buffered_file)
+                                        else:
+                                            # 批量写入批量写入器
+                                            for buffered_file in file_buffer:
+                                                await batch_writer.add_file(buffered_file)
+                                    except asyncio.TimeoutError:
+                                        # 队列已满，记录警告但继续扫描
+                                        logger.warning(f"写入队列已满，跳过 {len(file_buffer)} 个文件")
+                                    except Exception as e:
+                                        # 其他错误，记录但不中断扫描
+                                        logger.error(f"批量写入文件失败: {e}，跳过 {len(file_buffer)} 个文件")
+                                
+                                # 清空缓冲区
+                                file_buffer.clear()
+                                
+                                # 更新数据库中的统计字段
                                 await self.backup_db.update_scan_progress_only(backup_task, total_files, total_bytes)
                                 # 再根据时间间隔决定是否输出一条统计日志
                                 now = time.time()
@@ -208,6 +219,21 @@ class BackupScanner:
                                     )
                                     last_log_time = now
                                     last_log_files = total_files
+                    
+                    # ES扫描完成，提交缓冲区中剩余的文件（如果有）
+                    if file_buffer and backup_set_db_id:
+                        try:
+                            if use_memory_db and 'memory_writer' in locals():
+                                # 批量写入内存数据库（极速）
+                                for buffered_file in file_buffer:
+                                    await memory_writer.add_file(buffered_file)
+                            else:
+                                # 批量写入批量写入器
+                                for buffered_file in file_buffer:
+                                    await batch_writer.add_file(buffered_file)
+                        except Exception as e:
+                            logger.error(f"批量写入剩余文件失败: {e}，跳过 {len(file_buffer)} 个文件")
+                        file_buffer.clear()
                     
                     # ES扫描完成，继续后续处理（与原有逻辑相同）
                     # 等待写入器完成所有文件写入
@@ -323,6 +349,9 @@ class BackupScanner:
                         await batch_writer.start()  # 启动批量写入器
                         logger.info(f"批量写入器已启动 (batch_size={batch_size}, max_queue={max_queue_size})")
                 
+                # 批量提交缓冲区：累积文件到 update_interval 后再批量提交
+                file_buffer = []
+                
                 async for file_batch in self.file_scanner.scan_source_files_streaming(
                     source_paths,
                     exclude_patterns,
@@ -334,24 +363,32 @@ class BackupScanner:
                         total_files += 1
                         total_bytes += file_size
                         
-                        # 扫描线程将文件信息提交到内存数据库或批量写入器
-                        if backup_set_db_id:
-                            try:
-                                if use_memory_db and 'memory_writer' in locals():
-                                    # 写入内存数据库（极速）
-                                    await memory_writer.add_file(file_info)
-                                else:
-                                    # 写入批量写入器
-                                    await batch_writer.add_file(file_info)
-                            except asyncio.TimeoutError:
-                                # 队列已满，记录警告但继续扫描
-                                logger.warning(f"写入队列已满，跳过文件: {file_info.get('path', 'unknown')}")
-                            except Exception as e:
-                                # 其他错误，记录但不中断扫描
-                                logger.error(f"写入文件失败: {e}, 文件: {file_info.get('path', 'unknown')}")
+                        # 将文件添加到缓冲区（不立即提交到数据库）
+                        file_buffer.append(file_info)
                         
-                        if total_files % update_interval == 0:
-                            # 先更新数据库中的统计字段
+                        # 当缓冲区达到 update_interval 时，批量提交到内存数据库
+                        if len(file_buffer) >= update_interval:
+                            if backup_set_db_id:
+                                try:
+                                    if use_memory_db and 'memory_writer' in locals():
+                                        # 批量写入内存数据库（极速）
+                                        for buffered_file in file_buffer:
+                                            await memory_writer.add_file(buffered_file)
+                                    else:
+                                        # 批量写入批量写入器
+                                        for buffered_file in file_buffer:
+                                            await batch_writer.add_file(buffered_file)
+                                except asyncio.TimeoutError:
+                                    # 队列已满，记录警告但继续扫描
+                                    logger.warning(f"写入队列已满，跳过 {len(file_buffer)} 个文件")
+                                except Exception as e:
+                                    # 其他错误，记录但不中断扫描
+                                    logger.error(f"批量写入文件失败: {e}，跳过 {len(file_buffer)} 个文件")
+                            
+                            # 清空缓冲区
+                            file_buffer.clear()
+                            
+                            # 更新数据库中的统计字段
                             await self.backup_db.update_scan_progress_only(backup_task, total_files, total_bytes)
                             # 再根据时间间隔决定是否输出一条统计日志
                             now = time.time()
@@ -369,6 +406,21 @@ class BackupScanner:
                                 )
                                 last_log_time = now
                                 last_log_files = total_files
+                
+                # 扫描完成，提交缓冲区中剩余的文件（如果有）
+                if file_buffer and backup_set_db_id:
+                    try:
+                        if use_memory_db and 'memory_writer' in locals():
+                            # 批量写入内存数据库（极速）
+                            for buffered_file in file_buffer:
+                                await memory_writer.add_file(buffered_file)
+                        else:
+                            # 批量写入批量写入器
+                            for buffered_file in file_buffer:
+                                await batch_writer.add_file(buffered_file)
+                    except Exception as e:
+                        logger.error(f"批量写入剩余文件失败: {e}，跳过 {len(file_buffer)} 个文件")
+                    file_buffer.clear()
 
                 # 等待写入器完成所有文件写入
                 if backup_set_db_id:
