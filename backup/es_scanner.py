@@ -99,7 +99,7 @@ class ESScanner:
         
         if short_path != system_volume_path:
             short_name = os.path.basename(short_path)
-            logger.debug(f"使用短名称排除: {short_name}")
+            logger.info(f"使用短名称排除: {short_name}")
         else:
             short_name = "SYSTEM~1"  # 默认短名称
         
@@ -159,7 +159,7 @@ class ESScanner:
             
             return None
         except Exception as e:
-            logger.debug(f"获取文件总数失败: {str(e)}")
+            logger.warning(f"获取文件总数失败: {str(e)}")
             return None
     
     async def scan_files_streaming(
@@ -213,7 +213,7 @@ class ESScanner:
                         limit=limit
                     )
                     
-                    logger.debug(f"{log_context} 执行ES命令: {' '.join(cmd)}")
+                    logger.info(f"{log_context} 执行ES命令: {' '.join(cmd)}")
                     
                     # 执行ES命令
                     result = await asyncio.create_subprocess_exec(
@@ -271,12 +271,12 @@ class ESScanner:
                                         
                                         batch.append(file_info)
                                 except Exception as e:
-                                    logger.debug(f"{log_context} 解析文件信息失败: {line}, 错误: {str(e)}")
+                                    logger.warning(f"{log_context} 解析文件信息失败: {line}, 错误: {str(e)}")
                                     continue
                             
                             if batch:
                                 total_files_scanned += len(batch)
-                                logger.debug(
+                                logger.info(
                                     f"{log_context} 第 {page} 页: 找到 {len(batch)} 个文件 "
                                     f"(累计: {total_files_scanned} 个文件)"
                                 )

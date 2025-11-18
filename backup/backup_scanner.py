@@ -113,10 +113,15 @@ class BackupScanner:
             
             if use_es_scanner:
                 # 使用ES扫描器
+                es_scanner_initialized = False
                 try:
                     from backup.es_scanner import ESScanner
                     es_exe_path = getattr(self.settings, 'ES_EXE_PATH', r'E:\app\TAF\ITDT\ES\es.exe')
                     es_scanner = ESScanner(es_exe_path=es_exe_path)
+                    # 检查ES工具是否可用（在开始扫描前检查）
+                    if not es_scanner._check_es_tool():
+                        raise FileNotFoundError(f"ES工具不存在或不可用: {es_exe_path}")
+                    es_scanner_initialized = True
                     logger.info(f"========== 使用ES扫描器进行后台扫描 ==========")
                     logger.info(f"ES工具路径: {es_exe_path}")
                     
@@ -290,13 +295,31 @@ class BackupScanner:
                     return
                     
                 except FileNotFoundError as e:
-                    # ES工具不存在，回退到默认扫描
+                    # ES工具不存在或不可用，回退到默认扫描
                     logger.warning(f"ES扫描器初始化失败: {str(e)}，回退到默认扫描方法")
                     use_es_scanner = False
+                    # 如果已经初始化了数据库写入器，需要清理
+                    if es_scanner_initialized and backup_set_db_id:
+                        try:
+                            if 'memory_writer' in locals():
+                                await memory_writer.stop()
+                            elif 'batch_writer' in locals():
+                                await batch_writer.stop()
+                        except Exception as cleanup_err:
+                            logger.warning(f"清理ES扫描器的数据库写入器时出错: {cleanup_err}")
                 except Exception as e:
                     # ES扫描出错，回退到默认扫描
                     logger.error(f"ES扫描出错: {str(e)}，回退到默认扫描方法", exc_info=True)
                     use_es_scanner = False
+                    # 如果已经初始化了数据库写入器，需要清理
+                    if es_scanner_initialized and backup_set_db_id:
+                        try:
+                            if 'memory_writer' in locals():
+                                await memory_writer.stop()
+                            elif 'batch_writer' in locals():
+                                await batch_writer.stop()
+                        except Exception as cleanup_err:
+                            logger.warning(f"清理ES扫描器的数据库写入器时出错: {cleanup_err}")
             
             if use_streaming and not use_es_scanner:
                 # 重置统计变量（如果ES扫描失败回退到这里）
@@ -490,7 +513,7 @@ class BackupScanner:
                 if is_unc_path(source_path_str):
                     normalized_path = normalize_unc_path(source_path_str)
                     source_path = Path(normalized_path)
-                    logger.debug(f"后台扫描任务：检测到 UNC 路径，规范化后: {normalized_path}")
+                    logger.info(f"后台扫描任务：检测到 UNC 路径，规范化后: {normalized_path}")
                 else:
                     source_path = Path(source_path_str)
                 
@@ -694,7 +717,7 @@ class BackupScanner:
                                                                 current_path_str = str(entry_path)
                                                             except Exception as path_str_err:
                                                                 # 路径字符串化失败（可能是编码问题）
-                                                                logger.debug(f"后台扫描任务：路径字符串化失败: {str(path_str_err)}")
+                                                                logger.warning(f"后台扫描任务：路径字符串化失败: {str(path_str_err)}")
                                                                 continue
                                                             
                                                             # 检查是否应该排除
@@ -808,9 +831,9 @@ class BackupScanner:
                                                                         # 记录文件错误但继续扫描
                                                                         try:
                                                                             file_path_display = format_path_for_log(current_path_str)
-                                                                            logger.debug(f"后台扫描任务：跳过文件错误 {file_path_display}: {str(file_err)}")
+                                                                            logger.warning(f"后台扫描任务：跳过文件错误 {file_path_display}: {str(file_err)}")
                                                                         except Exception:
-                                                                            logger.debug(f"后台扫描任务：跳过文件错误: {str(file_err)}")
+                                                                            logger.warning(f"后台扫描任务：跳过文件错误: {str(file_err)}")
                                                                         continue
                                                             except (OSError, PermissionError) as entry_err:
                                                                 # 无法判断类型，尝试作为文件处理
@@ -827,7 +850,7 @@ class BackupScanner:
                                                                 except Exception:
                                                                     permission_error_count += 1
                                                                     if permission_error_count <= 20:
-                                                                        logger.debug(f"后台扫描任务：无法访问路径: {format_path_for_log(current_path_str)}，错误: {str(entry_err)}")
+                                                                        logger.warning(f"后台扫描任务：无法访问路径: {format_path_for_log(current_path_str)}，错误: {str(entry_err)}")
                                                                     continue
                                                         except (PermissionError, OSError) as entry_err:
                                                             # 路径权限错误：记录详细路径信息
@@ -848,9 +871,9 @@ class BackupScanner:
                                                             try:
                                                                 path_str = str(entry.path) if hasattr(entry, 'path') else "未知路径"
                                                                 path_display = format_path_for_log(path_str)
-                                                                logger.debug(f"后台扫描任务：跳过路径错误 {path_display}: {str(entry_err)}")
-                                                            except Exception:
-                                                                logger.debug(f"后台扫描任务：跳过路径错误: {str(entry_err)}")
+                                                                logger.warning(f"后台扫描任务：跳过路径错误 {path_display}: {str(entry_err)}")
+                                                                except Exception:
+                                                                    logger.warning(f"后台扫描任务：跳过路径错误: {str(entry_err)}")
                                                             continue
                                             except (PermissionError, OSError) as scan_dir_err:
                                                 # 目录权限错误：记录并跳过该目录
@@ -869,9 +892,9 @@ class BackupScanner:
                                                 # 记录目录错误但继续扫描
                                                 try:
                                                     path_display = format_path_for_log(current_scan_dir_str)
-                                                    logger.debug(f"后台扫描任务：跳过目录错误 {path_display}: {str(scan_dir_err)}")
+                                                    logger.warning(f"后台扫描任务：跳过目录错误 {path_display}: {str(scan_dir_err)}")
                                                 except Exception:
-                                                    logger.debug(f"后台扫描任务：跳过目录错误: {str(scan_dir_err)}")
+                                                    logger.warning(f"后台扫描任务：跳过目录错误: {str(scan_dir_err)}")
                                                 continue
                                         except KeyboardInterrupt:
                                             logger.warning(f"后台扫描任务：遍历目录被中断 {source_path_str}，已扫描 {file_count} 个文件，{dir_count} 个目录")
@@ -882,7 +905,7 @@ class BackupScanner:
                                             break
                                         except Exception as dir_scan_err:
                                             # 目录扫描错误：记录但继续
-                                            logger.debug(f"后台扫描任务：目录扫描错误: {str(dir_scan_err)}")
+                                            logger.warning(f"后台扫描任务：目录扫描错误: {str(dir_scan_err)}")
                                             continue
                                     
                                     # 如果还有待扫描的目录，记录警告
