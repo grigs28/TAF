@@ -228,7 +228,7 @@ class ESScanner:
                         limit=limit
                     )
                     
-                    logger.info(f"{log_context} 执行ES命令: {' '.join(cmd)}")
+                    logger.debug(f"{log_context} 执行ES命令: {' '.join(cmd)}")
                     
                     # 执行ES命令
                     result = await asyncio.create_subprocess_exec(
@@ -402,7 +402,7 @@ class ESScanner:
                     logger.error(f"{log_context} 执行ES搜索时发生错误: {str(e)}", exc_info=True)
                     break
             
-            logger.info(f"{log_context} 源路径扫描完成: {source_path_str}，共扫描 {total_files_scanned} 个文件")
+            logger.debug(f"{log_context} 源路径扫描完成: {source_path_str}，共扫描 {total_files_scanned} 个文件")
         
         logger.info(f"{log_context} ES扫描完成，总共扫描 {total_files_scanned} 个文件")
 
