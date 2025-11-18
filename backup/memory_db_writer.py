@@ -146,6 +146,7 @@ class MemoryDBWriter:
         """启动同步任务"""
         # 启动定期同步任务
         self._sync_task = asyncio.create_task(self._sync_loop())
+        logger.info(f"内存数据库同步任务已启动 (同步间隔: {self.sync_interval}秒, 批次大小: {self.sync_batch_size})")
 
         # 仅在启用检查点时启动检查点任务
         if self.enable_checkpoint:
@@ -153,7 +154,7 @@ class MemoryDBWriter:
             logger.info(f"检查点任务已启动 (间隔: {self.checkpoint_interval}秒)")
         else:
             self._checkpoint_task = None
-            logger.debug("检查点功能已禁用")
+            logger.info("检查点功能已禁用")
 
     async def add_file(self, file_info: Dict):
         """添加文件到内存数据库 - 根据文件扫描器输出正确映射"""
@@ -368,17 +369,23 @@ class MemoryDBWriter:
 
     async def _sync_loop(self):
         """定期同步循环"""
+        logger.info("内存数据库同步循环已启动，等待同步间隔...")
         while True:
             try:
                 await asyncio.sleep(self.sync_interval)
+                
+                logger.info(f"定期同步触发（间隔: {self.sync_interval}秒）")
 
                 if not self._is_syncing:
                     await self._sync_to_opengauss("scheduled")
+                else:
+                    logger.warning("同步正在进行中，跳过本次定期同步")
 
             except asyncio.CancelledError:
+                logger.info("内存数据库同步循环被取消")
                 break
             except Exception as e:
-                logger.error(f"同步循环异常: {e}")
+                logger.error(f"同步循环异常: {e}", exc_info=True)
                 await asyncio.sleep(5)  # 错误后短暂等待
 
     async def _checkpoint_loop(self):
@@ -407,10 +414,10 @@ class MemoryDBWriter:
             files_to_sync = await self._get_files_to_sync()
 
             if not files_to_sync:
-                logger.debug("没有文件需要同步")
+                logger.info("内存数据库中没有文件需要同步到openGauss")
                 return
 
-            logger.debug(f"开始同步 {len(files_to_sync)} 个文件到openGauss (原因: {reason})")
+            logger.info(f"开始同步 {len(files_to_sync)} 个文件到openGauss (原因: {reason})")
 
             # 批量同步到openGauss
             synced_count = await self._batch_sync_to_opengauss(files_to_sync)
