@@ -1248,7 +1248,41 @@ class BackupDB:
                 for i in range(0, len(update_data), update_batch_size):
                     batch_update = update_data[i:i + update_batch_size]
                     try:
-                        await conn.executemany(
+                        # 添加超时设置，防止更新阻塞（60秒超时）
+                        import asyncio
+                        await asyncio.wait_for(
+                            conn.executemany(
+                                """
+                                UPDATE backup_files
+                                SET compressed_size = $2,
+                                    compressed = $3,
+                                    checksum = $4,
+                                    backup_time = $5,
+                                    chunk_number = $6,
+                                    tape_block_start = $7,
+                                    file_metadata = $8::json,
+                                    is_copy_success = TRUE,
+                                    copy_status_at = $9
+                                WHERE id = $1
+                                """,
+                                batch_update
+                            ),
+                            timeout=60.0  # 60秒超时
+                        )
+                        success_count += len(batch_update)
+                        logger.debug(f"[mark_files_as_copied] 已更新批次 {i // update_batch_size + 1}/{(len(update_data) + update_batch_size - 1) // update_batch_size}，{len(batch_update)} 个文件")
+                    except asyncio.TimeoutError:
+                        failed_count += len(batch_update)
+                        logger.error(f"[mark_files_as_copied] 批次更新超时（批次 {i // update_batch_size + 1}，60秒），跳过该批次")
+                    except Exception as batch_update_error:
+                        failed_count += len(batch_update)
+                        logger.error(f"[mark_files_as_copied] 批次更新失败（批次 {i // update_batch_size + 1}）: {batch_update_error}")
+            else:
+                try:
+                    # 添加超时设置，防止更新阻塞（60秒超时）
+                    import asyncio
+                    await asyncio.wait_for(
+                        conn.executemany(
                             """
                             UPDATE backup_files
                             SET compressed_size = $2,
@@ -1262,33 +1296,15 @@ class BackupDB:
                                 copy_status_at = $9
                             WHERE id = $1
                             """,
-                            batch_update
-                        )
-                        success_count += len(batch_update)
-                        logger.debug(f"[mark_files_as_copied] 已更新批次 {i // update_batch_size + 1}/{(len(update_data) + update_batch_size - 1) // update_batch_size}，{len(batch_update)} 个文件")
-                    except Exception as batch_update_error:
-                        failed_count += len(batch_update)
-                        logger.error(f"[mark_files_as_copied] 批次更新失败（批次 {i // update_batch_size + 1}）: {batch_update_error}")
-            else:
-                try:
-                    await conn.executemany(
-                        """
-                        UPDATE backup_files
-                        SET compressed_size = $2,
-                            compressed = $3,
-                            checksum = $4,
-                            backup_time = $5,
-                            chunk_number = $6,
-                            tape_block_start = $7,
-                            file_metadata = $8::json,
-                            is_copy_success = TRUE,
-                            copy_status_at = $9
-                        WHERE id = $1
-                        """,
-                        update_data
+                            update_data
+                        ),
+                        timeout=60.0  # 60秒超时
                     )
                     success_count += len(update_data)
                     logger.debug(f"[mark_files_as_copied] 批量更新 {len(update_data)} 个文件")
+                except asyncio.TimeoutError:
+                    failed_count += len(update_data)
+                    logger.error(f"[mark_files_as_copied] 批量更新超时（60秒），跳过")
                 except Exception as update_error:
                     failed_count += len(update_data)
                     logger.error(f"[mark_files_as_copied] 批量更新失败: {update_error}")
@@ -1443,7 +1459,7 @@ class BackupDB:
                         # 将result_summary转换为JSON字符串
                         result_summary_json = json.dumps(result_summary) if result_summary else None
                         
-                        logger.info(f"[update_scan_progress] 更新任务 {backup_task.id} 的进度：processed_files={scanned_count}, processed_bytes={processed_bytes}, compressed_bytes={compressed_bytes}")
+                        logger.debug(f"[update_scan_progress] 更新任务 {backup_task.id} 的进度：processed_files={scanned_count}, processed_bytes={processed_bytes}, compressed_bytes={compressed_bytes}")
                         await conn.execute(
                             """
                             UPDATE backup_tasks

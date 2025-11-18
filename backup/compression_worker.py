@@ -399,6 +399,7 @@ class CompressionWorker:
                     # ========== 步骤3：修改数据库is_copy_success（顺序执行，必须在压缩完成后立即执行） ==========
                     # 重要：压缩完成后立即更新数据库（is_copy_success = TRUE），顺序执行
                     # 必须等待数据库更新完成后再继续下一组压缩，确保数据一致性
+                    # 否则下一组检索时可能还会检索到已压缩但is_copy_success未更新的文件，导致重复压缩
                     # 只有成功压缩的文件才会更新is_copy_success，超阈值跳过的文件保持FALSE状态
                     try:
                         logger.info(f"[压缩循环] [步骤3-数据库更新] 开始更新文件复制状态：文件组 {current_group_idx + 1}，包含 {len(file_group)} 个文件")
