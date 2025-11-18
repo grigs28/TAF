@@ -50,8 +50,22 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (file) {
                         const esExePathInput = document.getElementById('esExePath');
                         if (esExePathInput) {
-                            // 获取文件的完整路径
-                            esExePathInput.value = file.path || file.name;
+                            // 在浏览器环境中，file.path不可用，使用file.name
+                            // 用户可能需要手动调整路径为服务器端的完整路径
+                            const fileName = file.name;
+                            // 如果当前路径存在，尝试保持目录部分，只替换文件名
+                            const currentPath = esExePathInput.value;
+                            if (currentPath && currentPath.includes('\\')) {
+                                const dirPath = currentPath.substring(0, currentPath.lastIndexOf('\\') + 1);
+                                esExePathInput.value = dirPath + fileName;
+                            } else {
+                                // 如果没有当前路径，使用默认路径
+                                esExePathInput.value = `E:\\app\\TAF\\ITDT\\ES\\${fileName}`;
+                            }
+                            // 提示用户可能需要手动调整路径
+                            if (!file.path) {
+                                console.log('提示：请确认文件路径是否正确，必要时请手动编辑为服务器端的完整路径');
+                            }
                         }
                     }
                     // 清理临时元素
