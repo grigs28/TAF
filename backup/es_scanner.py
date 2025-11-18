@@ -155,7 +155,20 @@ class ESScanner:
             stdout, stderr = await asyncio.wait_for(result.communicate(), timeout=30)
             
             if result.returncode == 0:
-                count = stdout.decode('utf-8', errors='ignore').strip()
+                # Windows上ES可能输出GBK编码，尝试多种编码
+                count_str = None
+                for encoding in ['utf-8', 'gbk', 'gb2312', 'cp936']:
+                    try:
+                        count_str = stdout.decode(encoding, errors='strict').strip()
+                        break
+                    except (UnicodeDecodeError, LookupError):
+                        continue
+                
+                # 如果所有编码都失败，使用errors='ignore'的UTF-8作为后备
+                if count_str is None:
+                    count_str = stdout.decode('utf-8', errors='ignore').strip()
+                
+                count = count_str
                 if count.isdigit():
                     return int(count)
             
@@ -231,7 +244,20 @@ class ESScanner:
                     )
                     
                     if result.returncode == 0:
-                        output = stdout.decode('utf-8', errors='ignore').strip()
+                        # Windows上ES可能输出GBK编码，尝试多种编码
+                        output = None
+                        for encoding in ['utf-8', 'gbk', 'gb2312', 'cp936']:
+                            try:
+                                output = stdout.decode(encoding, errors='strict').strip()
+                                break
+                            except (UnicodeDecodeError, LookupError):
+                                continue
+                        
+                        # 如果所有编码都失败，使用errors='ignore'的UTF-8作为后备
+                        if output is None:
+                            output = stdout.decode('utf-8', errors='ignore').strip()
+                            logger.warning(f"{log_context} 无法确定ES输出编码，使用UTF-8（忽略错误）")
+                        
                         if output:
                             lines = output.split('\n')
                             # 过滤空行
@@ -348,7 +374,21 @@ class ESScanner:
                             # 没有更多结果
                             break
                     else:
-                        error_msg = stderr.decode('utf-8', errors='ignore') if stderr else "未知错误"
+                        # Windows上ES可能输出GBK编码，尝试多种编码
+                        error_msg = None
+                        if stderr:
+                            for encoding in ['utf-8', 'gbk', 'gb2312', 'cp936']:
+                                try:
+                                    error_msg = stderr.decode(encoding, errors='strict')
+                                    break
+                                except (UnicodeDecodeError, LookupError):
+                                    continue
+                            
+                            # 如果所有编码都失败，使用errors='ignore'的UTF-8作为后备
+                            if error_msg is None:
+                                error_msg = stderr.decode('utf-8', errors='ignore')
+                        else:
+                            error_msg = "未知错误"
                         logger.warning(
                             f"{log_context} ES命令执行失败，返回码: {result.returncode}, "
                             f"错误: {error_msg}"
