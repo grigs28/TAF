@@ -231,6 +231,12 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             updates["SCAN_UPDATE_INTERVAL"] = str(config.scan_update_interval)
         if config.scan_log_interval_seconds is not None:
             updates["SCAN_LOG_INTERVAL_SECONDS"] = str(config.scan_log_interval_seconds)
+        if config.scan_method is not None:
+            updates["SCAN_METHOD"] = config.scan_method
+        if config.es_exe_path is not None:
+            updates["ES_EXE_PATH"] = config.es_exe_path
+        if config.use_checkpoint is not None:
+            updates["USE_CHECKPOINT"] = str(config.use_checkpoint).lower()
         
         # 日志配置
         if config.log_level is not None:
