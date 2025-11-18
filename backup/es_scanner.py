@@ -88,7 +88,9 @@ class ESScanner:
             exclude_patterns = []
         
         # 基础命令 - 添加 -a-d 参数排除目录
-        cmd = [self.es_exe_path, "-full-path-and-name", "-size", "-a-d"]
+        # 使用 -dm (date-modified) 获取修改时间，-date-format 1 使用 ISO-8601 格式
+        # 使用 -tsv 格式输出 Tab 分隔值，便于解析
+        cmd = [self.es_exe_path, "-full-path-and-name", "-size", "-dm", "-a-d", "-tsv", "-no-header", "-date-format", "1"]
         
         # 添加分页参数
         cmd.extend(["-o", str(offset), "-n", str(limit)])
@@ -239,11 +241,11 @@ class ESScanner:
                                 # 没有更多结果
                                 break
                             
-                            # 解析文件信息
+                            # 解析文件信息（TSV格式：文件路径\t文件大小\t修改日期）
                             batch = []
                             for line in valid_lines:
                                 try:
-                                    # ES输出格式: "文件路径\t文件大小"
+                                    # ES输出格式（TSV）: "文件路径\t文件大小\t修改日期"
                                     parts = line.strip().split('\t')
                                     if len(parts) >= 2:
                                         file_path = parts[0].strip()
@@ -255,18 +257,38 @@ class ESScanner:
                                         except ValueError:
                                             file_size = 0
                                         
+                                        # 解析修改日期（ISO-8601格式，如果有）
+                                        modified_time_str = parts[2].strip() if len(parts) >= 3 else None
+                                        from datetime import datetime
+                                        
+                                        if modified_time_str:
+                                            try:
+                                                # ISO-8601格式: "2025-11-18T12:34:56" 或 "2025-11-18T12:34:56.789"
+                                                # 可能带时区: "2025-11-18T12:34:56+08:00" 或 "2025-11-18T12:34:56Z"
+                                                if modified_time_str.endswith('Z'):
+                                                    modified_time_str = modified_time_str[:-1] + '+00:00'
+                                                
+                                                # 尝试解析ISO-8601格式
+                                                if '+' in modified_time_str or modified_time_str.count('-') > 2:
+                                                    # 带时区的ISO-8601格式
+                                                    modified_time = datetime.fromisoformat(modified_time_str.replace('Z', '+00:00'))
+                                                    # 转换为naive datetime（移除时区信息），与file_scanner一致
+                                                    modified_time = modified_time.replace(tzinfo=None)
+                                                else:
+                                                    # 简单的ISO-8601格式（无时区）
+                                                    modified_time = datetime.fromisoformat(modified_time_str)
+                                            except (ValueError, AttributeError):
+                                                # 解析失败，使用当前时间
+                                                modified_time = datetime.now()
+                                        else:
+                                            # 没有修改日期，使用当前时间
+                                            modified_time = datetime.now()  # naive datetime，不带时区，与file_scanner一致
+                                        
                                         # 构建文件信息字典（必须与file_scanner格式完全一致）
                                         # file_scanner返回格式：{'path': str, 'name': str, 'size': int, 
                                         #                      'modified_time': datetime（naive，不带时区）, 'permissions': str,
                                         #                      'is_file': bool, 'is_dir': bool, 'is_symlink': bool}
                                         file_name = os.path.basename(file_path)
-                                        
-                                        # ES扫描器无法直接获取文件修改时间
-                                        # file_scanner使用 datetime.fromtimestamp(stat.st_mtime) 返回 naive datetime（不带时区）
-                                        # memory_db_writer会为其添加UTC时区，所以这里也应该返回 naive datetime
-                                        # 使用当前时间作为默认值（后续同步时会被openGauss中的实际值覆盖，如果文件已存在）
-                                        from datetime import datetime
-                                        modified_time = datetime.now()  # naive datetime，不带时区，与file_scanner一致
                                         
                                         # ES扫描器默认都是文件（因为已经用-a-d参数过滤了目录）
                                         file_info = {
