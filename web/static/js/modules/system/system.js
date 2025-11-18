@@ -35,6 +35,35 @@ document.addEventListener('DOMContentLoaded', function() {
             });
         }
         
+        // ES工具路径浏览按钮
+        const browseEsExePathBtn = document.getElementById('browseEsExePath');
+        if (browseEsExePathBtn) {
+            browseEsExePathBtn.addEventListener('click', function() {
+                // 创建隐藏的文件输入元素
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.accept = '.exe';
+                input.style.display = 'none';
+                
+                input.addEventListener('change', function(e) {
+                    const file = e.target.files[0];
+                    if (file) {
+                        const esExePathInput = document.getElementById('esExePath');
+                        if (esExePathInput) {
+                            // 获取文件的完整路径
+                            esExePathInput.value = file.path || file.name;
+                        }
+                    }
+                    // 清理临时元素
+                    document.body.removeChild(input);
+                });
+                
+                // 添加到DOM并触发点击
+                document.body.appendChild(input);
+                input.click();
+            });
+        }
+        
         // 测试数据库连接
         const testDbConnectionBtn = document.getElementById('testDbConnectionBtn');
         if (testDbConnectionBtn) {
