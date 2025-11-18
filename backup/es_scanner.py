@@ -255,12 +255,29 @@ class ESScanner:
                                         except ValueError:
                                             file_size = 0
                                         
-                                        # 构建文件信息字典（与file_scanner格式一致）
-                                        # 注意：file_scanner 返回的格式包含更多字段，但这里只提供必需的字段
+                                        # 构建文件信息字典（必须与file_scanner格式完全一致）
+                                        # file_scanner返回格式：{'path': str, 'name': str, 'size': int, 
+                                        #                      'modified_time': datetime, 'permissions': str,
+                                        #                      'is_file': bool, 'is_dir': bool, 'is_symlink': bool}
+                                        file_name = os.path.basename(file_path)
+                                        
+                                        # ES扫描器无法直接获取文件修改时间，使用当前时间作为默认值
+                                        # 但会在后续同步时被openGauss中的实际值覆盖（如果文件已存在）
+                                        from datetime import datetime, timezone
+                                        modified_time = datetime.now(timezone.utc)
+                                        
+                                        # ES扫描器默认都是文件（因为已经用-a-d参数过滤了目录）
                                         file_info = {
                                             'path': file_path,
+                                            'name': file_name,  # 注意：必须是'name'，不是'file_name'
                                             'size': file_size,
-                                            'file_name': os.path.basename(file_path),
+                                            'modified_time': modified_time,  # 必须提供modified_time
+                                            'permissions': None,  # ES扫描不提供权限信息
+                                            'is_file': True,  # ES扫描只返回文件
+                                            'is_dir': False,
+                                            'is_symlink': False,
+                                            # 以下字段是为了兼容性添加的，但不是必需的
+                                            'file_name': file_name,  # 保留用于向后兼容
                                             'file_type': 'FILE',
                                             'file_permissions': None,
                                             'file_stat': None,  # ES扫描不提供stat信息
