@@ -872,8 +872,8 @@ class BackupScanner:
                                                                 path_str = str(entry.path) if hasattr(entry, 'path') else "未知路径"
                                                                 path_display = format_path_for_log(path_str)
                                                                 logger.warning(f"后台扫描任务：跳过路径错误 {path_display}: {str(entry_err)}")
-                                                                except Exception:
-                                                                    logger.warning(f"后台扫描任务：跳过路径错误: {str(entry_err)}")
+                                                            except Exception:
+                                                                logger.warning(f"后台扫描任务：跳过路径错误: {str(entry_err)}")
                                                             continue
                                             except (PermissionError, OSError) as scan_dir_err:
                                                 # 目录权限错误：记录并跳过该目录
