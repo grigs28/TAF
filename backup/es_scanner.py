@@ -93,10 +93,7 @@ class ESScanner:
         # 添加分页参数
         cmd.extend(["-o", str(offset), "-n", str(limit)])
         
-        # 添加搜索目录
-        cmd.append(search_dir)
-        
-        # 获取System Volume Information的短名称
+        # 获取System Volume Information的短名称（系统必要排除）
         system_volume_path = os.path.join(search_dir, "System Volume Information")
         short_path = get_short_path_name(system_volume_path)
         
@@ -106,17 +103,17 @@ class ESScanner:
         else:
             short_name = "SYSTEM~1"  # 默认短名称
         
-        # 默认排除规则
-        default_excludes = [
-            "*.bak", "*.tmp", "*.log", "*.swp", "*.cache",
-            "Thumbs.db", ".DS_Store", "pagefile.sys", "$*",
-            short_name  # 使用短名称排除System Volume Information
-        ]
+        # 系统必要的排除规则（System Volume Information必须排除）
+        system_excludes = [short_name]
         
-        # 合并用户提供的排除规则
-        all_excludes = list(set(default_excludes + exclude_patterns))
+        # 合并用户提供的排除规则（从计划任务配置中获取）
+        # exclude_patterns 已经包含了计划任务配置中的所有排除规则，直接使用
+        all_excludes = list(set(system_excludes + (exclude_patterns or [])))
         
-        # 添加排除规则
+        # 添加搜索目录（必须在排除规则之前）
+        cmd.append(search_dir)
+        
+        # 添加排除规则（在搜索目录之后，符合ES工具命令格式）
         for pattern in all_excludes:
             cmd.append(f"!{pattern}")
         
