@@ -667,7 +667,7 @@ def _compress_with_tar(
 
                 current_time = time.time()
                 if file_idx % 100 == 0 or (current_time - last_log_time) >= log_interval:
-                    logger.info(f"[tar] 打包进度: {file_idx + 1}/{total_files_in_group} 个文件 ({((file_idx + 1) / max(total_files_in_group, 1) * 100):.1f}%)")
+                    logger.debug(f"[tar] 打包进度: {file_idx + 1}/{total_files_in_group} 个文件 ({((file_idx + 1) / max(total_files_in_group, 1) * 100):.1f}%)")
                     last_log_time = current_time
 
                 if not file_path.exists():

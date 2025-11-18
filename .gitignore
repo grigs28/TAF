@@ -53,7 +53,9 @@ logs/
 # Temp files
 temp/
 tmp/
+tests/
 *.tmp
+data/
 
 # OS
 .DS_Store
@@ -74,7 +76,8 @@ web/static/img/LOGO.png
 web/static/LOGO.png
 
 # Documentation
-docs/_build/
+docs/
+!docs/_build/
 site/
 CLAUDE.md
 
@@ -90,6 +93,9 @@ web/static/css/*
 web/static/js/*
 !web/static/js/main.js
 !web/static/js/**/*.js
+# Explicitly allow modules and pages
+!web/static/js/modules/
+!web/static/js/pages/
 
 # Backup files
 *.bak

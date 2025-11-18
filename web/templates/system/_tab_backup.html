@@ -34,7 +34,20 @@
                     <div class="mb-3">
                         <label class="form-label">后台扫描进度统计间隔（秒）</label>
                         <input type="number" class="form-control" id="scanLogIntervalSeconds" value="60" min="1" step="1">
-                        <small class="text-muted">控制“后台扫描任务：已扫描 N 个文件...”这类日志和速度统计的输出时间间隔</small>
+                        <small class="text-muted">控制"后台扫描任务：已扫描 N 个文件..."这类日志和速度统计的输出时间间隔</small>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">扫描方法</label>
+                        <select class="form-select" id="scanMethod">
+                            <option value="default">默认扫描（os.scandir）</option>
+                            <option value="es">Everything搜索工具（ES）</option>
+                        </select>
+                        <small class="text-muted">选择后台扫描任务使用的扫描方法。ES方法需要Everything搜索工具支持</small>
+                    </div>
+                    <div class="mb-3" id="esExePathGroup" style="display: none;">
+                        <label class="form-label">ES工具路径</label>
+                        <input type="text" class="form-control" id="esExePath" value="E:\app\TAF\ITDT\ES\es.exe">
+                        <small class="text-muted">Everything搜索工具可执行文件路径</small>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">压缩临时目录</label>

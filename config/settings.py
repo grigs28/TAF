@@ -141,6 +141,10 @@ class Settings(BaseSettings):
     # 扫描进度更新配置
     SCAN_UPDATE_INTERVAL: int = 500  # 后台扫描每处理多少个文件更新一次数据库（total_files/total_bytes）
     SCAN_LOG_INTERVAL_SECONDS: int = 60  # 后台扫描进度日志输出的时间间隔（秒）
+    
+    # 扫描方法配置
+    SCAN_METHOD: str = "default"  # 扫描方法: "default" (默认) 或 "es" (Everything搜索工具)
+    ES_EXE_PATH: str = r"E:\app\TAF\ITDT\ES\es.exe"  # Everything搜索工具可执行文件路径
 
     # 磁带管理配置
     TAPE_POOL_SIZE: int = 12  # 磁带池大小
