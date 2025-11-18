@@ -60,6 +60,7 @@ class SystemEnvConfig(BaseModel):
     scan_log_interval_seconds: Optional[int] = Field(None, description="后台扫描进度日志时间间隔（秒）")
     scan_method: Optional[str] = Field(None, description="扫描方法: default (默认) 或 es (Everything搜索工具)")
     es_exe_path: Optional[str] = Field(None, description="Everything搜索工具可执行文件路径")
+    use_checkpoint: Optional[bool] = Field(None, description="是否启用检查点文件，默认不启用")
     
     # 日志配置
     log_level: Optional[str] = Field(None, description="日志级别")
@@ -140,6 +141,7 @@ async def get_env_config():
             "scan_log_interval_seconds": parse_int(env_vars.get("SCAN_LOG_INTERVAL_SECONDS"), 60),
             "scan_method": env_vars.get("SCAN_METHOD", "default"),
             "es_exe_path": env_vars.get("ES_EXE_PATH", r"E:\app\TAF\ITDT\ES\es.exe"),
+            "use_checkpoint": parse_bool(env_vars.get("USE_CHECKPOINT"), False),
             
             # 日志配置
             "log_level": env_vars.get("LOG_LEVEL", "INFO"),

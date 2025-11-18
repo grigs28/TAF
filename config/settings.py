@@ -145,6 +145,9 @@ class Settings(BaseSettings):
     # 扫描方法配置
     SCAN_METHOD: str = "default"  # 扫描方法: "default" (默认) 或 "es" (Everything搜索工具)
     ES_EXE_PATH: str = r"E:\app\TAF\ITDT\ES\es.exe"  # Everything搜索工具可执行文件路径
+    
+    # 检查点配置
+    USE_CHECKPOINT: bool = False  # 是否启用检查点文件，默认不启用
 
     # 磁带管理配置
     TAPE_POOL_SIZE: int = 12  # 磁带池大小

@@ -130,13 +130,19 @@ class BackupScanner:
                             sync_batch_size = getattr(self.settings, 'MEMORY_DB_SYNC_BATCH_SIZE', 5000)
                             sync_interval = getattr(self.settings, 'MEMORY_DB_SYNC_INTERVAL', 30)
                             max_memory_files = getattr(self.settings, 'MEMORY_DB_MAX_FILES', 100000)
+                            checkpoint_interval = getattr(self.settings, 'MEMORY_DB_CHECKPOINT_INTERVAL', 300)
+                            checkpoint_retention_hours = getattr(self.settings, 'MEMORY_DB_CHECKPOINT_RETENTION_HOURS', 24)
+                            enable_checkpoint = getattr(self.settings, 'USE_CHECKPOINT', False)
 
                             from backup.memory_db_writer import MemoryDBWriter
                             memory_writer = MemoryDBWriter(
                                 backup_set_db_id=backup_set_db_id,
                                 sync_batch_size=sync_batch_size,
                                 sync_interval=sync_interval,
-                                max_memory_files=max_memory_files
+                                max_memory_files=max_memory_files,
+                                checkpoint_interval=checkpoint_interval,
+                                checkpoint_retention_hours=checkpoint_retention_hours,
+                                enable_checkpoint=enable_checkpoint
                             )
                             await memory_writer.initialize()
                             logger.info(f"内存数据库写入器已启动 (sync_batch={sync_batch_size}, interval={sync_interval}s)")
@@ -287,13 +293,19 @@ class BackupScanner:
                         sync_batch_size = getattr(self.settings, 'MEMORY_DB_SYNC_BATCH_SIZE', 5000)
                         sync_interval = getattr(self.settings, 'MEMORY_DB_SYNC_INTERVAL', 30)
                         max_memory_files = getattr(self.settings, 'MEMORY_DB_MAX_FILES', 100000)
+                        checkpoint_interval = getattr(self.settings, 'MEMORY_DB_CHECKPOINT_INTERVAL', 300)
+                        checkpoint_retention_hours = getattr(self.settings, 'MEMORY_DB_CHECKPOINT_RETENTION_HOURS', 24)
+                        enable_checkpoint = getattr(self.settings, 'USE_CHECKPOINT', False)
 
                         from backup.memory_db_writer import MemoryDBWriter
                         memory_writer = MemoryDBWriter(
                             backup_set_db_id=backup_set_db_id,
                             sync_batch_size=sync_batch_size,
                             sync_interval=sync_interval,
-                            max_memory_files=max_memory_files
+                            max_memory_files=max_memory_files,
+                            checkpoint_interval=checkpoint_interval,
+                            checkpoint_retention_hours=checkpoint_retention_hours,
+                            enable_checkpoint=enable_checkpoint
                         )
                         await memory_writer.initialize()
                         logger.info(f"内存数据库写入器已启动 (sync_batch={sync_batch_size}, interval={sync_interval}s)")

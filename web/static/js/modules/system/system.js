@@ -700,6 +700,10 @@ async function loadAllSystemConfig() {
                 const esExePathInput = document.getElementById('esExePath');
                 if (esExePathInput) esExePathInput.value = config.es_exe_path;
             }
+            if (config.use_checkpoint !== undefined) {
+                const useCheckpointInput = document.getElementById('useCheckpoint');
+                if (useCheckpointInput) useCheckpointInput.checked = config.use_checkpoint;
+            }
             
             console.log('系统配置加载完成');
         }
@@ -738,6 +742,7 @@ async function saveEnvConfigSection() {
             scan_log_interval_seconds: parseInt(document.getElementById('scanLogIntervalSeconds')?.value) || null,
             scan_method: document.getElementById('scanMethod')?.value || null,
             es_exe_path: document.getElementById('esExePath')?.value || null,
+            use_checkpoint: document.getElementById('useCheckpoint')?.checked || null,
             log_level: document.getElementById('logLevel')?.value || null,
         };
         

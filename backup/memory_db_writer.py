@@ -29,7 +29,8 @@ class MemoryDBWriter:
                  sync_interval: int = 30,                # 同步间隔(秒)
                  max_memory_files: int = 100000,         # 内存中最大文件数
                  checkpoint_interval: int = 300,         # 检查点间隔(秒)
-                 checkpoint_retention_hours: int = 24):  # 检查点保留时间(小时)
+                 checkpoint_retention_hours: int = 24,   # 检查点保留时间(小时)
+                 enable_checkpoint: bool = False):        # 是否启用检查点，默认不启用
 
         self.backup_set_db_id = backup_set_db_id
         self.sync_batch_size = sync_batch_size
@@ -37,11 +38,15 @@ class MemoryDBWriter:
         self.max_memory_files = max_memory_files
         self.checkpoint_interval = checkpoint_interval
         self.checkpoint_retention_hours = checkpoint_retention_hours
+        self.enable_checkpoint = enable_checkpoint  # 是否启用检查点
 
-        # 检查点目录：使用项目根目录下的 temp/checkpoints 目录
-        project_root = Path(__file__).parent.parent  # backup -> 项目根目录
-        self.checkpoint_dir = project_root / "temp" / "checkpoints"
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        # 检查点目录：使用项目根目录下的 temp/checkpoints 目录（仅在启用检查点时创建）
+        if self.enable_checkpoint:
+            project_root = Path(__file__).parent.parent  # backup -> 项目根目录
+            self.checkpoint_dir = project_root / "temp" / "checkpoints"
+            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            self.checkpoint_dir = None
 
         # 内存数据库
         self.memory_db = None
@@ -69,11 +74,12 @@ class MemoryDBWriter:
 
     async def initialize(self):
         """初始化内存数据库和同步任务"""
-        # 启动时清理过期的检查点文件
-        await self._cleanup_old_checkpoints_on_startup()
+        # 启动时清理过期的检查点文件（仅在启用检查点时）
+        if self.enable_checkpoint:
+            await self._cleanup_old_checkpoints_on_startup()
         await self._setup_memory_database()
         await self._start_sync_tasks()
-        logger.info(f"内存数据库写入器已初始化 (backup_set_id={self.backup_set_db_id})")
+        logger.info(f"内存数据库写入器已初始化 (backup_set_id={self.backup_set_db_id}, checkpoint={self.enable_checkpoint})")
 
     async def _setup_memory_database(self):
         """设置内存数据库 - 完全按照openGauss BackupFile模型"""
@@ -141,8 +147,13 @@ class MemoryDBWriter:
         # 启动定期同步任务
         self._sync_task = asyncio.create_task(self._sync_loop())
 
-        # 启动检查点任务
-        self._checkpoint_task = asyncio.create_task(self._checkpoint_loop())
+        # 仅在启用检查点时启动检查点任务
+        if self.enable_checkpoint:
+            self._checkpoint_task = asyncio.create_task(self._checkpoint_loop())
+            logger.info(f"检查点任务已启动 (间隔: {self.checkpoint_interval}秒)")
+        else:
+            self._checkpoint_task = None
+            logger.debug("检查点功能已禁用")
 
     async def add_file(self, file_info: Dict):
         """添加文件到内存数据库 - 根据文件扫描器输出正确映射"""
@@ -575,9 +586,13 @@ class MemoryDBWriter:
 
     async def _create_checkpoint(self):
         """创建检查点 - 持久化保护"""
+        if not self.enable_checkpoint:
+            return  # 检查点功能已禁用，直接返回
+        
         try:
             # 确保检查点目录存在
-            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            if self.checkpoint_dir:
+                self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
             
             # 获取创建检查点时的最大未同步文件ID
             max_unsynced_id = await self._get_max_unsynced_file_id()
@@ -616,13 +631,16 @@ class MemoryDBWriter:
     
     async def _cleanup_old_checkpoints_on_startup(self):
         """启动时清理所有过期的检查点文件"""
+        if not self.enable_checkpoint:
+            return  # 检查点功能已禁用，直接返回
+        
         try:
             import os
             current_time = time.time()
             retention_seconds = self.checkpoint_retention_hours * 3600
             
             # 清理检查点目录中的所有过期文件
-            if self.checkpoint_dir.exists():
+            if self.checkpoint_dir and self.checkpoint_dir.exists():
                 import glob
                 pattern = str(self.checkpoint_dir / 'tmp*.sql')
                 cleaned_count = 0
@@ -648,6 +666,8 @@ class MemoryDBWriter:
     
     async def _cleanup_synced_checkpoints(self):
         """清理已完全同步到openGauss的检查点文件"""
+        if not self.enable_checkpoint:
+            return  # 检查点功能已禁用，直接返回
         try:
             import os
             # 获取当前已同步的最大文件ID
@@ -691,6 +711,8 @@ class MemoryDBWriter:
     
     async def _cleanup_old_checkpoints(self):
         """清理过期的检查点文件（定期调用）"""
+        if not self.enable_checkpoint:
+            return  # 检查点功能已禁用，直接返回
         try:
             import os
             current_time = time.time()
@@ -745,6 +767,8 @@ class MemoryDBWriter:
     
     async def _cleanup_all_checkpoints(self):
         """清理所有检查点文件（停止时调用）"""
+        if not self.enable_checkpoint:
+            return  # 检查点功能已禁用，直接返回
         try:
             import os
             for checkpoint_info in self._checkpoint_files[:]:
@@ -781,7 +805,8 @@ class MemoryDBWriter:
             except asyncio.CancelledError:
                 pass
 
-        if self._checkpoint_task:
+        # 如果检查点任务还在运行，等待它完成（仅在启用检查点时）
+        if self.enable_checkpoint and self._checkpoint_task:
             self._checkpoint_task.cancel()
             try:
                 await self._checkpoint_task
@@ -792,12 +817,15 @@ class MemoryDBWriter:
         if self.memory_db:
             try:
                 await self.force_sync()
-                await self._create_checkpoint()
+                # 创建最终检查点（仅在启用检查点时）
+                if self.enable_checkpoint:
+                    await self._create_checkpoint()
             except Exception as e:
                 logger.error(f"最终同步失败: {e}")
         
-        # 清理所有检查点文件（停止时）
-        await self._cleanup_all_checkpoints()
+        # 清理所有检查点文件（停止时，仅在启用检查点时）
+        if self.enable_checkpoint:
+            await self._cleanup_all_checkpoints()
 
         # 关闭数据库连接
         if self.memory_db:
