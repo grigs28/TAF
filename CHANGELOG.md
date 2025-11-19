@@ -1,5 +1,55 @@
 # 更新日志
 
+## [0.1.20] - 2025-11-19
+
+### 改进
+
+#### 数据库操作全面原生化
+- ✅ 移除所有 SQLAlchemy ORM 使用，全面采用原生 SQL
+  - openGauss 分支：使用 `asyncpg` 原生 SQL 查询
+  - SQLite 分支：使用 `aiosqlite` 原生 SQL 查询
+  - 两个数据库分支完全独立，互不影响
+  - 提升数据库操作性能和稳定性
+
+- ✅ 修复的文件列表（共 10 个文件）:
+  - `web/api/system/logs.py` - SQLite 分支改为原生 SQL
+  - `web/api/system/statistics.py` - SQLite 分支改为原生 SQL
+  - `web/api/scheduler.py` - 备份任务模板验证改为原生 SQL
+  - `web/api/backup_statistics.py` - SQLite 分支改为原生 SQL
+  - `web/api/tape/crud.py` - 所有 SQLite 分支改为原生 SQL
+    - `_check_tape_exists_sqlite` - 磁带存在性检查
+    - `_count_serial_numbers_sqlite` - 序列号统计
+    - `create_tape` - 磁带创建/更新
+    - `check_tape_exists` - 磁带存在性查询
+    - `list_tapes` - 磁带列表查询
+    - `get_tape_inventory` - 磁带库存统计
+    - `get_tape_drive_history` - 磁带操作历史
+
+#### 同步持续时间显示修复
+- ✅ 修复 openGauss 模式下同步持续时间显示为 0.0 秒的问题
+  - 在 `_sync_to_opengauss` 函数中正确设置 `_sync_start_time`
+  - 与 SQLite 模式保持一致的时间记录机制
+  - 确保同步持续时间正确显示
+
+#### 压缩日志格式优化
+- ✅ 优化压缩处理速度日志显示格式
+  - 从 "最近1000个文件平均处理时间: 0.004秒/文件 (总耗时: 4.2秒)"
+  - 改为 "最近1000个文件耗时: 4.2秒，xxx文件/秒"
+  - 更直观地显示处理速度和总耗时
+
+### 技术细节
+
+#### 原生 SQL 实现
+- openGauss: 使用 `asyncpg` 连接池，参数化查询使用 `$1, $2, ...` 占位符
+- SQLite: 使用 `aiosqlite` 连接，参数化查询使用 `?` 占位符
+- 所有枚举类型转换在应用层处理，确保数据库兼容性
+- JSON 字段手动序列化/反序列化，避免 ORM 自动处理问题
+
+#### 性能优化
+- 批量操作使用 `executemany` 减少数据库交互次数
+- 连接池复用减少连接开销
+- 原生 SQL 查询性能优于 ORM 查询
+
 ## [0.1.19] - 2025-11-17
 
 ### 改进
