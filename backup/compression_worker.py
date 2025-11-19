@@ -97,9 +97,21 @@ class CompressionWorker:
         - 所有参数、日志、错误处理等细节与backup_engine.py中的原始逻辑完全一致
         """
         logger.info("[压缩循环线程] ========== 压缩循环后台任务已启动 ==========")
+        logger.info(
+            f"[压缩循环线程] 初始化参数: backup_set_id={self.backup_set.id}, "
+            f"backup_set.set_id={getattr(self.backup_set, 'set_id', 'N/A')}, "
+            f"backup_task_id={self.backup_task.id}, max_file_size={self.settings.MAX_FILE_SIZE}"
+        )
+        
+        # 验证 backup_set.id 是否正确
+        if not self.backup_set.id:
+            logger.error(f"[压缩循环线程] ⚠️⚠️ 错误：backup_set.id 为空！backup_set={self.backup_set}")
         
         try:
+            loop_iteration = 0
             while self._running:
+                loop_iteration += 1
+                logger.debug(f"[压缩循环] 开始第 {loop_iteration} 次循环迭代")
                 try:
                     current_task = asyncio.current_task()
                     if current_task and current_task.cancelled():
@@ -117,13 +129,35 @@ class CompressionWorker:
                 #   - 累积文件直到达到 max_file_size 阈值
                 #   - 超过阈值的文件跳过（保持 FALSE 状态，下次仍可检索，不修改is_copy_success）
                 logger.info(f"[压缩循环] [步骤1-检索文件] 开始检索下一批待压缩文件（文件组索引: {self.group_idx + 1}）...")
-                file_groups = await self.backup_db.fetch_pending_files_grouped_by_size(
-                    self.backup_set.id,
-                    self.settings.MAX_FILE_SIZE,
-                    self.backup_task.id,
-                    should_wait_if_small=(self.wait_retry_count < self.max_wait_retries)
+                logger.info(
+                    f"[压缩循环] [步骤1-检索文件] 检索参数: backup_set_id={self.backup_set.id}, "
+                    f"max_file_size={self.settings.MAX_FILE_SIZE}, "
+                    f"should_wait={self.wait_retry_count < self.max_wait_retries}, "
+                    f"wait_retry_count={self.wait_retry_count}/{self.max_wait_retries}"
                 )
-                logger.info(f"[压缩循环] [步骤1-检索文件] 检索完成，返回文件组数量: {len(file_groups) if file_groups else 0}")
+                
+                try:
+                    import time
+                    retrieval_start_time = time.time()
+                    file_groups = await self.backup_db.fetch_pending_files_grouped_by_size(
+                        self.backup_set.id,
+                        self.settings.MAX_FILE_SIZE,
+                        self.backup_task.id,
+                        should_wait_if_small=(self.wait_retry_count < self.max_wait_retries)
+                    )
+                    retrieval_elapsed = time.time() - retrieval_start_time
+                    logger.info(
+                        f"[压缩循环] [步骤1-检索文件] 检索完成，耗时: {retrieval_elapsed:.2f}秒，"
+                        f"返回文件组数量: {len(file_groups) if file_groups else 0}"
+                    )
+                except Exception as retrieval_error:
+                    logger.error(
+                        f"[压缩循环] [步骤1-检索文件] 检索失败: {str(retrieval_error)}",
+                        exc_info=True
+                    )
+                    # 检索失败，等待后重试
+                    await asyncio.sleep(5)
+                    continue
                 
                 if not file_groups:
                     # 新策略：返回空列表说明没有待压缩文件或需要等待
@@ -132,21 +166,31 @@ class CompressionWorker:
                     total_files_from_db = await self.backup_db.get_total_files_from_db(self.backup_task.id)
 
                     logger.info(
-                        f"[新策略] 文件组为空，扫描状态={scan_status}, "
-                        f"已处理={self.processed_files}, 总文件={total_files_from_db}"
+                        f"[压缩循环] [步骤1-检索文件] 文件组为空，扫描状态={scan_status}, "
+                        f"已处理={self.processed_files}, 总文件={total_files_from_db}, "
+                        f"idle_checks={self.idle_checks}/{self.max_idle_checks}, "
+                        f"wait_retry_count={self.wait_retry_count}/{self.max_wait_retries}"
                     )
 
                     if scan_status == 'completed' or self.processed_files >= total_files_from_db:
                         # 扫描完成或已处理所有文件，退出循环
-                        logger.info("所有文件已压缩完毕，退出压缩循环")
+                        logger.info(
+                            f"[压缩循环] 所有文件已压缩完毕，退出压缩循环。"
+                            f"扫描状态={scan_status}, 已处理={self.processed_files}, 总文件={total_files_from_db}"
+                        )
                         break
 
                     # 否则等待更多文件
                     self.idle_checks += 1
                     if self.idle_checks >= self.max_idle_checks:
                         logger.warning(
-                            f"等待压缩文件超时，扫描状态={scan_status}，"
+                            f"[压缩循环] 等待压缩文件超时，扫描状态={scan_status}，"
                             f"已等待 {self.idle_checks * 5} 秒，继续等待..."
+                        )
+                    else:
+                        logger.info(
+                            f"[压缩循环] 等待更多文件，idle_checks={self.idle_checks}/{self.max_idle_checks}，"
+                            f"将在5秒后重试..."
                         )
 
                     await asyncio.sleep(5)
@@ -324,10 +368,36 @@ class CompressionWorker:
                         f"[压缩完成] 文件组 {current_group_idx + 1}：{format_bytes(compressed_file['compressed_size'])}"
                     )
                     
+                    # ========== 步骤3：修改数据库is_copy_success（顺序执行，必须在压缩完成后立即执行，在文件移动之前） ==========
+                    # 重要：压缩完成后立即更新数据库（is_copy_success = TRUE），顺序执行
+                    # 必须等待数据库更新完成后再继续下一组压缩，确保数据一致性
+                    # 否则下一组检索时可能还会检索到已压缩但is_copy_success未更新的文件，导致重复压缩
+                    # 只有成功压缩的文件才会更新is_copy_success，超阈值跳过的文件保持FALSE状态
+                    # 注意：数据库更新必须在文件移动之前执行，确保压缩完成后立即更新数据库状态
+                    if compress_directly_to_tape:
+                        tape_file_path = compressed_file['path']
+                    else:
+                        # 暂时使用源路径作为磁带路径（移动完成后会更新）
+                        tape_file_path = compressed_file['path']
+                    
+                    try:
+                        logger.info(f"[压缩循环] [步骤3-数据库更新] 开始更新文件复制状态：文件组 {current_group_idx + 1}，包含 {len(file_group)} 个文件")
+                        await self.backup_db.mark_files_as_copied(
+                            backup_set=self.backup_set,
+                            file_group=file_group,
+                            compressed_file=compressed_file,
+                            tape_file_path=tape_file_path or compressed_file['path'],
+                            chunk_number=current_group_idx
+                        )
+                        logger.info(f"[压缩循环] [步骤3-数据库更新] ✅ 文件复制状态更新成功：文件组 {current_group_idx + 1}，{len(file_group)} 个文件的 is_copy_success 已设置为 TRUE")
+                    except Exception as db_error:
+                        logger.error(f"⚠️ [数据库更新] 更新文件复制状态失败: {str(db_error)}，继续执行", exc_info=True)
+                        # 即使更新失败，也继续执行，避免阻塞整个流程
+                    
+                    # ========== 步骤4：文件移动（在数据库更新完成后执行，不阻塞压缩循环） ==========
                     if compress_directly_to_tape:
                         # 直接压缩到磁带，不需要移动队列，但仍需要更新状态
                         logger.info(f"文件已直接压缩到磁带机: {compressed_file['path']}")
-                        tape_file_path = compressed_file['path']
 
                         # 记录关键阶段：开始写入磁带（直接压缩时）
                         self.backup_db._log_operation_stage_event(
@@ -353,69 +423,12 @@ class CompressionWorker:
                             f"[写入完成] 文件组 {current_group_idx + 1}：{os.path.basename(compressed_file['path'])}"
                         )
                     else:
-                        # 将文件加入移动队列，由后台线程顺序移动到磁带机
-                        # 定义回调函数，在移动完成后记录日志（数据库已在保存时记录）
-                        def move_callback(source_path: str, tape_file_path: Optional[str], success: bool, error: Optional[str]):
-                            """文件移动完成后的回调函数"""
-                            if success and tape_file_path:
-                                logger.info(f"文件已成功移动到磁带机: {tape_file_path}")
-                                # 记录关键阶段：文件已移动到磁带机（统一格式）
-                                self.backup_db._log_operation_stage_event(
-                                    self.backup_task,
-                                    f"[文件已移动到磁带机] {os.path.basename(tape_file_path)} (文件组 {current_group_idx + 1})"
-                                )
-                            elif not success:
-                                logger.error(f"文件移动到磁带机失败: {source_path}, 错误: {error}")
-                                # 记录关键阶段：移动失败
-                                self.backup_db._log_operation_stage_event(
-                                    self.backup_task,
-                                    f"[移动到磁带机失败] 文件组 {current_group_idx + 1}，错误: {error}"
-                                )
-                        
-                        # 将文件加入移动队列（后台任务，不阻塞压缩循环）
-                        if self.file_move_worker:
-                            temp_archive_path = compressed_file.get('temp_path')
-                            final_archive_path = compressed_file.get('final_path')
-                            
-                            # 将文件加入文件移动worker队列（非阻塞，使用create_task确保不等待）
-                            asyncio.create_task(
-                                self.file_move_worker.add_file_move_task(
-                                    temp_path=temp_archive_path,
-                                    final_path=final_archive_path,
-                                    backup_set=self.backup_set,
-                                    chunk_number=current_group_idx,
-                                    callback=move_callback,
-                                    backup_task=self.backup_task
-                                )
-                            )
-                            logger.debug(f"[文件移动] 文件移动任务已提交到队列（异步，不阻塞压缩循环）")
-                            
-                            # 暂时使用源路径作为磁带路径（移动完成后会更新）
-                            tape_file_path = compressed_file['path']
-                        else:
-                            logger.error("文件移动工作线程未初始化，无法将文件加入队列！")
-                            tape_file_path = compressed_file['path']
+                        # 非直接压缩模式：文件已经在压缩线程中移动到final目录
+                        # file_move_worker 会独立扫描 final 目录并移动到磁带，不需要向它发送消息
+                        logger.info(f"文件已在压缩线程中移动到final目录: {compressed_file.get('final_path')}")
+                        logger.debug(f"file_move_worker 将独立扫描 final 目录并处理文件移动到磁带")
 
-                    # ========== 步骤3：修改数据库is_copy_success（顺序执行，必须在压缩完成后立即执行） ==========
-                    # 重要：压缩完成后立即更新数据库（is_copy_success = TRUE），顺序执行
-                    # 必须等待数据库更新完成后再继续下一组压缩，确保数据一致性
-                    # 否则下一组检索时可能还会检索到已压缩但is_copy_success未更新的文件，导致重复压缩
-                    # 只有成功压缩的文件才会更新is_copy_success，超阈值跳过的文件保持FALSE状态
-                    try:
-                        logger.info(f"[压缩循环] [步骤3-数据库更新] 开始更新文件复制状态：文件组 {current_group_idx + 1}，包含 {len(file_group)} 个文件")
-                        await self.backup_db.mark_files_as_copied(
-                            backup_set=self.backup_set,
-                            file_group=file_group,
-                            compressed_file=compressed_file,
-                            tape_file_path=tape_file_path or compressed_file['path'],
-                            chunk_number=current_group_idx
-                        )
-                        logger.info(f"[压缩循环] [步骤3-数据库更新] ✅ 文件复制状态更新成功：文件组 {current_group_idx + 1}，{len(file_group)} 个文件的 is_copy_success 已设置为 TRUE")
-                    except Exception as db_error:
-                        logger.error(f"⚠️ [数据库更新] 更新文件复制状态失败: {str(db_error)}，继续执行", exc_info=True)
-                        # 即使更新失败，也继续执行，避免阻塞整个流程
-
-                    # ========== 更新进度统计（必须在数据库更新之前） ==========
+                    # ========== 更新进度统计（在数据库更新之后） ==========
                     self.processed_files += len(file_group)
                     self.total_size += compressed_file['compressed_size']  # 压缩后的总大小
                     self.total_original_size += compressed_file['original_size']  # 原始文件的总大小
@@ -502,6 +515,56 @@ class CompressionWorker:
                     await self.backup_notifier.notify_progress(self.backup_task)
                     
                     logger.info(f"[压缩循环] 文件组 {current_group_idx + 1} 处理完成，数据库已更新，准备继续下一组压缩")
+                    
+                    # 验证 is_copy_success 是否已正确更新（用于调试）
+                    try:
+                        # 检查刚才处理的文件是否已标记为 is_copy_success = 1
+                        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+                        from utils.scheduler.sqlite_utils import get_sqlite_connection
+                        
+                        # 随机选择几个文件路径进行验证
+                        sample_paths = [f.get("file_path") or f.get("path") for f in file_group[:10] if f.get("file_path") or f.get("path")]
+                        if sample_paths:
+                            if is_opengauss():
+                                # openGauss 模式
+                                async with get_opengauss_connection() as conn:
+                                    # 占位符从 $2 开始，因为 $1 用于 backup_set_id
+                                    placeholders = ','.join([f'${i+2}' for i in range(len(sample_paths))])
+                                    verify_rows = await conn.fetch(f"""
+                                        SELECT file_path, is_copy_success FROM backup_files 
+                                        WHERE backup_set_id = $1 AND file_path IN ({placeholders})
+                                    """, self.backup_set.id, *sample_paths)
+                                    verified_count = sum(1 for row in verify_rows if row['is_copy_success'] is True)
+                                    logger.info(f"[压缩循环] [验证] 文件组 {current_group_idx + 1} 的样本文件验证: {verified_count}/{len(verify_rows)} 个文件的 is_copy_success=TRUE")
+                                    
+                                    # 如果验证失败，显示详细信息
+                                    if verified_count < len(verify_rows):
+                                        logger.warning(f"[压缩循环] [验证] ⚠️ 验证失败: 期望 {len(verify_rows)} 个文件 is_copy_success=TRUE，实际只有 {verified_count} 个")
+                                        for verify_row in verify_rows:
+                                            if verify_row['is_copy_success'] is not True:
+                                                logger.warning(f"[压缩循环] [验证] 文件状态异常: {verify_row['file_path'][:100]} -> is_copy_success={verify_row['is_copy_success']}")
+                            else:
+                                # SQLite 模式
+                                async with get_sqlite_connection() as conn:
+                                    placeholders = ','.join(['?' for _ in sample_paths])
+                                    verify_cursor = await conn.execute(f"""
+                                        SELECT file_path, is_copy_success FROM backup_files 
+                                        WHERE backup_set_id = ? AND file_path IN ({placeholders})
+                                    """, (self.backup_set.id,) + tuple(sample_paths))
+                                    verify_rows = await verify_cursor.fetchall()
+                                    verified_count = sum(1 for row in verify_rows if row[1] == 1)
+                                    logger.info(f"[压缩循环] [验证] 文件组 {current_group_idx + 1} 的样本文件验证: {verified_count}/{len(verify_rows)} 个文件的 is_copy_success=1")
+                                    
+                                    # 如果验证失败，显示详细信息
+                                    if verified_count < len(verify_rows):
+                                        logger.warning(f"[压缩循环] [验证] ⚠️ 验证失败: 期望 {len(verify_rows)} 个文件 is_copy_success=1，实际只有 {verified_count} 个")
+                                        for verify_row in verify_rows:
+                                            if verify_row[1] != 1:
+                                                logger.warning(f"[压缩循环] [验证] 文件状态异常: {verify_row[0][:100]} -> is_copy_success={verify_row[1]}")
+                        else:
+                            logger.warning(f"[压缩循环] [验证] ⚠️ 无法提取文件路径进行验证，file_group示例: {file_group[:3] if file_group else '空'}")
+                    except Exception as verify_error:
+                        logger.error(f"[压缩循环] [验证] ❌ 验证 is_copy_success 时出错: {str(verify_error)}", exc_info=True)
                 
                 except Exception as group_error:
                     # 文件组处理失败，记录错误但继续处理下一个文件组
@@ -511,19 +574,34 @@ class CompressionWorker:
                 
                 # ========== 步骤4：循环到步骤1（更新文件组索引，准备下一轮检索） ==========
                 # 更新文件组索引（每次只处理一个文件组）
+                logger.info(f"[压缩循环] [步骤4-循环] ========== 开始准备下一轮循环 ==========")
+                logger.info(f"[压缩循环] [步骤4-循环] 当前文件组索引: {self.group_idx}，准备更新为: {self.group_idx + 1}")
                 self.group_idx += 1
+                logger.info(f"[压缩循环] [步骤4-循环] ✅ 文件组索引已更新: {self.group_idx}")
+                
                 if hasattr(self.backup_task, 'result_summary') and isinstance(self.backup_task.result_summary, dict):
                     estimated_count = self.backup_task.result_summary.get('estimated_archive_count', 'N/A')
-                    logger.info(f"文件组处理完成，estimated_archive_count={estimated_count}")
+                    logger.info(f"[压缩循环] [步骤4-循环] 文件组处理完成，estimated_archive_count={estimated_count}")
+
+                logger.info(f"[压缩循环] [步骤4-循环] 准备更新扫描进度...")
+                try:
+                    import time
+                    progress_update_start = time.time()
+                    await self.backup_db.update_scan_progress(
+                        self.backup_task,
+                        self.processed_files,
+                        self.processed_files,
+                        "[等待下一批文件...]"
+                    )
+                    progress_update_elapsed = time.time() - progress_update_start
+                    logger.info(f"[压缩循环] [步骤4-循环] ✅ 扫描进度已更新，耗时: {progress_update_elapsed:.2f}秒")
+                    logger.info(f"[压缩循环] [步骤4-循环] 准备继续循环检索下一批文件（回到步骤1）...")
+                except Exception as progress_error:
+                    logger.error(f"[压缩循环] [步骤4-循环] ❌ 更新扫描进度失败: {str(progress_error)}，继续循环", exc_info=True)
+                    # 即使更新失败，也继续循环
                 
-                logger.info(f"[压缩循环] [步骤4-循环] 准备更新扫描进度，状态: [等待下一批文件...]")
-                await self.backup_db.update_scan_progress(
-                    self.backup_task,
-                    self.processed_files,
-                    self.processed_files,
-                    "[等待下一批文件...]"
-                )
-                logger.info(f"[压缩循环] [步骤4-循环] 扫描进度已更新，准备继续循环检索下一批文件（回到步骤1）...")
+                logger.info(f"[压缩循环] [步骤4-循环] ✅ 准备开始下一轮循环（文件组索引: {self.group_idx + 1}）...")
+                logger.info(f"[压缩循环] [步骤4-循环] ========== 准备回到步骤1（检索下一批文件） ==========")
             
         except (KeyboardInterrupt, asyncio.CancelledError):
             logger.warning("========== 压缩循环被中止 ==========")

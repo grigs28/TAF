@@ -11,7 +11,7 @@ from typing import AsyncGenerator, Optional
 from sqlalchemy import create_engine, MetaData
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import StaticPool, NullPool
 
 from .settings import get_settings
 from models.base import Base
@@ -86,58 +86,76 @@ class DatabaseManager:
             async_database_url = self._build_async_database_url()
 
             # 根据数据库类型创建引擎
-            if database_url.startswith("sqlite"):
-                # SQLite不支持连接池
+            # 对于openGauss，需要特殊处理以避免版本解析错误
+            is_opengauss = self.is_opengauss_database()
+            is_sqlite = raw_database_url.startswith("sqlite:///") or raw_database_url.startswith("sqlite+aiosqlite:///")
+            
+            # 对于openGauss，完全不创建SQLAlchemy引擎，避免版本解析错误
+            if is_opengauss:
+                logger.warning("检测到openGauss数据库，跳过SQLAlchemy引擎创建，将使用原生SQL查询")
+                self.engine = None
+                self.async_engine = None
+                self.AsyncSessionLocal = None
+                self.SessionLocal = None
+            elif is_sqlite:
+                # SQLite 需要特殊处理
+                logger.info("检测到SQLite数据库，创建SQLAlchemy异步引擎")
+                # 为避免单连接被多个协程共享导致游标重置，SQLite 使用 NullPool（每次请求新连接）
+                connect_args = {"check_same_thread": False}
+                pool_class = NullPool
+                # 同步引擎（用于创建表等操作）
                 self.engine = create_engine(
                     database_url,
                     echo=self.settings.DEBUG,
-                    pool_pre_ping=True
+                    poolclass=pool_class,
+                    connect_args=connect_args
                 )
+                # 异步引擎（使用 aiosqlite）
                 self.async_engine = create_async_engine(
                     async_database_url,
                     echo=self.settings.DEBUG,
-                    pool_pre_ping=True
+                    poolclass=pool_class,
+                    connect_args=connect_args
+                )
+                self.AsyncSessionLocal = async_sessionmaker(
+                    self.async_engine,
+                    class_=AsyncSession,
+                    expire_on_commit=False
+                )
+                self.SessionLocal = sessionmaker(
+                    autocommit=False,
+                    autoflush=False,
+                    bind=self.engine
                 )
             else:
-                # PostgreSQL/openGauss支持连接池
-                # 对于openGauss，需要特殊处理以避免版本解析错误
-                is_opengauss = self.is_opengauss_database()
-                
-                # 对于openGauss，完全不创建SQLAlchemy引擎，避免版本解析错误
-                if is_opengauss:
-                    logger.warning("检测到openGauss数据库，跳过SQLAlchemy引擎创建，将使用原生SQL查询")
-                    self.engine = None
-                    self.async_engine = None
-                    self.AsyncSessionLocal = None
-                    self.SessionLocal = None
-                else:
-                    connect_args = {}
-                    self.engine = create_engine(
-                        database_url,
-                        pool_size=self.settings.DB_POOL_SIZE,
-                        max_overflow=self.settings.DB_MAX_OVERFLOW,
-                        echo=self.settings.DEBUG,
-                        pool_pre_ping=True,
-                        connect_args=connect_args
-                    )
-                    self.async_engine = create_async_engine(
-                        async_database_url,
-                        pool_size=self.settings.DB_POOL_SIZE,
-                        max_overflow=self.settings.DB_MAX_OVERFLOW,
-                        echo=self.settings.DEBUG,
-                        pool_pre_ping=True,
-                        connect_args=connect_args
-                    )
-                    self.AsyncSessionLocal = async_sessionmaker(
-                        self.async_engine,
-                        class_=AsyncSession,
-                        expire_on_commit=False
-                    )
-                    self.SessionLocal = sessionmaker(
-                        autocommit=False,
-                        autoflush=False,
-                        bind=self.engine
-                    )
+                # PostgreSQL支持连接池
+                connect_args = {}
+                self.engine = create_engine(
+                    database_url,
+                    pool_size=self.settings.DB_POOL_SIZE,
+                    max_overflow=self.settings.DB_MAX_OVERFLOW,
+                    echo=self.settings.DEBUG,
+                    pool_pre_ping=True,
+                    connect_args=connect_args
+                )
+                self.async_engine = create_async_engine(
+                    async_database_url,
+                    pool_size=self.settings.DB_POOL_SIZE,
+                    max_overflow=self.settings.DB_MAX_OVERFLOW,
+                    echo=self.settings.DEBUG,
+                    pool_pre_ping=True,
+                    connect_args=connect_args
+                )
+                self.AsyncSessionLocal = async_sessionmaker(
+                    self.async_engine,
+                    class_=AsyncSession,
+                    expire_on_commit=False
+                )
+                self.SessionLocal = sessionmaker(
+                    autocommit=False,
+                    autoflush=False,
+                    bind=self.engine
+                )
 
             # 创建表
             await self.create_tables()
@@ -155,18 +173,25 @@ class DatabaseManager:
         # 将opengauss URL转换为postgresql URL（兼容）
         if url.startswith("opengauss://"):
             return url.replace("opengauss://", "postgresql://")
+        # 将 SQLite 异步 URL 转换为同步 URL（用于同步引擎）
+        if url.startswith("sqlite+aiosqlite:///"):
+            return url.replace("sqlite+aiosqlite:///", "sqlite:///")
         return url
 
     def _build_async_database_url(self) -> str:
         """构建异步数据库URL"""
         # 将同步URL转换为异步URL
         url = self.settings.DATABASE_URL
-        if url.startswith("sqlite:///"):
-            return url.replace("sqlite:///", "sqlite+aiosqlite:///")
-        elif url.startswith("postgresql://"):
+        if url.startswith("postgresql://"):
             return url.replace("postgresql://", "postgresql+asyncpg://")
         elif url.startswith("opengauss://"):
             return url.replace("opengauss://", "postgresql+asyncpg://")
+        elif url.startswith("sqlite:///"):
+            # SQLite 需要使用 aiosqlite 作为异步驱动
+            return url.replace("sqlite:///", "sqlite+aiosqlite:///")
+        elif url.startswith("sqlite+aiosqlite:///"):
+            # 已经是异步 URL，直接返回
+            return url
         else:
             return url
 
@@ -175,24 +200,30 @@ class DatabaseManager:
         try:
             # 导入所有模型以确保它们被注册
             from models import backup, tape, user, system_log, system_config, scheduled_task
-            import psycopg2
-            import re
             
-            # 对于openGauss，使用psycopg2直接创建表，避免版本检查问题
-            if self.is_opengauss_database():
+            database_url = self.settings.DATABASE_URL
+            
+            # 检查是否为 SQLite
+            if database_url.startswith("sqlite:///") or database_url.startswith("sqlite+aiosqlite:///"):
+                # SQLite 使用专门的初始化器
+                from config.sqlite_init import SQLiteInitializer
+                sqlite_init = SQLiteInitializer()
+                logger.info("检测到 SQLite 数据库，使用 SQLite 初始化器创建表...")
+                await sqlite_init.create_tables()
+            elif self.is_opengauss_database():
+                # 对于openGauss，使用psycopg2直接创建表，避免版本检查问题
                 logger.info("检测到openGauss数据库，使用psycopg2创建表...")
                 await self._create_tables_with_psycopg2()
             else:
-                # PostgreSQL/SQLite使用SQLAlchemy引擎来创建表
+                # PostgreSQL使用SQLAlchemy引擎来创建表
                 with self.engine.begin() as conn:
                     Base.metadata.create_all(conn)
                 logger.info("数据库表创建完成")
                 
-                # 检查并添加缺失的字段（字段迁移）- 仅对PostgreSQL/openGauss
-                if not database_url.startswith("sqlite"):
-                    await self._migrate_missing_columns_postgresql()
-                    # 修改现有字段的长度（字段长度迁移）
-                    await self._migrate_column_lengths_postgresql()
+                # 检查并添加缺失的字段（字段迁移）
+                await self._migrate_missing_columns_postgresql()
+                # 关键修复：确保路径、文件名字段是 TEXT 类型（对于已存在的表）
+                await self._ensure_text_fields_postgresql()
 
         except Exception as e:
             logger.error(f"创建数据库表失败: {str(e)}")
@@ -317,6 +348,31 @@ class DatabaseManager:
                     """, (table.name,))
                     if not cur.fetchone():
                         create_sql = str(CreateTable(table).compile(compile_kwargs={"literal_binds": True}, dialect=temp_engine.dialect))
+                        
+                        # 关键修复：将路径、文件名相关字段从 VARCHAR 改为 TEXT
+                        # 确保在创建表时就使用 TEXT 类型，而不是 VARCHAR
+                        if table.name == 'backup_files':
+                            # 替换 file_name, file_path, directory_path, display_name 的 VARCHAR 为 TEXT
+                            create_sql = create_sql.replace('file_name VARCHAR', 'file_name TEXT')
+                            create_sql = create_sql.replace('file_name CHARACTER VARYING', 'file_name TEXT')
+                            create_sql = create_sql.replace('file_path VARCHAR', 'file_path TEXT')
+                            create_sql = create_sql.replace('file_path CHARACTER VARYING', 'file_path TEXT')
+                            create_sql = create_sql.replace('directory_path VARCHAR', 'directory_path TEXT')
+                            create_sql = create_sql.replace('directory_path CHARACTER VARYING', 'directory_path TEXT')
+                            create_sql = create_sql.replace('display_name VARCHAR', 'display_name TEXT')
+                            create_sql = create_sql.replace('display_name CHARACTER VARYING', 'display_name TEXT')
+                            # 处理可能的长度限制（如 VARCHAR(4096) 等）
+                            import re
+                            create_sql = re.sub(r'file_name VARCHAR\([^)]+\)', 'file_name TEXT', create_sql, flags=re.IGNORECASE)
+                            create_sql = re.sub(r'file_name CHARACTER VARYING\([^)]+\)', 'file_name TEXT', create_sql, flags=re.IGNORECASE)
+                            create_sql = re.sub(r'file_path VARCHAR\([^)]+\)', 'file_path TEXT', create_sql, flags=re.IGNORECASE)
+                            create_sql = re.sub(r'file_path CHARACTER VARYING\([^)]+\)', 'file_path TEXT', create_sql, flags=re.IGNORECASE)
+                            create_sql = re.sub(r'directory_path VARCHAR\([^)]+\)', 'directory_path TEXT', create_sql, flags=re.IGNORECASE)
+                            create_sql = re.sub(r'directory_path CHARACTER VARYING\([^)]+\)', 'directory_path TEXT', create_sql, flags=re.IGNORECASE)
+                            create_sql = re.sub(r'display_name VARCHAR\([^)]+\)', 'display_name TEXT', create_sql, flags=re.IGNORECASE)
+                            create_sql = re.sub(r'display_name CHARACTER VARYING\([^)]+\)', 'display_name TEXT', create_sql, flags=re.IGNORECASE)
+                            logger.info(f"已将 backup_files 表的路径、文件名、展示名称相关字段设置为 TEXT 类型")
+                        
                         cur.execute(create_sql)
                         created_tables.append(table.name)
                     else:
@@ -331,15 +387,95 @@ class DatabaseManager:
                 # 检查并添加缺失的字段（字段迁移）
                 self._migrate_missing_columns(cur)
                 
-                # 修改现有字段的长度（字段长度迁移）
-                self._migrate_column_lengths(cur)
+                # 关键修复：无论表是新创建还是已存在，都强制检查并修改字段类型为 TEXT
+                # 在提交前执行，确保在同一事务中完成
+                logger.info("========== 开始检查 backup_files 表字段类型 ==========")
+                try:
+                    cur.execute("""
+                        SELECT 1 FROM information_schema.tables WHERE table_name = 'backup_files'
+                    """)
+                    if cur.fetchone():
+                        # 表已存在，强制检查并修改字段类型为 TEXT
+                        logger.info("backup_files 表已存在，强制检查并修改字段类型为 TEXT...")
+                        logger.info("确保路径、文件名、展示名称字段为 TEXT 类型（无长度限制）...")
+                        text_fields = ['file_name', 'file_path', 'directory_path', 'display_name']
+                        modified_fields = []
+                        skipped_fields = []
+                        error_fields = []
+                        
+                        for field_name in text_fields:
+                            try:
+                                # 检查字段当前类型
+                                cur.execute("""
+                                    SELECT data_type, character_maximum_length
+                                    FROM information_schema.columns 
+                                    WHERE table_name = 'backup_files' AND column_name = %s
+                                """, (field_name,))
+                                result = cur.fetchone()
+                                if not result:
+                                    logger.warning(f"字段 backup_files.{field_name} 不存在，跳过")
+                                    continue
+                                
+                                current_type, max_length = result
+                                if current_type == 'character varying':
+                                    # 字段是 VARCHAR，强制改为 TEXT
+                                    logger.info(f"将 backup_files.{field_name} 从 VARCHAR({max_length}) 改为 TEXT...")
+                                    try:
+                                        cur.execute(f"ALTER TABLE backup_files ALTER COLUMN {field_name} TYPE TEXT USING {field_name}::TEXT")
+                                        # 再次验证修改是否成功
+                                        cur.execute("""
+                                            SELECT data_type FROM information_schema.columns 
+                                            WHERE table_name = 'backup_files' AND column_name = %s
+                                        """, (field_name,))
+                                        verify_result = cur.fetchone()
+                                        if verify_result and verify_result[0] == 'text':
+                                            modified_fields.append(field_name)
+                                            logger.info(f"✅ 成功将 backup_files.{field_name} 改为 TEXT 类型（已验证）")
+                                        else:
+                                            error_fields.append(f"{field_name} (修改后验证失败)")
+                                            logger.error(f"❌ backup_files.{field_name} 修改后验证失败，当前类型: {verify_result[0] if verify_result else 'unknown'}")
+                                    except Exception as alter_err:
+                                        error_fields.append(f"{field_name} ({str(alter_err)})")
+                                        logger.error(f"❌ 修改 backup_files.{field_name} 失败: {str(alter_err)}", exc_info=True)
+                                elif current_type == 'text':
+                                    skipped_fields.append(field_name)
+                                    logger.debug(f"backup_files.{field_name} 已是 TEXT 类型，无需修改")
+                                else:
+                                    logger.warning(f"backup_files.{field_name} 类型为 {current_type}，不是 VARCHAR 或 TEXT")
+                            except Exception as check_err:
+                                error_fields.append(f"{field_name} (检查失败: {str(check_err)})")
+                                logger.error(f"❌ 检查 backup_files.{field_name} 失败: {str(check_err)}", exc_info=True)
+                    
+                        # 汇总输出
+                        if modified_fields:
+                            logger.info(f"========== ✅ 成功修改了 {len(modified_fields)} 个字段为 TEXT: {', '.join(modified_fields)} ==========")
+                        if skipped_fields:
+                            logger.info(f"跳过 {len(skipped_fields)} 个已是 TEXT 类型的字段: {', '.join(skipped_fields)}")
+                        if error_fields:
+                            logger.error(f"========== ❌ {len(error_fields)} 个字段修改失败: ==========")
+                            for err_field in error_fields:
+                                logger.error(f"   - {err_field}")
+                            logger.error(f"这会导致长文件名/路径无法同步到数据库！")
+                        else:
+                            logger.info("========== 字段类型检查完成，所有字段都是 TEXT 类型 ==========")
+                    else:
+                        logger.info("backup_files 表不存在，将在创建时自动设置为 TEXT 类型")
+                except Exception as text_check_err:
+                    logger.error(f"========== 字段类型检查和修改过程发生异常 ==========")
+                    logger.error(f"错误信息: {str(text_check_err)}", exc_info=True)
+                    logger.error(f"这可能导致长文件名/路径无法同步到数据库！")
+                    # 不抛出异常，避免影响表创建流程，但记录详细错误信息
             
+            # 提交所有修改（表创建、字段迁移、字段类型修改）
             conn.commit()
-            logger.info("使用psycopg2成功创建数据库表")
+            logger.info("使用psycopg2成功创建数据库表并确保字段类型正确")
+            
         except Exception as e:
             conn.rollback()
+            logger.error(f"数据库初始化失败: {str(e)}", exc_info=True)
             raise
         finally:
+            # 关闭连接（表创建和字段类型检查已完成）
             conn.close()
     
     def _migrate_missing_columns(self, cur):
@@ -476,8 +612,8 @@ class DatabaseManager:
                             await conn.execute(text(alter_sql))
                             added_columns.append(f"{table_name}.{col_name}")
                             
-                            # 添加注释（如果提供且数据库支持）
-                            if comment and not self.settings.DATABASE_URL.startswith("sqlite"):
+                            # 添加注释（如果提供）
+                            if comment:
                                 try:
                                     comment_sql = text(f"COMMENT ON COLUMN {table_name}.{col_name} IS '{comment}'")
                                     await conn.execute(comment_sql)
@@ -497,52 +633,75 @@ class DatabaseManager:
             # 不抛出异常，避免影响主流程
     
     def _migrate_column_lengths(self, cur):
-        """修改现有字段的长度（字段长度迁移）- openGauss
+        """修改现有字段的类型（字段类型迁移）- openGauss
+        将路径、文件名相关字段从 VARCHAR 改为 TEXT 类型（无长度限制）
         
         Args:
             cur: psycopg2 cursor对象
         """
         try:
-            # 定义需要修改长度的字段（表名 -> [(字段名, 目标长度), ...]）
-            length_migrations = {
+            # 定义需要修改类型的字段（表名 -> [(字段名, 注释), ...]）
+            text_migrations = {
                 'backup_files': [
-                    ('file_name', 2048, '文件名'),
+                    ('file_name', '文件名'),
+                    ('file_path', '文件路径'),
+                    ('directory_path', '目录路径'),
                 ],
             }
             
             modified_columns = []
             skipped_columns = []
+            error_columns = []
             
-            for table_name, columns in length_migrations.items():
+            logger.info("========== 开始检查字段类型迁移（VARCHAR -> TEXT）==========")
+            logger.info("注意：如果数据库字段仍然是 VARCHAR(255)，需要执行此迁移将字段改为 TEXT 类型")
+            
+            for table_name, columns in text_migrations.items():
                 # 检查表是否存在
                 cur.execute("""
                     SELECT 1 FROM information_schema.tables WHERE table_name = %s
                 """, (table_name,))
                 if not cur.fetchone():
                     # 表不存在，跳过
+                    logger.debug(f"表 {table_name} 不存在，跳过字段类型迁移")
                     continue
                 
-                # 获取表中现有字段的长度信息
+                # 获取表中现有字段的类型信息
                 cur.execute("""
-                    SELECT column_name, character_maximum_length 
+                    SELECT column_name, data_type, character_maximum_length
                     FROM information_schema.columns 
-                    WHERE table_name = %s AND data_type = 'character varying'
+                    WHERE table_name = %s AND (data_type = 'character varying' OR data_type = 'text')
                 """, (table_name,))
-                existing_cols = {row[0]: row[1] for row in cur.fetchall()}
+                existing_cols = {}
+                for row in cur.fetchall():
+                    col_name, data_type, max_length = row
+                    existing_cols[col_name] = {'type': data_type, 'length': max_length}
                 
-                # 检查每个需要修改长度的字段
-                for col_name, target_length, comment in columns:
+                # 检查每个需要修改类型的字段
+                for col_name, comment in columns:
                     if col_name not in existing_cols:
                         # 字段不存在，跳过
+                        logger.debug(f"字段 {table_name}.{col_name} 不存在，跳过")
                         continue
                     
-                    current_length = existing_cols[col_name]
-                    if current_length is None or current_length < target_length:
-                        # 需要修改长度
+                    current_type = existing_cols[col_name]['type']
+                    current_length = existing_cols[col_name]['length']
+                    
+                    # 如果已经是 TEXT 类型，跳过
+                    if current_type == 'text':
+                        skipped_columns.append(f"{table_name}.{col_name} (已是 TEXT 类型)")
+                        logger.debug(f"字段 {table_name}.{col_name} 已是 TEXT 类型，跳过")
+                        continue
+                    
+                    # 如果是 VARCHAR 类型，改为 TEXT
+                    if current_type == 'character varying':
                         try:
-                            alter_sql = f"ALTER TABLE {table_name} ALTER COLUMN {col_name} TYPE VARCHAR({target_length})"
+                            logger.info(f"正在修改字段类型: {table_name}.{col_name} (VARCHAR({current_length}) -> TEXT)")
+                            # 使用 USING 子句确保数据转换成功
+                            alter_sql = f"ALTER TABLE {table_name} ALTER COLUMN {col_name} TYPE TEXT USING {col_name}::TEXT"
                             cur.execute(alter_sql)
-                            modified_columns.append(f"{table_name}.{col_name} ({current_length} -> {target_length})")
+                            modified_columns.append(f"{table_name}.{col_name} (VARCHAR({current_length}) -> TEXT)")
+                            logger.info(f"✅ 成功修改字段类型: {table_name}.{col_name} (VARCHAR({current_length}) -> TEXT)")
                             
                             # 更新注释（如果提供）
                             if comment:
@@ -552,89 +711,226 @@ class DatabaseManager:
                                 except Exception as comment_err:
                                     logger.debug(f"更新字段注释失败 {table_name}.{col_name}: {str(comment_err)}")
                         except Exception as alter_err:
-                            logger.warning(f"修改字段长度失败 {table_name}.{col_name}: {str(alter_err)}")
-                    else:
-                        skipped_columns.append(f"{table_name}.{col_name} (已为 {current_length})")
+                            error_msg = f"{table_name}.{col_name}: {str(alter_err)}"
+                            error_columns.append(error_msg)
+                            logger.error(f"❌ 修改字段类型失败: {error_msg}")
             
             # 汇总输出
             if modified_columns:
-                logger.info(f"修改了 {len(modified_columns)} 个字段长度: {', '.join(modified_columns)}")
+                logger.info(f"✅ 成功修改了 {len(modified_columns)} 个字段类型: {', '.join(modified_columns)}")
             if skipped_columns:
-                logger.debug(f"跳过 {len(skipped_columns)} 个已满足长度要求的字段")
+                logger.info(f"跳过 {len(skipped_columns)} 个已是 TEXT 类型的字段（无需迁移）")
+            if error_columns:
+                logger.error(f"❌ {len(error_columns)} 个字段类型修改失败:")
+                for error_col in error_columns:
+                    logger.error(f"   - {error_col}")
+                logger.error(f"这些字段可能仍然是 VARCHAR(255)，长文件名/路径可能无法同步")
+                
+            # 如果没有任何字段被修改，且表存在，记录信息
+            if not modified_columns and not skipped_columns and not error_columns:
+                logger.info("未找到需要迁移的字段（表可能不存在或字段已迁移）")
                 
         except Exception as e:
-            logger.warning(f"字段长度迁移检查失败: {str(e)}，但不影响表创建流程")
-            # 不抛出异常，避免影响主流程
+            logger.error(f"========== 字段类型迁移检查失败 ==========")
+            logger.error(f"错误信息: {str(e)}", exc_info=True)
+            logger.error(f"这可能导致长文件名/路径无法同步到数据库")
+            # 不抛出异常，避免影响主流程，但记录详细错误信息
+    
+    async def _ensure_text_fields_postgresql(self):
+        """确保路径、文件名字段是 TEXT 类型（PostgreSQL初始化时调用）"""
+        try:
+            from sqlalchemy import text, inspect
+            
+            if self.async_engine is None:
+                logger.debug("异步引擎未初始化，跳过字段类型检查")
+                return
+            
+            inspector = inspect(self.engine)
+            
+            # 检查 backup_files 表是否存在
+            if not inspector.has_table('backup_files'):
+                logger.debug("backup_files 表不存在，跳过字段类型检查")
+                return
+            
+            logger.info("========== 强制检查 backup_files 表字段类型（PostgreSQL）==========")
+            logger.info("确保路径、文件名、展示名称字段为 TEXT 类型（无长度限制）...")
+            
+            # 需要检查的字段
+            text_fields = [
+                ('file_name', '文件名'),
+                ('file_path', '文件路径'),
+                ('directory_path', '目录路径'),
+                ('display_name', '展示名称'),
+            ]
+            
+            modified_fields = []
+            skipped_fields = []
+            error_fields = []
+            
+            async with self.async_engine.begin() as conn:
+                # 获取表中现有字段的类型信息
+                existing_cols = {}
+                for col in inspector.get_columns('backup_files'):
+                    col_name = col['name']
+                    col_type = col['type']
+                    type_name = col_type.__class__.__name__
+                    if type_name == 'VARCHAR':
+                        existing_cols[col_name] = {'type': 'VARCHAR', 'length': col_type.length}
+                    elif type_name == 'TEXT' or str(col_type) == 'TEXT':
+                        existing_cols[col_name] = {'type': 'TEXT', 'length': None}
+                
+                # 检查每个字段
+                for field_name, comment in text_fields:
+                    try:
+                        if field_name not in existing_cols:
+                            logger.warning(f"字段 backup_files.{field_name} 不存在，跳过")
+                            continue
+                        
+                        current_type = existing_cols[field_name]['type']
+                        current_length = existing_cols[field_name]['length']
+                        
+                        if current_type == 'TEXT':
+                            skipped_fields.append(field_name)
+                            logger.debug(f"backup_files.{field_name} 已是 TEXT 类型，无需修改")
+                            continue
+                        
+                        if current_type == 'VARCHAR':
+                            logger.info(f"将 backup_files.{field_name} 从 VARCHAR({current_length}) 改为 TEXT...")
+                            try:
+                                alter_sql = text(f"ALTER TABLE backup_files ALTER COLUMN {field_name} TYPE TEXT USING {field_name}::TEXT")
+                                await conn.execute(alter_sql)
+                                modified_fields.append(field_name)
+                                logger.info(f"✅ 成功将 backup_files.{field_name} 改为 TEXT 类型")
+                            except Exception as alter_err:
+                                error_fields.append(f"{field_name} ({str(alter_err)})")
+                                logger.error(f"❌ 修改 backup_files.{field_name} 失败: {str(alter_err)}")
+                    except Exception as check_err:
+                        error_fields.append(f"{field_name} (检查失败: {str(check_err)})")
+                        logger.error(f"❌ 检查 backup_files.{field_name} 失败: {str(check_err)}")
+            
+            # 汇总输出
+            if modified_fields:
+                logger.info(f"========== ✅ 成功修改了 {len(modified_fields)} 个字段为 TEXT: {', '.join(modified_fields)} ==========")
+            if skipped_fields:
+                logger.info(f"跳过 {len(skipped_fields)} 个已是 TEXT 类型的字段: {', '.join(skipped_fields)}")
+            if error_fields:
+                logger.error(f"========== ❌ {len(error_fields)} 个字段修改失败: ==========")
+                for err_field in error_fields:
+                    logger.error(f"   - {err_field}")
+                logger.error(f"这会导致长文件名/路径无法同步到数据库！")
+            else:
+                logger.info("========== 字段类型检查完成，所有字段都是 TEXT 类型 ==========")
+                
+        except Exception as e:
+            logger.error(f"字段类型检查失败: {str(e)}", exc_info=True)
+            # 不抛出异常，避免影响应用启动
     
     async def _migrate_column_lengths_postgresql(self):
-        """修改现有字段的长度（字段长度迁移）- PostgreSQL/非openGauss数据库
+        """修改现有字段的类型（字段类型迁移）- PostgreSQL/非openGauss数据库
+        将路径、文件名相关字段从 VARCHAR 改为 TEXT 类型（无长度限制）
         
         使用SQLAlchemy引擎执行迁移
         """
         try:
             from sqlalchemy import text, inspect
             
-            # 定义需要修改长度的字段（表名 -> [(字段名, 目标长度, 注释), ...]）
-            length_migrations = {
+            # 定义需要修改类型的字段（表名 -> [(字段名, 注释), ...]）
+            text_migrations = {
                 'backup_files': [
-                    ('file_name', 2048, '文件名'),
+                    ('file_name', '文件名'),
+                    ('file_path', '文件路径'),
+                    ('directory_path', '目录路径'),
                 ],
             }
             
             if self.engine is None:
+                logger.debug("引擎未初始化，跳过字段类型迁移")
                 return
             
             inspector = inspect(self.engine)
             modified_columns = []
             skipped_columns = []
+            error_columns = []
+            
+            logger.info("========== 开始检查字段类型迁移（VARCHAR -> TEXT，PostgreSQL）==========")
+            logger.info("注意：如果数据库字段仍然是 VARCHAR(255)，需要执行此迁移将字段改为 TEXT 类型")
             
             async with self.async_engine.begin() as conn:
-                for table_name, columns in length_migrations.items():
+                for table_name, columns in text_migrations.items():
                     # 检查表是否存在
                     if not inspector.has_table(table_name):
+                        logger.debug(f"表 {table_name} 不存在，跳过字段类型迁移")
                         continue
                     
-                    # 获取表中现有字段的长度信息
+                    # 获取表中现有字段的类型信息
                     existing_cols = {}
                     for col in inspector.get_columns(table_name):
-                        if col['type'].__class__.__name__ == 'VARCHAR':
-                            existing_cols[col['name']] = col['type'].length
+                        col_name = col['name']
+                        col_type = col['type']
+                        type_name = col_type.__class__.__name__
+                        if type_name == 'VARCHAR':
+                            existing_cols[col_name] = {'type': 'VARCHAR', 'length': col_type.length}
+                        elif type_name == 'TEXT' or str(col_type) == 'TEXT':
+                            existing_cols[col_name] = {'type': 'TEXT', 'length': None}
                     
-                    # 检查每个需要修改长度的字段
-                    for col_name, target_length, comment in columns:
+                    # 检查每个需要修改类型的字段
+                    for col_name, comment in columns:
                         if col_name not in existing_cols:
                             # 字段不存在，跳过
+                            logger.debug(f"字段 {table_name}.{col_name} 不存在，跳过")
                             continue
                         
-                        current_length = existing_cols[col_name]
-                        if current_length is None or current_length < target_length:
-                            # 需要修改长度
+                        current_type = existing_cols[col_name]['type']
+                        current_length = existing_cols[col_name]['length']
+                        
+                        # 如果已经是 TEXT 类型，跳过
+                        if current_type == 'TEXT':
+                            skipped_columns.append(f"{table_name}.{col_name} (已是 TEXT 类型)")
+                            logger.debug(f"字段 {table_name}.{col_name} 已是 TEXT 类型，跳过")
+                            continue
+                        
+                        # 如果是 VARCHAR 类型，改为 TEXT
+                        if current_type == 'VARCHAR':
                             try:
-                                alter_sql = text(f"ALTER TABLE {table_name} ALTER COLUMN {col_name} TYPE VARCHAR({target_length})")
+                                logger.info(f"正在修改字段类型: {table_name}.{col_name} (VARCHAR({current_length}) -> TEXT)")
+                                # 使用 USING 子句确保数据转换成功
+                                alter_sql = text(f"ALTER TABLE {table_name} ALTER COLUMN {col_name} TYPE TEXT USING {col_name}::TEXT")
                                 await conn.execute(alter_sql)
-                                modified_columns.append(f"{table_name}.{col_name} ({current_length} -> {target_length})")
+                                modified_columns.append(f"{table_name}.{col_name} (VARCHAR({current_length}) -> TEXT)")
+                                logger.info(f"✅ 成功修改字段类型: {table_name}.{col_name} (VARCHAR({current_length}) -> TEXT)")
                                 
-                                # 更新注释（如果提供且数据库支持）
-                                if comment and not self.settings.DATABASE_URL.startswith("sqlite"):
+                                # 更新注释（如果提供）
+                                if comment:
                                     try:
                                         comment_sql = text(f"COMMENT ON COLUMN {table_name}.{col_name} IS '{comment}'")
                                         await conn.execute(comment_sql)
                                     except Exception as comment_err:
                                         logger.debug(f"更新字段注释失败 {table_name}.{col_name}: {str(comment_err)}")
                             except Exception as alter_err:
-                                logger.warning(f"修改字段长度失败 {table_name}.{col_name}: {str(alter_err)}")
-                        else:
-                            skipped_columns.append(f"{table_name}.{col_name} (已为 {current_length})")
+                                error_msg = f"{table_name}.{col_name}: {str(alter_err)}"
+                                error_columns.append(error_msg)
+                                logger.error(f"❌ 修改字段类型失败: {error_msg}")
                 
                 # 汇总输出
                 if modified_columns:
-                    logger.info(f"修改了 {len(modified_columns)} 个字段长度: {', '.join(modified_columns)}")
+                    logger.info(f"✅ 成功修改了 {len(modified_columns)} 个字段类型: {', '.join(modified_columns)}")
                 if skipped_columns:
-                    logger.debug(f"跳过 {len(skipped_columns)} 个已满足长度要求的字段")
+                    logger.info(f"跳过 {len(skipped_columns)} 个已是 TEXT 类型的字段（无需迁移）")
+                if error_columns:
+                    logger.error(f"❌ {len(error_columns)} 个字段类型修改失败:")
+                    for error_col in error_columns:
+                        logger.error(f"   - {error_col}")
+                    logger.error(f"这些字段可能仍然是 VARCHAR(255)，长文件名/路径可能无法同步")
+                
+                # 如果没有任何字段被修改，且表存在，记录信息
+                if not modified_columns and not skipped_columns and not error_columns:
+                    logger.info("未找到需要迁移的字段（表可能不存在或字段已迁移）")
                     
         except Exception as e:
-            logger.warning(f"字段长度迁移检查失败: {str(e)}，但不影响表创建流程")
-            # 不抛出异常，避免影响主流程
+            logger.error(f"========== 字段类型迁移检查失败（PostgreSQL）==========")
+            logger.error(f"错误信息: {str(e)}", exc_info=True)
+            logger.error(f"这可能导致长文件名/路径无法同步到数据库")
+            # 不抛出异常，避免影响主流程，但记录详细错误信息
 
     def get_sync_session(self) -> Session:
         """获取同步数据库会话"""

@@ -93,11 +93,19 @@ export class FormManager {
         const onceDateTime = document.getElementById('onceDateTime');
         if (onceDateTime) onceDateTime.value = '';
         
-        const timeInputs = ['dailyTime', 'weeklyTime', 'monthlyTime', 'yearlyTime'];
+        const timeInputs = ['dailyTime', 'weeklyTime', 'yearlyTime'];
         timeInputs.forEach(id => {
             const input = document.getElementById(id);
             if (input) input.value = '02:00';
         });
+        // 每月任务默认时间为 00:02
+        const monthlyTime = document.getElementById('monthlyTime');
+        const monthlyTimeHidden = document.getElementById('monthlyTimeHidden');
+        if (monthlyTime) monthlyTime.value = '00:02';
+        if (monthlyTimeHidden) monthlyTimeHidden.value = '00:02';
+        // 每月任务默认日期为 28
+        const monthlyDay = document.getElementById('monthlyDay');
+        if (monthlyDay) monthlyDay.value = '28';
     }
     
     /**

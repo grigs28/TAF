@@ -58,6 +58,11 @@ class BackupScanner:
             exclude_patterns: 排除模式列表
         """
         backup_set_db_id = getattr(backup_set, 'id', None)
+        logger.info(
+            f"[后台扫描] 获取 backup_set_db_id: {backup_set_db_id}, "
+            f"backup_set.id={backup_set.id if hasattr(backup_set, 'id') else 'N/A'}, "
+            f"backup_set.set_id={getattr(backup_set, 'set_id', 'N/A')}"
+        )
 
         try:
             if backup_task and backup_task.id:
@@ -134,7 +139,7 @@ class BackupScanner:
                         if use_memory_db:
                             sync_batch_size = getattr(self.settings, 'MEMORY_DB_SYNC_BATCH_SIZE', 5000)
                             sync_interval = getattr(self.settings, 'MEMORY_DB_SYNC_INTERVAL', 30)
-                            max_memory_files = getattr(self.settings, 'MEMORY_DB_MAX_FILES', 100000)
+                            max_memory_files = getattr(self.settings, 'MEMORY_DB_MAX_FILES', 5000000)
                             checkpoint_interval = getattr(self.settings, 'MEMORY_DB_CHECKPOINT_INTERVAL', 300)
                             checkpoint_retention_hours = getattr(self.settings, 'MEMORY_DB_CHECKPOINT_RETENTION_HOURS', 24)
                             enable_checkpoint = getattr(self.settings, 'USE_CHECKPOINT', False)
@@ -150,7 +155,10 @@ class BackupScanner:
                                 enable_checkpoint=enable_checkpoint
                             )
                             await memory_writer.initialize()
-                            logger.info(f"内存数据库写入器已启动 (sync_batch={sync_batch_size}, interval={sync_interval}s)")
+                            logger.info(
+                                f"内存数据库写入器已启动 (backup_set_db_id={backup_set_db_id}, "
+                                f"sync_batch={sync_batch_size}, interval={sync_interval}s)"
+                            )
                         else:
                             # 回退到批量写入器
                             batch_size = getattr(self.settings, 'DB_BATCH_SIZE', 1000)
@@ -190,17 +198,46 @@ class BackupScanner:
                                 if backup_set_db_id:
                                     try:
                                         if use_memory_db and 'memory_writer' in locals():
-                                            # 批量写入内存数据库（极速）
+                                            # 批量写入内存数据库（使用批量插入优化性能）
                                             logger.debug(f"[后台扫描-ES] 开始批量提交 {buffer_size} 个文件到内存数据库...")
-                                            for buffered_file in file_buffer:
-                                                await memory_writer.add_file(buffered_file)
-                                            logger.debug(f"[后台扫描-ES] ✅ 已成功提交 {buffer_size} 个文件到内存数据库")
+                                            try:
+                                                await memory_writer.add_files_batch(file_buffer)
+                                                logger.debug(f"[后台扫描-ES] ✅ 已成功批量提交 {buffer_size} 个文件到内存数据库")
+                                            except Exception as batch_error:
+                                                logger.error(f"[后台扫描-ES] ❌ 批量提交失败: {str(batch_error)}，尝试逐个添加", exc_info=True)
+                                                # 回退到逐个添加（容错处理）
+                                                success_count = 0
+                                                failed_count = 0
+                                                for buffered_file in file_buffer:
+                                                    try:
+                                                        await memory_writer.add_file(buffered_file)
+                                                        success_count += 1
+                                                    except Exception as file_error:
+                                                        failed_count += 1
+                                                        file_path = buffered_file.get('path', 'unknown')
+                                                        logger.warning(f"[后台扫描-ES] 添加文件到内存数据库失败: {file_path[:200]}, 错误: {str(file_error)}")
+                                                if success_count > 0:
+                                                    logger.debug(f"[后台扫描-ES] ✅ 已成功提交 {success_count} 个文件到内存数据库（逐个添加）")
+                                                if failed_count > 0:
+                                                    logger.warning(f"[后台扫描-ES] ⚠️ {failed_count} 个文件添加失败，已跳过")
                                         else:
                                             # 批量写入批量写入器
                                             logger.debug(f"[后台扫描-ES] 开始批量提交 {buffer_size} 个文件到批量写入器...")
+                                            success_count = 0
+                                            failed_count = 0
                                             for buffered_file in file_buffer:
-                                                await batch_writer.add_file(buffered_file)
-                                            logger.debug(f"[后台扫描-ES] ✅ 已成功提交 {buffer_size} 个文件到批量写入器")
+                                                try:
+                                                    await batch_writer.add_file(buffered_file)
+                                                    success_count += 1
+                                                except Exception as file_error:
+                                                    failed_count += 1
+                                                    file_path = buffered_file.get('path', 'unknown')
+                                                    logger.warning(f"[后台扫描-ES] 添加文件到批量写入器失败: {file_path[:200]}, 错误: {str(file_error)}")
+                                                    # 继续处理下一个文件，不中断循环
+                                            if success_count > 0:
+                                                logger.debug(f"[后台扫描-ES] ✅ 已成功提交 {success_count} 个文件到批量写入器")
+                                            if failed_count > 0:
+                                                logger.warning(f"[后台扫描-ES] ⚠️ {failed_count} 个文件添加失败，已跳过")
                                     except asyncio.TimeoutError:
                                         # 队列已满，记录警告但继续扫描
                                         logger.warning(f"[后台扫描-ES] ❌ 写入队列已满，跳过 {buffer_size} 个文件")
@@ -236,17 +273,45 @@ class BackupScanner:
                         remaining_count = len(file_buffer)
                         try:
                             if use_memory_db and 'memory_writer' in locals():
-                                # 批量写入内存数据库（极速）
+                                # 批量写入内存数据库（使用批量插入优化性能）
                                 logger.debug(f"[后台扫描-ES] 提交剩余 {remaining_count} 个文件到内存数据库...")
-                                for buffered_file in file_buffer:
-                                    await memory_writer.add_file(buffered_file)
-                                logger.debug(f"[后台扫描-ES] ✅ 已成功提交剩余 {remaining_count} 个文件到内存数据库")
+                                try:
+                                    await memory_writer.add_files_batch(file_buffer)
+                                    logger.debug(f"[后台扫描-ES] ✅ 已成功批量提交剩余 {remaining_count} 个文件到内存数据库")
+                                except Exception as batch_error:
+                                    logger.error(f"[后台扫描-ES] ❌ 批量提交剩余文件失败: {str(batch_error)}，尝试逐个添加", exc_info=True)
+                                    # 回退到逐个添加（容错处理）
+                                    success_count = 0
+                                    failed_count = 0
+                                    for buffered_file in file_buffer:
+                                        try:
+                                            await memory_writer.add_file(buffered_file)
+                                            success_count += 1
+                                        except Exception as file_error:
+                                            failed_count += 1
+                                            file_path = buffered_file.get('path', 'unknown')
+                                            logger.warning(f"[后台扫描-ES] 添加剩余文件到内存数据库失败: {file_path[:200]}, 错误: {str(file_error)}")
+                                    if success_count > 0:
+                                        logger.debug(f"[后台扫描-ES] ✅ 已成功提交剩余 {success_count} 个文件到内存数据库（逐个添加）")
+                                    if failed_count > 0:
+                                        logger.warning(f"[后台扫描-ES] ⚠️ {failed_count} 个剩余文件添加失败，已跳过")
                             else:
                                 # 批量写入批量写入器
                                 logger.debug(f"[后台扫描-ES] 提交剩余 {remaining_count} 个文件到批量写入器...")
+                                success_count = 0
+                                failed_count = 0
                                 for buffered_file in file_buffer:
-                                    await batch_writer.add_file(buffered_file)
-                                logger.debug(f"[后台扫描-ES] ✅ 已成功提交剩余 {remaining_count} 个文件到批量写入器")
+                                    try:
+                                        await batch_writer.add_file(buffered_file)
+                                        success_count += 1
+                                    except Exception as file_error:
+                                        failed_count += 1
+                                        file_path = buffered_file.get('path', 'unknown')
+                                        logger.warning(f"[后台扫描-ES] 添加剩余文件到批量写入器失败: {file_path[:200]}, 错误: {str(file_error)}")
+                                if success_count > 0:
+                                    logger.debug(f"[后台扫描-ES] ✅ 已成功提交剩余 {success_count} 个文件到批量写入器")
+                                if failed_count > 0:
+                                    logger.warning(f"[后台扫描-ES] ⚠️ {failed_count} 个剩余文件添加失败，已跳过")
                         except Exception as e:
                             logger.error(f"[后台扫描-ES] ❌ 批量写入剩余文件失败: {e}，跳过 {remaining_count} 个文件", exc_info=True)
                         file_buffer.clear()
@@ -409,13 +474,38 @@ class BackupScanner:
                             if backup_set_db_id:
                                 try:
                                     if use_memory_db and 'memory_writer' in locals():
-                                        # 批量写入内存数据库（极速）
-                                        for buffered_file in file_buffer:
-                                            await memory_writer.add_file(buffered_file)
+                                        # 批量写入内存数据库（使用批量插入优化性能）
+                                        try:
+                                            await memory_writer.add_files_batch(file_buffer)
+                                        except Exception as batch_error:
+                                            logger.error(f"[后台扫描] ❌ 批量提交失败: {str(batch_error)}，尝试逐个添加", exc_info=True)
+                                            # 回退到逐个添加（容错处理）
+                                            success_count = 0
+                                            failed_count = 0
+                                            for buffered_file in file_buffer:
+                                                try:
+                                                    await memory_writer.add_file(buffered_file)
+                                                    success_count += 1
+                                                except Exception as file_error:
+                                                    failed_count += 1
+                                                    file_path = buffered_file.get('path', 'unknown')
+                                                    logger.warning(f"[后台扫描] 添加文件到内存数据库失败: {file_path[:200]}, 错误: {str(file_error)}")
+                                            if failed_count > 0:
+                                                logger.warning(f"[后台扫描] ⚠️ {failed_count} 个文件添加失败，已跳过")
                                     else:
                                         # 批量写入批量写入器
+                                        success_count = 0
+                                        failed_count = 0
                                         for buffered_file in file_buffer:
-                                            await batch_writer.add_file(buffered_file)
+                                            try:
+                                                await batch_writer.add_file(buffered_file)
+                                                success_count += 1
+                                            except Exception as file_error:
+                                                failed_count += 1
+                                                file_path = buffered_file.get('path', 'unknown')
+                                                logger.warning(f"[后台扫描] 添加文件到批量写入器失败: {file_path[:200]}, 错误: {str(file_error)}")
+                                        if failed_count > 0:
+                                            logger.warning(f"[后台扫描] ⚠️ {failed_count} 个文件添加失败，已跳过")
                                 except asyncio.TimeoutError:
                                     # 队列已满，记录警告但继续扫描
                                     logger.warning(f"写入队列已满，跳过 {len(file_buffer)} 个文件")
@@ -449,9 +539,18 @@ class BackupScanner:
                 if file_buffer and backup_set_db_id:
                     try:
                         if use_memory_db and 'memory_writer' in locals():
-                            # 批量写入内存数据库（极速）
-                            for buffered_file in file_buffer:
-                                await memory_writer.add_file(buffered_file)
+                            # 批量写入内存数据库（使用批量插入优化性能）
+                            try:
+                                await memory_writer.add_files_batch(file_buffer)
+                            except Exception as batch_error:
+                                logger.error(f"[后台扫描] ❌ 批量提交剩余文件失败: {str(batch_error)}，尝试逐个添加", exc_info=True)
+                                # 回退到逐个添加（容错处理）
+                                for buffered_file in file_buffer:
+                                    try:
+                                        await memory_writer.add_file(buffered_file)
+                                    except Exception as file_error:
+                                        file_path = buffered_file.get('path', 'unknown')
+                                        logger.warning(f"[后台扫描] 添加剩余文件到内存数据库失败: {file_path[:200]}, 错误: {str(file_error)}")
                         else:
                             # 批量写入批量写入器
                             for buffered_file in file_buffer:

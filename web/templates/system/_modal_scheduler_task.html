@@ -52,7 +52,7 @@
                                 <option value="interval">间隔任务</option>
                                 <option value="daily">每日任务</option>
                                 <option value="weekly">每周任务</option>
-                                <option value="monthly">每月任务</option>
+                                <option value="monthly" selected>每月任务</option>
                                 <option value="yearly">每年任务</option>
                                 <option value="cron">Cron表达式</option>
                             </select>
@@ -146,19 +146,17 @@
                                     <div class="row">
                                         <div class="col-6">
                                             <label class="form-label small text-muted">每月日期</label>
-                                            <input type="number" class="form-control bg-dark text-light" id="monthlyDay" placeholder="日期" min="1" max="31" value="1">
-                                            <small class="text-muted">1-31</small>
+                                            <input type="number" class="form-control bg-dark text-light" id="monthlyDay" placeholder="日期" min="1" max="31" value="28">
                                         </div>
                                         <div class="col-6">
                                             <label class="form-label small text-muted">执行时间</label>
                                             <div class="input-group">
-                                                <input type="text" class="form-control bg-dark text-light" id="monthlyTime" value="02:00" placeholder="HH:MM" pattern="[0-9]{1,2}:[0-9]{2}">
+                                                <input type="text" class="form-control bg-dark text-light" id="monthlyTime" value="00:02" placeholder="HH:MM" pattern="[0-9]{1,2}:[0-9]{2}">
                                                 <button class="btn btn-outline-secondary" type="button" id="monthlyTimeBtn" title="打开时间选择器">
                                                     <i class="bi bi-clock"></i>
                                                 </button>
                                             </div>
-                                            <input type="time" class="form-control d-none" id="monthlyTimeHidden" value="02:00">
-                                            <small class="text-muted">格式: HH:MM (如 02:00)</small>
+                                            <input type="time" class="form-control d-none" id="monthlyTimeHidden" value="00:02">
                                         </div>
                                     </div>
                                 </div>

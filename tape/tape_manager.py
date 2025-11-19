@@ -118,14 +118,22 @@ class TapeManager:
                 logger.info(f"验证缓存设备（{len(self.cached_devices)} 个）...")
                 if await self._verify_devices(self.cached_devices):
                     logger.info("缓存设备验证通过，无需重新扫描")
+                    # 验证通过，直接返回，不执行扫描
                     return
                 else:
                     logger.warning("缓存设备验证失败，重新扫描")
             
-            # 配置中没有设备或验证失败，执行扫描
+            # 配置中没有设备或验证失败，执行扫描（60秒超时）
             logger.info("开始后台扫描磁带设备...")
-            devices = await self.itdt_interface.scan_devices()
-            logger.info(f"后台扫描完成，检测到 {len(devices)} 个磁带设备")
+            try:
+                devices = await asyncio.wait_for(
+                    self.itdt_interface.scan_devices(),
+                    timeout=60.0
+                )
+                logger.info(f"后台扫描完成，检测到 {len(devices)} 个磁带设备")
+            except asyncio.TimeoutError:
+                logger.error("设备扫描超时（60秒），返回空列表")
+                devices = []
 
             for device in devices:
                 logger.info(f"磁带设备: {device.get('path', 'unknown')} - {device.get('model', 'Unknown')}")
@@ -232,14 +240,21 @@ class TapeManager:
             logger.warning("等待扫描超时，返回空列表")
             return []
         
-        # 如果没有缓存且扫描未进行，触发扫描（只在必要时）
+        # 如果没有缓存且扫描未进行，触发扫描（只在必要时，60秒超时）
         logger.info("缓存为空，触发设备扫描...")
         try:
-            devices = await self.itdt_interface.scan_devices()
-            if devices:
-                self._save_cached_devices(devices)
-                self.cached_devices = devices
-            return devices
+            try:
+                devices = await asyncio.wait_for(
+                    self.itdt_interface.scan_devices(),
+                    timeout=60.0
+                )
+                if devices:
+                    self._save_cached_devices(devices)
+                    self.cached_devices = devices
+                return devices
+            except asyncio.TimeoutError:
+                logger.error("设备扫描超时（60秒），返回空列表")
+                return []
         except Exception as e:
             logger.error(f"获取设备列表失败: {str(e)}")
             return []

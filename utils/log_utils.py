@@ -209,6 +209,7 @@ async def log_system(
         if is_opengauss():
             # 使用原生SQL插入系统日志，严禁SQLAlchemy解析openGauss
             # 使用连接池
+            import json  # 确保在 openGauss 分支中可以使用 json 模块
             async with get_opengauss_connection() as conn:
                 # 构建SQL语句
                 sql = """
@@ -245,28 +246,54 @@ async def log_system(
                 await conn.execute(sql, *params)
                 return True
         else:
-            # 使用SQLAlchemy插入系统日志
-            async with db_manager.AsyncSessionLocal() as session:
-                system_log = SystemLog(
-                    log_level=level,
-                    category=category,
-                    message=message,
-                    module=module,
-                    function=function,
-                    file_path=file_path,
-                    line_number=line_number,
-                    user_id=user_id,
-                    task_id=task_id,
-                    log_time=log_time,
-                    details=details,
-                    exception_type=exception_type,
-                    stack_trace=stack_trace,
-                    duration_ms=duration_ms,
-                    memory_usage_mb=memory_usage_mb,
-                    cpu_usage_percent=cpu_usage_percent
-                )
-                session.add(system_log)
-                await session.commit()
+            # 使用原生 SQL 插入系统日志（SQLite 版本，避免 RETURNING 子句问题）
+            from utils.scheduler.sqlite_utils import get_sqlite_connection
+            import json
+            
+            async with get_sqlite_connection() as conn:
+                # 使用原生 SQL 插入，避免 SQLAlchemy 的 RETURNING 子句导致的游标问题
+                sql = """
+                    INSERT INTO system_logs (
+                        log_level, category, message, details, log_time, timestamp,
+                        module, function, line_number, file_path, thread_id, process_id,
+                        request_id, session_id, hostname, environment, version,
+                        user_id, task_id, correlation_id, duration_ms, memory_usage_mb,
+                        cpu_usage_percent, exception_type, stack_trace, created_by, updated_by
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """
+                
+                params = [
+                    level.value if isinstance(level, Enum) else str(level),
+                    category.value if isinstance(category, Enum) else str(category),
+                    message,
+                    json.dumps(details) if details else None,
+                    log_time,
+                    int(log_time.timestamp() * 1000) if log_time else None,
+                    module,
+                    function,
+                    line_number,
+                    file_path,
+                    None,  # thread_id
+                    None,  # process_id
+                    None,  # request_id
+                    None,  # session_id
+                    None,  # hostname
+                    None,  # environment
+                    None,  # version
+                    user_id,
+                    str(task_id) if task_id is not None else None,
+                    None,  # correlation_id
+                    duration_ms,
+                    memory_usage_mb,
+                    cpu_usage_percent,
+                    exception_type,
+                    stack_trace,
+                    None,  # created_by
+                    None   # updated_by
+                ]
+                
+                await conn.execute(sql, params)
+                await conn.commit()
                 return True
                 
     except Exception as e:
@@ -274,8 +301,15 @@ async def log_system(
         error_msg = str(e).lower()
         if any(keyword in error_msg for keyword in [
             "shutting down", "connection_lost", "asynchronous generator",
-            "cancellederror", "connection closed"
+            "cancellederror", "connection closed", "cursor needed to be reset",
+            "interfaceerror", "no such column"
         ]):
+            return False
+
+        # 对于 SQLite 的 InterfaceError，静默忽略（日志记录失败不应影响主程序）
+        import sqlite3
+        if isinstance(e, (sqlite3.InterfaceError, sqlite3.OperationalError)):
+            logger.debug(f"记录系统日志失败（SQLite并发问题，已忽略）: {str(e)}")
             return False
 
         logger.error(f"记录系统日志失败: {str(e)}")

@@ -37,8 +37,16 @@ async def read_tape_label(request: Request):
         
         logger.info("系统实例检查通过，准备调用tape_operations._read_tape_label")
         
-        # 通过磁带操作读取标签
-        metadata = await system.tape_manager.tape_operations._read_tape_label()
+        # 通过磁带操作读取标签（60秒超时）
+        try:
+            import asyncio
+            metadata = await asyncio.wait_for(
+                system.tape_manager.tape_operations._read_tape_label(),
+                timeout=60.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning("读取磁带卷标超时（60秒）")
+            metadata = None
         
         duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
         

@@ -6,6 +6,7 @@ Task Action Handlers
 """
 
 import logging
+import asyncio
 from datetime import datetime, timezone
 from utils.datetime_utils import now, format_datetime
 from typing import Dict, Any, Optional
@@ -167,32 +168,10 @@ class BackupActionHandler(ActionHandler):
             elif manual_run:
                 logger.info("手动运行模式，跳过周期检查")
             
-            # 2) 运行中检查（根据任务状态）- 手动运行和自动运行都检查
-            if scheduled_task and getattr(scheduled_task, 'status', None) and str(scheduled_task.status).upper().endswith('RUNNING'):
-                logger.info("任务仍在执行中，跳过本次备份")
-                try:
-                    await log_operation(
-                        operation_type=OperationType.SCHEDULER_RUN,
-                        resource_type="scheduler",
-                        resource_id=str(getattr(scheduled_task, 'id', '')),
-                        resource_name=getattr(scheduled_task, 'task_name', ''),
-                        operation_name="执行计划任务",
-                        operation_description="跳过：任务正在执行中",
-                        category="scheduler",
-                        success=True,
-                        result_message="跳过执行（任务正在执行中）"
-                    )
-                    await log_system(
-                        level=LogLevel.INFO,
-                        category=LogCategory.SCHEDULER,
-                        message="计划任务跳过：任务正在执行中",
-                        module="utils.scheduler.action_handlers",
-                        function="BackupActionHandler.execute",
-                        task_id=getattr(scheduled_task, 'id', None)
-                    )
-                except Exception:
-                    pass
-                return {"status": "skipped", "message": "任务正在执行中"}
+            # 2) 运行中检查已移除
+            # 注意：任务锁机制已经在 task_executor 中处理了并发控制
+            # 如果执行到这里，说明已经成功获取了锁，状态已经更新为 RUNNING
+            # 因此不需要再次检查任务状态，直接继续执行即可
 
             # 3) 磁带标签是否当月（从 LTFS 标签或磁带头读取）
             # 仅当备份目标为磁带时要求当月
@@ -208,7 +187,15 @@ class BackupActionHandler(ActionHandler):
                 if target_is_tape and self.system_instance and getattr(self.system_instance, 'tape_manager', None):
                     tape_ops = getattr(self.system_instance.tape_manager, 'tape_operations', None)
                     if tape_ops and hasattr(tape_ops, '_read_tape_label'):
-                        metadata = await tape_ops._read_tape_label()
+                        try:
+                            # 计划任务中检索卷标设置60秒超时
+                            metadata = await asyncio.wait_for(
+                                tape_ops._read_tape_label(),
+                                timeout=60.0
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning("计划任务中读取磁带卷标超时（60秒）")
+                            metadata = None
                         # 无标签时允许继续，后续会自动提示换盘逻辑在业务层处理
                         if metadata and (metadata.get('created_date') or metadata.get('tape_id')):
                             try:
@@ -389,9 +376,12 @@ class BackupActionHandler(ActionHandler):
                                             f"(任务ID: {running_task.id})"
                                         )
             
+            # 初始化变量，确保在所有异常情况下都有值
             backup_executed = False
             backup_task = None
             resumed_from_existing = False
+            template_task = None
+            task_name = ""
 
             resume_template_id = template_task.id if template_task else backup_task_id
             if scheduled_task and scheduled_task.task_metadata:

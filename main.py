@@ -85,6 +85,16 @@ class TapeBackupSystem:
                 
                 print("   ├─ 初始化数据库连接池...")
                 await self.db_manager.initialize()
+                
+                # 如果是 SQLite 模式，启动 SQLite 操作队列管理器
+                from utils.scheduler.db_utils import is_opengauss
+                if not is_opengauss():
+                    print("   ├─ 启动 SQLite 操作队列管理器...")
+                    from backup.sqlite_queue_manager import get_sqlite_queue_manager
+                    sqlite_queue_manager = get_sqlite_queue_manager()
+                    await sqlite_queue_manager.start()
+                    logger.info("SQLite 操作队列管理器已启动（写操作优先于同步）")
+                
                 step_time = time.time() - step_start
                 safe_print(f"   └─ 数据库初始化完成 (耗时: {step_time:.2f}秒)\n")
                 logger.info("数据库连接初始化完成")
@@ -282,6 +292,14 @@ class TapeBackupSystem:
                 async def shutdown_monitor():
                     await shutdown_event.wait()
                     logger.warning("收到关闭信号（Ctrl+C），准备强制关闭服务...")
+                    
+                    # 再次确保解锁（防止信号处理器中的解锁失败）
+                    try:
+                        from utils.scheduler.task_storage import release_all_active_locks
+                        await release_all_active_locks()
+                    except Exception as unlock_error:
+                        logger.warning(f"关闭时解锁失败: {str(unlock_error)}")
+                    
                     # 取消所有正在运行的任务
                     try:
                         loop = asyncio.get_running_loop()
@@ -336,8 +354,14 @@ class TapeBackupSystem:
                     if self.opengauss_monitor:
                         await self.opengauss_monitor.stop()
                     await close_opengauss_pool()
+                else:
+                    # 如果是 SQLite 模式，停止 SQLite 操作队列管理器
+                    from backup.sqlite_queue_manager import get_sqlite_queue_manager
+                    sqlite_queue_manager = get_sqlite_queue_manager()
+                    await sqlite_queue_manager.stop()
+                    logger.info("SQLite 操作队列管理器已停止")
             except Exception as e:
-                logger.warning(f"关闭openGauss连接池失败: {str(e)}")
+                logger.warning(f"关闭数据库连接池失败: {str(e)}")
 
             # 关闭备份引擎（停止文件移动队列管理器）
             if self.backup_engine:
@@ -378,6 +402,45 @@ def setup_signal_handlers(system):
         """处理信号"""
         logger = logging.getLogger(__name__)
         logger.warning(f"收到信号 {signum}（Ctrl+C），准备强制关闭系统...")
+        
+        # 立即解锁所有任务锁（在关闭前）
+        try:
+            loop = asyncio.get_running_loop()
+            # 创建一个任务来立即解锁
+            async def unlock_immediately():
+                try:
+                    from utils.scheduler.task_storage import release_all_active_locks
+                    logger.info("正在立即释放所有任务锁...")
+                    await release_all_active_locks()
+                    logger.info("所有任务锁已释放")
+                except Exception as unlock_error:
+                    logger.warning(f"立即解锁失败: {str(unlock_error)}")
+            
+            # 在事件循环中调度解锁任务（使用 call_soon_threadsafe 或直接创建任务）
+            try:
+                # 尝试创建任务（如果事件循环正在运行）
+                asyncio.create_task(unlock_immediately())
+            except RuntimeError:
+                # 如果无法创建任务，使用 call_soon_threadsafe
+                loop.call_soon_threadsafe(lambda: asyncio.create_task(unlock_immediately()))
+        except RuntimeError:
+            # 如果没有运行中的事件循环，尝试直接调用（同步方式）
+            try:
+                # 创建一个新的事件循环来执行解锁
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    from utils.scheduler.task_storage import release_all_active_locks
+                    logger.info("正在立即释放所有任务锁...")
+                    new_loop.run_until_complete(release_all_active_locks())
+                    logger.info("所有任务锁已释放")
+                finally:
+                    new_loop.close()
+            except Exception as unlock_error:
+                logger.warning(f"立即解锁失败: {str(unlock_error)}")
+        except Exception as e:
+            logger.warning(f"解锁时出错: {str(e)}")
+        
         # 设置关闭事件
         shutdown_event.set()
         
@@ -458,6 +521,28 @@ def setup_asyncio_exception_handler():
         
         # 记录异常
         logger = logging.getLogger(__name__)
+        
+        # 检查是否是 openGauss UNLISTEN 错误（可以安全忽略）
+        if exception:
+            error_msg = str(exception)
+            error_type = type(exception).__name__
+            
+            # 检查是否是 FeatureNotSupportedError 或 UNLISTEN 相关错误
+            try:
+                import asyncpg
+                if isinstance(exception, asyncpg.exceptions.FeatureNotSupportedError):
+                    if "UNLISTEN" in error_msg or "not yet supported" in error_msg:
+                        # openGauss 不支持 UNLISTEN，这是 asyncpg 在释放连接时的正常行为
+                        # 可以安全忽略，使用 DEBUG 级别记录
+                        logger.debug(f"[asyncio异常] openGauss限制（可忽略）: {message} - {error_msg}")
+                        return
+            except ImportError:
+                pass
+            
+            # 检查是否是 UNLISTEN 相关错误（即使没有导入 asyncpg）
+            if "UNLISTEN" in error_msg and "not yet supported" in error_msg:
+                logger.debug(f"[asyncio异常] openGauss限制（可忽略）: {message} - {error_msg}")
+                return
         
         # 如果是Future异常，记录但不阻塞（避免需要回车）
         if exception and isinstance(exception, (ConnectionError, OSError)):

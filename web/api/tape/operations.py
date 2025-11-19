@@ -7,6 +7,7 @@ Tape Management API - operations
 
 import logging
 import traceback
+import asyncio
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Request, Depends
@@ -304,8 +305,15 @@ async def check_tape_format(request: Request):
             # 使用ITDT qrypart命令检查格式化状态
             is_formatted = await system.tape_manager.tape_operations._is_tape_formatted()
             
-            # 尝试读取磁带标签（用于获取标签信息）
-            metadata = await system.tape_manager.tape_operations._read_tape_label()
+            # 尝试读取磁带标签（用于获取标签信息，60秒超时）
+            try:
+                metadata = await asyncio.wait_for(
+                    system.tape_manager.tape_operations._read_tape_label(),
+                    timeout=60.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("读取磁带卷标超时（60秒）")
+                metadata = None
             
             if is_formatted:
                 # ITDT确认已格式化（有分区信息）
@@ -409,9 +417,16 @@ async def format_tape(request: Request, format_request: FormatRequest = FormatRe
         # 先读取现有标签（如果有），格式化后重新写入以保持标签不变
         existing_label = None
         
-        # 检查是否已格式化（能读到标签的不要格式化）
+        # 检查是否已格式化（能读到标签的不要格式化，60秒超时）
         try:
-            existing_label = await system.tape_manager.tape_operations._read_tape_label()
+            try:
+                existing_label = await asyncio.wait_for(
+                    system.tape_manager.tape_operations._read_tape_label(),
+                    timeout=60.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("读取磁带卷标超时（60秒）")
+                existing_label = None
             if existing_label and existing_label.get('tape_id'):
                 # 能成功读取到标签，说明已格式化，拒绝格式化（除非强制）
                 if not format_request.force:

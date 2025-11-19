@@ -62,6 +62,20 @@ class SystemEnvConfig(BaseModel):
     es_exe_path: Optional[str] = Field(None, description="Everything搜索工具可执行文件路径")
     use_checkpoint: Optional[bool] = Field(None, description="是否启用检查点文件，默认不启用")
     
+    # 内存数据库配置
+    memory_db_max_files: Optional[int] = Field(None, description="内存数据库中最大文件数（默认500万）")
+    memory_db_sync_batch_size: Optional[int] = Field(None, description="内存数据库同步批次大小（默认5000）")
+    memory_db_sync_interval: Optional[int] = Field(None, description="内存数据库同步间隔（秒，默认30）")
+    memory_db_checkpoint_interval: Optional[int] = Field(None, description="内存数据库检查点间隔（秒，默认300）")
+    memory_db_checkpoint_retention_hours: Optional[int] = Field(None, description="内存数据库检查点保留时间（小时，默认24）")
+    
+    # SQLite 配置
+    sqlite_cache_size: Optional[int] = Field(None, description="SQLite 缓存大小（KB，默认10000）")
+    sqlite_page_size: Optional[int] = Field(None, description="SQLite 页面大小（字节，默认4096）")
+    sqlite_timeout: Optional[float] = Field(None, description="SQLite 连接超时（秒，默认30）")
+    sqlite_journal_mode: Optional[str] = Field(None, description="SQLite 日志模式（WAL/DELETE/TRUNCATE等，默认WAL）")
+    sqlite_synchronous: Optional[str] = Field(None, description="SQLite 同步模式（OFF/NORMAL/FULL/EXTRA，默认NORMAL）")
+    
     # 日志配置
     log_level: Optional[str] = Field(None, description="日志级别")
 
@@ -142,6 +156,20 @@ async def get_env_config():
             "scan_method": env_vars.get("SCAN_METHOD", "default"),
             "es_exe_path": env_vars.get("ES_EXE_PATH", r"E:\app\TAF\ITDT\ES\es.exe"),
             "use_checkpoint": parse_bool(env_vars.get("USE_CHECKPOINT"), False),
+            
+            # 内存数据库配置
+            "memory_db_max_files": parse_int(env_vars.get("MEMORY_DB_MAX_FILES"), 5000000),
+            "memory_db_sync_batch_size": parse_int(env_vars.get("MEMORY_DB_SYNC_BATCH_SIZE"), 5000),
+            "memory_db_sync_interval": parse_int(env_vars.get("MEMORY_DB_SYNC_INTERVAL"), 30),
+            "memory_db_checkpoint_interval": parse_int(env_vars.get("MEMORY_DB_CHECKPOINT_INTERVAL"), 300),
+            "memory_db_checkpoint_retention_hours": parse_int(env_vars.get("MEMORY_DB_CHECKPOINT_RETENTION_HOURS"), 24),
+            
+            # SQLite 配置
+            "sqlite_cache_size": parse_int(env_vars.get("SQLITE_CACHE_SIZE"), 10000),
+            "sqlite_page_size": parse_int(env_vars.get("SQLITE_PAGE_SIZE"), 4096),
+            "sqlite_timeout": float(env_vars.get("SQLITE_TIMEOUT", 30.0)),
+            "sqlite_journal_mode": env_vars.get("SQLITE_JOURNAL_MODE", "WAL"),
+            "sqlite_synchronous": env_vars.get("SQLITE_SYNCHRONOUS", "NORMAL"),
             
             # 日志配置
             "log_level": env_vars.get("LOG_LEVEL", "INFO"),
@@ -237,6 +265,30 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             updates["ES_EXE_PATH"] = config.es_exe_path
         if config.use_checkpoint is not None:
             updates["USE_CHECKPOINT"] = str(config.use_checkpoint).lower()
+        
+        # 内存数据库配置
+        if config.memory_db_max_files is not None:
+            updates["MEMORY_DB_MAX_FILES"] = str(config.memory_db_max_files)
+        if config.memory_db_sync_batch_size is not None:
+            updates["MEMORY_DB_SYNC_BATCH_SIZE"] = str(config.memory_db_sync_batch_size)
+        if config.memory_db_sync_interval is not None:
+            updates["MEMORY_DB_SYNC_INTERVAL"] = str(config.memory_db_sync_interval)
+        if config.memory_db_checkpoint_interval is not None:
+            updates["MEMORY_DB_CHECKPOINT_INTERVAL"] = str(config.memory_db_checkpoint_interval)
+        if config.memory_db_checkpoint_retention_hours is not None:
+            updates["MEMORY_DB_CHECKPOINT_RETENTION_HOURS"] = str(config.memory_db_checkpoint_retention_hours)
+        
+        # SQLite 配置
+        if config.sqlite_cache_size is not None:
+            updates["SQLITE_CACHE_SIZE"] = str(config.sqlite_cache_size)
+        if config.sqlite_page_size is not None:
+            updates["SQLITE_PAGE_SIZE"] = str(config.sqlite_page_size)
+        if config.sqlite_timeout is not None:
+            updates["SQLITE_TIMEOUT"] = str(config.sqlite_timeout)
+        if config.sqlite_journal_mode is not None:
+            updates["SQLITE_JOURNAL_MODE"] = config.sqlite_journal_mode
+        if config.sqlite_synchronous is not None:
+            updates["SQLITE_SYNCHRONOUS"] = config.sqlite_synchronous
         
         # 日志配置
         if config.log_level is not None:

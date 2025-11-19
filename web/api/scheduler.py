@@ -199,31 +199,47 @@ async def create_scheduled_task(task: ScheduledTaskCreate, request: Request = No
         
         # 验证备份任务模板（如果提供了backup_task_id）
         if task.action_type == "backup" and task.backup_task_id:
-            from config.database import db_manager
-            from sqlalchemy import select
-            from models.backup import BackupTask
+            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+            from utils.scheduler.sqlite_utils import get_sqlite_connection
             
-            async with db_manager.AsyncSessionLocal() as session:
-                from sqlalchemy import and_
-                stmt = select(BackupTask).where(
-                    and_(
-                        BackupTask.id == task.backup_task_id,
-                        BackupTask.is_template == True
-                    )
-                )
-                result = await session.execute(stmt)
-                template = result.scalar_one_or_none()
-                
-                if not template:
-                    raise HTTPException(
-                        status_code=404,
-                        detail=f"备份任务模板不存在: {task.backup_task_id}"
-                    )
-                
-                # 将backup_task_id保存到task_metadata中
-                if task.task_metadata is None:
-                    task.task_metadata = {}
-                task.task_metadata['backup_task_id'] = task.backup_task_id
+            if is_opengauss():
+                # 使用原生SQL查询（openGauss）
+                async with get_opengauss_connection() as conn:
+                    row = await conn.fetchrow("""
+                        SELECT id, task_name, task_type, source_paths, exclude_patterns,
+                               compression_enabled, encryption_enabled, retention_days,
+                               description, tape_device, is_template
+                        FROM backup_tasks
+                        WHERE id = $1 AND is_template = TRUE
+                    """, task.backup_task_id)
+                    
+                    if not row:
+                        raise HTTPException(
+                            status_code=404,
+                            detail=f"备份任务模板不存在: {task.backup_task_id}"
+                        )
+            else:
+                # 使用原生SQL查询（SQLite）
+                async with get_sqlite_connection() as conn:
+                    cursor = await conn.execute("""
+                        SELECT id, task_name, task_type, source_paths, exclude_patterns,
+                               compression_enabled, encryption_enabled, retention_days,
+                               description, tape_device, is_template
+                        FROM backup_tasks
+                        WHERE id = ? AND is_template = 1
+                    """, (task.backup_task_id,))
+                    row = await cursor.fetchone()
+                    
+                    if not row:
+                        raise HTTPException(
+                            status_code=404,
+                            detail=f"备份任务模板不存在: {task.backup_task_id}"
+                        )
+            
+            # 将backup_task_id保存到task_metadata中
+            if task.task_metadata is None:
+                task.task_metadata = {}
+            task.task_metadata['backup_task_id'] = task.backup_task_id
         
         # 验证调度类型
         try:
@@ -490,12 +506,25 @@ async def _format_tape_via_disk_management(
                     drive_letter = drive_letter.strip().upper()
                     
                     logger.info(f"后台格式化磁盘（计划任务）: 卷标={volume_label}, SN={serial_number}, 盘符={drive_letter}")
-                    format_result = await tape_tools_manager.format_tape_ltfs(
-                        drive_letter=drive_letter,
-                        volume_label=volume_label,
-                        serial=serial_number,
-                        eject_after=False
-                    )
+                    # 格式化操作设置2小时超时（7200秒）
+                    try:
+                        format_result = await asyncio.wait_for(
+                            tape_tools_manager.format_tape_ltfs(
+                                drive_letter=drive_letter,
+                                volume_label=volume_label,
+                                serial=serial_number,
+                                eject_after=False
+                            ),
+                            timeout=7200.0  # 2小时超时
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(f"计划任务中格式化磁带超时（2小时）: 卷标={volume_label}, SN={serial_number}")
+                        format_result = {
+                            "success": False,
+                            "returncode": -1,
+                            "stdout": "",
+                            "stderr": "格式化操作超时（2小时），操作未完成"
+                        }
                     
                     logger.info(f"格式化命令执行完成 - 成功: {format_result.get('success')}, 返回码: {format_result.get('returncode')}, "
                               f"stdout长度: {len(format_result.get('stdout', ''))}, stderr长度: {len(format_result.get('stderr', ''))}")
@@ -508,8 +537,15 @@ async def _format_tape_via_disk_management(
                             # 等待一小段时间，确保格式化操作完全完成
                             await asyncio.sleep(2)
                             
-                            # 读取磁盘上的实际卷标和序列号
-                            label_result = await tape_tools_manager.read_tape_label_windows()
+                            # 读取磁盘上的实际卷标和序列号（60秒超时）
+                            try:
+                                label_result = await asyncio.wait_for(
+                                    tape_tools_manager.read_tape_label_windows(),
+                                    timeout=60.0
+                                )
+                            except asyncio.TimeoutError:
+                                logger.warning("计划任务中读取磁带卷标超时（60秒）")
+                                label_result = {"success": False, "error": "读取卷标超时（60秒）"}
                             
                             if label_result.get("success"):
                                 actual_label = label_result.get("volume_name", "").strip()
@@ -577,30 +613,35 @@ async def _format_tape_via_disk_management(
                             except Exception as db_update_error:
                                 logger.error(f"更新状态失败: {str(db_update_error)}", exc_info=True)
                     else:
-                        # 格式化失败，将状态改为ERROR（故障）
+                        # 格式化失败或超时，将状态改为ERROR（故障）
                         error_detail = format_result.get("stderr") or format_result.get("stdout") or "格式化失败"
                         returncode = format_result.get("returncode", -1)
-                        logger.error(f"格式化磁盘失败 - 返回码: {returncode}, 错误详情: {error_detail}")
+                        is_timeout = "超时" in error_detail or "超时" in (format_result.get("stderr") or "")
                         
-                        # 格式化失败时，将状态改为ERROR
+                        if is_timeout:
+                            logger.error(f"格式化磁盘超时（2小时）- 卷标: {volume_label}, SN: {serial_number}, 错误详情: {error_detail}")
+                        else:
+                            logger.error(f"格式化磁盘失败 - 返回码: {returncode}, 错误详情: {error_detail}")
+                        
+                        # 格式化失败或超时时，将状态改为ERROR
                         with db_conn.cursor() as db_cur:
                             db_cur.execute("UPDATE tape_cartridges SET status = %s WHERE tape_id = %s", 
                                         ('ERROR', tape_id))
                             db_conn.commit()
-                            logger.warning(f"格式化失败，将磁带 {tape_id} 状态设置为 ERROR")
+                            logger.warning(f"格式化失败/超时，将磁带 {tape_id} 状态设置为 ERROR")
                         
-                        # 发送钉钉通知
+                        # 发送钉钉通知（失败或超时都发送）
                         try:
                             if system_instance and hasattr(system_instance, 'dingtalk_notifier') and system_instance.dingtalk_notifier:
                                 await system_instance.dingtalk_notifier.send_tape_format_notification(
                                     tape_id=tape_id,
                                     status="failed",
-                                    error_detail=f"返回码: {returncode}, {error_detail}",
+                                    error_detail=f"{'超时（2小时）' if is_timeout else f'返回码: {returncode}'}, {error_detail}",
                                     volume_label=volume_label,
                                     serial_number=serial_number
                                 )
                         except Exception as notify_error:
-                            logger.error(f"发送格式化失败钉钉通知异常: {str(notify_error)}", exc_info=True)
+                            logger.error(f"发送格式化失败/超时钉钉通知异常: {str(notify_error)}", exc_info=True)
                 finally:
                     db_conn.close()
             except Exception as e:
@@ -1016,7 +1057,11 @@ async def unlock_scheduled_task(task_id: int, request: Request = None):
             details={"task_name": task.task_name, "task_id": task_id}
         )
         
-        await release_task_locks_by_task(task_id)
+        # 解锁任务并重置状态
+        from utils.scheduler.task_unlocker import unlock_task_and_reset_status
+        success = await unlock_task_and_reset_status(task_id)
+        if not success:
+            logger.warning(f"解锁任务 {task_id} 可能失败，但继续执行")
 
         await log_operation(
             operation_type=OperationType.SCHEDULER_STOP,
@@ -1101,7 +1146,10 @@ async def unlock_all_tasks(request: Request = None):
             details={"operation": "unlock_all"}
         )
         
-        await release_all_active_locks()
+        # 解锁所有任务并重置状态
+        from utils.scheduler.task_unlocker import unlock_all_tasks_and_reset_status
+        count = await unlock_all_tasks_and_reset_status()
+        logger.info(f"已解锁所有任务并重置了 {count} 个 RUNNING 状态的任务")
 
         await log_operation(
             operation_type=OperationType.SCHEDULER_STOP,

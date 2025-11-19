@@ -570,6 +570,11 @@ const SchedulerManager = {
             actionTypeEl.value = 'backup';
             ActionConfigManager.updateActionConfigForm('backup');
         }
+        // 默认选择每月任务
+        const scheduleTypeSelect = document.getElementById('scheduleType');
+        if (scheduleTypeSelect) {
+            scheduleTypeSelect.value = 'monthly';
+        }
         // 顶部备份类型与表单内备份类型同步默认值
         const backupTaskType = document.getElementById('backupTaskType');
         const backupTaskTypeHeader = document.getElementById('backupTaskTypeHeader');
@@ -591,10 +596,20 @@ const SchedulerManager = {
         modalEl.addEventListener('shown.bs.modal', () => {
             // 重新初始化时间选择器（确保DOM已完全渲染）
             this.setupDatePickers();
-            // 如果已选择调度类型，更新配置表单
-            const scheduleTypeSelect = document.getElementById('scheduleType');
+            // 更新调度配置表单（显示每月任务配置面板）
             if (scheduleTypeSelect && scheduleTypeSelect.value) {
                 ScheduleConfigManager.updateScheduleConfigForm(scheduleTypeSelect.value, {});
+            }
+            
+            // 自动选择第一个磁带机
+            if (backupTargetType && backupTargetType.value === 'tape' && this.pathManager.tapeDevices.length > 0) {
+                const tapeDeviceSelect = document.getElementById('backupTapeDeviceSelect');
+                if (tapeDeviceSelect && tapeDeviceSelect.options.length > 1) {
+                    // 选择第一个实际磁带机（跳过"请选择"选项）
+                    tapeDeviceSelect.value = tapeDeviceSelect.options[1].value;
+                    // 自动添加到列表
+                    this.pathManager.addTapeDevice();
+                }
             }
         }, { once: true }); // 只执行一次
         

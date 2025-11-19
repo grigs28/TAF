@@ -120,8 +120,8 @@ export class ScheduleConfigManager {
                         }
                         break;
                     case 'monthly':
-                        document.getElementById('monthlyDay').value = config.day_of_month || 1;
-                        const monthlyTime = config.time || '02:00:00';
+                        document.getElementById('monthlyDay').value = config.day_of_month || 28;
+                        const monthlyTime = config.time || '00:02:00';
                         const monthlyTimeHidden = document.getElementById('monthlyTimeHidden');
                         const monthlyTimeDisplay = document.getElementById('monthlyTime');
                         if (monthlyTimeHidden) {
@@ -274,7 +274,7 @@ export class ScheduleConfigManager {
                 // 无论面板是否可见，都尝试获取时间值
                 const monthlyTimeHiddenEl = document.getElementById('monthlyTimeHidden');
                 const monthlyTimeDisplayEl = document.getElementById('monthlyTime');
-                let monthlyTime = '02:00:00'; // 默认值
+                let monthlyTime = '00:02:00'; // 默认值 00:02
                 
                 if (monthlyTimeHiddenEl && monthlyTimeHiddenEl.value) {
                     monthlyTime = monthlyTimeHiddenEl.value;
@@ -286,7 +286,7 @@ export class ScheduleConfigManager {
                 }
                 
                 config = {
-                    day_of_month: safeGetIntValue('monthlyDay', 1),
+                    day_of_month: safeGetIntValue('monthlyDay', 28), // 默认值 28
                     time: monthlyTime
                 };
                 console.log('Monthly schedule config:', config);

@@ -59,6 +59,7 @@ def setup_logging():
     root_logger.addHandler(file_handler)
 
     # 错误日志文件处理器（按大小轮转，最大10MB，保留30个备份文件）
+    # 所有警告及以上级别的日志都写入error.log
     error_log_file = log_dir / 'error.log'
     error_handler = logging.handlers.RotatingFileHandler(
         filename=error_log_file,
@@ -66,12 +67,66 @@ def setup_logging():
         backupCount=30,  # 保留30个备份文件
         encoding='utf-8'
     )
-    error_handler.setLevel(logging.ERROR)
+    error_handler.setLevel(logging.WARNING)  # 改为WARNING级别，包含所有警告及以上日志
     error_handler.setFormatter(formatter)
     root_logger.addHandler(error_handler)
     
     # 设置错误日志格式，包含异常堆栈
     error_handler.formatter = detailed_formatter
+    
+    # 压缩日志文件处理器（压缩过程中的所有警告及以上级别日志）
+    # 使用TimedRotatingFileHandler按日期命名，匹配现有日志文件格式（compression_YYYYMMDD.log）
+    compression_log_dir = log_dir / 'compression'
+    compression_log_dir.mkdir(exist_ok=True)
+    # 使用基础文件名，TimedRotatingFileHandler会在轮转时自动添加日期后缀
+    compression_log_file = compression_log_dir / "compression.log"
+    compression_handler = logging.handlers.TimedRotatingFileHandler(
+        filename=str(compression_log_file),
+        when='midnight',
+        interval=1,
+        backupCount=30,  # 保留30天的日志文件
+        encoding='utf-8'
+    )
+    compression_handler.setLevel(logging.WARNING)
+    compression_handler.setFormatter(formatter)
+    
+    # 添加过滤器：只记录压缩相关模块的日志
+    class CompressionLogFilter(logging.Filter):
+        def filter(self, record):
+            # 压缩相关模块：backup.compressor, backup.compression_worker
+            module_name = record.name
+            return (module_name.startswith('backup.compressor') or 
+                    module_name.startswith('backup.compression_worker'))
+    
+    compression_handler.addFilter(CompressionLogFilter())
+    root_logger.addHandler(compression_handler)
+    
+    # 文件移动日志文件处理器（文件移动过程中的所有警告及以上级别日志）
+    # 使用TimedRotatingFileHandler按日期命名，匹配现有日志文件格式（file_move_YYYYMMDD.log）
+    file_move_log_dir = log_dir / 'file_move'
+    file_move_log_dir.mkdir(exist_ok=True)
+    # 使用基础文件名，TimedRotatingFileHandler会在轮转时自动添加日期后缀
+    file_move_log_file = file_move_log_dir / "file_move.log"
+    file_move_handler = logging.handlers.TimedRotatingFileHandler(
+        filename=str(file_move_log_file),
+        when='midnight',
+        interval=1,
+        backupCount=30,  # 保留30天的日志文件
+        encoding='utf-8'
+    )
+    file_move_handler.setLevel(logging.WARNING)
+    file_move_handler.setFormatter(formatter)
+    
+    # 添加过滤器：只记录文件移动相关模块的日志
+    class FileMoveLogFilter(logging.Filter):
+        def filter(self, record):
+            # 文件移动相关模块：backup.file_move_worker, backup.tape_file_mover
+            module_name = record.name
+            return (module_name.startswith('backup.file_move_worker') or 
+                    module_name.startswith('backup.tape_file_mover'))
+    
+    file_move_handler.addFilter(FileMoveLogFilter())
+    root_logger.addHandler(file_move_handler)
 
     # 获取logger（在添加处理器之前先定义）
     logger = logging.getLogger(__name__)
@@ -97,6 +152,9 @@ def setup_logging():
     logger.info("企业级磁带备份系统 - 日志系统初始化完成")
     logger.info(f"日志级别: {settings.LOG_LEVEL}")
     logger.info(f"日志文件: {settings.LOG_FILE}")
+    logger.info(f"错误日志文件: {error_log_file} (警告及以上级别)")
+    logger.info(f"压缩日志文件: {compression_log_file} (压缩相关警告及以上级别)")
+    logger.info(f"文件移动日志文件: {file_move_log_file} (文件移动相关警告及以上级别)")
     logger.info(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("=" * 60)
 

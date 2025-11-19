@@ -131,11 +131,47 @@ class BackupTaskManager:
                     )
                     backup_task.id = task_id
             else:
-                # 非 openGauss 使用 SQLAlchemy（其他数据库）
-                async for db in get_db():
-                    db.add(backup_task)
-                    await db.commit()
-                    await db.refresh(backup_task)
+                # SQLite 版本：使用原生 SQL
+                from utils.scheduler.sqlite_utils import get_sqlite_connection
+                import json as json_module
+                
+                async with get_sqlite_connection() as conn:
+                    # 准备数据
+                    source_paths_json = json_module.dumps(backup_task.source_paths) if backup_task.source_paths else None
+                    exclude_patterns_json = json_module.dumps(backup_task.exclude_patterns) if backup_task.exclude_patterns else None
+                    result_summary_json = json_module.dumps(backup_task.result_summary) if backup_task.result_summary else None
+                    
+                    # 插入备份任务
+                    cursor = await conn.execute("""
+                        INSERT INTO backup_tasks (
+                            task_name, task_type, description, status, source_paths, exclude_patterns,
+                            compression_enabled, encryption_enabled, retention_days, scheduled_time,
+                            created_by, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        task_name,
+                        backup_task.task_type.value if hasattr(backup_task.task_type, 'value') else str(backup_task.task_type),
+                        backup_task.description or '',
+                        backup_task.status.value if hasattr(backup_task.status, 'value') else str(backup_task.status),
+                        source_paths_json,
+                        exclude_patterns_json,
+                        backup_task.compression_enabled,
+                        backup_task.encryption_enabled,
+                        backup_task.retention_days,
+                        backup_task.scheduled_time,
+                        backup_task.created_by or 'system',
+                        datetime.now(),
+                        datetime.now()
+                    ))
+                    await conn.commit()
+                    
+                    # 查询插入的记录获取 id
+                    cursor = await conn.execute("""
+                        SELECT id FROM backup_tasks WHERE task_name = ? ORDER BY id DESC LIMIT 1
+                    """, (task_name,))
+                    row = await cursor.fetchone()
+                    if row:
+                        backup_task.id = row[0]
 
             logger.info(f"创建备份任务成功: {task_name}")
             return backup_task

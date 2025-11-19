@@ -19,13 +19,13 @@ from typing import List, Dict, Any, Optional, Callable
 import py7zr
 
 from config.settings import get_settings
-from config.database import get_db, db_manager
-from models.backup import BackupSet, BackupFile, BackupSetStatus, BackupTaskType, BackupFileType
+from config.database import get_db
+from models.backup import BackupSetStatus, BackupTaskType, BackupFileType
 from models.system_log import OperationLog, OperationType
 from tape.tape_manager import TapeManager
 from utils.dingtalk_notifier import DingTalkNotifier
 from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
-from sqlalchemy import select, and_, or_, func
+from utils.scheduler.sqlite_utils import get_sqlite_connection
 from datetime import datetime, timedelta
 import json
 
@@ -142,43 +142,78 @@ class RecoveryEngine:
                         }
                         backup_sets.append(backup_set)
             else:
-                # 使用SQLAlchemy查询
-                async with db_manager.AsyncSessionLocal() as session:
-                    stmt = select(BackupSet).where(BackupSet.status == BackupSetStatus.ACTIVE)
-
+                # 使用原生SQL查询（SQLite）
+                async with get_sqlite_connection() as conn:
+                    # 构建WHERE子句
+                    where_clauses = ["LOWER(status) = LOWER('ACTIVE')"]
+                    params = []
+                    
                     # 应用过滤条件
                     if 'backup_group' in filters and filters['backup_group']:
-                        stmt = stmt.where(BackupSet.backup_group == filters['backup_group'])
-
+                        where_clauses.append("backup_group = ?")
+                        params.append(filters['backup_group'])
+                    
                     if 'tape_id' in filters and filters['tape_id']:
-                        stmt = stmt.where(BackupSet.tape_id == filters['tape_id'])
-
+                        where_clauses.append("tape_id = ?")
+                        params.append(filters['tape_id'])
+                    
                     if 'date_from' in filters and filters['date_from']:
-                        stmt = stmt.where(BackupSet.backup_time >= filters['date_from'])
-
+                        where_clauses.append("backup_time >= ?")
+                        params.append(filters['date_from'])
+                    
                     if 'date_to' in filters and filters['date_to']:
-                        stmt = stmt.where(BackupSet.backup_time <= filters['date_to'])
-
-                    stmt = stmt.order_by(BackupSet.backup_time.desc()).limit(100)
-                    result = await session.execute(stmt)
-                    sets = result.scalars().all()
-
+                        where_clauses.append("backup_time <= ?")
+                        params.append(filters['date_to'])
+                    
+                    where_sql = " AND ".join(where_clauses)
+                    
+                    sql = f"""
+                        SELECT id, set_id, set_name, backup_group, backup_type, backup_time,
+                               total_files, total_bytes, compressed_bytes, compression_ratio,
+                               tape_id, status, created_at
+                        FROM backup_sets
+                        WHERE {where_sql}
+                        ORDER BY backup_time DESC
+                        LIMIT 100
+                    """
+                    cursor = await conn.execute(sql, params)
+                    rows = await cursor.fetchall()
+                    
                     # 转换为字典格式
-                    for backup_set in sets:
+                    for row in rows:
+                        # 处理枚举值
+                        backup_type_value = row[4]  # backup_type
+                        if isinstance(backup_type_value, str) and backup_type_value.islower():
+                            try:
+                                from models.backup import BackupTaskType
+                                backup_type_enum = BackupTaskType(backup_type_value)
+                                backup_type_value = backup_type_enum.value
+                            except (ValueError, AttributeError):
+                                pass
+                        
+                        status_value = row[11]  # status
+                        if isinstance(status_value, str) and status_value.islower():
+                            try:
+                                from models.backup import BackupSetStatus
+                                status_enum = BackupSetStatus(status_value)
+                                status_value = status_enum.value
+                            except (ValueError, AttributeError):
+                                pass
+                        
                         backup_sets.append({
-                            'id': backup_set.id,
-                            'set_id': backup_set.set_id,
-                            'set_name': backup_set.set_name,
-                            'backup_group': backup_set.backup_group,
-                            'backup_type': backup_set.backup_type.value if hasattr(backup_set.backup_type, 'value') else str(backup_set.backup_type),
-                            'backup_time': backup_set.backup_time.isoformat() if backup_set.backup_time else None,
-                            'total_files': backup_set.total_files or 0,
-                            'total_bytes': backup_set.total_bytes or 0,
-                            'compressed_bytes': backup_set.compressed_bytes or 0,
-                            'compression_ratio': float(backup_set.compression_ratio) if backup_set.compression_ratio else None,
-                            'tape_id': backup_set.tape_id,
-                            'status': backup_set.status.value if hasattr(backup_set.status, 'value') else str(backup_set.status),
-                            'created_at': backup_set.created_at.isoformat() if backup_set.created_at else None
+                            'id': row[0],  # id
+                            'set_id': row[1],  # set_id
+                            'set_name': row[2],  # set_name
+                            'backup_group': row[3],  # backup_group
+                            'backup_type': backup_type_value,
+                            'backup_time': row[5].isoformat() if row[5] and hasattr(row[5], 'isoformat') else (str(row[5]) if row[5] else None),  # backup_time
+                            'total_files': row[6] or 0,  # total_files
+                            'total_bytes': row[7] or 0,  # total_bytes
+                            'compressed_bytes': row[8] or 0,  # compressed_bytes
+                            'compression_ratio': float(row[9]) if row[9] else None,  # compression_ratio
+                            'tape_id': row[10],  # tape_id
+                            'status': status_value,
+                            'created_at': row[12].isoformat() if row[12] and hasattr(row[12], 'isoformat') else (str(row[12]) if row[12] else None)  # created_at
                         })
 
             logger.info(f"查询到 {len(backup_sets)} 个备份集")
@@ -246,48 +281,69 @@ class RecoveryEngine:
                         }
                         files.append(file_info)
             else:
-                # 使用SQLAlchemy查询
-                async with db_manager.AsyncSessionLocal() as session:
+                # 使用原生SQL查询（SQLite）
+                async with get_sqlite_connection() as conn:
                     # 首先查找备份集
-                    stmt = select(BackupSet).where(BackupSet.set_id == backup_set_id)
-                    result = await session.execute(stmt)
-                    backup_set = result.scalar_one_or_none()
-
-                    if not backup_set:
+                    cursor = await conn.execute(
+                        "SELECT id FROM backup_sets WHERE set_id = ?",
+                        (backup_set_id,)
+                    )
+                    row = await cursor.fetchone()
+                    
+                    if not row:
                         logger.warning(f"备份集不存在: {backup_set_id}")
                         return []
-
+                    
+                    backup_set_db_id = row[0]
+                    
                     # 查询该备份集的所有文件
-                    stmt = (
-                        select(BackupFile)
-                        .where(
-                            BackupFile.backup_set_id == backup_set.id,
-                            BackupFile.is_copy_success.is_(True)
-                        )
-                        .order_by(BackupFile.file_path)
-                    )
-                    result = await session.execute(stmt)
-                    backup_files = result.scalars().all()
-
+                    cursor = await conn.execute("""
+                        SELECT id, file_path, file_name, directory_path, display_name, file_type,
+                               file_size, compressed_size, file_permissions, created_time, modified_time,
+                               accessed_time, compressed, checksum, backup_time, chunk_number
+                        FROM backup_files
+                        WHERE backup_set_id = ? AND is_copy_success = 1
+                        ORDER BY file_path
+                    """, (backup_set_db_id,))
+                    rows = await cursor.fetchall()
+                    
                     # 转换为字典格式
-                    for file in backup_files:
+                    for row in rows:
+                        # 处理枚举值
+                        file_type_value = row[5]  # file_type
+                        if isinstance(file_type_value, str) and file_type_value.islower():
+                            try:
+                                from models.backup import BackupFileType
+                                file_type_enum = BackupFileType(file_type_value)
+                                file_type_value = file_type_enum.value
+                            except (ValueError, AttributeError):
+                                pass
+                        
+                        # 处理日期时间
+                        def _format_datetime(dt):
+                            if dt is None:
+                                return None
+                            if hasattr(dt, 'isoformat'):
+                                return dt.isoformat()
+                            return str(dt) if dt else None
+                        
                         files.append({
-                            'id': file.id,
-                            'file_path': file.file_path,
-                            'file_name': file.file_name,
-                            'directory_path': file.directory_path,
-                            'display_name': file.display_name,
-                            'file_type': file.file_type.value if hasattr(file.file_type, 'value') else str(file.file_type),
-                            'file_size': file.file_size or 0,
-                            'compressed_size': file.compressed_size or 0,
-                            'file_permissions': file.file_permissions,
-                            'created_time': file.created_time.isoformat() if file.created_time else None,
-                            'modified_time': file.modified_time.isoformat() if file.modified_time else None,
-                            'accessed_time': file.accessed_time.isoformat() if file.accessed_time else None,
-                            'compressed': file.compressed or False,
-                            'checksum': file.checksum,
-                            'backup_time': file.backup_time.isoformat() if file.backup_time else None,
-                            'chunk_number': file.chunk_number
+                            'id': row[0],  # id
+                            'file_path': row[1],  # file_path
+                            'file_name': row[2],  # file_name
+                            'directory_path': row[3],  # directory_path
+                            'display_name': row[4],  # display_name
+                            'file_type': file_type_value,
+                            'file_size': row[6] or 0,  # file_size
+                            'compressed_size': row[7] or 0,  # compressed_size
+                            'file_permissions': row[8],  # file_permissions
+                            'created_time': _format_datetime(row[9]),  # created_time
+                            'modified_time': _format_datetime(row[10]),  # modified_time
+                            'accessed_time': _format_datetime(row[11]),  # accessed_time
+                            'compressed': bool(row[12]) if row[12] is not None else False,  # compressed
+                            'checksum': row[13],  # checksum
+                            'backup_time': _format_datetime(row[14]),  # backup_time
+                            'chunk_number': row[15]  # chunk_number
                         })
 
             logger.info(f"查询到 {len(files)} 个文件 (备份集: {backup_set_id})")
@@ -449,38 +505,42 @@ class RecoveryEngine:
                                 'has_children': has_children
                             }
             else:
-                # 使用SQLAlchemy查询（PostgreSQL等数据库）
-                async with db_manager.AsyncSessionLocal() as session:
-                    stmt = select(BackupSet).where(BackupSet.set_id == backup_set_id)
-                    result = await session.execute(stmt)
-                    backup_set = result.scalar_one_or_none()
+                # 使用原生SQL查询（SQLite）
+                async with get_sqlite_connection() as conn:
+                    # 首先查找备份集
+                    cursor = await conn.execute(
+                        "SELECT id FROM backup_sets WHERE set_id = ?",
+                        (backup_set_id,)
+                    )
+                    row = await cursor.fetchone()
                     
-                    if not backup_set:
+                    if not row:
                         logger.warning(f"备份集不存在: {backup_set_id}")
                         return []
                     
-                    # 使用原生SQL查询来提取唯一的顶层目录和文件
-                    # 这样可以避免在Python中遍历所有文件路径
-                    from sqlalchemy import text
-                    sql = text("""
+                    backup_set_db_id = row[0]
+                    
+                    # 使用SQLite的CTE来提取唯一的顶层目录和文件
+                    # SQLite支持CTE，但语法略有不同（使用INSTR代替POSITION）
+                    sql = """
                         WITH normalized_paths AS (
                             SELECT 
                                 file_path,
                                 REPLACE(file_path, '\\', '/') as normalized_path
                             FROM backup_files
-                            WHERE backup_set_id = :backup_set_id
-                              AND is_copy_success = TRUE
+                            WHERE backup_set_id = ?
+                              AND is_copy_success = 1
                         ),
                         first_levels AS (
                             SELECT 
                                 CASE 
-                                    WHEN POSITION('/' IN normalized_path) > 0 
-                                    THEN SUBSTRING(normalized_path FROM 1 FOR POSITION('/' IN normalized_path) - 1)
+                                    WHEN INSTR(normalized_path, '/') > 0 
+                                    THEN SUBSTR(normalized_path, 1, INSTR(normalized_path, '/') - 1)
                                     ELSE normalized_path
                                 END as first_level,
                                 file_path,
                                 CASE 
-                                    WHEN POSITION('/' IN normalized_path) > 0 THEN 'directory'
+                                    WHEN INSTR(normalized_path, '/') > 0 THEN 'directory'
                                     ELSE 'file'
                                 END as item_type
                             FROM normalized_paths
@@ -492,9 +552,9 @@ class RecoveryEngine:
                         FROM first_levels
                         GROUP BY first_level, item_type
                         ORDER BY first_level ASC
-                    """)
-                    result = await session.execute(sql, {'backup_set_id': backup_set.id})
-                    rows = result.fetchall()
+                    """
+                    cursor = await conn.execute(sql, (backup_set_db_id,))
+                    rows = await cursor.fetchall()
                     
                     logger.info(f"通过SQL查询提取到 {len(rows)} 个唯一的顶层项")
                     
@@ -509,36 +569,52 @@ class RecoveryEngine:
                         
                         if item_type == 'file':
                             # 顶层文件，查询文件信息
-                            file_stmt = (
-                                select(BackupFile)
-                                .where(
-                                    BackupFile.backup_set_id == backup_set.id,
-                                    BackupFile.file_path == sample_path,
-                                    BackupFile.is_copy_success.is_(True)
-                                )
-                                .limit(1)
-                            )
-                            file_result = await session.execute(file_stmt)
-                            backup_file = file_result.scalar_one_or_none()
+                            file_cursor = await conn.execute("""
+                                SELECT id, file_path, file_name, directory_path, display_name, file_type,
+                                       file_size, compressed_size, file_permissions, created_time, modified_time,
+                                       accessed_time, compressed, checksum, backup_time, chunk_number
+                                FROM backup_files
+                                WHERE backup_set_id = ? AND file_path = ? AND is_copy_success = 1
+                                LIMIT 1
+                            """, (backup_set_db_id, sample_path))
+                            file_row = await file_cursor.fetchone()
                             
-                            if backup_file:
+                            if file_row:
+                                # 处理枚举值
+                                file_type_value = file_row[5]  # file_type
+                                if isinstance(file_type_value, str) and file_type_value.islower():
+                                    try:
+                                        from models.backup import BackupFileType
+                                        file_type_enum = BackupFileType(file_type_value)
+                                        file_type_value = file_type_enum.value
+                                    except (ValueError, AttributeError):
+                                        pass
+                                
+                                # 处理日期时间
+                                def _format_datetime(dt):
+                                    if dt is None:
+                                        return None
+                                    if hasattr(dt, 'isoformat'):
+                                        return dt.isoformat()
+                                    return str(dt) if dt else None
+                                
                                 file_info = {
-                                    'id': backup_file.id,
-                                    'file_path': backup_file.file_path,
-                                    'file_name': backup_file.file_name,
-                                    'directory_path': backup_file.directory_path,
-                                    'display_name': backup_file.display_name,
-                                    'file_type': backup_file.file_type.value if hasattr(backup_file.file_type, 'value') else str(backup_file.file_type),
-                                    'file_size': backup_file.file_size or 0,
-                                    'compressed_size': backup_file.compressed_size or 0,
-                                    'file_permissions': backup_file.file_permissions,
-                                    'created_time': backup_file.created_time.isoformat() if backup_file.created_time else None,
-                                    'modified_time': backup_file.modified_time.isoformat() if backup_file.modified_time else None,
-                                    'accessed_time': backup_file.accessed_time.isoformat() if backup_file.accessed_time else None,
-                                    'compressed': backup_file.compressed or False,
-                                    'checksum': backup_file.checksum,
-                                    'backup_time': backup_file.backup_time.isoformat() if backup_file.backup_time else None,
-                                    'chunk_number': backup_file.chunk_number
+                                    'id': file_row[0],  # id
+                                    'file_path': file_row[1],  # file_path
+                                    'file_name': file_row[2],  # file_name
+                                    'directory_path': file_row[3],  # directory_path
+                                    'display_name': file_row[4],  # display_name
+                                    'file_type': file_type_value,
+                                    'file_size': file_row[6] or 0,  # file_size
+                                    'compressed_size': file_row[7] or 0,  # compressed_size
+                                    'file_permissions': file_row[8],  # file_permissions
+                                    'created_time': _format_datetime(file_row[9]),  # created_time
+                                    'modified_time': _format_datetime(file_row[10]),  # modified_time
+                                    'accessed_time': _format_datetime(file_row[11]),  # accessed_time
+                                    'compressed': bool(file_row[12]) if file_row[12] is not None else False,  # compressed
+                                    'checksum': file_row[13],  # checksum
+                                    'backup_time': _format_datetime(file_row[14]),  # backup_time
+                                    'chunk_number': file_row[15]  # chunk_number
                                 }
                                 files.append({
                                     'name': first_level,
@@ -549,20 +625,21 @@ class RecoveryEngine:
                                 })
                         else:
                             # 顶层目录，检查是否有子项
-                            child_stmt = (
-                                select(func.count(BackupFile.id))
-                                .where(
-                                    BackupFile.backup_set_id == backup_set.id,
-                                    or_(
-                                        func.replace(BackupFile.file_path, '\\', '/').like(first_level + '/%'),
-                                        func.replace(BackupFile.file_path, '\\', '/').like(first_level + '\\%')
-                                    ),
-                                    func.replace(BackupFile.file_path, '\\', '/') != first_level,
-                                    BackupFile.is_copy_success.is_(True)
-                                )
-                            )
-                            child_result = await session.execute(child_stmt)
-                            has_children = child_result.scalar() > 0
+                            like_pattern1 = first_level + '/%'
+                            like_pattern2 = first_level + '\\%'
+                            child_cursor = await conn.execute("""
+                                SELECT COUNT(*) as cnt
+                                FROM backup_files
+                                WHERE backup_set_id = ? 
+                                  AND (
+                                      REPLACE(file_path, '\\', '/') LIKE ?
+                                      OR REPLACE(file_path, '\\', '/') LIKE ?
+                                  )
+                                  AND REPLACE(file_path, '\\', '/') != ?
+                                  AND is_copy_success = 1
+                            """, (backup_set_db_id, like_pattern1, like_pattern2, first_level))
+                            child_row = await child_cursor.fetchone()
+                            has_children = (child_row[0] > 0) if child_row else True
                             
                             directories[first_level] = {
                                 'name': first_level,
@@ -753,45 +830,56 @@ class RecoveryEngine:
                                     'has_children': True
                                 }
             else:
-                # 使用SQLAlchemy查询
-                async with db_manager.AsyncSessionLocal() as session:
-                    stmt = select(BackupSet).where(BackupSet.set_id == backup_set_id)
-                    result = await session.execute(stmt)
-                    backup_set = result.scalar_one_or_none()
+                # 使用原生SQL查询（SQLite）
+                async with get_sqlite_connection() as conn:
+                    # 首先查找备份集
+                    cursor = await conn.execute(
+                        "SELECT id FROM backup_sets WHERE set_id = ?",
+                        (backup_set_id,)
+                    )
+                    row = await cursor.fetchone()
                     
-                    if not backup_set:
+                    if not row:
                         logger.warning(f"备份集不存在: {backup_set_id}")
                         return []
+                    
+                    backup_set_db_id = row[0]
                     
                     # 查询该目录下的所有文件
                     if directory_path:
                         # 规范化目录路径
                         normalized_dir = directory_path.replace('\\', '/')
-                        # 使用 func.replace 规范化路径后再匹配
-                        stmt = select(BackupFile).where(
-                            BackupFile.backup_set_id == backup_set.id,
-                            BackupFile.is_copy_success.is_(True)
-                        ).where(
-                            or_(
-                                func.replace(BackupFile.file_path, '\\', '/') == normalized_dir,
-                                func.replace(BackupFile.file_path, '\\', '/').like(normalized_dir + '/%'),
-                                func.replace(BackupFile.file_path, '\\', '/').like(normalized_dir + '\\%')
-                            )
-                        ).order_by(BackupFile.file_path)
+                        # 使用 REPLACE 规范化路径后再匹配
+                        cursor = await conn.execute("""
+                            SELECT id, file_path, file_name, directory_path, display_name, file_type,
+                                   file_size, compressed_size, file_permissions, created_time, modified_time,
+                                   accessed_time, compressed, checksum, backup_time, chunk_number
+                            FROM backup_files
+                            WHERE backup_set_id = ? AND is_copy_success = 1
+                              AND (
+                                  REPLACE(file_path, '\\', '/') = ?
+                                  OR REPLACE(file_path, '\\', '/') LIKE ?
+                                  OR REPLACE(file_path, '\\', '/') LIKE ?
+                              )
+                            ORDER BY file_path
+                        """, (backup_set_db_id, normalized_dir, normalized_dir + '/%', normalized_dir + '\\%'))
                     else:
-                        stmt = select(BackupFile).where(
-                            BackupFile.backup_set_id == backup_set.id,
-                            BackupFile.is_copy_success.is_(True)
-                        ).order_by(BackupFile.file_path)
+                        cursor = await conn.execute("""
+                            SELECT id, file_path, file_name, directory_path, display_name, file_type,
+                                   file_size, compressed_size, file_permissions, created_time, modified_time,
+                                   accessed_time, compressed, checksum, backup_time, chunk_number
+                            FROM backup_files
+                            WHERE backup_set_id = ? AND is_copy_success = 1
+                            ORDER BY file_path
+                        """, (backup_set_db_id,))
                     
-                    result = await session.execute(stmt)
-                    backup_files = result.scalars().all()
+                    rows = await cursor.fetchall()
                     
                     # 处理查询结果
                     normalized_dir = directory_path.replace('\\', '/') if directory_path else ''
                     
-                    for file in backup_files:
-                        file_path = file.file_path
+                    for row in rows:
+                        file_path = row[1]  # file_path
                         
                         # 规范化文件路径
                         normalized_file_path = file_path.replace('\\', '/')
@@ -828,23 +916,41 @@ class RecoveryEngine:
                         
                         if len(path_parts) == 1:
                             # 这是当前目录下的文件
+                            # 处理枚举值
+                            file_type_value = row[5]  # file_type
+                            if isinstance(file_type_value, str) and file_type_value.islower():
+                                try:
+                                    from models.backup import BackupFileType
+                                    file_type_enum = BackupFileType(file_type_value)
+                                    file_type_value = file_type_enum.value
+                                except (ValueError, AttributeError):
+                                    pass
+                            
+                            # 处理日期时间
+                            def _format_datetime(dt):
+                                if dt is None:
+                                    return None
+                                if hasattr(dt, 'isoformat'):
+                                    return dt.isoformat()
+                                return str(dt) if dt else None
+                            
                             file_info = {
-                                'id': file.id,
-                                'file_path': file.file_path,
-                                'file_name': file.file_name,
-                                'directory_path': file.directory_path,
-                                'display_name': file.display_name,
-                                'file_type': file.file_type.value if hasattr(file.file_type, 'value') else str(file.file_type),
-                                'file_size': file.file_size or 0,
-                                'compressed_size': file.compressed_size or 0,
-                                'file_permissions': file.file_permissions,
-                                'created_time': file.created_time.isoformat() if file.created_time else None,
-                                'modified_time': file.modified_time.isoformat() if file.modified_time else None,
-                                'accessed_time': file.accessed_time.isoformat() if file.accessed_time else None,
-                                'compressed': file.compressed or False,
-                                'checksum': file.checksum,
-                                'backup_time': file.backup_time.isoformat() if file.backup_time else None,
-                                'chunk_number': file.chunk_number
+                                'id': row[0],  # id
+                                'file_path': row[1],  # file_path
+                                'file_name': row[2],  # file_name
+                                'directory_path': row[3],  # directory_path
+                                'display_name': row[4],  # display_name
+                                'file_type': file_type_value,
+                                'file_size': row[6] or 0,  # file_size
+                                'compressed_size': row[7] or 0,  # compressed_size
+                                'file_permissions': row[8],  # file_permissions
+                                'created_time': _format_datetime(row[9]),  # created_time
+                                'modified_time': _format_datetime(row[10]),  # modified_time
+                                'accessed_time': _format_datetime(row[11]),  # accessed_time
+                                'compressed': bool(row[12]) if row[12] is not None else False,  # compressed
+                                'checksum': row[13],  # checksum
+                                'backup_time': _format_datetime(row[14]),  # backup_time
+                                'chunk_number': row[15]  # chunk_number
                             }
                             files.append({
                                 'name': first_part,
@@ -1121,27 +1227,59 @@ class RecoveryEngine:
                         'status': row['status'].value if hasattr(row['status'], 'value') else str(row['status'])
                     }
             else:
-                # 使用SQLAlchemy查询
-                async with db_manager.AsyncSessionLocal() as session:
-                    stmt = select(BackupSet).where(BackupSet.set_id == backup_set_id)
-                    result = await session.execute(stmt)
-                    backup_set = result.scalar_one_or_none()
+                # 使用原生SQL查询（SQLite）
+                async with get_sqlite_connection() as conn:
+                    cursor = await conn.execute("""
+                        SELECT id, set_id, set_name, backup_group, backup_type, backup_time,
+                               total_files, total_bytes, compressed_bytes, tape_id, status
+                        FROM backup_sets
+                        WHERE set_id = ?
+                    """, (backup_set_id,))
+                    row = await cursor.fetchone()
                     
-                    if not backup_set:
+                    if not row:
                         return None
                     
+                    # 处理枚举值
+                    backup_type_value = row[4]  # backup_type
+                    if isinstance(backup_type_value, str) and backup_type_value.islower():
+                        try:
+                            from models.backup import BackupTaskType
+                            backup_type_enum = BackupTaskType(backup_type_value)
+                            backup_type_value = backup_type_enum.value
+                        except (ValueError, AttributeError):
+                            pass
+                    
+                    status_value = row[10]  # status
+                    if isinstance(status_value, str) and status_value.islower():
+                        try:
+                            from models.backup import BackupSetStatus
+                            status_enum = BackupSetStatus(status_value)
+                            status_value = status_enum.value
+                        except (ValueError, AttributeError):
+                            pass
+                    
+                    # 处理日期时间
+                    backup_time_value = row[5]  # backup_time
+                    if backup_time_value and hasattr(backup_time_value, 'isoformat'):
+                        backup_time_value = backup_time_value.isoformat()
+                    elif backup_time_value:
+                        backup_time_value = str(backup_time_value)
+                    else:
+                        backup_time_value = None
+                    
                     return {
-                        'id': backup_set.id,
-                        'set_id': backup_set.set_id,
-                        'set_name': backup_set.set_name,
-                        'backup_group': backup_set.backup_group,
-                        'backup_type': backup_set.backup_type.value if hasattr(backup_set.backup_type, 'value') else str(backup_set.backup_type),
-                        'backup_time': backup_set.backup_time.isoformat() if backup_set.backup_time else None,
-                        'total_files': backup_set.total_files or 0,
-                        'total_bytes': backup_set.total_bytes or 0,
-                        'compressed_bytes': backup_set.compressed_bytes or 0,
-                        'tape_id': backup_set.tape_id,
-                        'status': backup_set.status.value if hasattr(backup_set.status, 'value') else str(backup_set.status)
+                        'id': row[0],  # id
+                        'set_id': row[1],  # set_id
+                        'set_name': row[2],  # set_name
+                        'backup_group': row[3],  # backup_group
+                        'backup_type': backup_type_value,
+                        'backup_time': backup_time_value,
+                        'total_files': row[6] or 0,  # total_files
+                        'total_bytes': row[7] or 0,  # total_bytes
+                        'compressed_bytes': row[8] or 0,  # compressed_bytes
+                        'tape_id': row[9],  # tape_id
+                        'status': status_value
                     }
         except Exception as e:
             logger.error(f"获取备份集信息失败: {str(e)}")
@@ -1365,13 +1503,17 @@ class RecoveryEngine:
                     rows = await conn.fetch(sql)
                     groups = [row['backup_group'] for row in rows]
             else:
-                # 使用SQLAlchemy查询
-                async with db_manager.AsyncSessionLocal() as session:
-                    stmt = select(BackupSet.backup_group).where(
-                        BackupSet.status == BackupSetStatus.ACTIVE
-                    ).distinct().order_by(BackupSet.backup_group.desc()).limit(12)
-                    result = await session.execute(stmt)
-                    groups = [row[0] for row in result.all()]
+                # 使用原生SQL查询（SQLite）
+                async with get_sqlite_connection() as conn:
+                    cursor = await conn.execute("""
+                        SELECT DISTINCT backup_group
+                        FROM backup_sets
+                        WHERE LOWER(status) = LOWER('ACTIVE')
+                        ORDER BY backup_group DESC
+                        LIMIT 12
+                    """)
+                    rows = await cursor.fetchall()
+                    groups = [row[0] for row in rows]
 
             # 如果没有查询到数据，返回最近6个月的默认组
             if not groups:

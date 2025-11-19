@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable
 import py7zr
 import psutil
-from sqlalchemy import text
 
 # 尝试导入 tqdm，如果不可用则使用简单的文本进度条
 try:
@@ -1110,7 +1109,7 @@ class BackupEngine:
             except Exception as log_setup_error:
                 logger.warning(f"设置专属日志处理器失败: {str(log_setup_error)}，将使用默认日志")
             
-            # ========== 创建文件移动后台任务（独立线程，顺序执行） ==========
+            # ========== 创建文件移动后台任务（独立扫描 final 目录） ==========
             file_move_worker = FileMoveWorker(tape_file_mover=self.tape_file_mover)
             file_move_worker.start()
             
@@ -1121,7 +1120,7 @@ class BackupEngine:
                 backup_set=backup_set,
                 backup_task=backup_task,
                 settings=self.settings,
-                file_move_worker=file_move_worker,
+                file_move_worker=None,  # 不再向 file_move_worker 发送消息，它独立扫描 final 目录
                 backup_notifier=self.backup_notifier,
                 tape_file_mover=self.tape_file_mover
             )

@@ -527,6 +527,41 @@ def create_task_executor(
                 stack_trace=stack_trace,
                 duration_ms=duration
             )
+            
+            # 发送钉钉通知（计划任务失败时）
+            try:
+                if system_instance and hasattr(system_instance, 'dingtalk_notifier') and system_instance.dingtalk_notifier:
+                    # 根据动作类型发送不同的通知
+                    if scheduled_task.action_type == TaskActionType.BACKUP:
+                        await system_instance.dingtalk_notifier.send_backup_notification(
+                            backup_name=scheduled_task.task_name,
+                            status='failed',
+                            details={
+                                'error': error_msg,
+                                'task_id': scheduled_task.id,
+                                'execution_id': execution_id,
+                                'duration_ms': duration
+                            }
+                        )
+                    else:
+                        # 其他动作类型发送系统通知
+                        await system_instance.dingtalk_notifier.send_system_notification(
+                            title="❌ 计划任务执行失败",
+                            content=f"""## 计划任务执行失败通知
+
+**任务名称**: {scheduled_task.task_name}
+**任务ID**: {scheduled_task.id}
+**执行ID**: {execution_id}
+**动作类型**: {scheduled_task.action_type.value if scheduled_task.action_type else 'N/A'}
+**执行耗时**: {duration_seconds:.2f}秒
+**错误类型**: {type(e).__name__}
+**错误信息**: {error_msg}
+
+请检查任务配置和执行日志。
+"""
+                        )
+            except Exception as notify_error:
+                logger.error(f"发送计划任务失败钉钉通知异常: {str(notify_error)}", exc_info=True)
         
         finally:
             # 确保无论成功还是失败，都释放任务锁

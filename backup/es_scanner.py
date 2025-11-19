@@ -204,10 +204,12 @@ class ESScanner:
             logger.error(f"{log_context} ES工具不存在: {self.es_exe_path}，无法使用ES扫描")
             raise FileNotFoundError(f"ES工具不存在: {self.es_exe_path}")
         
-        # 从配置中获取后台扫描进度更新间隔（文件数），作为ES分页的limit
+        # ES扫描器的分页limit，使用SCAN_UPDATE_INTERVAL配置的值
+        # 由备份策略中的"后台扫描进度更新间隔（文件数）"控制
         from config.settings import get_settings
         settings = get_settings()
-        limit = getattr(settings, 'SCAN_UPDATE_INTERVAL', 500)  # 默认500，与后台扫描更新间隔一致
+        # 使用SCAN_UPDATE_INTERVAL作为ES查询的批次大小
+        limit = getattr(settings, 'SCAN_UPDATE_INTERVAL', 500)  # ES查询批次大小，默认500
         
         total_files_scanned = 0
         

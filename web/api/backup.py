@@ -18,6 +18,7 @@ from models.backup import BackupTask, BackupTaskType, BackupTaskStatus
 from config.settings import get_settings
 from utils.logger import get_logger
 from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+from utils.scheduler.sqlite_utils import get_sqlite_connection
 from models.system_log import OperationType, LogCategory, LogLevel
 from utils.log_utils import log_operation, log_system
 
@@ -300,28 +301,44 @@ async def create_backup_task(
                     "is_template": True
                 }
         else:
-            # 使用SQLAlchemy插入
-            from config.database import db_manager
-            
-            async with db_manager.AsyncSessionLocal() as session:
-                backup_task = BackupTask(
-                    task_name=request.task_name,
-                    task_type=request.task_type,
-                    source_paths=request.source_paths,
-                    exclude_patterns=request.exclude_patterns,
-                    compression_enabled=request.compression_enabled,
-                    encryption_enabled=request.encryption_enabled,
-                    retention_days=request.retention_days,
-                    description=request.description,
-                    tape_device=request.tape_device,
-                    status=BackupTaskStatus.PENDING,
-                    is_template=True,
-                    created_by='backup_api'
-                )
+            # 使用原生SQL插入（SQLite）
+            import json as json_module
+            async with get_sqlite_connection() as conn:
+                source_paths_json = json_module.dumps(request.source_paths or [])
+                exclude_patterns_json = json_module.dumps(request.exclude_patterns or [])
                 
-                session.add(backup_task)
-                await session.commit()
-                await session.refresh(backup_task)
+                cursor = await conn.execute("""
+                    INSERT INTO backup_tasks (
+                        task_name, task_type, source_paths, exclude_patterns,
+                        compression_enabled, encryption_enabled, retention_days,
+                        description, tape_device, status, is_template, created_by
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    request.task_name,
+                    request.task_type.value if hasattr(request.task_type, 'value') else str(request.task_type),
+                    source_paths_json,
+                    exclude_patterns_json,
+                    1 if request.compression_enabled else 0,
+                    1 if request.encryption_enabled else 0,
+                    request.retention_days,
+                    request.description or "",
+                    request.tape_device,
+                    BackupTaskStatus.PENDING.value,
+                    1,  # is_template
+                    'backup_api'
+                ))
+                await conn.commit()
+                
+                # 获取插入的ID
+                cursor = await conn.execute(
+                    "SELECT id FROM backup_tasks WHERE task_name = ? AND is_template = 1 ORDER BY id DESC LIMIT 1",
+                    (request.task_name,)
+                )
+                row = await cursor.fetchone()
+                task_id = row[0] if row else None
+                
+                if not task_id:
+                    raise HTTPException(status_code=500, detail="无法获取创建的任务ID")
                 
                 # 记录操作日志
                 client_ip = http_request.client.host if http_request.client else None
@@ -329,7 +346,7 @@ async def create_backup_task(
                 await log_operation(
                     operation_type=OperationType.CREATE,
                     resource_type="backup",
-                    resource_id=str(backup_task.id),
+                    resource_id=str(task_id),
                     resource_name=f"备份任务模板: {request.task_name}",
                     operation_name="创建备份任务模板",
                     operation_description=f"创建备份任务配置模板: {request.task_name}",
@@ -338,7 +355,7 @@ async def create_backup_task(
                     result_message="备份任务配置已创建",
                     new_values={
                         "task_name": request.task_name,
-                        "task_type": request.task_type.value,
+                        "task_type": request.task_type.value if hasattr(request.task_type, 'value') else str(request.task_type),
                         "source_paths": request.source_paths,
                         "tape_device": request.tape_device
                     },
@@ -350,9 +367,9 @@ async def create_backup_task(
                 
                 return {
                     "success": True,
-                    "task_id": backup_task.id,
+                    "task_id": task_id,
                     "message": "备份任务配置已创建",
-                    "task_name": backup_task.task_name,
+                    "task_name": request.task_name,
                     "is_template": True
                 }
 
@@ -644,100 +661,297 @@ async def get_backup_tasks(
                 tasks.sort(key=lambda x: _ts(x.get('created_at')), reverse=True)
                 return tasks[offset:offset+limit]
         else:
-            # 使用SQLAlchemy查询
-            from config.database import db_manager
-            from sqlalchemy import select, desc
-            
-            async with db_manager.AsyncSessionLocal() as session:
-                # 构建查询
-                stmt = select(BackupTask)
+            # 使用原生SQL查询（SQLite）
+            async with get_sqlite_connection() as conn:
+                # 构建WHERE子句
+                where_clauses = ["is_template = 0"]
+                params = []
                 
-                if status and status.lower() != 'all':
-                    try:
-                        status_enum = BackupTaskStatus(status)
-                        stmt = stmt.where(BackupTask.status == status_enum)
-                    except ValueError:
-                        pass
+                # 状态过滤
+                normalized_status = (status or '').lower()
+                include_not_run = normalized_status in ('not_run', '未运行')
+                if status and normalized_status not in ('all', 'not_run', '未运行'):
+                    # 使用LOWER进行大小写不敏感匹配
+                    where_clauses.append("LOWER(status) = LOWER(?)")
+                    params.append(status)
+                # 未运行：仅限未启动的pending记录
+                if include_not_run:
+                    where_clauses.append("(started_at IS NULL) AND LOWER(status) = LOWER('pending')")
                 
                 if task_type and task_type.lower() != 'all':
-                    try:
-                        task_type_enum = BackupTaskType(task_type)
-                        stmt = stmt.where(BackupTask.task_type == task_type_enum)
-                    except ValueError:
-                        pass
+                    where_clauses.append("LOWER(task_type) = LOWER(?)")
+                    params.append(task_type)
+                
                 if q and q.strip():
-                    from sqlalchemy import or_
-                    stmt = stmt.where(BackupTask.task_name.ilike(f"%{q.strip()}%"))
+                    where_clauses.append("task_name LIKE ?")
+                    params.append(f"%{q.strip()}%")
                 
-                # 按创建时间倒序排列
-                stmt = stmt.order_by(desc(BackupTask.created_at))
+                where_sql = " AND ".join(where_clauses)
                 
-                # 应用分页
-                stmt = stmt.limit(limit).offset(offset)
-                
-                result = await session.execute(stmt)
-                backup_tasks = result.scalars().all()
+                # 构建查询
+                sql = f"""
+                    SELECT id, task_name, task_type, status, progress_percent, total_files, 
+                           processed_files, total_bytes, processed_bytes, compressed_bytes, 
+                           created_at, started_at, completed_at, error_message, is_template, 
+                           tape_device, source_paths, description, result_summary, scan_status
+                    FROM backup_tasks
+                    WHERE {where_sql}
+                    ORDER BY created_at DESC
+                """
+                cursor = await conn.execute(sql, params)
+                rows = await cursor.fetchall()
                 
                 # 转换为响应格式
                 tasks = []
-                for task in backup_tasks:
-                    total_bytes_actual = 0
+                for row in rows:
+                    # 解析JSON字段
+                    source_paths = []
+                    try:
+                        if row[16]:  # source_paths
+                            if isinstance(row[16], str):
+                                source_paths = json.loads(row[16])
+                            elif isinstance(row[16], (list, dict)):
+                                source_paths = row[16]
+                    except Exception:
+                        source_paths = []
+                    
+                    # 计算压缩率
                     compression_ratio = 0.0
+                    total_bytes_actual = 0
+                    processed_bytes = row[8] or 0  # processed_bytes
+                    compressed_bytes = row[9] or 0  # compressed_bytes
+                    if processed_bytes > 0 and compressed_bytes:
+                        compression_ratio = float(compressed_bytes) / float(processed_bytes)
+                    
+                    # 解析result_summary获取预计的压缩包总数
                     estimated_archive_count = None
+                    result_summary_dict = {}
                     try:
-                        result_summary_dict = None
-                        if task.result_summary:
-                            if isinstance(task.result_summary, str):
-                                result_summary_dict = json.loads(task.result_summary)
-                            elif isinstance(task.result_summary, dict):
-                                result_summary_dict = task.result_summary
+                        if row[18]:  # result_summary
+                            if isinstance(row[18], str):
+                                result_summary_dict = json.loads(row[18])
+                            elif isinstance(row[18], dict):
+                                result_summary_dict = row[18]
                         if isinstance(result_summary_dict, dict):
-                            total_bytes_actual = result_summary_dict.get('total_scanned_bytes') or 0
                             estimated_archive_count = result_summary_dict.get('estimated_archive_count')
+                            total_bytes_actual = (
+                                result_summary_dict.get('total_scanned_bytes')
+                                or result_summary_dict.get('total_bytes_actual')
+                                or 0
+                            )
                     except Exception:
-                        total_bytes_actual = 0
-                    try:
-                        if task.processed_bytes and task.processed_bytes > 0 and task.compressed_bytes:
-                            compression_ratio = float(task.compressed_bytes) / float(task.processed_bytes)
-                    except Exception:
-                        compression_ratio = 0.0
+                        pass
+                    
+                    # 处理状态值（将小写转换为枚举值）
+                    status_raw = row[3]  # status
+                    status_value = ""
+                    if status_raw:
+                        # 如果是字符串，尝试转换为枚举值
+                        if isinstance(status_raw, str):
+                            # 尝试直接匹配枚举值（不区分大小写）
+                            status_lower = status_raw.lower()
+                            try:
+                                # 枚举值本身就是小写，所以可以直接匹配
+                                status_enum = BackupTaskStatus(status_lower)
+                                status_value = status_enum.value
+                            except (ValueError, AttributeError):
+                                # 如果转换失败，尝试匹配枚举名称（大写）
+                                try:
+                                    # 尝试将小写转换为大写枚举名称
+                                    status_upper = status_raw.upper()
+                                    status_enum = BackupTaskStatus[status_upper]
+                                    status_value = status_enum.value
+                                except (KeyError, ValueError, AttributeError):
+                                    # 如果都失败，保持原值
+                                    status_value = status_raw
+                        else:
+                            # 如果不是字符串，使用 _normalize_status_value
+                            status_value = _normalize_status_value(status_raw)
+                    
                     stage_info = _build_stage_info(
-                        task.description,
-                        getattr(task, "scan_status", None),
-                        task.status.value if task.status else ""
+                        row[17] or "",  # description
+                        row[19],  # scan_status
+                        status_value
                     )
                     
+                    # 处理task_type
+                    task_type_value = row[2]  # task_type
+                    if isinstance(task_type_value, str) and task_type_value.islower():
+                        try:
+                            task_type_enum = BackupTaskType(task_type_value)
+                            task_type_value = task_type_enum.value
+                        except (ValueError, AttributeError):
+                            pass
+                    
                     tasks.append({
-                        "task_id": task.id,
-                        "task_name": task.task_name,
-                        "task_type": task.task_type.value,
-                        "status": task.status.value,
-                        "progress_percent": task.progress_percent or 0.0,
-                        "total_files": task.total_files or 0,
-                        "processed_files": task.processed_files or 0,
-                        "total_bytes": task.total_bytes or 0,
+                        "task_id": row[0],  # id
+                        "task_name": row[1],  # task_name
+                        "task_type": task_type_value,
+                        "status": status_value,
+                        "progress_percent": float(row[4]) if row[4] else 0.0,  # progress_percent
+                        "total_files": row[5] or 0,  # total_files
+                        "processed_files": row[6] or 0,  # processed_files
+                        "total_bytes": row[7] or 0,  # total_bytes
                         "total_bytes_actual": total_bytes_actual,
-                        "processed_bytes": task.processed_bytes or 0,
-                        "compressed_bytes": task.compressed_bytes or 0,
+                        "processed_bytes": processed_bytes,
+                        "compressed_bytes": compressed_bytes,
                         "compression_ratio": compression_ratio,
+                        "estimated_archive_count": estimated_archive_count,
+                        "created_at": row[10],  # created_at
+                        "started_at": row[11],  # started_at
+                        "completed_at": row[12],  # completed_at
+                        "error_message": row[13],  # error_message
+                        "is_template": bool(row[14]) if row[14] is not None else False,  # is_template
+                        "tape_device": row[15],  # tape_device
+                        "source_paths": source_paths or [],
+                        "description": row[17] or "",  # description
+                        "from_scheduler": False,
+                        "enabled": True,  # SQLite中没有enabled字段，默认为True
                         "operation_status": stage_info["operation_status"],
                         "operation_stage": stage_info["operation_stage"],
                         "operation_stage_label": stage_info["operation_stage_label"],
-                        "stage_steps": stage_info["stage_steps"],
-                        "estimated_archive_count": estimated_archive_count,
-                        "created_at": task.created_at,
-                        "started_at": task.started_at,
-                        "completed_at": task.completed_at,
-                        "error_message": task.error_message,
-                        "is_template": task.is_template or False,
-                        "tape_device": task.tape_device,
-                        "source_paths": task.source_paths,
-                        "description": task.description or "",
-                        "from_scheduler": False,
-                        "enabled": getattr(task, "enabled", True)
+                        "stage_steps": stage_info["stage_steps"]
                     })
                 
-                return tasks
+                # 追加计划任务（未运行模板）
+                # 仅当无状态过滤或过滤为pending/all时返回
+                normalized_status = (status or '').lower()
+                include_sched = (not status) or (normalized_status in ("all", "pending", 'not_run', '未运行'))
+                if include_sched:
+                    sched_where = ["action_type = 'BACKUP'"]
+                    sched_params = []
+                    if q and q.strip():
+                        sched_where.append("task_name LIKE ?")
+                        sched_params.append(f"%{q.strip()}%")
+                    
+                    sched_sql = f"""
+                        SELECT id, task_name, status, enabled, created_at, action_config, task_metadata
+                        FROM scheduled_tasks
+                        WHERE {' AND '.join(sched_where)}
+                        ORDER BY created_at DESC
+                    """
+                    sched_cursor = await conn.execute(sched_sql, sched_params)
+                    sched_rows = await sched_cursor.fetchall()
+                    
+                    template_ids = set()
+                    parsed_sched_rows = []
+                    for srow in sched_rows:
+                        task_metadata = {}
+                        try:
+                            if srow[6]:  # task_metadata
+                                if isinstance(srow[6], str):
+                                    task_metadata = json.loads(srow[6])
+                                elif isinstance(srow[6], dict):
+                                    task_metadata = srow[6]
+                        except Exception:
+                            pass
+                        backup_template_id = task_metadata.get("backup_task_id") if isinstance(task_metadata, dict) else None
+                        if backup_template_id:
+                            template_ids.add(int(backup_template_id))
+                        parsed_sched_rows.append((srow, task_metadata, backup_template_id))
+                    
+                    template_info_map = {}
+                    if template_ids:
+                        placeholders = ','.join('?' * len(template_ids))
+                        template_sql = f"""
+                            SELECT id, source_paths, tape_device
+                            FROM backup_tasks
+                            WHERE id IN ({placeholders})
+                        """
+                        template_cursor = await conn.execute(template_sql, list(template_ids))
+                        template_rows = await template_cursor.fetchall()
+                        for trow in template_rows:
+                            t_source_paths = []
+                            try:
+                                if trow[1]:  # source_paths
+                                    if isinstance(trow[1], str):
+                                        t_source_paths = json.loads(trow[1])
+                                    elif isinstance(trow[1], (list, dict)):
+                                        t_source_paths = trow[1]
+                            except Exception:
+                                pass
+                            template_info_map[trow[0]] = {
+                                "source_paths": t_source_paths or [],
+                                "tape_device": trow[2]
+                            }
+                    
+                    for srow, metadata, template_id in parsed_sched_rows:
+                        action_cfg = {}
+                        try:
+                            if srow[5]:  # action_config
+                                if isinstance(srow[5], str):
+                                    action_cfg = json.loads(srow[5])
+                                elif isinstance(srow[5], dict):
+                                    action_cfg = srow[5]
+                        except Exception:
+                            pass
+                        
+                        # 从action_config中提取task_type/tape_device/source_paths
+                        atype = 'full'
+                        tdev = None
+                        spaths: Optional[List[str]] = None
+                        try:
+                            if isinstance(action_cfg, dict):
+                                atype = action_cfg.get('task_type') or atype
+                                tdev = action_cfg.get('tape_device')
+                                cfg_paths = action_cfg.get('source_paths')
+                                if isinstance(cfg_paths, list):
+                                    spaths = [str(p) for p in cfg_paths if p]
+                                elif isinstance(cfg_paths, str) and cfg_paths.strip():
+                                    spaths = [cfg_paths.strip()]
+                        except Exception as parse_error:
+                            logger.debug(f"解析计划任务 action_config 失败: {parse_error}")
+                        
+                        template_fallback = template_info_map.get(int(template_id)) if template_id else None
+                        if (not spaths) and template_fallback:
+                            spaths = template_fallback.get("source_paths") or []
+                        if (not tdev) and template_fallback:
+                            tdev = template_fallback.get("tape_device")
+                        
+                        stage_info = _build_stage_info("", None, "pending")
+                        tasks.append({
+                            "task_id": srow[0],  # id
+                            "task_name": srow[1],  # task_name
+                            "task_type": atype,
+                            "status": "pending",  # 计划任务视为未运行
+                            "progress_percent": 0.0,
+                            "total_files": 0,
+                            "processed_files": 0,
+                            "total_bytes": 0,
+                            "total_bytes_actual": 0,
+                            "processed_bytes": 0,
+                            "compressed_bytes": 0,
+                            "compression_ratio": 0.0,
+                            "created_at": srow[4],  # created_at
+                            "started_at": None,
+                            "completed_at": None,
+                            "error_message": None,
+                            "is_template": True,
+                            "tape_device": tdev,
+                            "source_paths": spaths or [],
+                            "from_scheduler": True,
+                            "enabled": bool(srow[3]) if srow[3] is not None else True,  # enabled
+                            "description": "",
+                            "estimated_archive_count": None,
+                            "operation_status": stage_info["operation_status"],
+                            "operation_stage": stage_info["operation_stage"],
+                            "operation_stage_label": stage_info["operation_stage_label"],
+                            "stage_steps": stage_info["stage_steps"]
+                        })
+                
+                # 合并后排序与分页（统一为时间戳，避免aware/naive比较异常）
+                def _ts(val):
+                    try:
+                        if not val:
+                            return 0.0
+                        if isinstance(val, (int, float)):
+                            return float(val)
+                        # datetime
+                        return val.timestamp()
+                    except Exception:
+                        return 0.0
+                tasks.sort(key=lambda x: _ts(x.get('created_at')), reverse=True)
+                return tasks[offset:offset+limit]
 
     except Exception as e:
         logger.error(f"获取备份任务列表失败: {str(e)}", exc_info=True)
@@ -837,72 +1051,115 @@ async def get_backup_task(task_id: int, http_request: Request):
                     "stage_steps": stage_info["stage_steps"]
                 }
         else:
-            # 使用SQLAlchemy查询
-            from config.database import db_manager
-            from sqlalchemy import select
-            
-            async with db_manager.AsyncSessionLocal() as session:
-                stmt = select(BackupTask).where(BackupTask.id == task_id)
-                result = await session.execute(stmt)
-                task = result.scalar_one_or_none()
+            # 使用原生SQL查询（SQLite）
+            async with get_sqlite_connection() as conn:
+                cursor = await conn.execute("""
+                    SELECT id, task_name, task_type, status, progress_percent, total_files,
+                           processed_files, total_bytes, processed_bytes, compressed_bytes,
+                           created_at, started_at, completed_at, error_message, is_template,
+                           tape_device, source_paths, description, result_summary, scan_status
+                    FROM backup_tasks
+                    WHERE id = ?
+                """, (task_id,))
+                row = await cursor.fetchone()
                 
-                if not task:
+                if not row:
                     raise HTTPException(status_code=404, detail="备份任务不存在")
                 
+                # 解析JSON字段
+                source_paths = []
+                try:
+                    if row[16]:  # source_paths
+                        if isinstance(row[16], str):
+                            source_paths = json.loads(row[16])
+                        elif isinstance(row[16], (list, dict)):
+                            source_paths = row[16]
+                except Exception:
+                    source_paths = []
+                
+                # 解析result_summary
                 total_bytes_actual = 0
                 estimated_archive_count = None
                 try:
-                    result_summary = task.result_summary
-                    result_summary_dict = None
-                    if result_summary:
-                        if isinstance(result_summary, str):
-                            result_summary_dict = json.loads(result_summary)
-                        elif isinstance(result_summary, dict):
-                            result_summary_dict = result_summary
-                    if isinstance(result_summary_dict, dict):
-                        total_bytes_actual = result_summary_dict.get('total_scanned_bytes') or 0
-                        estimated_archive_count = result_summary_dict.get('estimated_archive_count')
+                    if row[18]:  # result_summary
+                        result_summary_dict = {}
+                        if isinstance(row[18], str):
+                            result_summary_dict = json.loads(row[18])
+                        elif isinstance(row[18], dict):
+                            result_summary_dict = row[18]
+                        if isinstance(result_summary_dict, dict):
+                            total_bytes_actual = result_summary_dict.get('total_scanned_bytes') or 0
+                            estimated_archive_count = result_summary_dict.get('estimated_archive_count')
                 except Exception:
-                    total_bytes_actual = 0
+                    pass
+                
+                # 计算压缩率
                 compression_ratio = 0.0
-                try:
-                    if task.processed_bytes and task.processed_bytes > 0 and task.compressed_bytes:
-                        compression_ratio = float(task.compressed_bytes) / float(task.processed_bytes)
-                except Exception:
-                    compression_ratio = 0.0
+                processed_bytes = row[8] or 0  # processed_bytes (索引8)
+                compressed_bytes = row[9] or 0  # compressed_bytes (索引9)
+                if processed_bytes > 0 and compressed_bytes:
+                    compression_ratio = float(compressed_bytes) / float(processed_bytes)
+                
+                # 处理状态值
+                status_raw = row[3]  # status
+                status_value = ""
+                if status_raw:
+                    if isinstance(status_raw, str):
+                        status_lower = status_raw.lower()
+                        try:
+                            status_enum = BackupTaskStatus(status_lower)
+                            status_value = status_enum.value
+                        except (ValueError, AttributeError):
+                            try:
+                                status_enum = BackupTaskStatus[status_raw.upper()]
+                                status_value = status_enum.value
+                            except (KeyError, ValueError, AttributeError):
+                                status_value = status_raw
+                    else:
+                        status_value = _normalize_status_value(status_raw)
+                
+                # 处理task_type
+                task_type_value = row[2]  # task_type
+                if isinstance(task_type_value, str) and task_type_value.islower():
+                    try:
+                        task_type_enum = BackupTaskType(task_type_value)
+                        task_type_value = task_type_enum.value
+                    except (ValueError, AttributeError):
+                        pass
                 
                 stage_info = _build_stage_info(
-                    task.description,
-                    getattr(task, "scan_status", None),
-                    task.status.value if task.status else ""
+                    row[17] or "",  # description
+                    row[19],  # scan_status
+                    status_value
                 )
+                
                 return {
-                    "task_id": task.id,
-                    "task_name": task.task_name,
-                    "task_type": task.task_type.value,
-                    "status": task.status.value,
-                    "progress_percent": task.progress_percent or 0.0,
-                    "total_files": task.total_files or 0,
-                    "processed_files": task.processed_files or 0,
-                    "total_bytes": task.total_bytes or 0,
+                    "task_id": row[0],  # id
+                    "task_name": row[1],  # task_name
+                    "task_type": task_type_value,
+                    "status": status_value,
+                    "progress_percent": float(row[4]) if row[4] else 0.0,  # progress_percent
+                    "total_files": row[5] or 0,  # total_files
+                    "processed_files": row[6] or 0,  # processed_files
+                    "total_bytes": row[7] or 0,  # total_bytes
                     "total_bytes_actual": total_bytes_actual,
-                    "processed_bytes": task.processed_bytes or 0,
-                    "compressed_bytes": task.compressed_bytes or 0,
+                    "processed_bytes": processed_bytes,
+                    "compressed_bytes": compressed_bytes,
                     "compression_ratio": compression_ratio,
                     "estimated_archive_count": estimated_archive_count,
-                    "created_at": task.created_at,
-                    "started_at": task.started_at,
-                    "completed_at": task.completed_at,
-                    "error_message": task.error_message,
-                    "description": task.description or "",
-                    "is_template": task.is_template or False,
-                    "tape_device": task.tape_device,
-                    "source_paths": task.source_paths,
+                    "created_at": row[10],  # created_at
+                    "started_at": row[11],  # started_at
+                    "completed_at": row[12],  # completed_at
+                    "error_message": row[13],  # error_message
+                    "description": row[17] or "",  # description
+                    "is_template": bool(row[14]) if row[14] is not None else False,  # is_template
+                    "tape_device": row[15],  # tape_device
+                    "source_paths": source_paths or [],
                     "operation_status": stage_info["operation_status"],
                     "operation_stage": stage_info["operation_stage"],
                     "operation_stage_label": stage_info["operation_stage_label"],
                     "stage_steps": stage_info["stage_steps"],
-                    "enabled": getattr(task, "enabled", True),
+                    "enabled": True,  # SQLite中没有enabled字段，默认为True
                     "from_scheduler": False
                 }
 
@@ -924,37 +1181,96 @@ async def get_backup_templates(
     返回所有备份任务配置模板，供计划任务模块选择。
     """
     try:
-        from config.database import db_manager
-        from sqlalchemy import select, desc
-        from models.backup import BackupTask
-        
-        async with db_manager.AsyncSessionLocal() as session:
-            # 查询所有模板
-            stmt = select(BackupTask).where(BackupTask.is_template == True)
-            stmt = stmt.order_by(desc(BackupTask.created_at))
-            stmt = stmt.limit(limit).offset(offset)
+        if is_opengauss():
+            # openGauss分支保持不变
+            from config.database import db_manager
+            from sqlalchemy import select, desc
+            from models.backup import BackupTask
             
-            result = await session.execute(stmt)
-            templates = result.scalars().all()
-            
-            # 转换为响应格式
-            template_list = []
-            for template in templates:
-                template_list.append({
-                    "task_id": template.id,
-                    "task_name": template.task_name,
-                    "task_type": template.task_type.value,
-                    "description": template.description,
-                    "source_paths": template.source_paths or [],
-                    "tape_device": template.tape_device,
-                    "compression_enabled": template.compression_enabled,
-                    "encryption_enabled": template.encryption_enabled,
-                    "retention_days": template.retention_days,
-                    "exclude_patterns": template.exclude_patterns or [],
-                    "created_at": template.created_at
-                })
-            
-            return template_list
+            async with db_manager.AsyncSessionLocal() as session:
+                stmt = select(BackupTask).where(BackupTask.is_template == True)
+                stmt = stmt.order_by(desc(BackupTask.created_at))
+                stmt = stmt.limit(limit).offset(offset)
+                
+                result = await session.execute(stmt)
+                templates = result.scalars().all()
+                
+                template_list = []
+                for template in templates:
+                    template_list.append({
+                        "task_id": template.id,
+                        "task_name": template.task_name,
+                        "task_type": template.task_type.value,
+                        "description": template.description,
+                        "source_paths": template.source_paths or [],
+                        "tape_device": template.tape_device,
+                        "compression_enabled": template.compression_enabled,
+                        "encryption_enabled": template.encryption_enabled,
+                        "retention_days": template.retention_days,
+                        "exclude_patterns": template.exclude_patterns or [],
+                        "created_at": template.created_at
+                    })
+                
+                return template_list
+        else:
+            # 使用原生SQL查询（SQLite）
+            async with get_sqlite_connection() as conn:
+                cursor = await conn.execute("""
+                    SELECT id, task_name, task_type, description, source_paths, tape_device,
+                           compression_enabled, encryption_enabled, retention_days, exclude_patterns, created_at
+                    FROM backup_tasks
+                    WHERE is_template = 1
+                    ORDER BY created_at DESC
+                    LIMIT ? OFFSET ?
+                """, (limit, offset))
+                rows = await cursor.fetchall()
+                
+                template_list = []
+                for row in rows:
+                    # 解析JSON字段
+                    source_paths = []
+                    exclude_patterns = []
+                    try:
+                        if row[4]:  # source_paths
+                            if isinstance(row[4], str):
+                                source_paths = json.loads(row[4])
+                            elif isinstance(row[4], (list, dict)):
+                                source_paths = row[4]
+                    except Exception:
+                        pass
+                    try:
+                        if row[9]:  # exclude_patterns
+                            if isinstance(row[9], str):
+                                exclude_patterns = json.loads(row[9])
+                            elif isinstance(row[9], (list, dict)):
+                                exclude_patterns = row[9]
+                    except Exception:
+                        pass
+                    
+                    # 处理task_type
+                    task_type_value = row[2]  # task_type
+                    if isinstance(task_type_value, str) and task_type_value.islower():
+                        try:
+                            task_type_enum = BackupTaskType(task_type_value)
+                            task_type_value = task_type_enum.value
+                        except (ValueError, AttributeError):
+                            pass
+                    
+                    template_list.append({
+                        "task_id": row[0],  # id
+                        "task_name": row[1],  # task_name
+                        "task_type": task_type_value,
+                        "description": row[3] or "",  # description
+                        "source_paths": source_paths or [],
+                        "tape_device": row[5],  # tape_device
+                        "compression_enabled": bool(row[6]) if row[6] is not None else False,  # compression_enabled
+                        "encryption_enabled": bool(row[7]) if row[7] is not None else False,  # encryption_enabled
+                        "retention_days": row[8],  # retention_days
+                        "exclude_patterns": exclude_patterns or [],
+                        "created_at": row[10]  # created_at
+                    })
+                
+                return template_list
 
     except Exception as e:
         logger.error(f"获取备份任务模板列表失败: {str(e)}")
@@ -984,15 +1300,13 @@ async def update_backup_task(
                 if not row["is_template"]:
                     raise HTTPException(status_code=400, detail="只能更新备份任务模板，不能更新执行记录")
         else:
-            from config.database import db_manager
-            from sqlalchemy import select
-            async with db_manager.AsyncSessionLocal() as session:
-                stmt = select(BackupTask).where(BackupTask.id == task_id)
-                result = await session.execute(stmt)
-                task = result.scalar_one_or_none()
-                if not task:
+            # 使用原生SQL查询（SQLite）
+            async with get_sqlite_connection() as conn:
+                cursor = await conn.execute("SELECT is_template FROM backup_tasks WHERE id = ?", (task_id,))
+                row = await cursor.fetchone()
+                if not row:
                     raise HTTPException(status_code=404, detail="备份任务不存在")
-                if not task.is_template:
+                if not row[0]:  # is_template
                     raise HTTPException(status_code=400, detail="只能更新备份任务模板，不能更新执行记录")
         
         import json
@@ -1075,23 +1389,33 @@ async def update_backup_task(
                 
                 return {"success": True, "message": "备份任务模板已更新"}
         else:
-            # 使用SQLAlchemy更新
-            from config.database import db_manager
-            async with db_manager.AsyncSessionLocal() as session:
-                stmt = select(BackupTask).where(BackupTask.id == task_id)
-                result = await session.execute(stmt)
-                task = result.scalar_one_or_none()
+            # 使用原生SQL更新（SQLite）
+            async with get_sqlite_connection() as conn:
+                # 构建更新SQL
+                set_clauses = []
+                params = []
                 
-                if not task:
-                    raise HTTPException(status_code=404, detail="备份任务不存在")
-                
-                # 更新字段
                 for key, value in updates.items():
-                    if hasattr(task, key):
-                        setattr(task, key, value)
+                    if key == "updated_at":
+                        set_clauses.append(f"{key} = ?")
+                        params.append(value)
+                    else:
+                        set_clauses.append(f"{key} = ?")
+                        params.append(value)
                 
-                await session.commit()
-                await session.refresh(task)
+                params.append(task_id)
+                update_sql = f"""
+                    UPDATE backup_tasks
+                    SET {', '.join(set_clauses)}
+                    WHERE id = ?
+                """
+                await conn.execute(update_sql, params)
+                await conn.commit()
+                
+                # 获取任务名称用于日志
+                cursor = await conn.execute("SELECT task_name FROM backup_tasks WHERE id = ?", (task_id,))
+                row = await cursor.fetchone()
+                task_name = row[0] if row else str(task_id)
                 
                 # 记录操作日志
                 client_ip = http_request.client.host if http_request.client else None
@@ -1100,9 +1424,9 @@ async def update_backup_task(
                     operation_type=OperationType.UPDATE,
                     resource_type="backup",
                     resource_id=str(task_id),
-                    resource_name=f"备份任务模板: {task.task_name}",
+                    resource_name=f"备份任务模板: {task_name}",
                     operation_name="更新备份任务模板",
-                    operation_description=f"更新备份任务模板: {task.task_name}",
+                    operation_description=f"更新备份任务模板: {task_name}",
                     category="backup",
                     success=True,
                     result_message="备份任务模板已更新",
@@ -1167,17 +1491,23 @@ async def delete_backup_task(task_id: int, http_request: Request):
                 is_template = row["is_template"]
                 task_status = row["status"].value if hasattr(row["status"], "value") else str(row["status"])
         else:
-            from config.database import db_manager
-            from sqlalchemy import select
-            async with db_manager.AsyncSessionLocal() as session:
-                stmt = select(BackupTask).where(BackupTask.id == task_id)
-                result = await session.execute(stmt)
-                task = result.scalar_one_or_none()
-                if not task:
+            # 使用原生SQL查询（SQLite）
+            async with get_sqlite_connection() as conn:
+                cursor = await conn.execute(
+                    "SELECT task_name, is_template, status FROM backup_tasks WHERE id = ?",
+                    (task_id,)
+                )
+                row = await cursor.fetchone()
+                if not row:
                     raise HTTPException(status_code=404, detail="备份任务不存在")
-                task_name = task.task_name
-                is_template = task.is_template
-                task_status = task.status.value
+                task_name = row[0]
+                is_template = bool(row[1]) if row[1] is not None else False
+                # 处理状态值
+                status_raw = row[2]
+                if isinstance(status_raw, str):
+                    task_status = status_raw
+                else:
+                    task_status = _normalize_status_value(status_raw)
         
         if is_opengauss():
             # 使用原生SQL删除（使用连接池）
@@ -1329,30 +1659,36 @@ async def delete_backup_task(task_id: int, http_request: Request):
                 
                 return {"success": True, "message": f"{resource_type_name}已删除"}
         else:
-            # 使用SQLAlchemy删除
-            from config.database import db_manager
-            async with db_manager.AsyncSessionLocal() as session:
-                stmt = select(BackupTask).where(BackupTask.id == task_id)
-                result = await session.execute(stmt)
-                task = result.scalar_one_or_none()
+            # 使用原生SQL删除（SQLite）
+            async with get_sqlite_connection() as conn:
+                # 查找关联的备份集ID
+                cursor = await conn.execute(
+                    "SELECT id FROM backup_sets WHERE backup_task_id = ?",
+                    (task_id,)
+                )
+                backup_set_ids = [row[0] for row in await cursor.fetchall()]
                 
-                if not task:
-                    raise HTTPException(status_code=404, detail="备份任务不存在")
+                # 删除备份集中的所有文件
+                if backup_set_ids:
+                    placeholders = ','.join('?' * len(backup_set_ids))
+                    await conn.execute(f"DELETE FROM backup_files WHERE backup_set_id IN ({placeholders})", backup_set_ids)
+                    await conn.execute(f"DELETE FROM backup_sets WHERE id IN ({placeholders})", backup_set_ids)
                 
-                await session.delete(task)
-                await session.commit()
+                # 删除备份任务
+                await conn.execute("DELETE FROM backup_tasks WHERE id = ?", (task_id,))
+                await conn.commit()
                 
                 # 记录操作日志
                 client_ip = http_request.client.host if http_request.client else None
                 duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
-                resource_type_name = "备份任务模板" if task.is_template else "备份任务执行记录"
+                resource_type_name = "备份任务模板" if is_template else "备份任务执行记录"
                 await log_operation(
                     operation_type=OperationType.DELETE,
                     resource_type="backup",
                     resource_id=str(task_id),
-                    resource_name=f"{resource_type_name}: {task.task_name}",
+                    resource_name=f"{resource_type_name}: {task_name}",
                     operation_name=f"删除{resource_type_name}",
-                    operation_description=f"删除{resource_type_name}: {task.task_name} (状态: {task.status.value})",
+                    operation_description=f"删除{resource_type_name}: {task_name} (状态: {task_status})",
                     category="backup",
                     success=True,
                     result_message=f"{resource_type_name}已删除",
@@ -1417,16 +1753,23 @@ async def cancel_backup_task(task_id: int, http_request: Request):
                         "status": row["status"].value if hasattr(row["status"], "value") else str(row["status"])
                     }
         else:
-            from config.database import db_manager
-            from sqlalchemy import select
-            async with db_manager.AsyncSessionLocal() as session:
-                stmt = select(BackupTask).where(BackupTask.id == task_id)
-                result = await session.execute(stmt)
-                task = result.scalar_one_or_none()
-                if task:
+            # 使用原生SQL查询（SQLite）
+            async with get_sqlite_connection() as conn:
+                cursor = await conn.execute(
+                    "SELECT task_name, status FROM backup_tasks WHERE id = ?",
+                    (task_id,)
+                )
+                row = await cursor.fetchone()
+                if row:
+                    # 处理状态值
+                    status_raw = row[1]
+                    if isinstance(status_raw, str):
+                        status_value = status_raw
+                    else:
+                        status_value = _normalize_status_value(status_raw)
                     task_info = {
-                        "task_name": task.task_name,
-                        "status": task.status.value
+                        "task_name": row[0],
+                        "status": status_value
                     }
 
         success = await system.backup_engine.cancel_task(task_id)
@@ -1525,6 +1868,18 @@ async def get_task_status(task_id: int, http_request: Request = None):
 @router.get("/statistics")
 async def get_backup_statistics(http_request: Request):
     """获取备份统计信息（使用真实数据）"""
+    try:
+        from web.api import backup_statistics
+        get_stats = backup_statistics.get_backup_statistics
+        return await get_stats()
+    except Exception as e:
+        logger.error(f"获取备份统计信息失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# 保留旧代码作为备份，但不再使用
+async def _get_backup_statistics_old(http_request: Request):
+    """获取备份统计信息（旧版本，已废弃）"""
     try:
         if is_opengauss():
             # 使用原生SQL查询（使用连接池）
@@ -1650,100 +2005,102 @@ async def get_backup_statistics(http_request: Request):
                     }
                 }
         else:
-            # 使用SQLAlchemy查询
-            from config.database import db_manager
-            from sqlalchemy import select, func, and_
-            
-            async with db_manager.AsyncSessionLocal() as session:
+            # 使用原生SQL查询（SQLite）
+            async with get_sqlite_connection() as conn:
                 # 总任务数（只查询非模板任务）
-                total_stmt = select(func.count(BackupTask.id)).where(BackupTask.is_template == False)
-                total_result = await session.execute(total_stmt)
-                total_tasks = total_result.scalar() or 0
+                cursor = await conn.execute(
+                    "SELECT COUNT(*) FROM backup_tasks WHERE is_template = 0"
+                )
+                row = await cursor.fetchone()
+                total_tasks = row[0] if row else 0
                 
                 # 按状态统计
-                completed_stmt = select(func.count(BackupTask.id)).where(
-                    BackupTask.is_template == False,
-                    BackupTask.status == BackupTaskStatus.COMPLETED
-                )
-                completed_result = await session.execute(completed_stmt)
-                completed_tasks = completed_result.scalar() or 0
+                completed_status = BackupTaskStatus.COMPLETED.value
+                failed_status = BackupTaskStatus.FAILED.value
+                running_status = BackupTaskStatus.RUNNING.value
+                pending_status = BackupTaskStatus.PENDING.value
                 
-                failed_stmt = select(func.count(BackupTask.id)).where(
-                    BackupTask.is_template == False,
-                    BackupTask.status == BackupTaskStatus.FAILED
+                cursor = await conn.execute(
+                    "SELECT COUNT(*) FROM backup_tasks WHERE is_template = 0 AND LOWER(status) = LOWER(?)",
+                    (completed_status,)
                 )
-                failed_result = await session.execute(failed_stmt)
-                failed_tasks = failed_result.scalar() or 0
+                row = await cursor.fetchone()
+                completed_tasks = row[0] if row else 0
                 
-                running_stmt = select(func.count(BackupTask.id)).where(
-                    BackupTask.is_template == False,
-                    BackupTask.status == BackupTaskStatus.RUNNING
+                cursor = await conn.execute(
+                    "SELECT COUNT(*) FROM backup_tasks WHERE is_template = 0 AND LOWER(status) = LOWER(?)",
+                    (failed_status,)
                 )
-                running_result = await session.execute(running_stmt)
-                running_tasks = running_result.scalar() or 0
+                row = await cursor.fetchone()
+                failed_tasks = row[0] if row else 0
                 
-                pending_stmt = select(func.count(BackupTask.id)).where(
-                    BackupTask.is_template == False,
-                    BackupTask.status == BackupTaskStatus.PENDING
+                cursor = await conn.execute(
+                    "SELECT COUNT(*) FROM backup_tasks WHERE is_template = 0 AND LOWER(status) = LOWER(?)",
+                    (running_status,)
                 )
-                pending_result = await session.execute(pending_stmt)
-                pending_tasks = pending_result.scalar() or 0
+                row = await cursor.fetchone()
+                running_tasks = row[0] if row else 0
+                
+                cursor = await conn.execute(
+                    "SELECT COUNT(*) FROM backup_tasks WHERE is_template = 0 AND LOWER(status) = LOWER(?)",
+                    (pending_status,)
+                )
+                row = await cursor.fetchone()
+                pending_tasks = row[0] if row else 0
                 
                 # 成功率
                 success_rate = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0.0
                 
                 # 总备份数据量
-                bytes_stmt = select(func.sum(BackupTask.processed_bytes)).where(
-                    BackupTask.is_template == False,
-                    BackupTask.status == BackupTaskStatus.COMPLETED
+                cursor = await conn.execute(
+                    "SELECT COALESCE(SUM(processed_bytes), 0) FROM backup_tasks WHERE is_template = 0 AND LOWER(status) = LOWER(?)",
+                    (completed_status,)
                 )
-                bytes_result = await session.execute(bytes_stmt)
-                total_data_backed_up = bytes_result.scalar() or 0
+                row = await cursor.fetchone()
+                total_data_backed_up = row[0] if row else 0
                 
                 # 最近24小时统计
                 twenty_four_hours_ago = datetime.now() - timedelta(hours=24)
-                recent_stmt = select(
-                    func.count(BackupTask.id),
-                    func.sum(func.case((BackupTask.status == BackupTaskStatus.COMPLETED, 1), else_=0)),
-                    func.sum(func.case((BackupTask.status == BackupTaskStatus.FAILED, 1), else_=0)),
-                    func.sum(BackupTask.processed_bytes)
-                ).where(
-                    BackupTask.is_template == False,
-                    BackupTask.created_at >= twenty_four_hours_ago
-                )
-                recent_result = await session.execute(recent_stmt)
-                recent_row = recent_result.first()
-                
-                recent_total = recent_row[0] or 0
-                recent_completed = recent_row[1] or 0
-                recent_failed = recent_row[2] or 0
-                recent_data = recent_row[3] or 0
+                cursor = await conn.execute("""
+                    SELECT 
+                        COUNT(*) as total,
+                        SUM(CASE WHEN LOWER(status) = LOWER(?) THEN 1 ELSE 0 END) as completed,
+                        SUM(CASE WHEN LOWER(status) = LOWER(?) THEN 1 ELSE 0 END) as failed,
+                        COALESCE(SUM(processed_bytes), 0) as data
+                    FROM backup_tasks
+                    WHERE is_template = 0 AND created_at >= ?
+                """, (completed_status, failed_status, twenty_four_hours_ago))
+                row = await cursor.fetchone()
+                recent_total = row[0] if row else 0
+                recent_completed = row[1] if row else 0
+                recent_failed = row[2] if row else 0
+                recent_data = row[3] if row else 0
                 
                 # 平均任务时长
-                avg_duration_stmt = select(
-                    func.avg(func.extract('epoch', BackupTask.completed_at - BackupTask.started_at))
-                ).where(
-                    BackupTask.is_template == False,
-                    BackupTask.status == BackupTaskStatus.COMPLETED,
-                    BackupTask.completed_at.isnot(None),
-                    BackupTask.started_at.isnot(None)
-                )
-                avg_duration_result = await session.execute(avg_duration_stmt)
-                avg_duration = int(avg_duration_result.scalar() or 3600)
+                cursor = await conn.execute("""
+                    SELECT AVG((julianday(completed_at) - julianday(started_at)) * 86400) as avg_duration
+                    FROM backup_tasks
+                    WHERE is_template = 0 
+                      AND LOWER(status) = LOWER(?)
+                      AND completed_at IS NOT NULL 
+                      AND started_at IS NOT NULL
+                """, (completed_status,))
+                row = await cursor.fetchone()
+                avg_duration = int(row[0]) if row and row[0] else 3600
                 
                 # 压缩比
-                compression_stmt = select(
-                    func.sum(BackupTask.processed_bytes),
-                    func.sum(BackupTask.compressed_bytes)
-                ).where(
-                    BackupTask.is_template == False,
-                    BackupTask.status == BackupTaskStatus.COMPLETED,
-                    BackupTask.compressed_bytes > 0
-                )
-                compression_result = await session.execute(compression_stmt)
-                compression_row = compression_result.first()
-                if compression_row and compression_row[0] and compression_row[0] > 0:
-                    compression_ratio = float(compression_row[1] or 0) / float(compression_row[0])
+                cursor = await conn.execute("""
+                    SELECT 
+                        COALESCE(SUM(processed_bytes), 0) as processed,
+                        COALESCE(SUM(compressed_bytes), 0) as compressed
+                    FROM backup_tasks
+                    WHERE is_template = 0 
+                      AND LOWER(status) = LOWER(?)
+                      AND compressed_bytes > 0
+                """, (completed_status,))
+                row = await cursor.fetchone()
+                if row and row[0] and row[0] > 0:
+                    compression_ratio = float(row[1] or 0) / float(row[0])
                 else:
                     compression_ratio = 0.65
                 

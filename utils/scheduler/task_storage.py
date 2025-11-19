@@ -106,14 +106,9 @@ async def load_tasks_from_db(enabled_only: bool = True) -> List[ScheduledTask]:
                 
                 return tasks
         else:
-            # 非openGauss数据库，使用SQLAlchemy
-            async with db_manager.AsyncSessionLocal() as session:
-                stmt = select(ScheduledTask)
-                if enabled_only:
-                    stmt = stmt.where(ScheduledTask.enabled == True)
-                stmt = stmt.order_by(ScheduledTask.id)
-                result = await session.execute(stmt)
-                return list(result.scalars().all())
+            # SQLite 版本
+            from utils.scheduler.sqlite_task_storage import load_tasks_from_db_sqlite
+            return await load_tasks_from_db_sqlite(enabled_only)
                 
     except Exception as e:
         import traceback
@@ -154,8 +149,9 @@ async def record_run_start(task_id: int, execution_id: str, started_at: datetime
                     task_id, execution_id, started_at
                 )
         else:
-            # 非 openGauss 暂不实现（保留 SQLAlchemy 版本可选）
-            pass
+            # SQLite 版本
+            from utils.scheduler.sqlite_task_storage import record_run_start_sqlite
+            await record_run_start_sqlite(task_id, execution_id, started_at)
     except Exception as e:
         logger.warning(f"记录任务开始失败（忽略继续）: {str(e)}")
 
@@ -293,7 +289,9 @@ async def acquire_task_lock(task_id: int, execution_id: str) -> bool:
                             logger.warning(f"插入任务锁失败（可能被其他进程占用）: {str(insert_error)}")
                             return False
         else:
-            return True
+            # SQLite 版本
+            from utils.scheduler.sqlite_task_storage import acquire_task_lock_sqlite
+            return await acquire_task_lock_sqlite(task_id, execution_id)
     except Exception as e:
         logger.warning(f"获取任务锁失败（忽略并继续）: {str(e)}")
         return True
@@ -314,7 +312,9 @@ async def release_task_lock(task_id: int, execution_id: str) -> None:
                     task_id, execution_id
                 )
         else:
-            pass
+            # SQLite 版本
+            from utils.scheduler.sqlite_task_storage import release_task_lock_sqlite
+            await release_task_lock_sqlite(task_id, execution_id)
     except Exception as e:
         logger.warning(f"释放任务锁失败（忽略继续）: {str(e)}")
 
@@ -351,7 +351,9 @@ async def release_task_locks_by_task(task_id: int) -> None:
                 else:
                     logger.info(f"任务 {task_id} 没有活跃锁需要释放")
         else:
-            pass
+            # SQLite 版本
+            from utils.scheduler.sqlite_task_storage import release_task_locks_by_task_sqlite
+            await release_task_locks_by_task_sqlite(task_id)
     except Exception as e:
         logger.warning(f"释放指定任务锁失败（忽略继续）: {str(e)}")
 
@@ -386,7 +388,9 @@ async def release_all_active_locks() -> None:
                 else:
                     logger.info("没有活跃的任务锁需要释放")
         else:
-            pass
+            # SQLite 版本
+            from utils.scheduler.sqlite_task_storage import release_all_active_locks_sqlite
+            await release_all_active_locks_sqlite()
     except Exception as e:
         logger.warning(f"释放所有任务锁失败（忽略继续）: {str(e)}")
 
@@ -403,11 +407,9 @@ async def get_task_by_id(task_id: int) -> Optional[ScheduledTask]:
                     return None
                 return row_to_task(row)
         else:
-            # 非openGauss数据库，使用SQLAlchemy
-            async with db_manager.AsyncSessionLocal() as session:
-                stmt = select(ScheduledTask).where(ScheduledTask.id == task_id)
-                result = await session.execute(stmt)
-                return result.scalar_one_or_none()
+            # SQLite 版本
+            from utils.scheduler.sqlite_task_storage import get_task_by_id_sqlite
+            return await get_task_by_id_sqlite(task_id)
     except Exception as e:
         import traceback
         error_detail = traceback.format_exc()
@@ -438,14 +440,9 @@ async def get_all_tasks(enabled_only: bool = False) -> List[ScheduledTask]:
                 
                 return tasks
         else:
-            # 非openGauss数据库，使用SQLAlchemy
-            async with db_manager.AsyncSessionLocal() as session:
-                stmt = select(ScheduledTask)
-                if enabled_only:
-                    stmt = stmt.where(ScheduledTask.enabled == True)
-                stmt = stmt.order_by(ScheduledTask.id)
-                result = await session.execute(stmt)
-                return list(result.scalars().all())
+            # SQLite 版本
+            from utils.scheduler.sqlite_task_storage import get_all_tasks_sqlite
+            return await get_all_tasks_sqlite(enabled_only)
     except Exception as e:
         import traceback
         error_detail = traceback.format_exc()
@@ -538,34 +535,9 @@ async def add_task(scheduled_task: ScheduledTask) -> bool:
                 
                 return True
         else:
-            # 非openGauss数据库，使用SQLAlchemy
-            async with db_manager.AsyncSessionLocal() as session:
-                session.add(scheduled_task)
-                await session.commit()
-                await session.refresh(scheduled_task)
-                logger.info(f"使用SQLAlchemy插入计划任务成功: {scheduled_task.task_name} (ID: {scheduled_task.id})")
-                
-                # 记录操作日志
-                await log_operation(
-                    operation_type=OperationType.SCHEDULER_CREATE,
-                    resource_type="scheduler",
-                    resource_id=str(scheduled_task.id),
-                    resource_name=scheduled_task.task_name,
-                    operation_name="创建计划任务",
-                    operation_description=f"创建计划任务: {scheduled_task.task_name}",
-                    category="scheduler",
-                    success=True,
-                    result_message=f"计划任务创建成功 (ID: {scheduled_task.id})",
-                    new_values={
-                        "task_name": scheduled_task.task_name,
-                        "description": scheduled_task.description,
-                        "schedule_type": scheduled_task.schedule_type.value if scheduled_task.schedule_type else None,
-                        "action_type": scheduled_task.action_type.value if scheduled_task.action_type else None,
-                        "enabled": scheduled_task.enabled
-                    }
-                )
-                
-                return True
+            # SQLite 版本
+            from utils.scheduler.sqlite_task_storage import add_task_sqlite
+            return await add_task_sqlite(scheduled_task)
             
     except Exception as e:
         import traceback
@@ -626,39 +598,9 @@ async def delete_task(task_id: int) -> bool:
                 logger.info(f"使用原生SQL删除计划任务成功: {task_name} (ID: {task_id})")
                 return True
         else:
-            # 非openGauss数据库，使用SQLAlchemy
-            async with db_manager.AsyncSessionLocal() as session:
-                stmt = select(ScheduledTask).where(ScheduledTask.id == task_id)
-                result = await session.execute(stmt)
-                task = result.scalar_one_or_none()
-                
-                if task:
-                    task_name = task.task_name
-                    
-                    # 记录操作日志（删除前）
-                    await log_operation(
-                        operation_type=OperationType.SCHEDULER_DELETE,
-                        resource_type="scheduler",
-                        resource_id=str(task_id),
-                        resource_name=task_name,
-                        operation_name="删除计划任务",
-                        operation_description=f"删除计划任务: {task_name}",
-                        category="scheduler",
-                        success=True,
-                        result_message=f"计划任务删除成功 (ID: {task_id})",
-                        old_values={
-                            "task_name": task_name,
-                            "task_id": task_id
-                        }
-                    )
-                    
-                    await session.delete(task)
-                    await session.commit()
-                    logger.info(f"使用SQLAlchemy删除计划任务成功: {task_name} (ID: {task_id})")
-                    return True
-                else:
-                    logger.warning(f"未找到任务 ID: {task_id}")
-                    return False
+            # SQLite 版本
+            from utils.scheduler.sqlite_task_storage import delete_task_sqlite
+            return await delete_task_sqlite(task_id)
                     
     except Exception as e:
         import traceback
@@ -800,64 +742,9 @@ async def update_task(task_id: int, updates: Dict[str, Any], next_run_time: Opti
                 # 重新获取更新后的任务
                 return await get_task_by_id(task_id)
         else:
-            # 非openGauss数据库，使用SQLAlchemy
-            async with db_manager.AsyncSessionLocal() as session:
-                stmt = select(ScheduledTask).where(ScheduledTask.id == task_id)
-                result = await session.execute(stmt)
-                task = result.scalar_one_or_none()
-                
-                if not task:
-                    logger.warning(f"未找到任务 ID: {task_id}")
-                    return None
-                
-                # 记录旧值（用于日志）
-                old_values = {
-                    "task_name": task.task_name,
-                    "description": task.description,
-                    "schedule_type": task.schedule_type.value if task.schedule_type else None,
-                    "action_type": task.action_type.value if task.action_type else None,
-                    "enabled": task.enabled,
-                    "status": task.status.value if task.status else None
-                }
-                
-                # 更新字段
-                for key, value in updates.items():
-                    if hasattr(task, key):
-                        setattr(task, key, value)
-                
-                # 如果提供了next_run_time，使用它
-                if next_run_time is not None:
-                    task.next_run_time = next_run_time
-                
-                session.add(task)
-                await session.commit()
-                await session.refresh(task)
-                logger.info(f"使用SQLAlchemy更新计划任务成功: {task.task_name} (ID: {task_id})")
-                
-                # 记录操作日志
-                await log_operation(
-                    operation_type=OperationType.SCHEDULER_UPDATE,
-                    resource_type="scheduler",
-                    resource_id=str(task_id),
-                    resource_name=task.task_name,
-                    operation_name="更新计划任务",
-                    operation_description=f"更新计划任务: {task.task_name}",
-                    category="scheduler",
-                    success=True,
-                    result_message=f"计划任务更新成功 (ID: {task_id})",
-                    old_values=old_values,
-                    new_values={
-                        "task_name": task.task_name,
-                        "description": task.description,
-                        "schedule_type": task.schedule_type.value if task.schedule_type else None,
-                        "action_type": task.action_type.value if task.action_type else None,
-                        "enabled": task.enabled,
-                        "status": task.status.value if task.status else None
-                    },
-                    changed_fields=list(updates.keys())
-                )
-                
-                return task
+            # SQLite 版本
+            from utils.scheduler.sqlite_task_storage import update_task_sqlite
+            return await update_task_sqlite(task_id, updates, next_run_time)
             
     except Exception as e:
         import traceback

@@ -410,8 +410,9 @@ class BackupDB:
                     else:
                         raise RuntimeError(f"备份集插入后查询失败: {set_id}")
             else:
-                # 非 openGauss 使用 SQLAlchemy（其他数据库）- 但当前项目只支持 openGauss
-                raise RuntimeError("当前项目仅支持 openGauss 数据库")
+                # SQLite 版本
+                from backup.sqlite_backup_db import create_backup_set_sqlite
+                backup_set = await create_backup_set_sqlite(backup_task, tape)
 
             backup_task.backup_set_id = set_id
             logger.info(f"创建备份集: {set_id}")
@@ -463,10 +464,9 @@ class BackupDB:
                         backup_set.set_id
                     )
             else:
-                # 非 openGauss 使用 SQLAlchemy
-                from config.database import get_db
-                async for db in get_db():
-                    await db.commit()
+                # SQLite 版本：使用原生 SQL
+                from backup.sqlite_backup_db import finalize_backup_set_sqlite
+                await finalize_backup_set_sqlite(backup_set, file_count, total_size)
 
             logger.info(f"备份集完成: {backup_set.set_id}")
 
@@ -615,8 +615,34 @@ class BackupDB:
         chunk_number: int
     ):
         """标记文件为复制成功"""
+        logger.info(f"[mark_files_as_copied] 开始标记文件为复制成功: backup_set={backup_set}, file_group数量={len(file_group)}, chunk_number={chunk_number}")
+        
         from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
         if not is_opengauss():
+            backup_set_db_id = getattr(backup_set, 'id', None)
+            logger.info(f"[mark_files_as_copied] SQLite模式: backup_set.id={backup_set_db_id}, backup_set对象={backup_set}")
+            
+            if not backup_set_db_id:
+                logger.error(f"[mark_files_as_copied] ❌ SQLite 模式下无法获取 backup_set.id，跳过文件状态更新！backup_set对象属性: {dir(backup_set)}")
+                logger.error(f"[mark_files_as_copied] backup_set.set_id={getattr(backup_set, 'set_id', None)}, backup_set类型={type(backup_set)}")
+                return
+
+            from backup.sqlite_backup_db import mark_files_as_copied_sqlite
+
+            logger.info(f"[mark_files_as_copied] 调用 mark_files_as_copied_sqlite: backup_set_db_id={backup_set_db_id}, 文件数={len(file_group)}")
+            try:
+                await mark_files_as_copied_sqlite(
+                    backup_set_db_id=backup_set_db_id,
+                    processed_files=file_group,
+                    compressed_file=compressed_file,
+                    tape_file_path=tape_file_path,
+                    chunk_number=chunk_number,
+                    backup_time=datetime.now()
+                )
+                logger.info(f"[mark_files_as_copied] ✅ mark_files_as_copied_sqlite 执行完成")
+            except Exception as e:
+                logger.error(f"[mark_files_as_copied] ❌ mark_files_as_copied_sqlite 执行失败: {str(e)}", exc_info=True)
+                raise
             return
 
         backup_set_db_id = getattr(backup_set, 'id', None)
@@ -662,11 +688,9 @@ class BackupDB:
                     set_id
                 )
         else:
-            async with db_manager.AsyncSessionLocal() as session:
-                stmt = select(BackupSet).where(BackupSet.set_id == set_id)
-                result = await session.execute(stmt)
-                backup_set = result.scalar_one_or_none()
-                return backup_set
+            # SQLite 版本
+            from backup.sqlite_backup_db import get_backup_set_by_set_id_sqlite
+            return await get_backup_set_by_set_id_sqlite(set_id)
         
         if not row:
             return None
@@ -892,7 +916,14 @@ class BackupDB:
         from backup.utils import format_bytes
 
         if not is_opengauss():
-            return []
+            from backup.sqlite_backup_db import fetch_pending_files_grouped_by_size_sqlite
+
+            return await fetch_pending_files_grouped_by_size_sqlite(
+                backup_set_db_id,
+                max_file_size,
+                backup_task_id,
+                should_wait_if_small,
+            )
 
         # 获取重试计数（如果没有backup_task_id则使用0）
         retry_count = 0
@@ -1044,47 +1075,53 @@ class BackupDB:
     async def get_scan_status(self, backup_task_id: int) -> Optional[str]:
         """获取扫描状态"""
         from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
-        if not is_opengauss():
-            return None
-        async with get_opengauss_connection() as conn:
-            row = await conn.fetchrow(
-                "SELECT scan_status FROM backup_tasks WHERE id = $1",
-                backup_task_id
-            )
-        return row['scan_status'] if row else None
+        if is_opengauss():
+            async with get_opengauss_connection() as conn:
+                row = await conn.fetchrow(
+                    "SELECT scan_status FROM backup_tasks WHERE id = $1",
+                    backup_task_id
+                )
+            return row['scan_status'] if row else None
+        else:
+            # SQLite 版本
+            from backup.sqlite_backup_db import get_scan_status_sqlite
+            return await get_scan_status_sqlite(backup_task_id)
 
     async def update_scan_status(self, backup_task_id: int, status: str):
         """更新扫描状态"""
         from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
-        if not is_opengauss():
-            return
-        current_time = datetime.now()
-        async with get_opengauss_connection() as conn:
-            if status == 'completed':
-                await conn.execute(
-                    """
-                    UPDATE backup_tasks
-                    SET scan_status = $1,
-                        scan_completed_at = $2,
-                        updated_at = $2
-                    WHERE id = $3
-                    """,
-                    status,
-                    current_time,
-                    backup_task_id
-                )
-            else:
-                await conn.execute(
-                    """
-                    UPDATE backup_tasks
-                    SET scan_status = $1,
-                        updated_at = $2
-                    WHERE id = $3
-                    """,
-                    status,
-                    current_time,
-                    backup_task_id
-                )
+        if is_opengauss():
+            current_time = datetime.now()
+            async with get_opengauss_connection() as conn:
+                if status == 'completed':
+                    await conn.execute(
+                        """
+                        UPDATE backup_tasks
+                        SET scan_status = $1,
+                            scan_completed_at = $2,
+                            updated_at = $2
+                        WHERE id = $3
+                        """,
+                        status,
+                        current_time,
+                        backup_task_id
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        UPDATE backup_tasks
+                        SET scan_status = $1,
+                            updated_at = $2
+                        WHERE id = $3
+                        """,
+                        status,
+                        current_time,
+                        backup_task_id
+                    )
+        else:
+            # SQLite 版本
+            from backup.sqlite_backup_db import update_scan_status_sqlite
+            await update_scan_status_sqlite(backup_task_id, status)
 
     async def _mark_files_as_copied(
         self,
@@ -1121,16 +1158,24 @@ class BackupDB:
         logger.info(f"[mark_files_as_copied] 准备更新 {len(file_paths)} 个文件的 is_copy_success 状态")
         
         # 分批查询已存在的文件，避免单次查询过多文件导致超时
-        # 批次大小：5000 个文件一批（可根据实际情况调整）
-        batch_size = 5000
+        # 批次大小：2000 个文件一批（减小批次大小以降低查询超时风险）
+        batch_size = 2000
         existing_map = {}
         
         if len(file_paths) > batch_size:
             logger.info(f"[mark_files_as_copied] 文件数量较多（{len(file_paths)} 个），将分批查询（每批 {batch_size} 个）")
             for i in range(0, len(file_paths), batch_size):
                 batch_paths = file_paths[i:i + batch_size]
+                batch_num = i // batch_size + 1
+                total_batches = (len(file_paths) + batch_size - 1) // batch_size
                 try:
-                    # 添加超时设置，防止查询阻塞（60秒超时）
+                    # 每次查询前重置超时设置（使用 SQL statement_timeout，确保每次查询独立计时）
+                    # 设置查询超时为 180 秒（3分钟），给查询足够的执行时间
+                    logger.info(f"[mark_files_as_copied] 开始查询批次 {batch_num}/{total_batches}，包含 {len(batch_paths)} 个文件...")
+                    await conn.execute("SET LOCAL statement_timeout = '180s'")
+                    logger.debug(f"[mark_files_as_copied] 已设置 statement_timeout，开始执行查询...")
+                    
+                    # 添加超时设置，防止查询阻塞（180秒超时，减小批次后应该足够）
                     import asyncio
                     batch_existing = await asyncio.wait_for(
                         conn.fetch(
@@ -1141,17 +1186,22 @@ class BackupDB:
                             """,
                             backup_set_db_id, batch_paths
                         ),
-                        timeout=60.0  # 60秒超时
+                        timeout=180.0  # 180秒超时（批次减小到2000后，应该足够）
                     )
+                    logger.info(f"[mark_files_as_copied] 批次 {batch_num}/{total_batches} 查询完成，找到 {len(batch_existing)} 个已存在文件")
                     for row in batch_existing:
                         existing_map[row['file_path']] = row
-                    logger.debug(f"[mark_files_as_copied] 已查询批次 {i // batch_size + 1}/{(len(file_paths) + batch_size - 1) // batch_size}，找到 {len(batch_existing)} 个已存在文件")
+                    logger.debug(f"[mark_files_as_copied] 已查询批次 {batch_num}/{total_batches}，找到 {len(batch_existing)} 个已存在文件")
+                except asyncio.TimeoutError:
+                    logger.error(f"[mark_files_as_copied] 批次 {batch_num}/{total_batches} 查询超时（180秒），跳过该批次")
+                    # 继续处理下一批次
+                    continue
                 except Exception as batch_error:
                     # 记录详细的错误信息，包括错误类型和消息
                     error_type = type(batch_error).__name__
                     error_msg = str(batch_error) if batch_error else "未知错误"
                     logger.error(
-                        f"[mark_files_as_copied] 批次查询失败（批次 {i // batch_size + 1}）: "
+                        f"[mark_files_as_copied] 批次查询失败（批次 {batch_num}/{total_batches}）: "
                         f"错误类型: {error_type}, 错误信息: {error_msg}",
                         exc_info=True  # 包含完整的堆栈跟踪
                     )
@@ -1160,7 +1210,10 @@ class BackupDB:
         else:
             # 文件数量较少，直接查询
             try:
-                # 添加超时设置，防止查询阻塞（60秒超时）
+                # 每次查询前重置超时设置（使用 SQL statement_timeout，确保每次查询独立计时）
+                await conn.execute("SET LOCAL statement_timeout = '300s'")
+                
+                # 添加超时设置，防止查询阻塞（300秒超时，增加超时时间以处理大数据量）
                 import asyncio
                 existing_files = await asyncio.wait_for(
                     conn.fetch(
@@ -1171,16 +1224,24 @@ class BackupDB:
                         """,
                         backup_set_db_id, file_paths
                     ),
-                    timeout=60.0  # 60秒超时
+                    timeout=300.0  # 300秒超时（增加超时时间）
                 )
                 existing_map = {row['file_path']: row for row in existing_files}
+            except asyncio.TimeoutError:
+                logger.error(f"[mark_files_as_copied] 查询已存在文件超时（300秒），文件数={len(file_paths)}，将跳过查询，直接进行更新")
+                # 查询超时，清空 existing_map，让所有文件都走更新流程（通过 file_path 匹配）
+                existing_map = {}
             except Exception as query_error:
-                logger.error(f"[mark_files_as_copied] 查询已存在文件失败: {query_error}")
-                raise
+                logger.error(f"[mark_files_as_copied] 查询已存在文件失败: {query_error}，将跳过查询，直接进行更新")
+                # 查询失败，清空 existing_map，让所有文件都走更新流程
+                existing_map = {}
         
         # 准备批量更新和插入的数据
         update_data = []
         insert_data = []
+        
+        # 如果查询失败或超时，existing_map 为空，需要通过 file_path 直接更新
+        use_file_path_update = len(existing_map) == 0 and len(processed_files) > 0
         
         for processed_file in processed_files:
             try:
@@ -1199,10 +1260,23 @@ class BackupDB:
                 metadata_json = json.dumps(metadata)
                 
                 if file_path in existing_map:
-                    # 批量更新
+                    # 批量更新（通过 id）
                     file_id = existing_map[file_path]['id']
                     update_data.append((
                         file_id,
+                        per_file_compressed_size,
+                        is_compressed,
+                        checksum,
+                        backup_time,
+                        chunk_number,
+                        0,
+                        metadata_json,
+                        copy_time
+                    ))
+                elif use_file_path_update:
+                    # 查询失败时，通过 file_path 更新（需要 file_path 作为参数）
+                    update_data.append((
+                        file_path,  # 使用 file_path 而不是 id
                         per_file_compressed_size,
                         is_compressed,
                         checksum,
@@ -1239,17 +1313,102 @@ class BackupDB:
                     f"[mark_files_as_copied] Failed to prepare {processed_file.get('file_path', 'unknown')}: {e}"
                 )
                 continue
-        
+                    
         # 执行批量更新（分批处理，避免单次操作过多数据）
         if update_data:
-            update_batch_size = 5000
+            update_batch_size = 2000  # 减小批次大小以降低超时风险
             if len(update_data) > update_batch_size:
                 logger.info(f"[mark_files_as_copied] 更新数据较多（{len(update_data)} 条），将分批更新（每批 {update_batch_size} 条）")
                 for i in range(0, len(update_data), update_batch_size):
                     batch_update = update_data[i:i + update_batch_size]
                     try:
-                        # 添加超时设置，防止更新阻塞（60秒超时）
+                        # 每次更新前重置超时设置（使用 SQL statement_timeout，确保每次更新独立计时）
+                        await conn.execute("SET LOCAL statement_timeout = '300s'")
+                        
+                        # 添加超时设置，防止更新阻塞（300秒超时，增加超时时间）
                         import asyncio
+                        # 根据是否使用 file_path 更新选择不同的 SQL
+                        if use_file_path_update and len(batch_update) > 0 and isinstance(batch_update[0][0], str):
+                            # 通过 file_path 更新（查询失败时的备用方案）
+                            await asyncio.wait_for(
+                                conn.executemany(
+                                    """
+                                    UPDATE backup_files
+                                    SET compressed_size = $2,
+                                        compressed = $3,
+                                        checksum = $4,
+                                        backup_time = $5,
+                                        chunk_number = $6,
+                                        tape_block_start = $7,
+                                        file_metadata = $8::json,
+                                        is_copy_success = TRUE,
+                                        copy_status_at = $9
+                                    WHERE backup_set_id = $10 AND file_path = $1
+                                    """,
+                                    [(row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], backup_set_db_id) for row in batch_update]
+                                ),
+                                timeout=300.0  # 300秒超时
+                            )
+                        else:
+                            # 通过 id 更新（正常情况）
+                            await asyncio.wait_for(
+                                conn.executemany(
+                                    """
+                                    UPDATE backup_files
+                                    SET compressed_size = $2,
+                                        compressed = $3,
+                                        checksum = $4,
+                                        backup_time = $5,
+                                        chunk_number = $6,
+                                        tape_block_start = $7,
+                                        file_metadata = $8::json,
+                                        is_copy_success = TRUE,
+                                        copy_status_at = $9
+                                    WHERE id = $1
+                                    """,
+                                    batch_update
+                                ),
+                                timeout=300.0  # 300秒超时（增加超时时间）
+                            )
+                        success_count += len(batch_update)
+                        logger.debug(f"[mark_files_as_copied] 已更新批次 {i // update_batch_size + 1}/{(len(update_data) + update_batch_size - 1) // update_batch_size}，{len(batch_update)} 个文件")
+                    except asyncio.TimeoutError:
+                        failed_count += len(batch_update)
+                        logger.error(f"[mark_files_as_copied] 批次更新超时（批次 {i // update_batch_size + 1}，180秒），跳过该批次")
+                    except Exception as batch_update_error:
+                        failed_count += len(batch_update)
+                        logger.error(f"[mark_files_as_copied] 批次更新失败（批次 {i // update_batch_size + 1}）: {batch_update_error}")
+            else:
+                try:
+                    # 每次更新前重置超时设置（使用 SQL statement_timeout，确保每次更新独立计时）
+                    await conn.execute("SET LOCAL statement_timeout = '180s'")
+                    
+                    # 添加超时设置，防止更新阻塞（180秒超时）
+                    import asyncio
+                    # 根据是否使用 file_path 更新选择不同的 SQL
+                    if use_file_path_update and len(update_data) > 0 and isinstance(update_data[0][0], str):
+                        # 通过 file_path 更新（查询失败时的备用方案）
+                        await asyncio.wait_for(
+                            conn.executemany(
+                                """
+                                UPDATE backup_files
+                                SET compressed_size = $2,
+                                    compressed = $3,
+                                    checksum = $4,
+                                    backup_time = $5,
+                                    chunk_number = $6,
+                                    tape_block_start = $7,
+                                    file_metadata = $8::json,
+                                    is_copy_success = TRUE,
+                                    copy_status_at = $9
+                                WHERE backup_set_id = $10 AND file_path = $1
+                                """,
+                                [(row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], backup_set_db_id) for row in update_data]
+                            ),
+                            timeout=300.0  # 300秒超时
+                        )
+                    else:
+                        # 通过 id 更新（正常情况）
                         await asyncio.wait_for(
                             conn.executemany(
                                 """
@@ -1265,46 +1424,15 @@ class BackupDB:
                                     copy_status_at = $9
                                 WHERE id = $1
                                 """,
-                                batch_update
+                                update_data
                             ),
-                            timeout=60.0  # 60秒超时
+                            timeout=300.0  # 300秒超时（增加超时时间）
                         )
-                        success_count += len(batch_update)
-                        logger.debug(f"[mark_files_as_copied] 已更新批次 {i // update_batch_size + 1}/{(len(update_data) + update_batch_size - 1) // update_batch_size}，{len(batch_update)} 个文件")
-                    except asyncio.TimeoutError:
-                        failed_count += len(batch_update)
-                        logger.error(f"[mark_files_as_copied] 批次更新超时（批次 {i // update_batch_size + 1}，60秒），跳过该批次")
-                    except Exception as batch_update_error:
-                        failed_count += len(batch_update)
-                        logger.error(f"[mark_files_as_copied] 批次更新失败（批次 {i // update_batch_size + 1}）: {batch_update_error}")
-            else:
-                try:
-                    # 添加超时设置，防止更新阻塞（60秒超时）
-                    import asyncio
-                    await asyncio.wait_for(
-                        conn.executemany(
-                            """
-                            UPDATE backup_files
-                            SET compressed_size = $2,
-                                compressed = $3,
-                                checksum = $4,
-                                backup_time = $5,
-                                chunk_number = $6,
-                                tape_block_start = $7,
-                                file_metadata = $8::json,
-                                is_copy_success = TRUE,
-                                copy_status_at = $9
-                            WHERE id = $1
-                            """,
-                            update_data
-                        ),
-                        timeout=60.0  # 60秒超时
-                    )
                     success_count += len(update_data)
                     logger.debug(f"[mark_files_as_copied] 批量更新 {len(update_data)} 个文件")
                 except asyncio.TimeoutError:
                     failed_count += len(update_data)
-                    logger.error(f"[mark_files_as_copied] 批量更新超时（60秒），跳过")
+                    logger.error(f"[mark_files_as_copied] 批量更新超时（180秒），跳过")
                 except Exception as update_error:
                     failed_count += len(update_data)
                     logger.error(f"[mark_files_as_copied] 批量更新失败: {update_error}")
@@ -1317,7 +1445,47 @@ class BackupDB:
                 for i in range(0, len(insert_data), insert_batch_size):
                     batch_insert = insert_data[i:i + insert_batch_size]
                     try:
-                        await conn.executemany(
+                        # 每次插入前重置超时设置（使用 SQL statement_timeout，确保每次插入独立计时）
+                        await conn.execute("SET LOCAL statement_timeout = '180s'")
+                        
+                        # 添加超时设置，防止插入阻塞（180秒超时）
+                        import asyncio
+                        await asyncio.wait_for(
+                            conn.executemany(
+                                """
+                                INSERT INTO backup_files (
+                                    backup_set_id, file_path, file_name, file_type, file_size,
+                                    compressed_size, file_permissions, created_time, modified_time,
+                                    accessed_time, compressed, checksum, backup_time, chunk_number,
+                                    tape_block_start, file_metadata, is_copy_success, copy_status_at
+                                ) VALUES (
+                                    $1, $2, $3, $4::backupfiletype, $5,
+                                    $6, $7, $8, $9,
+                                    $10, $11, $12, $13, $14,
+                                    $15, $16::json, TRUE, $17
+                                )
+                                """,
+                                batch_insert
+                            ),
+                            timeout=180.0  # 180秒超时
+                        )
+                        success_count += len(batch_insert)
+                        logger.debug(f"[mark_files_as_copied] 已插入批次 {i // insert_batch_size + 1}/{(len(insert_data) + insert_batch_size - 1) // insert_batch_size}，{len(batch_insert)} 个文件")
+                    except asyncio.TimeoutError:
+                        failed_count += len(batch_insert)
+                        logger.error(f"[mark_files_as_copied] 批次插入超时（批次 {i // insert_batch_size + 1}，180秒），跳过该批次")
+                    except Exception as batch_insert_error:
+                        failed_count += len(batch_insert)
+                        logger.error(f"[mark_files_as_copied] 批次插入失败（批次 {i // insert_batch_size + 1}）: {batch_insert_error}")
+            else:
+                try:
+                    # 每次插入前重置超时设置（使用 SQL statement_timeout，确保每次插入独立计时）
+                    await conn.execute("SET LOCAL statement_timeout = '180s'")
+                    
+                    # 添加超时设置，防止插入阻塞（180秒超时）
+                    import asyncio
+                    await asyncio.wait_for(
+                        conn.executemany(
                             """
                             INSERT INTO backup_files (
                                 backup_set_id, file_path, file_name, file_type, file_size,
@@ -1331,39 +1499,23 @@ class BackupDB:
                                 $15, $16::json, TRUE, $17
                             )
                             """,
-                            batch_insert
-                        )
-                        success_count += len(batch_insert)
-                        logger.debug(f"[mark_files_as_copied] 已插入批次 {i // insert_batch_size + 1}/{(len(insert_data) + insert_batch_size - 1) // insert_batch_size}，{len(batch_insert)} 个文件")
-                    except Exception as batch_insert_error:
-                        failed_count += len(batch_insert)
-                        logger.error(f"[mark_files_as_copied] 批次插入失败（批次 {i // insert_batch_size + 1}）: {batch_insert_error}")
-            else:
-                try:
-                    await conn.executemany(
-                        """
-                        INSERT INTO backup_files (
-                            backup_set_id, file_path, file_name, file_type, file_size,
-                            compressed_size, file_permissions, created_time, modified_time,
-                            accessed_time, compressed, checksum, backup_time, chunk_number,
-                            tape_block_start, file_metadata, is_copy_success, copy_status_at
-                        ) VALUES (
-                            $1, $2, $3, $4::backupfiletype, $5,
-                            $6, $7, $8, $9,
-                            $10, $11, $12, $13, $14,
-                            $15, $16::json, TRUE, $17
-                        )
-                        """,
-                        insert_data
+                            insert_data
+                        ),
+                        timeout=180.0  # 180秒超时
                     )
                     success_count += len(insert_data)
                     logger.debug(f"[mark_files_as_copied] 批量插入 {len(insert_data)} 个文件")
+                except asyncio.TimeoutError:
+                    failed_count += len(insert_data)
+                    logger.error(f"[mark_files_as_copied] 批量插入超时（180秒），跳过")
                 except Exception as insert_error:
                     failed_count += len(insert_data)
                     logger.error(f"[mark_files_as_copied] 批量插入失败: {insert_error}")
         
         if success_count > 0:
-            logger.info(f"[mark_files_as_copied] 成功更新 {success_count} 个文件的 is_copy_success=TRUE（批量操作：更新 {len(update_data)} 个，插入 {len(insert_data)} 个）")
+            logger.info(
+                f"[mark_files_as_copied] 成功更新 {success_count} 个文件的 is_copy_success=TRUE（批量操作：更新 {len(update_data)} 个，插入 {len(insert_data)} 个）"
+            )
         if failed_count > 0:
             logger.warning(
                 f"[mark_files_as_copied] {failed_count} 个文件更新失败，继续备份流程"
@@ -1550,8 +1702,9 @@ class BackupDB:
                         )
                         # 注意：total_bytes 字段不更新，由后台扫描任务负责更新
             else:
-                # 非 openGauss 使用 SQLAlchemy（但当前项目仅支持 openGauss）
-                logger.warning("非 openGauss 数据库，跳过进度更新")
+                # SQLite 版本
+                from backup.sqlite_backup_db import update_scan_progress_sqlite
+                await update_scan_progress_sqlite(backup_task, scanned_count, valid_count, operation_status)
         except Exception as e:
             logger.warning(f"更新扫描进度失败（忽略继续）: {str(e)}")
     
@@ -1620,10 +1773,9 @@ class BackupDB:
                         *params
                     )
             else:
-                # 非 openGauss 使用 SQLAlchemy
-                from config.database import get_db
-                async for db in get_db():
-                    await db.commit()
+                # SQLite 版本
+                from backup.sqlite_backup_db import update_task_status_sqlite
+                await update_task_status_sqlite(backup_task, status)
         except Exception as e:
             logger.error(f"更新任务状态失败: {str(e)}")
     
@@ -1667,17 +1819,9 @@ class BackupDB:
                             WHERE id = $3
                         """, stage_code, current_time, task_id)
             else:
-                # 非 openGauss 数据库更新
-                from config.database import get_db
-                async for db in get_db():
-                    # 这里假设模型有operation_stage字段
-                    if hasattr(backup_task, 'operation_stage'):
-                        backup_task.operation_stage = stage_code
-                    if description and hasattr(backup_task, 'description'):
-                        backup_task.description = description
-                    backup_task.updated_at = current_time
-                    await db.commit()
-                    break
+                # SQLite 版本
+                from backup.sqlite_backup_db import update_task_stage_async_sqlite
+                await update_task_stage_async_sqlite(backup_task, stage_code, description)
 
             logger.info(f"任务 {task_id} 阶段更新为: {stage_code}" + (f", 描述: {description}" if description else ""))
 
@@ -1792,10 +1936,9 @@ class BackupDB:
                         *params
                     )
             else:
-                # 非 openGauss 使用 SQLAlchemy
-                from config.database import get_db
-                async for db in get_db():
-                    await db.commit()
+                # SQLite 版本
+                from backup.sqlite_backup_db import update_task_fields_sqlite
+                await update_task_fields_sqlite(backup_task, **fields)
         except Exception as e:
             logger.error(f"更新任务字段失败: {str(e)}")
     
@@ -1877,6 +2020,29 @@ class BackupDB:
                             'started_at': row['started_at'],
                             'completed_at': row['completed_at']
                         }
+            else:
+                # SQLite 版本
+                from backup.sqlite_backup_db import get_task_status_sqlite
+                result = await get_task_status_sqlite(task_id)
+                if result:
+                    return {
+                        'task_id': result['id'],
+                        'status': result['status'],
+                        'progress_percent': result['progress_percent'],
+                        'processed_files': result['processed_files'],
+                        'total_files': result['total_files'],
+                        'total_bytes': result['total_bytes'],
+                        'processed_bytes': result['processed_bytes'],
+                        'compressed_bytes': result['compressed_bytes'],
+                        'compression_ratio': result['compression_ratio'],
+                        'estimated_archive_count': result['estimated_archive_count'],
+                        'description': result['description'],
+                        'source_paths': result['source_paths'],
+                        'tape_device': result['tape_device'],
+                        'tape_id': result['tape_id'],
+                        'started_at': result['started_at'],
+                        'completed_at': result['completed_at']
+                    }
             
             return None
         except Exception as e:
@@ -1904,6 +2070,13 @@ class BackupDB:
                     )
                     if row:
                         return row['total_files'] or 0
+            else:
+                # SQLite 版本：使用原生 SQL
+                from utils.scheduler.sqlite_utils import get_sqlite_connection
+                async with get_sqlite_connection() as conn:
+                    cursor = await conn.execute("SELECT total_files FROM backup_tasks WHERE id = ?", (task_id,))
+                    row = await cursor.fetchone()
+                    return row[0] or 0 if row else 0
             return 0
         except Exception as e:
             logger.debug(f"读取总文件数失败（忽略继续）: {str(e)}")
@@ -1966,6 +2139,10 @@ class BackupDB:
                         datetime.now(),
                         backup_task.id
                     )
+            else:
+                # SQLite 版本
+                from backup.sqlite_backup_db import update_scan_progress_only_sqlite
+                await update_scan_progress_only_sqlite(backup_task, total_files, total_bytes)
         except Exception as e:
             logger.warning(f"更新扫描进度失败（忽略继续）: {str(e)}")
 

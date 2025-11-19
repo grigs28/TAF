@@ -29,7 +29,7 @@ class DatabaseInitializer:
             
             # 只处理PostgreSQL/openGauss数据库
             if not (database_url.startswith("postgresql://") or database_url.startswith("opengauss://")):
-                logger.debug(f"SQLite数据库无需创建: {database_url}")
+                logger.debug(f"非PostgreSQL/openGauss数据库，跳过数据库创建: {database_url}")
                 return True
             
             # 处理opengauss URL

@@ -156,10 +156,10 @@ class BackupFile(BaseModel):
     backup_set_id = Column(Integer, ForeignKey("backup_sets.id"), nullable=False, comment="备份集ID")
 
     # 文件信息
-    file_path = Column(String(1000), nullable=False, comment="文件路径")
-    file_name = Column(String(2048), nullable=False, comment="文件名")
-    directory_path = Column(String(1000), comment="目录路径")
-    display_name = Column(String(255), comment="展示名称")
+    file_path = Column(Text, nullable=False, comment="文件路径")  # 使用TEXT类型，无长度限制
+    file_name = Column(Text, nullable=False, comment="文件名")  # 使用TEXT类型，无长度限制
+    directory_path = Column(Text, comment="目录路径")  # 使用TEXT类型，无长度限制
+    display_name = Column(Text, comment="展示名称")  # 使用TEXT类型，无长度限制
     file_type = Column(Enum(BackupFileType), nullable=False, comment="文件类型")
     file_size = Column(BigInteger, nullable=False, comment="文件大小")
     compressed_size = Column(BigInteger, comment="压缩后大小")

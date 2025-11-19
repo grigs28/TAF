@@ -143,26 +143,23 @@ async function saveDatabaseConfigSection() {
     }
     const config = getDatabaseConfig();
     
-    // 验证必填字段
+    // 验证必填字段 - 如果配置不完整，跳过保存（允许用户只保存其他配置）
     if (config.db_type === 'sqlite') {
         if (!config.db_path || config.db_path.trim() === '') {
-            throw new Error('请填写SQLite数据库路径');
+            // SQLite 路径为空，跳过保存数据库配置（不抛出错误）
+            console.log('SQLite数据库路径为空，跳过保存数据库配置');
+            return true;
         }
     } else {
-        if (!config.db_host || config.db_host.trim() === '') {
-            throw new Error('请填写数据库主机');
-        }
-        if (!config.db_port) {
-            throw new Error('请填写数据库端口');
-        }
-        if (!config.db_user || config.db_user.trim() === '') {
-            throw new Error('请填写用户名');
-        }
-        if (!config.db_password || config.db_password.trim() === '') {
-            throw new Error('请填写密码');
-        }
-        if (!config.db_database || config.db_database.trim() === '') {
-            throw new Error('请填写数据库名称');
+        // 对于服务器数据库，如果任何必填字段为空，也跳过保存
+        if (!config.db_host || config.db_host.trim() === '' ||
+            !config.db_port ||
+            !config.db_user || config.db_user.trim() === '' ||
+            !config.db_password || config.db_password.trim() === '' ||
+            !config.db_database || config.db_database.trim() === '') {
+            // 服务器数据库配置不完整，跳过保存数据库配置（不抛出错误）
+            console.log('数据库配置不完整，跳过保存数据库配置');
+            return true;
         }
     }
     
@@ -189,9 +186,14 @@ async function loadDatabaseConfig() {
             document.getElementById('dbType').value = config.db_type || 'sqlite';
             
             if (config.db_type === 'sqlite') {
-                if (config.db_path) document.getElementById('dbPath').value = config.db_path;
+                // 如果配置中有路径，使用配置的路径；否则使用默认路径
+                const defaultPath = 'data\\backup_system.db';
+                document.getElementById('dbPath').value = config.db_path || defaultPath;
                 document.getElementById('sqliteConfig').style.display = 'block';
                 document.getElementById('serverDbConfig').style.display = 'none';
+                
+                // 加载 SQLite 配置（从环境配置中加载）
+                loadSQLiteConfig();
             } else {
                 if (config.db_host) document.getElementById('dbHost').value = config.db_host;
                 if (config.db_port) document.getElementById('dbPort').value = config.db_port;
@@ -213,6 +215,42 @@ async function loadDatabaseConfig() {
         loadDatabaseStatus();
     } catch (error) {
         console.error('加载数据库配置失败:', error);
+    }
+}
+
+// 加载 SQLite 配置
+async function loadSQLiteConfig() {
+    try {
+        const response = await fetch('/api/system/env-config');
+        const result = await response.json();
+        
+        if (result.success && result.config) {
+            const config = result.config;
+            
+            // SQLite 配置
+            if (config.sqlite_cache_size) {
+                const sqliteCacheSizeInput = document.getElementById('sqliteCacheSize');
+                if (sqliteCacheSizeInput) sqliteCacheSizeInput.value = config.sqlite_cache_size;
+            }
+            if (config.sqlite_page_size) {
+                const sqlitePageSizeSelect = document.getElementById('sqlitePageSize');
+                if (sqlitePageSizeSelect) sqlitePageSizeSelect.value = config.sqlite_page_size;
+            }
+            if (config.sqlite_timeout) {
+                const sqliteTimeoutInput = document.getElementById('sqliteTimeout');
+                if (sqliteTimeoutInput) sqliteTimeoutInput.value = config.sqlite_timeout;
+            }
+            if (config.sqlite_journal_mode) {
+                const sqliteJournalModeSelect = document.getElementById('sqliteJournalMode');
+                if (sqliteJournalModeSelect) sqliteJournalModeSelect.value = config.sqlite_journal_mode;
+            }
+            if (config.sqlite_synchronous) {
+                const sqliteSynchronousSelect = document.getElementById('sqliteSynchronous');
+                if (sqliteSynchronousSelect) sqliteSynchronousSelect.value = config.sqlite_synchronous;
+            }
+        }
+    } catch (error) {
+        console.error('加载 SQLite 配置失败:', error);
     }
 }
 
@@ -705,6 +743,50 @@ async function loadAllSystemConfig() {
                 if (useCheckpointInput) useCheckpointInput.checked = config.use_checkpoint;
             }
             
+            // 内存数据库配置
+            if (config.memory_db_max_files) {
+                const memoryDbMaxFilesInput = document.getElementById('memoryDbMaxFiles');
+                if (memoryDbMaxFilesInput) memoryDbMaxFilesInput.value = config.memory_db_max_files;
+            }
+            if (config.memory_db_sync_batch_size) {
+                const memoryDbSyncBatchSizeInput = document.getElementById('memoryDbSyncBatchSize');
+                if (memoryDbSyncBatchSizeInput) memoryDbSyncBatchSizeInput.value = config.memory_db_sync_batch_size;
+            }
+            if (config.memory_db_sync_interval) {
+                const memoryDbSyncIntervalInput = document.getElementById('memoryDbSyncInterval');
+                if (memoryDbSyncIntervalInput) memoryDbSyncIntervalInput.value = config.memory_db_sync_interval;
+            }
+            if (config.memory_db_checkpoint_interval) {
+                const memoryDbCheckpointIntervalInput = document.getElementById('memoryDbCheckpointInterval');
+                if (memoryDbCheckpointIntervalInput) memoryDbCheckpointIntervalInput.value = config.memory_db_checkpoint_interval;
+            }
+            if (config.memory_db_checkpoint_retention_hours) {
+                const memoryDbCheckpointRetentionHoursInput = document.getElementById('memoryDbCheckpointRetentionHours');
+                if (memoryDbCheckpointRetentionHoursInput) memoryDbCheckpointRetentionHoursInput.value = config.memory_db_checkpoint_retention_hours;
+            }
+            
+            // SQLite 配置
+            if (config.sqlite_cache_size) {
+                const sqliteCacheSizeInput = document.getElementById('sqliteCacheSize');
+                if (sqliteCacheSizeInput) sqliteCacheSizeInput.value = config.sqlite_cache_size;
+            }
+            if (config.sqlite_page_size) {
+                const sqlitePageSizeSelect = document.getElementById('sqlitePageSize');
+                if (sqlitePageSizeSelect) sqlitePageSizeSelect.value = config.sqlite_page_size;
+            }
+            if (config.sqlite_timeout) {
+                const sqliteTimeoutInput = document.getElementById('sqliteTimeout');
+                if (sqliteTimeoutInput) sqliteTimeoutInput.value = config.sqlite_timeout;
+            }
+            if (config.sqlite_journal_mode) {
+                const sqliteJournalModeSelect = document.getElementById('sqliteJournalMode');
+                if (sqliteJournalModeSelect) sqliteJournalModeSelect.value = config.sqlite_journal_mode;
+            }
+            if (config.sqlite_synchronous) {
+                const sqliteSynchronousSelect = document.getElementById('sqliteSynchronous');
+                if (sqliteSynchronousSelect) sqliteSynchronousSelect.value = config.sqlite_synchronous;
+            }
+            
             console.log('系统配置加载完成');
         }
     } catch (error) {
@@ -743,6 +825,21 @@ async function saveEnvConfigSection() {
             scan_method: document.getElementById('scanMethod')?.value || null,
             es_exe_path: document.getElementById('esExePath')?.value || null,
             use_checkpoint: document.getElementById('useCheckpoint')?.checked || null,
+            
+            // 内存数据库配置
+            memory_db_max_files: parseInt(document.getElementById('memoryDbMaxFiles')?.value) || null,
+            memory_db_sync_batch_size: parseInt(document.getElementById('memoryDbSyncBatchSize')?.value) || null,
+            memory_db_sync_interval: parseInt(document.getElementById('memoryDbSyncInterval')?.value) || null,
+            memory_db_checkpoint_interval: parseInt(document.getElementById('memoryDbCheckpointInterval')?.value) || null,
+            memory_db_checkpoint_retention_hours: parseInt(document.getElementById('memoryDbCheckpointRetentionHours')?.value) || null,
+            
+            // SQLite 配置
+            sqlite_cache_size: parseInt(document.getElementById('sqliteCacheSize')?.value) || null,
+            sqlite_page_size: parseInt(document.getElementById('sqlitePageSize')?.value) || null,
+            sqlite_timeout: parseFloat(document.getElementById('sqliteTimeout')?.value) || null,
+            sqlite_journal_mode: document.getElementById('sqliteJournalMode')?.value || null,
+            sqlite_synchronous: document.getElementById('sqliteSynchronous')?.value || null,
+            
             log_level: document.getElementById('logLevel')?.value || null,
         };
         

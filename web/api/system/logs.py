@@ -196,118 +196,140 @@ async def get_system_logs(
                     })
                 
         else:
-            # 使用SQLAlchemy查询（其他数据库）
-            # 仅在非openGauss时导入SQLAlchemy模型，避免解析openGauss
-            from models.system_log import SystemLog, OperationLog, LogLevel, LogCategory, OperationType
-            from sqlalchemy import select, and_, or_, desc
+            # 使用原生SQL查询（SQLite）
+            from utils.scheduler.sqlite_utils import get_sqlite_connection
             
-            # 查询操作日志（OperationLog）
-            operation_logs_query = select(OperationLog)
-            operation_conditions = [
-                OperationLog.operation_time >= start_time,
-                OperationLog.operation_time <= end_time
-            ]
-            
-            if category:
-                operation_conditions.append(OperationLog.category == category)
-            if operation_type:
-                try:
-                    operation_conditions.append(OperationLog.operation_type == OperationType(operation_type))
-                except ValueError:
-                    pass  # 无效的操作类型，忽略
-            if resource_type:
-                operation_conditions.append(OperationLog.resource_type == resource_type)
-            if user_id:
-                operation_conditions.append(OperationLog.user_id == user_id)
-            
-            operation_logs_query = operation_logs_query.where(and_(*operation_conditions))
-            operation_logs_query = operation_logs_query.order_by(desc(OperationLog.operation_time))
-            operation_logs_query = operation_logs_query.limit(limit).offset(offset)
-            
-            # 查询系统日志（SystemLog）
-            system_logs_query = select(SystemLog)
-            system_conditions = [
-                SystemLog.log_time >= start_time,
-                SystemLog.log_time <= end_time
-            ]
-            
-            if category:
-                try:
-                    system_conditions.append(SystemLog.category == LogCategory(category))
-                except ValueError:
-                    pass  # 无效的分类，忽略
-            if level:
-                try:
-                    system_conditions.append(SystemLog.log_level == LogLevel(level.lower()))
-                except ValueError:
-                    pass  # 无效的级别，忽略
-            
-            system_logs_query = system_logs_query.where(and_(*system_conditions))
-            system_logs_query = system_logs_query.order_by(desc(SystemLog.log_time))
-            system_logs_query = system_logs_query.limit(limit).offset(offset)
-            
-            # 执行查询
-            async with db_manager.AsyncSessionLocal() as session:
-                # 查询操作日志
-                operation_result = await session.execute(operation_logs_query)
-                operation_logs = operation_result.scalars().all()
+            async with get_sqlite_connection() as conn:
+                # 构建操作日志查询条件
+                operation_where = ["operation_time >= ?", "operation_time <= ?"]
+                operation_params = [start_time, end_time]
                 
-                # 查询系统日志
-                system_result = await session.execute(system_logs_query)
-                system_logs = system_result.scalars().all()
-            
-            # 格式化操作日志
-            for log in operation_logs:
-                logs.append({
-                    "id": log.id,
-                    "type": "operation",
-                    "timestamp": log.operation_time.isoformat() if log.operation_time else None,
-                    "level": "info" if log.success else "error",
-                    "category": log.category or "operation",
-                    "operation_type": log.operation_type.value if log.operation_type else None,
-                    "resource_type": log.resource_type,
-                    "resource_id": log.resource_id,
-                    "resource_name": log.resource_name,
-                    "user_id": log.user_id,
-                    "username": log.username,
-                    "operation_name": log.operation_name,
-                    "operation_description": log.operation_description,
-                    "success": log.success,
-                    "result_message": log.result_message,
-                    "error_message": log.error_message,
-                    "ip_address": log.ip_address,
-                    "duration_ms": log.duration_ms,
-                    "details": {
-                        "request_method": log.request_method,
-                        "request_url": log.request_url,
-                        "response_status": log.response_status,
-                        "old_values": log.old_values,
-                        "new_values": log.new_values
-                    }
-                })
-            
-            # 格式化系统日志
-            for log in system_logs:
-                logs.append({
-                    "id": log.id,
-                    "type": "system",
-                    "timestamp": log.log_time.isoformat() if log.log_time else None,
-                    "level": log.log_level.value if log.log_level else "info",
-                    "category": log.category.value if log.category else "system",
-                    "message": log.message,
-                    "module": log.module,
-                    "function": log.function,
-                    "file_path": log.file_path,
-                    "line_number": log.line_number,
-                    "user_id": log.user_id,
-                    "task_id": log.task_id,
-                    "details": log.details,
-                    "exception_type": log.exception_type,
-                    "stack_trace": log.stack_trace,
-                    "duration_ms": log.duration_ms,
-                    "memory_usage_mb": log.memory_usage_mb,
-                    "cpu_usage_percent": log.cpu_usage_percent
-                })
+                if category:
+                    operation_where.append("category = ?")
+                    operation_params.append(category)
+                if operation_type:
+                    operation_where.append("operation_type = ?")
+                    operation_params.append(operation_type)
+                if resource_type:
+                    operation_where.append("resource_type = ?")
+                    operation_params.append(resource_type)
+                if user_id:
+                    operation_where.append("user_id = ?")
+                    operation_params.append(user_id)
+                
+                operation_sql = f"""
+                    SELECT * FROM operation_logs
+                    WHERE {' AND '.join(operation_where)}
+                    ORDER BY operation_time DESC
+                    LIMIT ? OFFSET ?
+                """
+                operation_params.extend([limit, offset])
+                
+                operation_cursor = await conn.execute(operation_sql, operation_params)
+                operation_rows = await operation_cursor.fetchall()
+                
+                # 构建系统日志查询条件
+                system_where = ["log_time >= ?", "log_time <= ?"]
+                system_params = [start_time, end_time]
+                
+                if category:
+                    system_where.append("category = ?")
+                    system_params.append(category)
+                if level:
+                    system_where.append("LOWER(log_level) = LOWER(?)")
+                    system_params.append(level)
+                
+                system_sql = f"""
+                    SELECT * FROM system_logs
+                    WHERE {' AND '.join(system_where)}
+                    ORDER BY log_time DESC
+                    LIMIT ? OFFSET ?
+                """
+                system_params.extend([limit, offset])
+                
+                system_cursor = await conn.execute(system_sql, system_params)
+                system_rows = await system_cursor.fetchall()
+                
+                # 获取列名
+                operation_columns = [desc[0] for desc in operation_cursor.description] if operation_cursor.description else []
+                system_columns = [desc[0] for desc in system_cursor.description] if system_cursor.description else []
+                
+                # 格式化操作日志
+                for row in operation_rows:
+                    row_dict = dict(zip(operation_columns, row))
+                    # 处理 JSON 字段
+                    old_values = row_dict.get('old_values')
+                    if isinstance(old_values, str):
+                        try:
+                            old_values = json.loads(old_values)
+                        except:
+                            pass
+                    new_values = row_dict.get('new_values')
+                    if isinstance(new_values, str):
+                        try:
+                            new_values = json.loads(new_values)
+                        except:
+                            pass
+                    
+                    logs.append({
+                        "id": row_dict.get('id'),
+                        "type": "operation",
+                        "timestamp": row_dict.get('operation_time').isoformat() if row_dict.get('operation_time') and hasattr(row_dict.get('operation_time'), 'isoformat') else (str(row_dict.get('operation_time')) if row_dict.get('operation_time') else None),
+                        "level": "info" if row_dict.get('success', True) else "error",
+                        "category": row_dict.get('category') or "operation",
+                        "operation_type": row_dict.get('operation_type'),
+                        "resource_type": row_dict.get('resource_type'),
+                        "resource_id": row_dict.get('resource_id'),
+                        "resource_name": row_dict.get('resource_name'),
+                        "user_id": row_dict.get('user_id'),
+                        "username": row_dict.get('username'),
+                        "operation_name": row_dict.get('operation_name'),
+                        "operation_description": row_dict.get('operation_description'),
+                        "success": row_dict.get('success', True),
+                        "result_message": row_dict.get('result_message'),
+                        "error_message": row_dict.get('error_message'),
+                        "ip_address": row_dict.get('ip_address'),
+                        "duration_ms": row_dict.get('duration_ms'),
+                        "details": {
+                            "request_method": row_dict.get('request_method'),
+                            "request_url": row_dict.get('request_url'),
+                            "response_status": row_dict.get('response_status'),
+                            "old_values": old_values,
+                            "new_values": new_values
+                        }
+                    })
+                
+                # 格式化系统日志
+                for row in system_rows:
+                    row_dict = dict(zip(system_columns, row))
+                    # 处理 JSON 字段
+                    details = row_dict.get('details')
+                    if isinstance(details, str):
+                        try:
+                            details = json.loads(details)
+                        except:
+                            pass
+                    
+                    logs.append({
+                        "id": row_dict.get('id'),
+                        "type": "system",
+                        "timestamp": row_dict.get('log_time').isoformat() if row_dict.get('log_time') and hasattr(row_dict.get('log_time'), 'isoformat') else (str(row_dict.get('log_time')) if row_dict.get('log_time') else None),
+                        "level": row_dict.get('log_level') or "info",
+                        "category": row_dict.get('category') or "system",
+                        "message": row_dict.get('message'),
+                        "module": row_dict.get('module'),
+                        "function": row_dict.get('function'),
+                        "file_path": row_dict.get('file_path'),
+                        "line_number": row_dict.get('line_number'),
+                        "user_id": row_dict.get('user_id'),
+                        "task_id": row_dict.get('task_id'),
+                        "details": details,
+                        "exception_type": row_dict.get('exception_type'),
+                        "stack_trace": row_dict.get('stack_trace'),
+                        "duration_ms": row_dict.get('duration_ms'),
+                        "memory_usage_mb": row_dict.get('memory_usage_mb'),
+                        "cpu_usage_percent": row_dict.get('cpu_usage_percent')
+                    })
         
         # 按时间排序（最新的在前）
         logs.sort(key=lambda x: x.get("timestamp") or "", reverse=True)

@@ -15,7 +15,6 @@ from config.database import db_manager
 from models.backup import BackupTask, BackupSet, BackupTaskStatus, BackupSetStatus
 from models.tape import TapeCartridge as TapeCartridgeModel, TapeStatus
 from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
-from sqlalchemy import select, func, and_, or_
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -97,37 +96,41 @@ async def _get_backup_tasks_statistics() -> Dict[str, Any]:
                     "failed": failed_count
                 }
         else:
-            async with db_manager.AsyncSessionLocal() as session:
-                running_count = await session.scalar(
-                    select(func.count(BackupTask.id)).where(
-                        and_(
-                            BackupTask.status == BackupTaskStatus.RUNNING,
-                            BackupTask.is_template == False
-                        )
-                    )
-                ) or 0
+            # 使用原生SQL查询（SQLite）
+            from utils.scheduler.sqlite_utils import get_sqlite_connection
+            
+            async with get_sqlite_connection() as conn:
+                # 查询运行中的任务
+                cursor = await conn.execute("""
+                    SELECT COUNT(*) FROM backup_tasks
+                    WHERE LOWER(status) = LOWER(?) AND is_template = 0
+                """, (BackupTaskStatus.RUNNING.value,))
+                row = await cursor.fetchone()
+                running_count = row[0] if row else 0
                 
-                completed_count = await session.scalar(
-                    select(func.count(BackupTask.id)).where(
-                        and_(
-                            BackupTask.status == BackupTaskStatus.COMPLETED,
-                            BackupTask.is_template == False
-                        )
-                    )
-                ) or 0
+                # 查询已完成的任务
+                cursor = await conn.execute("""
+                    SELECT COUNT(*) FROM backup_tasks
+                    WHERE LOWER(status) = LOWER(?) AND is_template = 0
+                """, (BackupTaskStatus.COMPLETED.value,))
+                row = await cursor.fetchone()
+                completed_count = row[0] if row else 0
                 
-                failed_count = await session.scalar(
-                    select(func.count(BackupTask.id)).where(
-                        and_(
-                            BackupTask.status == BackupTaskStatus.FAILED,
-                            BackupTask.is_template == False
-                        )
-                    )
-                ) or 0
+                # 查询失败的任务
+                cursor = await conn.execute("""
+                    SELECT COUNT(*) FROM backup_tasks
+                    WHERE LOWER(status) = LOWER(?) AND is_template = 0
+                """, (BackupTaskStatus.FAILED.value,))
+                row = await cursor.fetchone()
+                failed_count = row[0] if row else 0
                 
-                total_count = await session.scalar(
-                    select(func.count(BackupTask.id)).where(BackupTask.is_template == False)
-                ) or 0
+                # 查询总任务数
+                cursor = await conn.execute("""
+                    SELECT COUNT(*) FROM backup_tasks
+                    WHERE is_template = 0
+                """)
+                row = await cursor.fetchone()
+                total_count = row[0] if row else 0
                 
                 return {
                     "total": total_count,
@@ -170,23 +173,38 @@ async def _get_tape_inventory_statistics() -> Dict[str, Any]:
                     "offline": offline_count
                 }
         else:
-            async with db_manager.AsyncSessionLocal() as session:
-                total_count = await session.scalar(select(func.count(TapeCartridgeModel.id))) or 0
-                available_count = await session.scalar(
-                    select(func.count(TapeCartridgeModel.id)).where(
-                        TapeCartridgeModel.status == TapeStatus.AVAILABLE
-                    )
-                ) or 0
-                in_use_count = await session.scalar(
-                    select(func.count(TapeCartridgeModel.id)).where(
-                        TapeCartridgeModel.status == TapeStatus.IN_USE
-                    )
-                ) or 0
-                expired_count = await session.scalar(
-                    select(func.count(TapeCartridgeModel.id)).where(
-                        TapeCartridgeModel.status == TapeStatus.EXPIRED
-                    )
-                ) or 0
+            # 使用原生SQL查询（SQLite）
+            from utils.scheduler.sqlite_utils import get_sqlite_connection
+            
+            async with get_sqlite_connection() as conn:
+                # 查询总磁带数
+                cursor = await conn.execute("SELECT COUNT(*) FROM tape_cartridges")
+                row = await cursor.fetchone()
+                total_count = row[0] if row else 0
+                
+                # 查询可用磁带数
+                cursor = await conn.execute("""
+                    SELECT COUNT(*) FROM tape_cartridges
+                    WHERE LOWER(status) = LOWER(?)
+                """, (TapeStatus.AVAILABLE.value,))
+                row = await cursor.fetchone()
+                available_count = row[0] if row else 0
+                
+                # 查询使用中的磁带数
+                cursor = await conn.execute("""
+                    SELECT COUNT(*) FROM tape_cartridges
+                    WHERE LOWER(status) = LOWER(?)
+                """, (TapeStatus.IN_USE.value,))
+                row = await cursor.fetchone()
+                in_use_count = row[0] if row else 0
+                
+                # 查询过期的磁带数
+                cursor = await conn.execute("""
+                    SELECT COUNT(*) FROM tape_cartridges
+                    WHERE LOWER(status) = LOWER(?)
+                """, (TapeStatus.EXPIRED.value,))
+                row = await cursor.fetchone()
+                expired_count = row[0] if row else 0
                 
                 online_count = available_count + in_use_count
                 offline_count = total_count - online_count

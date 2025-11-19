@@ -19,8 +19,60 @@
                     <div id="sqliteConfig">
                         <div class="mb-3">
                             <label class="form-label">数据库路径</label>
-                            <input type="text" class="form-control" id="dbPath" placeholder="./backup_system.db">
+                            <input type="text" class="form-control" id="dbPath" placeholder="data\backup_system.db" value="data\backup_system.db">
                             <small class="text-muted">SQLite数据库文件路径</small>
+                        </div>
+                        
+                        <hr>
+                        <h6 class="card-title mt-3">SQLite 性能配置</h6>
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">缓存大小（KB）</label>
+                                <input type="number" class="form-control" id="sqliteCacheSize" value="10000" min="1000" max="100000">
+                                <small class="text-muted">默认 10000 (10MB)，建议 10000-50000</small>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">页面大小（字节）</label>
+                                <select class="form-select" id="sqlitePageSize">
+                                    <option value="1024">1024 (1KB)</option>
+                                    <option value="2048">2048 (2KB)</option>
+                                    <option value="4096" selected>4096 (4KB) - 推荐</option>
+                                    <option value="8192">8192 (8KB)</option>
+                                    <option value="16384">16384 (16KB)</option>
+                                    <option value="32768">32768 (32KB)</option>
+                                    <option value="65536">65536 (64KB)</option>
+                                </select>
+                                <small class="text-muted">仅对新创建的数据库有效</small>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">连接超时（秒）</label>
+                                <input type="number" class="form-control" id="sqliteTimeout" value="30" min="5" max="300" step="1">
+                                <small class="text-muted">默认 30 秒</small>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">日志模式</label>
+                                <select class="form-select" id="sqliteJournalMode">
+                                    <option value="WAL" selected>WAL (Write-Ahead Logging) - 推荐</option>
+                                    <option value="DELETE">DELETE</option>
+                                    <option value="TRUNCATE">TRUNCATE</option>
+                                    <option value="PERSIST">PERSIST</option>
+                                    <option value="MEMORY">MEMORY</option>
+                                    <option value="OFF">OFF</option>
+                                </select>
+                                <small class="text-muted">WAL 模式提供更好的并发性能</small>
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">同步模式</label>
+                            <select class="form-select" id="sqliteSynchronous">
+                                <option value="OFF">OFF - 最快，但可能丢失数据</option>
+                                <option value="NORMAL" selected>NORMAL - 推荐，平衡性能和安全性</option>
+                                <option value="FULL">FULL - 最安全，但较慢</option>
+                                <option value="EXTRA">EXTRA - 最安全，但最慢</option>
+                            </select>
+                            <small class="text-muted">NORMAL 模式在性能和安全性之间取得平衡</small>
                         </div>
                     </div>
 

@@ -146,6 +146,13 @@ class Settings(BaseSettings):
     SCAN_METHOD: str = "default"  # 扫描方法: "default" (默认) 或 "es" (Everything搜索工具)
     ES_EXE_PATH: str = r"E:\app\TAF\ITDT\ES\es.exe"  # Everything搜索工具可执行文件路径
     
+    # 内存数据库配置
+    MEMORY_DB_MAX_FILES: int = 5000000  # 内存数据库中最大文件数（500万）
+    MEMORY_DB_SYNC_BATCH_SIZE: int = 5000  # 内存数据库同步批次大小
+    MEMORY_DB_SYNC_INTERVAL: int = 30  # 内存数据库同步间隔（秒）
+    MEMORY_DB_CHECKPOINT_INTERVAL: int = 300  # 内存数据库检查点间隔（秒）
+    MEMORY_DB_CHECKPOINT_RETENTION_HOURS: int = 24  # 内存数据库检查点保留时间（小时）
+    
     # 检查点配置
     USE_CHECKPOINT: bool = False  # 是否启用检查点文件，默认不启用
 
@@ -181,7 +188,14 @@ class Settings(BaseSettings):
     
     # 数据目录配置
     DATA_DIR: str = "data"
-    SQLITE_DB_FILE: str = "data/taf_backup.db"
+    SQLITE_DB_FILE: str = "data/backup_system.db"
+    
+    # SQLite 配置参数
+    SQLITE_CACHE_SIZE: int = 10000  # 缓存大小（KB），默认 10MB
+    SQLITE_PAGE_SIZE: int = 4096  # 页面大小（字节），默认 4KB
+    SQLITE_TIMEOUT: float = 30.0  # 连接超时时间（秒）
+    SQLITE_JOURNAL_MODE: str = "WAL"  # 日志模式：WAL, DELETE, TRUNCATE, PERSIST, MEMORY, OFF
+    SQLITE_SYNCHRONOUS: str = "NORMAL"  # 同步模式：OFF, NORMAL, FULL, EXTRA
 
     class Config:
         env_file = ".env"

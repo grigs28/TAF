@@ -398,8 +398,16 @@ async def scan_tape_devices(request: Request, force_generic: bool = True, show_a
                 settings.ITDT_SCAN_SHOW_ALL_PATHS = bool(show_all_paths)
             except Exception:
                 pass
-            # 扫描设备（ITDT 不需要 -f）
-            devices = await itdt.scan_devices()
+            # 扫描设备（ITDT 不需要 -f，60秒超时）
+            try:
+                import asyncio
+                devices = await asyncio.wait_for(
+                    itdt.scan_devices(),
+                    timeout=60.0
+                )
+            except asyncio.TimeoutError:
+                logger.error("设备扫描超时（60秒）")
+                devices = []
             
             # 更新缓存
             if devices:
