@@ -31,7 +31,8 @@ async def get_database_config():
         db_info = {
             "db_type": "sqlite",
             "pool_size": settings.DB_POOL_SIZE,
-            "max_overflow": settings.DB_MAX_OVERFLOW
+            "max_overflow": settings.DB_MAX_OVERFLOW,
+            "query_dop": getattr(settings, 'DB_QUERY_DOP', 16)  # openGauss 查询并行度
         }
         
         # 优先使用 DB_FLAVOR 配置获取数据库类型
@@ -40,12 +41,25 @@ async def get_database_config():
         # 否则从 DATABASE_URL 推断数据库类型
         elif db_url.startswith("sqlite"):
             db_info["db_type"] = "sqlite"
+        elif db_url.startswith("redis://") or db_url.startswith("rediss://"):
+            db_info["db_type"] = "redis"
         elif db_url.startswith("postgresql://") or db_url.startswith("opengauss://"):
             db_info["db_type"] = "opengauss" if db_url.startswith("opengauss") else "postgresql"
         
         # 根据数据库类型设置相应参数
         if db_info["db_type"] == "sqlite":
             db_info["db_path"] = db_url.replace("sqlite:///", "")
+        elif db_info["db_type"] == "redis":
+            # Redis配置参数
+            db_info["db_host"] = settings.DB_HOST or "localhost"
+            db_info["db_port"] = settings.DB_PORT or 6379
+            db_info["db_password"] = settings.DB_PASSWORD or ""
+            db_info["db_index"] = getattr(settings, 'DB_INDEX', 0) or 0
+            # 尝试获取配置文件路径
+            from config.redis_db import get_redis_config_file_path
+            config_file_path = get_redis_config_file_path()
+            if config_file_path:
+                db_info["config_file_path"] = config_file_path
         else:
             # 提取连接参数
             db_info["db_host"] = settings.DB_HOST
@@ -77,6 +91,14 @@ async def test_database_connection(config: DatabaseConfig):
             if not config.db_path:
                 raise ValueError("SQLite数据库需要指定路径")
             db_url = f"sqlite:///{config.db_path}"
+        elif config.db_type == "redis":
+            if not config.db_host or not config.db_port:
+                raise ValueError("Redis数据库需要主机和端口")
+            # Redis URL格式: redis://[password@]host:port/db
+            if config.db_password:
+                db_url = f"redis://:{config.db_password}@{config.db_host}:{config.db_port}/{config.db_index or 0}"
+            else:
+                db_url = f"redis://{config.db_host}:{config.db_port}/{config.db_index or 0}"
         elif config.db_type in ["postgresql", "opengauss"]:
             if not all([config.db_host, config.db_port, config.db_user, config.db_database]):
                 raise ValueError("PostgreSQL/openGauss数据库需要完整的连接参数")
@@ -86,7 +108,18 @@ async def test_database_connection(config: DatabaseConfig):
         else:
             raise ValueError(f"不支持的数据库类型: {config.db_type}")
         
-        # 创建临时数据库管理器进行测试
+        # Redis使用专门的测试函数
+        if config.db_type == "redis":
+            from config.redis_db import test_redis_connection
+            result = await test_redis_connection(
+                host=config.db_host or "localhost",
+                port=config.db_port or 6379,
+                password=config.db_password,
+                db=config.db_index or 0
+            )
+            return result
+        
+        # 其他数据库使用DatabaseManager
         temp_db = DatabaseManager()
         # 手动设置URL进行测试
         temp_db.settings.DATABASE_URL = db_url
@@ -155,6 +188,17 @@ async def update_database_config(config: DatabaseConfig, request: Request):
             # 创建目录
             Path(config.db_path).parent.mkdir(parents=True, exist_ok=True)
             db_url = f"sqlite:///{config.db_path}"
+        elif config.db_type == "redis":
+            if not config.db_host or not config.db_port:
+                raise ValueError("Redis数据库需要主机和端口")
+            # 验证db_index范围
+            if config.db_index is not None and (config.db_index < 0 or config.db_index > 15):
+                raise ValueError("Redis数据库编号必须在0-15之间")
+            # Redis URL格式: redis://[password@]host:port/db
+            if config.db_password:
+                db_url = f"redis://:{config.db_password}@{config.db_host}:{config.db_port}/{config.db_index or 0}"
+            else:
+                db_url = f"redis://{config.db_host}:{config.db_port}/{config.db_index or 0}"
         elif config.db_type in ["postgresql", "opengauss"]:
             # 如果密码为空，使用当前配置的密码
             if not config.db_password:
@@ -189,16 +233,13 @@ async def update_database_config(config: DatabaseConfig, request: Request):
         else:
             raise ValueError(f"不支持的数据库类型: {config.db_type}")
         
-        # 保存配置到.env文件
-        env_file = Path(".env")
-        env_lines = []
+        # 使用EnvFileManager保存配置到.env文件
+        from config.env_file_manager import get_env_manager
         
-        if env_file.exists():
-            with open(env_file, "r", encoding="utf-8") as f:
-                env_lines = f.readlines()
+        env_manager = get_env_manager()
         
-        # 更新或添加数据库配置
-        config_keys = {
+        # 构建更新字典
+        updates = {
             "DATABASE_URL": db_url,
             "DB_FLAVOR": config.db_type,  # 保存数据库类型
             "DB_HOST": config.db_host or "",
@@ -210,23 +251,25 @@ async def update_database_config(config: DatabaseConfig, request: Request):
             "DB_MAX_OVERFLOW": str(config.max_overflow)
         }
         
-        # 更新现有配置或添加新配置
-        updated_keys = set()
-        for i, line in enumerate(env_lines):
-            line_stripped = line.strip()
-            for key, value in config_keys.items():
-                if line_stripped.startswith(key + "="):
-                    env_lines[i] = f"{key}={value}\n"
-                    updated_keys.add(key)
+        # Redis特有配置
+        if config.db_type == "redis":
+            updates["DB_INDEX"] = str(config.db_index or 0)
+            if config.config_file_path:
+                updates["REDIS_CONFIG_FILE_PATH"] = config.config_file_path
+        else:
+            # 非Redis类型，清除Redis特有配置
+            updates["DB_INDEX"] = ""
+            updates["REDIS_CONFIG_FILE_PATH"] = ""
+            # openGauss/PostgreSQL特有配置：查询并行度
+            # 从当前配置获取 query_dop，如果没有则使用默认值 16
+            query_dop = getattr(current_settings, 'DB_QUERY_DOP', 16)
+            updates["DB_QUERY_DOP"] = str(query_dop)
         
-        # 添加未更新的配置
-        for key, value in config_keys.items():
-            if key not in updated_keys:
-                env_lines.append(f"{key}={value}\n")
+        # 使用EnvFileManager写入文件（自动处理备份和并发问题）
+        success = env_manager.write_env_file(updates, backup=True)
         
-        # 写入文件
-        with open(env_file, "w", encoding="utf-8") as f:
-            f.writelines(env_lines)
+        if not success:
+            raise ValueError("写入.env文件失败")
         
         # 记录新值（隐藏密码）
         new_values = {
@@ -342,6 +385,26 @@ async def update_database_config(config: DatabaseConfig, request: Request):
         raise HTTPException(status_code=500, detail=error_msg)
 
 
+@router.get("/database/redis/config-file")
+async def get_redis_config_file():
+    """获取Redis配置文件路径"""
+    try:
+        from config.redis_db import get_redis_config_file_path
+        config_file_path = get_redis_config_file_path()
+        return {
+            "success": True,
+            "config_file_path": config_file_path,
+            "message": "配置文件路径获取成功" if config_file_path else "未找到Redis配置文件"
+        }
+    except Exception as e:
+        logger.error(f"获取Redis配置文件路径失败: {str(e)}")
+        return {
+            "success": False,
+            "config_file_path": None,
+            "message": f"获取配置文件路径失败: {str(e)}"
+        }
+
+
 @router.get("/database/status")
 async def get_database_status(request: Request):
     """获取数据库状态"""
@@ -368,7 +431,12 @@ async def get_database_status(request: Request):
         
         # 解析数据库类型
         db_url = settings.DATABASE_URL
-        if db_url.startswith("sqlite"):
+        db_flavor = settings.DB_FLAVOR
+        if db_flavor and db_flavor.lower() == "redis":
+            db_info["db_type"] = "Redis"
+        elif db_url.startswith("redis://") or db_url.startswith("rediss://"):
+            db_info["db_type"] = "Redis"
+        elif db_url.startswith("sqlite"):
             db_info["db_type"] = "SQLite"
             db_info["db_path"] = db_url.replace("sqlite:///", "")
         elif db_url.startswith("opengauss://"):

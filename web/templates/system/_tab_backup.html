@@ -44,6 +44,11 @@
                         </select>
                         <small class="text-muted">选择后台扫描任务使用的扫描方法。ES方法需要Everything搜索工具支持</small>
                     </div>
+                    <div class="mb-3">
+                        <label class="form-label">目录扫描并发线程数</label>
+                        <input type="number" class="form-control" id="scanThreads" value="4" min="1" max="16" step="1">
+                        <small class="text-muted">目录扫描时使用的并发线程数（1-16）。默认4线程，建议值：本地磁盘4-8线程，网络路径8-16线程。线程数过多可能导致内存占用增加</small>
+                    </div>
                     <div class="mb-3" id="esExePathGroup" style="display: none;">
                         <label class="form-label">ES工具路径</label>
                         <div class="input-group">

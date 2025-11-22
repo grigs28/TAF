@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+备份管理API - 任务创建
+Backup Management API - Task Create
+"""
+
+import logging
+import json
+from typing import Dict, Any
+from datetime import datetime
+from fastapi import APIRouter, HTTPException, Request
+from models.backup import BackupTaskStatus
+from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
+from utils.scheduler.sqlite_utils import is_sqlite, get_sqlite_connection
+from models.system_log import OperationType
+from utils.log_utils import log_operation
+from .models import BackupTaskRequest
+from .utils import get_system_instance
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+
+@router.post("/tasks", response_model=Dict[str, Any])
+async def create_backup_task(
+    request: BackupTaskRequest,
+    http_request: Request
+):
+    """创建备份任务配置（模板）
+    
+    此接口创建备份任务配置模板，不立即执行。
+    创建的模板可以在计划任务模块中选择并执行。
+    """
+    start_time = datetime.now()
+    
+    try:
+        # 获取系统实例
+        system = get_system_instance(http_request)
+        if not system:
+            raise HTTPException(status_code=500, detail="系统未初始化")
+
+        # 验证源路径
+        for path in request.source_paths:
+            if not path or not path.strip():
+                raise HTTPException(status_code=400, detail="源路径不能为空")
+
+        import json
+        
+        # 创建备份任务模板
+        if is_opengauss():
+            # 使用原生SQL插入（使用连接池）
+            async with get_opengauss_connection() as conn:
+                task_id = await conn.fetchval(
+                    """
+                    INSERT INTO backup_tasks (
+                        task_name, task_type, status, is_template, source_paths, exclude_patterns,
+                        compression_enabled, encryption_enabled, retention_days, description,
+                        tape_device, created_at, updated_at, created_by
+                    ) VALUES (
+                        $1, CAST($2 AS backuptasktype), CAST($3 AS backuptaskstatus), $4, $5, $6,
+                        $7, $8, $9, $10,
+                        $11, $12, $13, $14
+                    )
+                    RETURNING id
+                    """,
+                    request.task_name,
+                    request.task_type.value,
+                    BackupTaskStatus.PENDING.value,
+                    True,  # is_template
+                    json.dumps(request.source_paths) if request.source_paths else None,
+                    json.dumps(request.exclude_patterns) if request.exclude_patterns else None,
+                    request.compression_enabled,
+                    request.encryption_enabled,
+                    request.retention_days,
+                    request.description,
+                    request.tape_device,
+                    datetime.now(),
+                    datetime.now(),
+                    'backup_api'
+                )
+                
+                # 记录操作日志
+                client_ip = http_request.client.host if http_request.client else None
+                duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                await log_operation(
+                    operation_type=OperationType.CREATE,
+                    resource_type="backup",
+                    resource_id=str(task_id),
+                    resource_name=f"备份任务模板: {request.task_name}",
+                    operation_name="创建备份任务模板",
+                    operation_description=f"创建备份任务配置模板: {request.task_name}",
+                    category="backup",
+                    success=True,
+                    result_message="备份任务配置已创建",
+                    new_values={
+                        "task_name": request.task_name,
+                        "task_type": request.task_type.value,
+                        "source_paths": request.source_paths,
+                        "tape_device": request.tape_device
+                    },
+                    ip_address=client_ip,
+                    request_method="POST",
+                    request_url=str(http_request.url),
+                    duration_ms=duration_ms
+                )
+                
+                return {
+                    "success": True,
+                    "task_id": task_id,
+                    "message": "备份任务配置已创建",
+                    "task_name": request.task_name,
+                    "is_template": True
+                }
+        else:
+            # 检查是否为Redis数据库
+            if is_redis():
+                logger.warning("[Redis模式] 创建备份任务模板暂未实现，抛出HTTPException")
+                raise HTTPException(status_code=501, detail="Redis模式下创建备份任务模板暂未实现，请使用Redis相关API")
+            
+            if not is_sqlite():
+                from utils.scheduler.db_utils import is_opengauss
+                db_type = "openGauss" if is_opengauss() else "未知类型"
+                logger.warning(f"[{db_type}模式] 当前数据库类型不支持使用SQLite连接创建备份任务模板，抛出HTTPException")
+                raise HTTPException(status_code=400, detail=f"{db_type}模式下不支持使用SQLite连接创建备份任务模板")
+            
+            # 使用原生SQL插入（SQLite）
+            import json as json_module
+            async with get_sqlite_connection() as conn:
+                source_paths_json = json_module.dumps(request.source_paths or [])
+                exclude_patterns_json = json_module.dumps(request.exclude_patterns or [])
+                
+                cursor = await conn.execute("""
+                    INSERT INTO backup_tasks (
+                        task_name, task_type, source_paths, exclude_patterns,
+                        compression_enabled, encryption_enabled, retention_days,
+                        description, tape_device, status, is_template, created_by
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    request.task_name,
+                    request.task_type.value if hasattr(request.task_type, 'value') else str(request.task_type),
+                    source_paths_json,
+                    exclude_patterns_json,
+                    1 if request.compression_enabled else 0,
+                    1 if request.encryption_enabled else 0,
+                    request.retention_days,
+                    request.description or "",
+                    request.tape_device,
+                    BackupTaskStatus.PENDING.value,
+                    1,  # is_template
+                    'backup_api'
+                ))
+                await conn.commit()
+                
+                # 获取插入的ID
+                cursor = await conn.execute(
+                    "SELECT id FROM backup_tasks WHERE task_name = ? AND is_template = 1 ORDER BY id DESC LIMIT 1",
+                    (request.task_name,)
+                )
+                row = await cursor.fetchone()
+                task_id = row[0] if row else None
+                
+                if not task_id:
+                    raise HTTPException(status_code=500, detail="无法获取创建的任务ID")
+                
+                # 记录操作日志
+                client_ip = http_request.client.host if http_request.client else None
+                duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                await log_operation(
+                    operation_type=OperationType.CREATE,
+                    resource_type="backup",
+                    resource_id=str(task_id),
+                    resource_name=f"备份任务模板: {request.task_name}",
+                    operation_name="创建备份任务模板",
+                    operation_description=f"创建备份任务配置模板: {request.task_name}",
+                    category="backup",
+                    success=True,
+                    result_message="备份任务配置已创建",
+                    new_values={
+                        "task_name": request.task_name,
+                        "task_type": request.task_type.value if hasattr(request.task_type, 'value') else str(request.task_type),
+                        "source_paths": request.source_paths,
+                        "tape_device": request.tape_device
+                    },
+                    ip_address=client_ip,
+                    request_method="POST",
+                    request_url=str(http_request.url),
+                    duration_ms=duration_ms
+                )
+                
+                return {
+                    "success": True,
+                    "task_id": task_id,
+                    "message": "备份任务配置已创建",
+                    "task_name": request.task_name,
+                    "is_template": True
+                }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        
+        # 记录失败的操作日志
+        client_ip = http_request.client.host if http_request.client else None
+        await log_operation(
+            operation_type=OperationType.CREATE,
+            resource_type="backup",
+            resource_name=f"备份任务模板: {request.task_name}",
+            operation_name="创建备份任务模板",
+            operation_description=f"创建备份任务配置模板失败: {error_msg}",
+            category="backup",
+            success=False,
+            error_message=error_msg,
+            ip_address=client_ip,
+            request_method="POST",
+            request_url=str(http_request.url),
+            duration_ms=duration_ms
+        )
+        
+        logger.error(f"创建备份任务配置失败: {error_msg}", exc_info=True)
+        raise HTTPException(status_code=500, detail=error_msg)
+

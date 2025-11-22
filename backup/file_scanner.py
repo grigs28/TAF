@@ -9,9 +9,13 @@ import logging
 import fnmatch
 import asyncio
 import os
+import threading
+import queue
+from collections import deque  # 使用deque优化队列操作性能（O(1)复杂度）
+from concurrent.futures import ThreadPoolExecutor, as_completed  # 并发目录扫描
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional, AsyncGenerator, Callable, Awaitable
+from typing import List, Dict, Optional, AsyncGenerator, Callable, Awaitable, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +222,161 @@ class FileScanner:
                     error_paths = []  # 记录出错的路径
                     
                     try:
+                        # 检查是否使用并发扫描（openGauss模式且SCAN_THREADS > 1）
+                        from utils.scheduler.db_utils import is_opengauss
+                        from config.settings import get_settings
+                        settings = get_settings()  # 获取最新配置
+                        use_concurrent_scan = is_opengauss() and getattr(settings, 'SCAN_THREADS', 4) > 1
+                        
+                        if use_concurrent_scan:
+                            # 使用并发目录扫描（openGauss模式）
+                            scan_threads = getattr(settings, 'SCAN_THREADS', 4)
+                            logger.info(f"{log_context or ''} 启用并发目录扫描 (线程数: {scan_threads})")
+                            
+                            # 异步生成器遍历目录（使用并发扫描）
+                            async def async_rglob_generator(path: Path):
+                                """异步递归遍历目录生成器（使用并发扫描）"""
+                                from backup.concurrent_dir_scanner import ConcurrentDirScanner
+                                
+                                # 使用无限制队列来缓冲路径（处理海量文件）
+                                path_queue = asyncio.Queue(maxsize=0)  # maxsize=0 表示无限制
+                                stop_signal = object()  # 停止信号
+                                scan_done = False
+                                total_paths_scanned = 0  # 总路径数（用于统计）
+                                
+                                # 获取主事件循环
+                                try:
+                                    main_loop = asyncio.get_running_loop()
+                                except RuntimeError:
+                                    main_loop = None
+                                
+                                # 创建并发扫描器
+                                scanner = ConcurrentDirScanner(
+                                    max_workers=scan_threads,
+                                    context_prefix=context_prefix or "[并发扫描]"
+                                )
+                                
+                                # 在线程池中启动并发扫描任务
+                                def concurrent_scan_worker():
+                                    """在线程池中执行并发扫描"""
+                                    nonlocal scan_done, total_paths_scanned
+                                    try:
+                                        # 开始并发扫描
+                                        # 注意：使用batch_size作为批次阈值（由SCAN_UPDATE_INTERVAL控制）
+                                        total_paths_scanned = scanner.scan_directory_tree(
+                                            root_path=path,
+                                            path_queue=path_queue,  # asyncio.Queue（异步队列）
+                                            main_loop=main_loop,
+                                            batch_threshold=batch_size,  # 使用传入的batch_size（SCAN_UPDATE_INTERVAL）
+                                            batch_force_interval=1200.0,  # 强制提交间隔（20分钟）
+                                            log_interval=60.0  # 日志输出间隔（1分钟）
+                                        )
+                                        
+                                        scan_done = True
+                                        
+                                        # 发送停止信号
+                                        if main_loop:
+                                            future = asyncio.run_coroutine_threadsafe(
+                                                path_queue.put(stop_signal),
+                                                main_loop
+                                            )
+                                            future.result(timeout=10.0)
+                                        else:
+                                            path_queue.put(stop_signal)
+                                    
+                                    except KeyboardInterrupt:
+                                        logger.warning(f"{context_prefix or ''} 并发扫描被中断")
+                                        scanner.scan_cancelled = True
+                                        if main_loop:
+                                            try:
+                                                future = asyncio.run_coroutine_threadsafe(
+                                                    path_queue.put(('CANCELLED', None, total_paths_scanned)),
+                                                    main_loop
+                                                )
+                                                future.result(timeout=10.0)
+                                            except Exception:
+                                                pass
+                                    except Exception as e:
+                                        logger.error(f"{context_prefix or ''} 并发扫描出错: {str(e)}", exc_info=True)
+                                        if main_loop:
+                                            try:
+                                                future = asyncio.run_coroutine_threadsafe(
+                                                    path_queue.put(('ERROR', str(e), total_paths_scanned)),
+                                                    main_loop
+                                                )
+                                                future.result(timeout=10.0)
+                                            except Exception:
+                                                pass
+                                
+                                # 在线程池中启动并发扫描任务
+                                scan_task = asyncio.create_task(
+                                    asyncio.to_thread(concurrent_scan_worker)
+                                )
+                                
+                                # 从队列中逐步获取路径并yield
+                                total_paths_count = 0
+                                try:
+                                    while True:
+                                        try:
+                                            batch = await asyncio.wait_for(path_queue.get(), timeout=5.0)
+                                            
+                                            if batch == stop_signal:
+                                                break
+                                            elif isinstance(batch, tuple) and len(batch) == 3:
+                                                # 错误信号
+                                                signal_type, error_info, paths_count = batch
+                                                if signal_type == 'CANCELLED':
+                                                    logger.warning(f"{context_prefix or ''} 并发扫描被取消")
+                                                    break
+                                                elif signal_type == 'ERROR':
+                                                    logger.error(f"{context_prefix or ''} 并发扫描出错: {error_info}")
+                                                    break
+                                                total_paths_count = paths_count
+                                                break
+                                            else:
+                                                # 文件批次
+                                                if batch:
+                                                    total_paths_count += len(batch)
+                                                    yield batch
+                                        except asyncio.TimeoutError:
+                                            # 超时，检查是否完成
+                                            if scan_done:
+                                                break
+                                            continue
+                                finally:
+                                    # 确保任务完成
+                                    if not scan_task.done():
+                                        scan_task.cancel()
+                                        try:
+                                            await scan_task
+                                        except asyncio.CancelledError:
+                                            pass
+                            
+                            # 使用并发扫描生成器
+                            async for file_path_batch in async_rglob_generator(source_path):
+                                # file_path_batch 已经是批次（List[Path]），直接处理
+                                if not file_path_batch:
+                                    continue
+                                
+                                # 将Path对象转换为文件信息
+                                file_batch = []
+                                for file_path_item in file_path_batch:
+                                    try:
+                                        file_info = await self.get_file_info(file_path_item)
+                                        if file_info and not self.should_exclude_file(file_info['path'], exclude_patterns):
+                                            file_batch.append(file_info)
+                                            scanned_count += 1
+                                    except Exception as file_error:
+                                        error_count += 1
+                                        continue
+                                
+                                # 返回文件批次
+                                if file_batch:
+                                    yield file_batch
+                            
+                            continue  # 跳过原有的顺序扫描代码
+                        
+                        # 原有的顺序扫描代码（非openGauss模式或SCAN_THREADS=1）
                         # 异步生成器遍历目录（逐步yield，避免一次性加载所有路径）
                         async def async_rglob_generator(path: Path):
                             """异步递归遍历目录生成器（逐步yield路径，避免阻塞）"""
@@ -306,8 +465,11 @@ class FileScanner:
                                     # 使用 os.scandir() 替代 rglob() 以提高性能（特别是对于大量目录）
                                     # os.scandir() 在 Windows 上比 rglob() 更快，且内存占用更少
                                     batch = []
-                                    dirs_to_scan = [path]  # 待扫描的目录队列
+                                    # 性能优化：使用deque替代list，popleft()是O(1)操作，比pop(0)的O(n)快得多
+                                    dirs_to_scan = deque([path])  # 待扫描的目录队列（使用deque提升性能）
                                     scanned_dirs = set()  # 已扫描的目录集合（避免重复扫描）
+                                    # 优化：缓存路径字符串，避免重复解析
+                                    dir_path_cache = {}  # {Path对象: 字符串路径} 缓存
                                     
                                     # 对于大量目录，调整日志频率
                                     LARGE_DIR_THRESHOLD = 10000  # 超过1万个目录时，使用更频繁的日志
@@ -315,15 +477,31 @@ class FileScanner:
                                     
                                     try:
                                         # 使用迭代方式遍历目录（避免 rglob 的内存问题）
+                                        # 性能优化：使用deque.popleft()替代list.pop(0)，O(1)复杂度
                                         while dirs_to_scan:
                                             try:
-                                                current_scan_dir = dirs_to_scan.pop(0)
+                                                # 性能优化：deque.popleft()是O(1)操作，比list.pop(0)的O(n)快得多
+                                                current_scan_dir = dirs_to_scan.popleft()
                                                 
-                                                # 避免重复扫描
-                                                try:
-                                                    current_scan_dir_str = str(current_scan_dir.resolve())
-                                                except Exception:
-                                                    current_scan_dir_str = str(current_scan_dir)
+                                                # 性能优化：减少路径解析开销，使用缓存避免重复resolve
+                                                if current_scan_dir in dir_path_cache:
+                                                    current_scan_dir_str = dir_path_cache[current_scan_dir]
+                                                else:
+                                                    # 只在第一次访问时解析路径
+                                                    try:
+                                                        # 如果已经是字符串，直接使用；否则解析为绝对路径
+                                                        if isinstance(current_scan_dir, str):
+                                                            current_scan_dir_str = current_scan_dir
+                                                        else:
+                                                            current_scan_dir_str = str(current_scan_dir.resolve())
+                                                        # 缓存解析结果
+                                                        if not isinstance(current_scan_dir, str):
+                                                            dir_path_cache[current_scan_dir] = current_scan_dir_str
+                                                    except Exception:
+                                                        # 解析失败，使用字符串表示
+                                                        current_scan_dir_str = str(current_scan_dir)
+                                                        if not isinstance(current_scan_dir, str):
+                                                            dir_path_cache[current_scan_dir] = current_scan_dir_str
                                                 
                                                 if current_scan_dir_str in scanned_dirs:
                                                     continue
@@ -1068,18 +1246,36 @@ class FileScanner:
                     
                     try:
                         # 使用迭代方式遍历目录（避免 rglob 的内存问题）
-                        dirs_to_scan = [source_path]  # 待扫描的目录队列
+                        # 性能优化：使用deque替代list，popleft()是O(1)操作，比pop(0)的O(n)快得多
+                        dirs_to_scan = deque([source_path])  # 待扫描的目录队列（使用deque提升性能）
                         scanned_dirs = set()  # 已扫描的目录集合（避免重复扫描）
+                        # 优化：缓存路径字符串，避免重复解析
+                        dir_path_cache = {}  # {Path对象: 字符串路径} 缓存
                         
                         while dirs_to_scan:
                             try:
-                                current_scan_dir = dirs_to_scan.pop(0)
+                                # 性能优化：deque.popleft()是O(1)操作，比list.pop(0)的O(n)快得多
+                                current_scan_dir = dirs_to_scan.popleft()
                                 
-                                # 避免重复扫描
-                                try:
-                                    current_scan_dir_str = str(current_scan_dir.resolve())
-                                except Exception:
-                                    current_scan_dir_str = str(current_scan_dir)
+                                # 性能优化：减少路径解析开销，使用缓存避免重复resolve
+                                if current_scan_dir in dir_path_cache:
+                                    current_scan_dir_str = dir_path_cache[current_scan_dir]
+                                else:
+                                    # 只在第一次访问时解析路径
+                                    try:
+                                        # 如果已经是字符串，直接使用；否则解析为绝对路径
+                                        if isinstance(current_scan_dir, str):
+                                            current_scan_dir_str = current_scan_dir
+                                        else:
+                                            current_scan_dir_str = str(current_scan_dir.resolve())
+                                        # 缓存解析结果
+                                        if not isinstance(current_scan_dir, str):
+                                            dir_path_cache[current_scan_dir] = current_scan_dir_str
+                                    except Exception:
+                                        # 解析失败，使用字符串表示
+                                        current_scan_dir_str = str(current_scan_dir)
+                                        if not isinstance(current_scan_dir, str):
+                                            dir_path_cache[current_scan_dir] = current_scan_dir_str
                                 
                                 if current_scan_dir_str in scanned_dirs:
                                     continue

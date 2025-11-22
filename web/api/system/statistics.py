@@ -66,6 +66,12 @@ async def get_system_statistics(request: Request):
 async def _get_backup_tasks_statistics() -> Dict[str, Any]:
     """获取备份任务统计"""
     try:
+        from utils.scheduler.db_utils import is_redis
+        if is_redis():
+            # Redis模式下返回默认值（暂未实现Redis查询统计）
+            logger.debug("[Redis模式] 查询备份任务统计暂未实现，返回默认值")
+            return {"total": 0, "running": 0, "completed": 0, "failed": 0}
+        
         if is_opengauss():
             # 使用连接池
             async with get_opengauss_connection() as conn:
@@ -146,6 +152,12 @@ async def _get_backup_tasks_statistics() -> Dict[str, Any]:
 async def _get_tape_inventory_statistics() -> Dict[str, Any]:
     """获取磁带库存统计"""
     try:
+        from utils.scheduler.db_utils import is_redis
+        if is_redis():
+            # Redis模式下返回默认值（暂未实现Redis查询统计）
+            logger.debug("[Redis模式] 查询磁带库存统计暂未实现，返回默认值")
+            return {"total": 0, "available": 0, "in_use": 0, "expired": 0, "online": 0, "offline": 0}
+        
         if is_opengauss():
             # 使用连接池
             async with get_opengauss_connection() as conn:
@@ -174,7 +186,11 @@ async def _get_tape_inventory_statistics() -> Dict[str, Any]:
                 }
         else:
             # 使用原生SQL查询（SQLite）
-            from utils.scheduler.sqlite_utils import get_sqlite_connection
+            from utils.scheduler.sqlite_utils import get_sqlite_connection, is_sqlite
+            
+            if not is_sqlite():
+                logger.debug("[数据库类型错误] 当前数据库类型不支持使用SQLite连接查询磁带库存统计，返回默认值")
+                return {"total": 0, "available": 0, "in_use": 0, "expired": 0, "online": 0, "offline": 0}
             
             async with get_sqlite_connection() as conn:
                 # 查询总磁带数
@@ -225,6 +241,12 @@ async def _get_tape_inventory_statistics() -> Dict[str, Any]:
 async def _get_storage_statistics() -> Dict[str, Any]:
     """获取存储统计"""
     try:
+        from utils.scheduler.db_utils import is_redis
+        if is_redis():
+            # Redis模式下返回默认值（暂未实现Redis查询统计）
+            logger.debug("[Redis模式] 查询存储统计暂未实现，返回默认值")
+            return {"total_capacity": 0, "used_capacity": 0, "usage_percent": 0.0}
+        
         if is_opengauss():
             # 使用连接池
             async with get_opengauss_connection() as conn:
@@ -268,8 +290,15 @@ async def _get_storage_statistics() -> Dict[str, Any]:
                     "usage_percent": round(usage_percent, 1)
                 }
         else:
+            # 检查是否为SQLite数据库
+            from utils.scheduler.sqlite_utils import is_sqlite
+            if not is_sqlite() or db_manager.AsyncSessionLocal is None:
+                logger.debug("[数据库类型错误] 当前数据库类型不支持使用SQLAlchemy会话查询存储统计，返回默认值")
+                return {"total_capacity": 0, "used_capacity": 0, "usage_percent": 0.0}
+            
             async with db_manager.AsyncSessionLocal() as session:
                 # 从备份集统计
+                from sqlalchemy import select, func, and_
                 backup_result = await session.execute(
                     select(
                         func.coalesce(func.sum(BackupSet.total_bytes), 0).label('total_bytes'),
@@ -310,6 +339,15 @@ async def _get_storage_statistics() -> Dict[str, Any]:
 async def _get_recent_backups(limit: int = 5) -> List[Dict[str, Any]]:
     """获取最近备份活动"""
     try:
+        # 在函数开始处导入所有需要的函数，避免变量未定义错误
+        from utils.scheduler.db_utils import is_redis, is_opengauss
+        from utils.scheduler.sqlite_utils import is_sqlite
+        
+        if is_redis():
+            # Redis模式下返回空列表（暂未实现Redis查询最近备份）
+            logger.debug("[Redis模式] 查询最近备份活动暂未实现，返回空列表")
+            return []
+        
         if is_opengauss():
             # 使用连接池
             async with get_opengauss_connection() as conn:
@@ -342,7 +380,14 @@ async def _get_recent_backups(limit: int = 5) -> List[Dict[str, Any]]:
                 
                 return backups
         else:
+            # 检查是否为SQLite数据库
+            if not is_sqlite() or db_manager.AsyncSessionLocal is None:
+                db_type = "openGauss" if is_opengauss() else "Redis" if is_redis() else "未知类型"
+                logger.debug(f"[{db_type}模式] 当前数据库类型不支持使用SQLAlchemy会话查询最近备份活动，返回空列表")
+                return []
+            
             async with db_manager.AsyncSessionLocal() as session:
+                from sqlalchemy import select
                 stmt = select(BackupTask).where(
                     BackupTask.is_template == False
                 ).order_by(
@@ -375,6 +420,12 @@ async def _get_recent_backups(limit: int = 5) -> List[Dict[str, Any]]:
 async def _get_storage_trend(days: int = 30) -> List[Dict[str, Any]]:
     """获取存储使用趋势"""
     try:
+        from utils.scheduler.db_utils import is_redis
+        if is_redis():
+            # Redis模式下返回空列表（暂未实现Redis查询趋势）
+            logger.debug("[Redis模式] 查询存储使用趋势暂未实现，返回空列表")
+            return []
+        
         if is_opengauss():
             # 使用连接池
             async with get_opengauss_connection() as conn:
@@ -403,8 +454,14 @@ async def _get_storage_trend(days: int = 30) -> List[Dict[str, Any]]:
                 
                 return trend
         else:
+            # 检查是否为SQLite数据库
+            from utils.scheduler.sqlite_utils import is_sqlite
+            if not is_sqlite() or db_manager.AsyncSessionLocal is None:
+                logger.debug("[数据库类型错误] 当前数据库类型不支持使用SQLAlchemy会话查询存储使用趋势，返回空列表")
+                return []
+            
             async with db_manager.AsyncSessionLocal() as session:
-                from sqlalchemy import func, cast, Date
+                from sqlalchemy import select, func, cast, Date, and_
                 
                 start_date = datetime.now() - timedelta(days=days)
                 
@@ -439,6 +496,12 @@ async def _get_storage_trend(days: int = 30) -> List[Dict[str, Any]]:
 async def _get_success_rate_statistics() -> Dict[str, Any]:
     """获取成功率统计"""
     try:
+        from utils.scheduler.db_utils import is_redis
+        if is_redis():
+            # Redis模式下返回默认值（暂未实现Redis查询统计）
+            logger.debug("[Redis模式] 查询成功率统计暂未实现，返回默认值")
+            return {"overall": 0.0, "this_month": 0.0, "last_month": 0.0, "change": 0.0, "this_month_count": 0, "last_month_count": 0}
+        
         if is_opengauss():
             # 使用连接池
             async with get_opengauss_connection() as conn:
@@ -510,7 +573,14 @@ async def _get_success_rate_statistics() -> Dict[str, Any]:
                     "last_month_count": last_month_success
                 }
         else:
+            # 检查是否为SQLite数据库
+            from utils.scheduler.sqlite_utils import is_sqlite
+            if not is_sqlite() or db_manager.AsyncSessionLocal is None:
+                logger.debug("[数据库类型错误] 当前数据库类型不支持使用SQLAlchemy会话查询成功率统计，返回默认值")
+                return {"overall": 0.0, "this_month": 0.0, "last_month": 0.0, "change": 0.0, "this_month_count": 0, "last_month_count": 0}
+            
             async with db_manager.AsyncSessionLocal() as session:
+                from sqlalchemy import select, func, and_
                 total = await session.scalar(
                     select(func.count(BackupTask.id)).where(
                         and_(

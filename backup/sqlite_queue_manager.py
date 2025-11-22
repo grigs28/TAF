@@ -231,6 +231,16 @@ async def execute_sqlite_write(operation: Callable, *args, **kwargs) -> Any:
         
         result = await execute_sqlite_write(my_write_operation, "users", {"name": "test"})
     """
+    # 检查是否为SQLite模式，Redis模式不需要SQLite队列管理器
+    from utils.scheduler.db_utils import is_redis
+    from utils.scheduler.sqlite_utils import is_sqlite
+    
+    if is_redis():
+        raise ValueError("[Redis模式] Redis模式下不能使用SQLite队列管理器，请使用Redis相关函数")
+    
+    if not is_sqlite():
+        raise ValueError("当前数据库类型不是SQLite，不能使用SQLite队列管理器")
+    
     manager = get_sqlite_queue_manager()
     if not manager._is_running:
         await manager.start()
@@ -248,6 +258,16 @@ async def execute_sqlite_sync(operation: Callable, *args, **kwargs) -> Any:
     Returns:
         操作函数的返回值
     """
+    # 检查是否为SQLite模式，Redis模式不需要SQLite队列管理器
+    from utils.scheduler.db_utils import is_redis
+    from utils.scheduler.sqlite_utils import is_sqlite
+    
+    if is_redis():
+        raise ValueError("[Redis模式] Redis模式下不能使用SQLite队列管理器，请使用Redis相关函数")
+    
+    if not is_sqlite():
+        raise ValueError("当前数据库类型不是SQLite，不能使用SQLite队列管理器")
+    
     manager = get_sqlite_queue_manager()
     if not manager._is_running:
         await manager.start()

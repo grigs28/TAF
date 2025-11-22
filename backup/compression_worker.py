@@ -57,6 +57,9 @@ class CompressionWorker:
         self.max_idle_checks = 12  # 约1分钟
         self.wait_retry_count = 0
         self.max_wait_retries = 6  # 最多循环6次等待文件
+        
+        # 关键修复：维护最后处理的文件ID，避免重复查询相同的文件
+        self.last_processed_file_id = 0  # 上次处理的最后一个文件ID
 
     def start(self):
         """启动压缩循环后台任务"""
@@ -73,13 +76,18 @@ class CompressionWorker:
         if not self._running:
             return
         
+        logger.info("[压缩循环线程] 收到停止信号，正在停止压缩循环...")
         self._running = False
         if self.compression_task:
+            # 取消任务
             self.compression_task.cancel()
             try:
                 await self.compression_task
             except asyncio.CancelledError:
-                pass
+                logger.info("[压缩循环线程] 压缩循环任务已取消")
+            except KeyboardInterrupt:
+                logger.warning("[压缩循环线程] 压缩循环收到KeyboardInterrupt")
+                raise
         logger.info("[压缩循环线程] 压缩循环后台任务已停止")
 
     async def _compression_loop(self):
@@ -97,10 +105,14 @@ class CompressionWorker:
         - 所有参数、日志、错误处理等细节与backup_engine.py中的原始逻辑完全一致
         """
         logger.info("[压缩循环线程] ========== 压缩循环后台任务已启动 ==========")
+        # 使用全局settings统一读取配置
+        settings = get_settings()
+        # 使用全局settings统一读取配置（不缓存，总是获取最新的）
+        settings = get_settings()
         logger.info(
             f"[压缩循环线程] 初始化参数: backup_set_id={self.backup_set.id}, "
             f"backup_set.set_id={getattr(self.backup_set, 'set_id', 'N/A')}, "
-            f"backup_task_id={self.backup_task.id}, max_file_size={self.settings.MAX_FILE_SIZE}"
+            f"backup_task_id={self.backup_task.id}, max_file_size={settings.MAX_FILE_SIZE}"
         )
         
         # 验证 backup_set.id 是否正确
@@ -112,6 +124,8 @@ class CompressionWorker:
             while self._running:
                 loop_iteration += 1
                 logger.debug(f"[压缩循环] 开始第 {loop_iteration} 次循环迭代")
+                
+                # 检查是否被取消
                 try:
                     current_task = asyncio.current_task()
                     if current_task and current_task.cancelled():
@@ -119,6 +133,11 @@ class CompressionWorker:
                         break
                 except RuntimeError:
                     logger.warning("压缩循环：检测到任务可能已被取消")
+                    break
+                
+                # 检查运行标志
+                if not self._running:
+                    logger.info("压缩循环：收到停止信号")
                     break
 
                 # ========== 步骤1：检索所有非is_copy_success的文件，超阈值的跳过不修改is_copy ==========
@@ -129,9 +148,11 @@ class CompressionWorker:
                 #   - 累积文件直到达到 max_file_size 阈值
                 #   - 超过阈值的文件跳过（保持 FALSE 状态，下次仍可检索，不修改is_copy_success）
                 logger.info(f"[压缩循环] [步骤1-检索文件] 开始检索下一批待压缩文件（文件组索引: {self.group_idx + 1}）...")
+                # 实时读取最新配置
+                settings = get_settings()
                 logger.info(
                     f"[压缩循环] [步骤1-检索文件] 检索参数: backup_set_id={self.backup_set.id}, "
-                    f"max_file_size={self.settings.MAX_FILE_SIZE}, "
+                    f"max_file_size={settings.MAX_FILE_SIZE}, "
                     f"should_wait={self.wait_retry_count < self.max_wait_retries}, "
                     f"wait_retry_count={self.wait_retry_count}/{self.max_wait_retries}"
                 )
@@ -139,16 +160,58 @@ class CompressionWorker:
                 try:
                     import time
                     retrieval_start_time = time.time()
-                    file_groups = await self.backup_db.fetch_pending_files_grouped_by_size(
-                        self.backup_set.id,
-                        self.settings.MAX_FILE_SIZE,
-                        self.backup_task.id,
-                        should_wait_if_small=(self.wait_retry_count < self.max_wait_retries)
+                    # 添加日志：记录查询参数
+                    logger.info(
+                        f"[压缩循环] [步骤1-检索文件] 开始检索下一批待压缩文件（文件组索引: {self.group_idx + 1}）... "
+                        f"start_from_id={self.last_processed_file_id}, "
+                        f"wait_retry_count={self.wait_retry_count}/{self.max_wait_retries}"
                     )
+                    result = await self.backup_db.fetch_pending_files_grouped_by_size(
+                        self.backup_set.id,
+                        settings.MAX_FILE_SIZE,
+                        self.backup_task.id,
+                        should_wait_if_small=(self.wait_retry_count < self.max_wait_retries),
+                        start_from_id=self.last_processed_file_id  # 关键修复：从上次处理的文件ID开始查询，避免重复
+                    )
+                    # 处理新的返回格式：(file_groups, last_processed_id)
+                    if isinstance(result, tuple) and len(result) == 2:
+                        file_groups, last_processed_id = result
+                        # 更新最后处理的文件ID，即使返回空列表也要更新
+                        old_last_processed_id = self.last_processed_file_id
+                        
+                        # 关键修复：如果返回的 last_processed_id 为 0，说明应该重置查询
+                        if last_processed_id == 0 and self.last_processed_file_id > 0:
+                            logger.warning(
+                                f"[压缩循环] [步骤1-检索文件] ⚠️ 检测到需要重置查询："
+                                f"返回的 last_processed_id=0，当前值={self.last_processed_file_id}，"
+                                f"可能存在ID更小的未压缩文件，重置为0重新查询"
+                            )
+                            self.last_processed_file_id = 0
+                        elif last_processed_id > self.last_processed_file_id:
+                            self.last_processed_file_id = last_processed_id
+                            logger.info(
+                                f"[压缩循环] [步骤1-检索文件] ✅ 更新最后处理的文件ID: "
+                                f"{old_last_processed_id} -> {self.last_processed_file_id}"
+                            )
+                        else:
+                            logger.warning(
+                                f"[压缩循环] [步骤1-检索文件] ⚠️ 返回的 last_processed_id ({last_processed_id}) "
+                                f"不大于当前值 ({self.last_processed_file_id})，未更新"
+                            )
+                    else:
+                        # 兼容旧格式（如果没有返回元组，说明是旧版本）
+                        logger.warning(
+                            f"[压缩循环] [步骤1-检索文件] ⚠️ 返回格式不是元组，可能是旧版本代码，"
+                            f"result类型: {type(result)}"
+                        )
+                        file_groups = result
+                        last_processed_id = 0
                     retrieval_elapsed = time.time() - retrieval_start_time
                     logger.info(
                         f"[压缩循环] [步骤1-检索文件] 检索完成，耗时: {retrieval_elapsed:.2f}秒，"
-                        f"返回文件组数量: {len(file_groups) if file_groups else 0}"
+                        f"返回文件组数量: {len(file_groups) if file_groups else 0}, "
+                        f"last_processed_id={last_processed_id}, "
+                        f"当前 self.last_processed_file_id={self.last_processed_file_id}"
                     )
                 except Exception as retrieval_error:
                     logger.error(
@@ -161,7 +224,10 @@ class CompressionWorker:
                 
                 if not file_groups:
                     # 新策略：返回空列表说明没有待压缩文件或需要等待
-                    # 数据库函数已处理6次重试逻辑，这里只需检查最终状态
+                    # 增加重试计数（每次返回空列表时递增）
+                    if self.wait_retry_count < self.max_wait_retries:
+                        self.wait_retry_count += 1
+                    
                     scan_status = await self.backup_db.get_scan_status(self.backup_task.id)
                     total_files_from_db = await self.backup_db.get_total_files_from_db(self.backup_task.id)
 
@@ -195,8 +261,9 @@ class CompressionWorker:
 
                     await asyncio.sleep(5)
                     continue
-
+                
                 # 成功获取到文件组，重置等待计数
+                self.wait_retry_count = 0
                 self.idle_checks = 0
                 
                 # file_groups 现在只包含一个文件组（每次调用只返回一个组）
@@ -213,7 +280,7 @@ class CompressionWorker:
                 if total_files_from_db > 0 and self.total_original_size > 0 and self.processed_files > 0:
                     avg_file_size = self.total_original_size / self.processed_files if self.processed_files > 0 else 0
                     if avg_file_size > 0:
-                        files_per_archive = min(self.settings.MAX_FILE_SIZE / avg_file_size, total_files_from_db)
+                        files_per_archive = min(settings.MAX_FILE_SIZE / avg_file_size, total_files_from_db)
                         if files_per_archive > 0:
                             estimated_archive_count = max(self.group_idx + 1, int(total_files_from_db / files_per_archive))
                     else:
@@ -237,27 +304,29 @@ class CompressionWorker:
                 )
                 
                 # 记录关键阶段：开始压缩（附带当前压缩参数）
-                compression_method = getattr(self.settings, 'COMPRESSION_METHOD', 'pgzip')
-                compression_level = getattr(self.settings, 'COMPRESSION_LEVEL', 9)
-                compression_threads = getattr(self.settings, 'COMPRESSION_THREADS', 4)
+                # 使用全局settings获取最新配置（仅在循环开始时读取一次，避免频繁调用）
+                settings = get_settings()
+                compression_method = getattr(settings, 'COMPRESSION_METHOD', 'pgzip')
+                compression_level = getattr(settings, 'COMPRESSION_LEVEL', 9)
+                compression_threads = getattr(settings, 'COMPRESSION_THREADS', 4)
                 # PGZip 专用参数
-                pgzip_block_size = getattr(self.settings, 'PGZIP_BLOCK_SIZE', '1G')
-                pgzip_threads = getattr(self.settings, 'PGZIP_THREADS', compression_threads)
+                pgzip_block_size = getattr(settings, 'PGZIP_BLOCK_SIZE', '1G')
+                pgzip_threads = getattr(settings, 'PGZIP_THREADS', compression_threads)
                 try:
                     pgzip_threads = int(pgzip_threads)
                 except (ValueError, TypeError):
                     pgzip_threads = int(compression_threads)
                 
                 # 7-Zip 命令行线程数（用于非 pgzip 场景）
-                compression_command_threads = getattr(self.settings, 'COMPRESSION_COMMAND_THREADS', None)
+                compression_command_threads = getattr(settings, 'COMPRESSION_COMMAND_THREADS', None)
                 if compression_command_threads is None:
-                    compression_command_threads = getattr(self.settings, 'WEB_WORKERS', compression_threads)
+                    compression_command_threads = getattr(settings, 'WEB_WORKERS', compression_threads)
                 try:
                     compression_command_threads = int(compression_command_threads)
                 except (ValueError, TypeError):
                     compression_command_threads = int(compression_threads)
                 
-                zstd_threads = getattr(self.settings, 'ZSTD_THREADS', compression_threads)
+                zstd_threads = getattr(settings, 'ZSTD_THREADS', compression_threads)
                 try:
                     zstd_threads = int(zstd_threads)
                 except (ValueError, TypeError):
@@ -333,6 +402,16 @@ class CompressionWorker:
                 
                 # ========== 步骤2：压缩文件组（顺序执行） ==========
                 try:
+                    # 再次检查是否被取消
+                    if not self._running:
+                        logger.info("压缩循环：在压缩前检测到停止信号，中止压缩")
+                        progress_update_task.cancel()
+                        try:
+                            await progress_update_task
+                        except asyncio.CancelledError:
+                            pass
+                        break
+                    
                     compressed_file = await self.compressor.compress_file_group(
                         file_group,
                         self.backup_set,
@@ -347,6 +426,12 @@ class CompressionWorker:
                         await progress_update_task
                     except asyncio.CancelledError:
                         pass
+                    
+                    # 检查是否在压缩过程中被取消
+                    if not self._running:
+                        logger.info("压缩循环：在压缩过程中检测到停止信号，中止循环")
+                        break
+                    
                     if not compressed_file:
                         logger.warning(f"文件组 {current_group_idx + 1} 压缩失败，跳过该组")
                         continue
@@ -452,7 +537,9 @@ class CompressionWorker:
                         avg_file_size = self.total_original_size / self.processed_files
                         if avg_file_size > 0:
                             # 计算每个压缩包能容纳的文件数（基于MAX_FILE_SIZE）
-                            files_per_archive = min(self.settings.MAX_FILE_SIZE / avg_file_size, total_files_from_db)
+                            # 使用全局settings获取最新配置
+                            settings = get_settings()
+                            files_per_archive = min(settings.MAX_FILE_SIZE / avg_file_size, total_files_from_db)
                             if files_per_archive > 0:
                                 # 基于总扫描文件数估算压缩包总数
                                 estimated_archive_count = max(current_group_idx + 1, int(total_files_from_db / files_per_archive))
@@ -516,61 +603,173 @@ class CompressionWorker:
                     
                     logger.info(f"[压缩循环] 文件组 {current_group_idx + 1} 处理完成，数据库已更新，准备继续下一组压缩")
                     
-                    # 验证 is_copy_success 是否已正确更新（用于调试）
+                    # 验证 is_copy_success 是否已正确更新（全量验证，使用批量查询优化性能）
                     try:
-                        # 检查刚才处理的文件是否已标记为 is_copy_success = 1
-                        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
-                        from utils.scheduler.sqlite_utils import get_sqlite_connection
-                        
-                        # 随机选择几个文件路径进行验证
-                        sample_paths = [f.get("file_path") or f.get("path") for f in file_group[:10] if f.get("file_path") or f.get("path")]
-                        if sample_paths:
-                            if is_opengauss():
-                                # openGauss 模式
+                        # 提取所有文件路径进行验证
+                        all_paths = [f.get("file_path") or f.get("path") for f in file_group if f.get("file_path") or f.get("path")]
+                        if all_paths:
+                            from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
+                            from utils.scheduler.sqlite_utils import get_sqlite_connection
+                            
+                            if is_redis():
+                                # Redis 模式：全量验证，使用批量查询优化性能
+                                from config.redis_db import get_redis_client
+                                from backup.redis_backup_db import KEY_PREFIX_BACKUP_FILE, KEY_INDEX_BACKUP_FILE_BY_PATH, _get_redis_key
+                                
+                                redis = await get_redis_client()
+                                path_index_key = KEY_INDEX_BACKUP_FILE_BY_PATH
+                                
+                                verified_count = 0
+                                total_checked = 0
+                                
+                                # 分批验证，每批1000个文件，避免单个pipeline过大导致超时
+                                batch_size = 1000
+                                for batch_start in range(0, len(all_paths), batch_size):
+                                    batch_paths = all_paths[batch_start:batch_start + batch_size]
+                                    
+                                    # 构建路径索引键: backup_set_id:file_path
+                                    path_keys = [f"{self.backup_set.id}:{path}" for path in batch_paths]
+                                    
+                                    # 批量获取文件ID
+                                    pipe = redis.pipeline()
+                                    for path_key in path_keys:
+                                        pipe.hget(path_index_key, path_key)
+                                    
+                                    file_id_results = await pipe.execute()
+                                    
+                                    # 根据文件ID批量获取文件状态
+                                    file_ids_to_check = []
+                                    for file_id_str in file_id_results:
+                                        if file_id_str:
+                                            try:
+                                                file_id = int(file_id_str)
+                                                file_ids_to_check.append(file_id)
+                                            except (ValueError, TypeError):
+                                                pass
+                                    
+                                    if file_ids_to_check:
+                                        # 批量获取文件状态
+                                        pipe2 = redis.pipeline()
+                                        for file_id in file_ids_to_check:
+                                            file_key = _get_redis_key(KEY_PREFIX_BACKUP_FILE, file_id)
+                                            pipe2.hget(file_key, 'is_copy_success')
+                                        
+                                        status_results = await pipe2.execute()
+                                        
+                                        # 统计验证结果
+                                        for is_copy_success in status_results:
+                                            if is_copy_success == '1':
+                                                verified_count += 1
+                                            total_checked += 1
+                                
+                                if total_checked > 0:
+                                    logger.info(f"[压缩循环] [验证] 文件组 {current_group_idx + 1} 验证完成: {verified_count}/{total_checked} 个文件的 is_copy_success=1 (总文件数: {len(all_paths)})")
+                                    if verified_count < total_checked:
+                                        logger.warning(f"[压缩循环] [验证] ⚠️ 验证失败: 期望 {total_checked} 个文件 is_copy_success=1，实际只有 {verified_count} 个 (失败率: {(total_checked - verified_count) / total_checked * 100:.1f}%)")
+                                else:
+                                    logger.warning(f"[压缩循环] [验证] ⚠️ 无法验证：未找到文件记录（路径可能不匹配）")
+                            elif is_opengauss():
+                                # openGauss 模式：全量验证（使用原生 openGauss SQL）
                                 async with get_opengauss_connection() as conn:
-                                    # 占位符从 $2 开始，因为 $1 用于 backup_set_id
-                                    placeholders = ','.join([f'${i+2}' for i in range(len(sample_paths))])
-                                    verify_rows = await conn.fetch(f"""
-                                        SELECT file_path, is_copy_success FROM backup_files 
-                                        WHERE backup_set_id = $1 AND file_path IN ({placeholders})
-                                    """, self.backup_set.id, *sample_paths)
-                                    verified_count = sum(1 for row in verify_rows if row['is_copy_success'] is True)
-                                    logger.info(f"[压缩循环] [验证] 文件组 {current_group_idx + 1} 的样本文件验证: {verified_count}/{len(verify_rows)} 个文件的 is_copy_success=TRUE")
+                                    # 分批验证，每批1000个文件
+                                    batch_size = 1000
+                                    verified_count = 0
+                                    total_checked = 0
                                     
-                                    # 如果验证失败，显示详细信息
-                                    if verified_count < len(verify_rows):
-                                        logger.warning(f"[压缩循环] [验证] ⚠️ 验证失败: 期望 {len(verify_rows)} 个文件 is_copy_success=TRUE，实际只有 {verified_count} 个")
-                                        for verify_row in verify_rows:
-                                            if verify_row['is_copy_success'] is not True:
-                                                logger.warning(f"[压缩循环] [验证] 文件状态异常: {verify_row['file_path'][:100]} -> is_copy_success={verify_row['is_copy_success']}")
+                                    for batch_start in range(0, len(all_paths), batch_size):
+                                        batch_paths = all_paths[batch_start:batch_start + batch_size]
+                                        # 使用原生 openGauss SQL：ANY($2) 方式查询
+                                        # 分别查询总记录数和 is_copy_success=TRUE 的数量，避免 FILTER 语法兼容性问题
+                                        try:
+                                            # 查询总记录数
+                                            total_result = await conn.fetchrow(
+                                                """
+                                                SELECT COUNT(*)::BIGINT as count
+                                                FROM backup_files 
+                                                WHERE backup_set_id = $1 AND file_path = ANY($2)
+                                                """,
+                                                self.backup_set.id, batch_paths
+                                            )
+                                            batch_total = total_result['count'] if total_result else 0
+                                            
+                                            # 查询 is_copy_success=TRUE 的数量
+                                            verified_result = await conn.fetchrow(
+                                                """
+                                                SELECT COUNT(*)::BIGINT as count
+                                                FROM backup_files 
+                                                WHERE backup_set_id = $1 
+                                                  AND file_path = ANY($2)
+                                                  AND is_copy_success = TRUE
+                                                """,
+                                                self.backup_set.id, batch_paths
+                                            )
+                                            batch_verified = verified_result['count'] if verified_result else 0
+                                            
+                                            verified_count += batch_verified
+                                            total_checked += batch_total
+                                        except Exception as verify_batch_error:
+                                            logger.error(
+                                                f"[压缩循环] [验证] 批次验证失败: {str(verify_batch_error)}，"
+                                                f"批次 {batch_start // batch_size + 1}，跳过该批次",
+                                                exc_info=True
+                                            )
+                                            # 跳过该批次，继续验证其他批次
+                                            continue
+                                    
+                                    logger.info(f"[压缩循环] [验证] 文件组 {current_group_idx + 1} 验证完成: {verified_count}/{total_checked} 个文件的 is_copy_success=TRUE (总文件数: {len(all_paths)})")
+                                    if verified_count < total_checked:
+                                        logger.warning(f"[压缩循环] [验证] ⚠️ 验证失败: 期望 {total_checked} 个文件 is_copy_success=TRUE，实际只有 {verified_count} 个")
                             else:
-                                # SQLite 模式
+                                # SQLite 模式：全量验证
                                 async with get_sqlite_connection() as conn:
-                                    placeholders = ','.join(['?' for _ in sample_paths])
-                                    verify_cursor = await conn.execute(f"""
-                                        SELECT file_path, is_copy_success FROM backup_files 
-                                        WHERE backup_set_id = ? AND file_path IN ({placeholders})
-                                    """, (self.backup_set.id,) + tuple(sample_paths))
-                                    verify_rows = await verify_cursor.fetchall()
-                                    verified_count = sum(1 for row in verify_rows if row[1] == 1)
-                                    logger.info(f"[压缩循环] [验证] 文件组 {current_group_idx + 1} 的样本文件验证: {verified_count}/{len(verify_rows)} 个文件的 is_copy_success=1")
+                                    # 分批验证，每批1000个文件
+                                    batch_size = 1000
+                                    verified_count = 0
+                                    total_checked = 0
                                     
-                                    # 如果验证失败，显示详细信息
-                                    if verified_count < len(verify_rows):
-                                        logger.warning(f"[压缩循环] [验证] ⚠️ 验证失败: 期望 {len(verify_rows)} 个文件 is_copy_success=1，实际只有 {verified_count} 个")
-                                        for verify_row in verify_rows:
-                                            if verify_row[1] != 1:
-                                                logger.warning(f"[压缩循环] [验证] 文件状态异常: {verify_row[0][:100]} -> is_copy_success={verify_row[1]}")
+                                    for batch_start in range(0, len(all_paths), batch_size):
+                                        batch_paths = all_paths[batch_start:batch_start + batch_size]
+                                        placeholders = ','.join(['?' for _ in batch_paths])
+                                        verify_cursor = await conn.execute(f"""
+                                            SELECT file_path, is_copy_success FROM backup_files 
+                                            WHERE backup_set_id = ? AND file_path IN ({placeholders})
+                                        """, (self.backup_set.id,) + tuple(batch_paths))
+                                        verify_rows = await verify_cursor.fetchall()
+                                        verified_count += sum(1 for row in verify_rows if row[1] == 1)
+                                        total_checked += len(verify_rows)
+                                    
+                                    logger.info(f"[压缩循环] [验证] 文件组 {current_group_idx + 1} 验证完成: {verified_count}/{total_checked} 个文件的 is_copy_success=1 (总文件数: {len(all_paths)})")
+                                    if verified_count < total_checked:
+                                        logger.warning(f"[压缩循环] [验证] ⚠️ 验证失败: 期望 {total_checked} 个文件 is_copy_success=1，实际只有 {verified_count} 个")
                         else:
                             logger.warning(f"[压缩循环] [验证] ⚠️ 无法提取文件路径进行验证，file_group示例: {file_group[:3] if file_group else '空'}")
                     except Exception as verify_error:
                         logger.error(f"[压缩循环] [验证] ❌ 验证 is_copy_success 时出错: {str(verify_error)}", exc_info=True)
                 
+                except (KeyboardInterrupt, asyncio.CancelledError) as cancel_error:
+                    # 收到中断信号，立即停止
+                    logger.warning(f"========== 压缩循环收到中断信号，正在中止 ==========")
+                    logger.warning(f"任务ID: {self.backup_task.id if self.backup_task else 'N/A'}")
+                    logger.warning(f"已处理文件组: {self.group_idx}")
+                    # 取消进度更新任务
+                    if 'progress_update_task' in locals():
+                        progress_update_task.cancel()
+                        try:
+                            await progress_update_task
+                        except asyncio.CancelledError:
+                            pass
+                    self._running = False
+                    raise
                 except Exception as group_error:
                     # 文件组处理失败，记录错误但继续处理下一个文件组
                     logger.error(f"⚠️ 处理文件组 {current_group_idx + 1} 时发生错误: {str(group_error)}，跳过该文件组，继续处理下一个文件组")
                     import traceback
                     logger.error(f"错误堆栈:\n{traceback.format_exc()}")
+                
+                # 在循环结束前检查是否被取消
+                if not self._running:
+                    logger.info("压缩循环：检测到停止信号，退出循环")
+                    break
                 
                 # ========== 步骤4：循环到步骤1（更新文件组索引，准备下一轮检索） ==========
                 # 更新文件组索引（每次只处理一个文件组）
@@ -578,6 +777,12 @@ class CompressionWorker:
                 logger.info(f"[压缩循环] [步骤4-循环] 当前文件组索引: {self.group_idx}，准备更新为: {self.group_idx + 1}")
                 self.group_idx += 1
                 logger.info(f"[压缩循环] [步骤4-循环] ✅ 文件组索引已更新: {self.group_idx}")
+                
+                # 关键修复：重置等待计数，确保立即查询下一批文件，而不是等待
+                # 因为新文件可能已经同步到数据库，或者正在同步中
+                self.wait_retry_count = 0
+                self.idle_checks = 0
+                logger.info(f"[压缩循环] [步骤4-循环] ✅ 已重置等待计数（wait_retry_count=0, idle_checks=0），准备立即查询下一批文件")
                 
                 if hasattr(self.backup_task, 'result_summary') and isinstance(self.backup_task.result_summary, dict):
                     estimated_count = self.backup_task.result_summary.get('estimated_archive_count', 'N/A')
@@ -591,7 +796,7 @@ class CompressionWorker:
                         self.backup_task,
                         self.processed_files,
                         self.processed_files,
-                        "[等待下一批文件...]"
+                        "[检索下一批文件...]"
                     )
                     progress_update_elapsed = time.time() - progress_update_start
                     logger.info(f"[压缩循环] [步骤4-循环] ✅ 扫描进度已更新，耗时: {progress_update_elapsed:.2f}秒")
@@ -602,11 +807,13 @@ class CompressionWorker:
                 
                 logger.info(f"[压缩循环] [步骤4-循环] ✅ 准备开始下一轮循环（文件组索引: {self.group_idx + 1}）...")
                 logger.info(f"[压缩循环] [步骤4-循环] ========== 准备回到步骤1（检索下一批文件） ==========")
+                # 注意：这里不 sleep，立即继续循环到步骤1，查询下一批文件
             
         except (KeyboardInterrupt, asyncio.CancelledError):
             logger.warning("========== 压缩循环被中止 ==========")
             logger.warning(f"任务ID: {self.backup_task.id if self.backup_task else 'N/A'}")
             logger.warning(f"已处理文件组: {self.group_idx}")
+            self._running = False
             raise
         except Exception as e:
             logger.error(f"[压缩循环线程] 压缩循环任务异常: {str(e)}", exc_info=True)

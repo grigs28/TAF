@@ -12,6 +12,7 @@
                             <option value="postgresql">PostgreSQL</option>
                             <option value="opengauss">openGauss</option>
                             <option value="mysql">MySQL</option>
+                            <option value="redis">Redis</option>
                         </select>
                     </div>
 
@@ -88,19 +89,69 @@
                                 <input type="number" class="form-control" id="dbPort" placeholder="5560">
                             </div>
                         </div>
-                        <div class="mb-3">
+                        <div class="mb-3" id="dbDatabaseGroup">
                             <label class="form-label">数据库名称</label>
                             <input type="text" class="form-control" id="dbDatabase" placeholder="taf_codex_1">
                         </div>
+                        <div class="mb-3" id="dbUserGroup">
+                            <label class="form-label">用户名</label>
+                            <input type="text" class="form-control" id="dbUser" placeholder="grigs">
+                        </div>
                         <div class="row">
-                            <div class="col-md-6 mb-3">
-                                <label class="form-label">用户名</label>
-                                <input type="text" class="form-control" id="dbUser" placeholder="grigs">
-                            </div>
                             <div class="col-md-6 mb-3">
                                 <label class="form-label">密码</label>
                                 <input type="password" class="form-control" id="dbPassword" placeholder="••••••••">
                             </div>
+                            <div class="col-md-6 mb-3" id="dbIndexGroup" style="display: none;">
+                                <label class="form-label">数据库编号</label>
+                                <input type="number" class="form-control" id="dbIndex" placeholder="0" min="0" max="15" value="0">
+                                <small class="text-muted">Redis数据库编号 (0-15)</small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Redis专用配置项 -->
+                    <div id="redisSpecificConfig" style="display: none;">
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Redis主机</label>
+                                <input type="text" class="form-control" id="redisHost" placeholder="localhost">
+                                <small class="text-muted">Redis服务器地址</small>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Redis端口</label>
+                                <input type="number" class="form-control" id="redisPort" placeholder="6379" min="1" max="65535" value="6379">
+                                <small class="text-muted">Redis服务器端口（默认6379）</small>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Redis密码</label>
+                                <input type="password" class="form-control" id="redisPassword" placeholder="••••••••">
+                                <small class="text-muted">Redis密码（可选，如果Redis未设置密码则留空）</small>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">数据库编号</label>
+                                <input type="number" class="form-control" id="redisDbIndex" placeholder="0" min="0" max="15" value="0">
+                                <small class="text-muted">Redis数据库编号 (0-15，默认0)</small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Redis配置 -->
+                    <div id="redisConfig" style="display: none;">
+                        <div class="mb-3">
+                            <label class="form-label">配置文件路径</label>
+                            <div class="input-group">
+                                <input type="text" class="form-control" id="redisConfigFilePath" placeholder="C:\Program Files\Redis\redis.conf">
+                                <button class="btn btn-outline-secondary" type="button" id="browseRedisConfigBtn">
+                                    <i class="bi bi-folder2-open me-1"></i>浏览
+                                </button>
+                                <button class="btn btn-outline-info" type="button" id="detectRedisConfigBtn" title="自动检测Redis配置文件路径">
+                                    <i class="bi bi-search me-1"></i>自动检测
+                                </button>
+                            </div>
+                            <small class="text-muted">Redis持久化配置文件位置，用于查看配置信息</small>
                         </div>
                     </div>
 

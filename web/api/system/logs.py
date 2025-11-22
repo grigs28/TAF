@@ -196,9 +196,40 @@ async def get_system_logs(
                     })
                 
         else:
-            # 使用原生SQL查询（SQLite）
-            from utils.scheduler.sqlite_utils import get_sqlite_connection
+            # 检查是否为Redis数据库
+            from utils.scheduler.db_utils import is_redis
+            from utils.scheduler.sqlite_utils import is_sqlite, get_sqlite_connection
             
+            if is_redis():
+                # Redis模式下不返回日志（Redis没有日志表）
+                logger.debug("[Redis模式] 系统日志查询暂未实现（Redis没有日志表），返回空列表")
+                return {
+                    "success": True,
+                    "total": 0,
+                    "logs": [],
+                    "pagination": {
+                        "limit": limit,
+                        "offset": offset,
+                        "has_more": False
+                    }
+                }
+            
+            if not is_sqlite():
+                from utils.scheduler.db_utils import is_opengauss
+                db_type = "openGauss" if is_opengauss() else "未知类型"
+                logger.debug(f"[{db_type}模式] 当前数据库类型不支持使用SQLite连接查询系统日志，返回空列表")
+                return {
+                    "success": True,
+                    "total": 0,
+                    "logs": [],
+                    "pagination": {
+                        "limit": limit,
+                        "offset": offset,
+                        "has_more": False
+                    }
+                }
+            
+            # 使用原生SQL查询（SQLite）
             async with get_sqlite_connection() as conn:
                 # 构建操作日志查询条件
                 operation_where = ["operation_time >= ?", "operation_time <= ?"]

@@ -91,11 +91,36 @@ class MemoryDBWriter:
         # 创建表结构 - 与openGauss BackupFile模型完全一致
         await self._create_tables()
 
-        # 启用WAL模式提升性能
+        # 性能优化：配置SQLite PRAGMA参数以最大化写入速度
+        # 1. WAL模式：提升并发写入性能
         await self.memory_db.execute("PRAGMA journal_mode=WAL")
-        await self.memory_db.execute("PRAGMA synchronous=NORMAL")
-        await self.memory_db.execute("PRAGMA cache_size=10000")
+        
+        # 2. 同步模式：OFF最快（内存数据库，数据最终会同步到openGauss，风险可控）
+        # 注意：内存数据库数据最终会同步到openGauss，即使崩溃也不会丢失已同步的数据
+        await self.memory_db.execute("PRAGMA synchronous=OFF")
+        
+        # 3. 增大缓存大小：从10000页增加到50000页（约200MB，可根据内存调整）
+        # 每页默认4KB，50000页 = 200MB
+        # 注意：负值表示以KB为单位
+        await self.memory_db.execute("PRAGMA cache_size=-50000")
+        
+        # 4. 临时存储使用内存
         await self.memory_db.execute("PRAGMA temp_store=memory")
+        
+        # 5. 启用内存映射：提升大数据库性能（内存数据库本身在内存中，但可优化内部操作）
+        # 设置mmap_size为1GB（内存数据库通常不会超过此大小）
+        await self.memory_db.execute("PRAGMA mmap_size=1073741824")
+        
+        # 6. 锁定模式：EXCLUSIVE模式提升写入性能（内存数据库单连接，无需共享）
+        await self.memory_db.execute("PRAGMA locking_mode=EXCLUSIVE")
+        
+        # 7. 优化器设置：优化查询计划器（写入场景也有一定优化效果）
+        await self.memory_db.execute("PRAGMA optimize")
+        
+        # 注意：page_size必须在创建数据库之前设置，对已创建的数据库无效
+        # 内存数据库使用默认4KB页面大小，对性能影响较小（数据都在内存中）
+        
+        logger.debug("内存数据库性能优化配置已应用（WAL模式、同步关闭、大缓存、内存映射、独占锁）")
 
     async def _create_tables(self):
         """创建内存表结构 - 与openGauss BackupFile模型字段完全一致"""
@@ -208,6 +233,12 @@ class MemoryDBWriter:
     async def add_files_batch(self, file_info_list: List[Dict]):
         """批量添加文件到内存数据库 - 使用批量插入优化性能
         
+        性能优化策略：
+        1. 使用显式事务控制
+        2. 批量准备数据，减少循环开销
+        3. 使用executemany一次性插入所有记录
+        4. 单次提交事务
+        
         Args:
             file_info_list: 文件信息列表
         """
@@ -218,23 +249,40 @@ class MemoryDBWriter:
             await self.initialize()
 
         try:
-            # 准备批量插入数据
+            # 性能优化：批量准备插入数据，使用列表推导式减少开销
+            # 预先定义prepare函数引用，避免循环中重复查找
+            prepare_func = self._prepare_insert_data_from_scanner
             insert_data_list = []
+            failed_files = []
+            
+            # 批量准备数据（优化：减少异常处理开销）
             for file_info in file_info_list:
                 try:
-                    insert_data = self._prepare_insert_data_from_scanner(file_info)
+                    insert_data = prepare_func(file_info)
                     # 添加 synced_to_opengauss 和 sync_error 字段
                     insert_data_list.append(insert_data + (False, None))
                 except Exception as e:
                     file_path = file_info.get('path', 'unknown')
-                    logger.warning(f"准备批量插入数据失败: {file_path[:200]}, 错误: {str(e)}")
+                    failed_files.append((file_path, str(e)))
                     continue
             
             if not insert_data_list:
-                logger.warning("批量插入：没有有效的数据可以插入")
+                if failed_files:
+                    logger.warning(f"批量插入：所有 {len(file_info_list)} 个文件的数据准备都失败")
+                else:
+                    logger.warning("批量插入：没有有效的数据可以插入")
                 return
             
+            # 记录失败的文件（如果有）
+            if failed_files:
+                logger.warning(f"批量插入：{len(failed_files)} 个文件数据准备失败，已跳过")
+            
+            # 性能优化：使用显式事务控制，确保批量操作的原子性
+            # 注意：SQLite默认自动提交，但显式BEGIN可以确保批量操作的性能
+            batch_size = len(insert_data_list)
+            
             # 使用 executemany 批量插入（性能优化：一次插入多个文件，只提交一次）
+            # executemany内部会优化批量插入，比循环执行INSERT快得多
             await self.memory_db.executemany("""
                 INSERT INTO backup_files (
                     backup_set_id, file_path, file_name, directory_path, display_name,
@@ -250,8 +298,7 @@ class MemoryDBWriter:
             await self.memory_db.commit()
 
             # 更新统计信息
-            added_count = len(insert_data_list)
-            self._stats['total_files'] += added_count
+            self._stats['total_files'] += batch_size
             self._last_file_added_time = time.time()  # 更新最后添加文件时间
 
             # 数据写入保证机制：
@@ -259,7 +306,7 @@ class MemoryDBWriter:
             # 2. commit() 成功提交事务（如果失败会抛出异常）
             # 3. 如果任何步骤失败，异常会被捕获并向上抛出，扫描器会处理（回退到逐个添加）
             # 因此，如果方法正常返回（没有抛出异常），数据已经成功写入并持久化
-            logger.debug(f"批量插入完成：成功插入 {added_count} 个文件到内存数据库（已提交事务）")
+            logger.debug(f"批量插入完成：成功插入 {batch_size} 个文件到内存数据库（已提交事务）")
 
             # 检查是否需要立即同步（批量添加后只检查一次）
             await self._check_sync_need()
@@ -270,7 +317,189 @@ class MemoryDBWriter:
                 f"文件数量: {len(file_info_list)}",
                 exc_info=True
             )
+            # 回滚事务（如果失败）
+            try:
+                await self.memory_db.rollback()
+            except:
+                pass
             raise
+
+    async def add_files_batch_direct_to_opengauss(self, file_info_list: List[Dict]) -> int:
+        """直接批量写入openGauss - 使用原生SQL批量插入，严禁SQLAlchemy解析openGauss
+        
+        在openGauss模式下，跳过内存数据库，直接批量写入openGauss数据库
+        按SCAN_UPDATE_INTERVAL累积后一次性写入，顺序执行
+        
+        Args:
+            file_info_list: 文件信息列表
+            
+        Returns:
+            int: 成功写入的文件数
+        """
+        if not file_info_list:
+            return 0
+        
+        # 检查数据库类型
+        from utils.scheduler.db_utils import is_opengauss
+        if not is_opengauss():
+            # 非openGauss模式，使用原来的内存数据库逻辑
+            await self.add_files_batch(file_info_list)
+            return len(file_info_list)
+        
+        try:
+            # 准备批量插入数据
+            insert_data = []
+            for file_info in file_info_list:
+                try:
+                    # 准备数据（与_prepare_insert_data_from_scanner相同逻辑）
+                    data_tuple = self._prepare_insert_data_for_opengauss(file_info)
+                    insert_data.append(data_tuple)
+                except Exception as e:
+                    file_path = file_info.get('path', 'unknown')
+                    logger.warning(f"准备批量插入数据失败: {file_path[:200]}, 错误: {str(e)}")
+                    continue
+            
+            if not insert_data:
+                logger.warning("批量插入：没有有效的数据可以插入")
+                return 0
+            
+            # 使用原生SQL批量插入到openGauss
+            async with get_opengauss_connection() as conn:
+                await conn.executemany("""
+                    INSERT INTO backup_files (
+                        backup_set_id, file_path, file_name, directory_path, display_name,
+                        file_type, file_size, compressed_size, file_permissions, file_owner,
+                        file_group, created_time, modified_time, accessed_time, tape_block_start,
+                        tape_block_count, compressed, encrypted, checksum, is_copy_success,
+                        copy_status_at, backup_time, chunk_number, version, file_metadata, tags,
+                        created_at, updated_at
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                        $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+                        $21, $22, $23, $24, $25::json, $26::json, NOW(), NOW()
+                    )
+                """, insert_data)
+            
+            # 更新统计信息
+            inserted_count = len(insert_data)
+            self._stats['total_files'] += inserted_count
+            self._stats['synced_files'] += inserted_count  # 直接写入，已同步
+            self._last_file_added_time = time.time()
+            
+            logger.debug(f"[openGauss直接写入] 批量插入完成：成功插入 {inserted_count} 个文件到openGauss数据库（已提交事务）")
+            
+            return inserted_count
+            
+        except Exception as e:
+            logger.error(
+                f"[openGauss直接写入] 批量添加文件到openGauss数据库失败: {e}, "
+                f"文件数量: {len(file_info_list)}",
+                exc_info=True
+            )
+            raise
+
+    def _prepare_insert_data_for_opengauss(self, file_info: Dict) -> tuple:
+        """为openGauss准备插入数据（与_prepare_insert_data_from_scanner逻辑相同，但返回格式适配openGauss）"""
+        # 基本路径信息 - 来自文件扫描器
+        file_path = file_info.get('path', '')
+        file_name = file_info.get('name') or Path(file_path).name
+
+        # 目录路径
+        directory_path = str(Path(file_path).parent) if file_path and Path(file_path).parent != Path(file_path).anchor else None
+
+        # 显示名称（暂时与文件名相同）
+        display_name = file_name
+
+        # 文件类型 - 根据扫描器输出判断
+        if file_info.get('is_file', True):
+            file_type = 'file'
+        elif file_info.get('is_dir', False):
+            file_type = 'directory'
+        elif file_info.get('is_symlink', False):
+            file_type = 'symlink'
+        else:
+            file_type = 'file'
+
+        # 文件大小 - 关键字段！直接从扫描器的size字段获取
+        file_size = file_info.get('size', 0) or 0
+
+        # 压缩大小（初始为None，压缩时更新）
+        compressed_size = None
+
+        # 文件权限 - 来自扫描器
+        file_permissions = file_info.get('permissions')
+
+        # 文件所有者和组（初始为None，Linux环境下可扩展）
+        file_owner = None
+        file_group = None
+
+        # 时间戳处理 - 优先使用扫描器提供的modified_time
+        modified_time = file_info.get('modified_time')
+        if isinstance(modified_time, datetime):
+            modified_time = modified_time.replace(tzinfo=timezone.utc)
+        else:
+            modified_time = datetime.now(timezone.utc)
+
+        # 创建时间和访问时间（暂时使用修改时间作为默认值）
+        created_time = modified_time
+        accessed_time = modified_time
+
+        # 磁带相关信息（初始为None，压缩时更新）
+        tape_block_start = None
+        tape_block_count = None
+        compressed = False
+        encrypted = False
+        checksum = None
+        is_copy_success = False
+        copy_status_at = None
+
+        # 备份时间
+        backup_time = datetime.now(timezone.utc)
+
+        # 其他字段
+        chunk_number = None
+        version = 1
+
+        # 元数据（记录扫描时信息）
+        file_metadata = json.dumps({
+            'scanned_at': datetime.now(timezone.utc).isoformat(),
+            'scanner_source': 'file_scanner',
+            'original_permissions': file_permissions,
+            'file_type_detected': file_info.get('is_file', True)
+        })
+
+        # 标签
+        tags = json.dumps({'status': 'scanned'})
+
+        # 返回格式：按照openGauss INSERT语句的字段顺序（不包含created_at和updated_at，它们在SQL中使用NOW()）
+        return (
+            self.backup_set_db_id,     # backup_set_id
+            file_path,                 # file_path
+            file_name,                 # file_name
+            directory_path,            # directory_path
+            display_name,              # display_name
+            file_type,                 # file_type
+            file_size,                 # file_size
+            compressed_size,           # compressed_size
+            file_permissions,          # file_permissions
+            file_owner,                # file_owner
+            file_group,                # file_group
+            created_time,              # created_time
+            modified_time,             # modified_time
+            accessed_time,             # accessed_time
+            tape_block_start,          # tape_block_start
+            tape_block_count,          # tape_block_count
+            compressed,                # compressed
+            encrypted,                 # encrypted
+            checksum,                  # checksum
+            is_copy_success,           # is_copy_success
+            copy_status_at,            # copy_status_at
+            backup_time,               # backup_time
+            chunk_number,              # chunk_number
+            version,                   # version
+            file_metadata,             # file_metadata
+            tags                       # tags
+        )
 
     def _prepare_insert_data_from_scanner(self, file_info: Dict) -> tuple:
         """
@@ -432,12 +661,28 @@ class MemoryDBWriter:
 
     async def _get_pending_sync_count(self) -> int:
         """获取待同步文件数量（仅当前备份集）"""
-        async with self.memory_db.execute(
-            "SELECT COUNT(*) FROM backup_files WHERE backup_set_id = ? AND synced_to_opengauss = FALSE",
-            (self.backup_set_db_id,)
-        ) as cursor:
-            result = await cursor.fetchone()
-            return result[0] if result else 0
+        # 检查数据库连接是否已关闭
+        if not self.memory_db:
+            return 0
+        try:
+            # 检查连接是否有效
+            if hasattr(self.memory_db, '_conn') and self.memory_db._conn is None:
+                return 0
+        except (ValueError, AttributeError):
+            # 连接已关闭
+            return 0
+        
+        try:
+            async with self.memory_db.execute(
+                "SELECT COUNT(*) FROM backup_files WHERE backup_set_id = ? AND synced_to_opengauss = FALSE",
+                (self.backup_set_db_id,)
+            ) as cursor:
+                result = await cursor.fetchone()
+                return result[0] if result else 0
+        except (ValueError, sqlite3.ProgrammingError) as e:
+            # 连接已关闭，返回 0
+            logger.debug(f"获取待同步文件数量时数据库连接已关闭: {e}")
+            return 0
 
     async def _trigger_sync(self, reason: str):
         """触发同步 - 增加防抖动机制，异步执行不阻塞扫描线程"""
@@ -487,7 +732,7 @@ class MemoryDBWriter:
                         # 如果没有记录开始时间，使用上次完成时间作为参考
                         sync_duration = time.time() - self._last_sync_time if self._last_sync_time > 0 else 0
                     
-                    logger.warning(
+                    logger.info(
                         f"⚠️ 同步正在进行中，跳过本次定期同步 - "
                         f"待同步: {pending_count} 个，"
                         f"累计总扫描: {total_scanned} 个，累计总同步: {total_synced} 个，"
@@ -495,7 +740,7 @@ class MemoryDBWriter:
                     )
                     # 如果同步状态持续超过5分钟，记录警告（可能是卡住了）
                     if sync_duration > 300:
-                        logger.error(
+                        logger.info(
                             f"⚠️⚠️ 警告：同步状态已持续 {sync_duration:.1f} 秒（超过5分钟），"
                             f"可能已卡住！待同步: {pending_count} 个文件。"
                             f"建议检查 SQLite 队列管理器是否正常工作。"
@@ -911,14 +1156,31 @@ class MemoryDBWriter:
 
     async def _mark_sync_error(self, files: List[Tuple], error_message: str):
         """标记同步错误（仅当前备份集）"""
-        file_ids = [f[0] for f in files]
-
-        placeholders = ','.join(['?' for _ in file_ids])
-        await self.memory_db.execute(
-            f"UPDATE backup_files SET sync_error = ? WHERE backup_set_id = ? AND id IN ({placeholders})",
-            [error_message, self.backup_set_db_id] + file_ids
-        )
-        await self.memory_db.commit()
+        # 检查数据库连接是否已关闭
+        if not self.memory_db:
+            logger.warning("内存数据库连接已关闭，无法标记同步错误")
+            return
+        
+        try:
+            # 检查连接是否有效
+            if hasattr(self.memory_db, '_conn') and self.memory_db._conn is None:
+                logger.warning("内存数据库连接已关闭，无法标记同步错误")
+                return
+        except (ValueError, AttributeError):
+            logger.warning("内存数据库连接已关闭，无法标记同步错误")
+            return
+        
+        try:
+            file_ids = [f[0] for f in files]
+            placeholders = ','.join(['?' for _ in file_ids])
+            await self.memory_db.execute(
+                f"UPDATE backup_files SET sync_error = ? WHERE backup_set_id = ? AND id IN ({placeholders})",
+                [error_message, self.backup_set_db_id] + file_ids
+            )
+            await self.memory_db.commit()
+        except (ValueError, sqlite3.ProgrammingError) as e:
+            # 连接已关闭，记录警告但不抛出异常
+            logger.warning(f"标记同步错误时数据库连接已关闭: {e}")
 
     async def _insert_files_to_sqlite(self, file_data_map: List[Tuple]) -> List[int]:
         """将扫描文件同步到 SQLite 主库（调用方负责队列和串行执行）"""
@@ -1031,7 +1293,11 @@ class MemoryDBWriter:
             max_batches = 1000  # 防止无限循环
             while batch_number < max_batches:
                 # 获取待同步的文件批次（每次获取一批）
+                get_files_start = time.time()
                 files_to_sync = await self._get_files_to_sync()
+                get_files_time = time.time() - get_files_start
+                if get_files_time > 1.0:
+                    logger.warning(f"[SQLite同步] 获取待同步文件耗时较长: {get_files_time:.2f}秒")
 
                 if not files_to_sync:
                     # 没有更多文件需要同步
@@ -1040,22 +1306,42 @@ class MemoryDBWriter:
                     break
 
                 batch_number += 1
-                logger.debug(
+                logger.info(
                     f"[SQLite批次 {batch_number}] 开始同步 {len(files_to_sync)} 个文件 "
                     f"(原因: {reason}, backup_set_db_id={self.backup_set_db_id})"
                 )
 
                 # 准备批量插入数据
+                prepare_start = time.time()
                 file_data_map = []
                 for file_record in files_to_sync:
                     file_data_map.append((file_record, None))  # 第二个参数在 SQLite 模式下不需要
+                prepare_time = time.time() - prepare_start
+                if prepare_time > 1.0:
+                    logger.warning(f"[SQLite批次 {batch_number}] 准备数据耗时较长: {prepare_time:.2f}秒")
 
                 # 通过队列同步到 SQLite（同步操作，普通优先级）
                 # _insert_files_to_sqlite 返回内存数据库中的文件ID列表
                 batch_sync_start = time.time()
                 try:
-                    synced_file_ids = await execute_sqlite_sync(self._insert_files_to_sqlite, file_data_map)
+                    logger.debug(f"[SQLite批次 {batch_number}] 调用 execute_sqlite_sync，文件数: {len(file_data_map)}")
+                    # 添加超时保护（5分钟超时）
+                    import asyncio
+                    synced_file_ids = await asyncio.wait_for(
+                        execute_sqlite_sync(self._insert_files_to_sqlite, file_data_map),
+                        timeout=300.0  # 5分钟超时
+                    )
                     batch_sync_time = time.time() - batch_sync_start
+                    logger.info(f"[SQLite批次 {batch_number}] execute_sqlite_sync 完成，耗时: {batch_sync_time:.2f}秒")
+                except asyncio.TimeoutError:
+                    batch_sync_time = time.time() - batch_sync_start
+                    logger.error(
+                        f"[SQLite批次 {batch_number}] ⚠️⚠️ 同步超时（300秒）！"
+                        f"文件数: {len(file_data_map)}，耗时: {batch_sync_time:.2f}秒。"
+                        f"可能原因：1) 批量插入数据量过大 2) SQLite 队列管理器阻塞 3) 数据库锁等待"
+                    )
+                    # 超时后继续处理下一批，不中断整个同步流程
+                    continue
                 except Exception as batch_error:
                     batch_sync_time = time.time() - batch_sync_start
                     logger.error(

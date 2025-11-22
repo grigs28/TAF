@@ -246,23 +246,40 @@ class ESScanner:
                     
                     stdout, stderr = await asyncio.wait_for(
                         result.communicate(), 
-                        timeout=60
+                        timeout=300  # 5分钟超时
                     )
                     
                     if result.returncode == 0:
-                        # Windows上ES可能输出GBK编码，尝试多种编码
+                        logger.debug(f"{log_context} ES命令执行成功（第 {page} 页），stdout长度: {len(stdout)} 字节")
+                        # Windows上ES工具通常输出GBK编码（中文Windows默认编码）
+                        # 优先使用GBK，然后尝试其他编码
                         output = None
-                        for encoding in ['utf-8', 'gbk', 'gb2312', 'cp936']:
+                        used_encoding = None
+                        
+                        # 编码尝试顺序：GBK优先（Windows中文系统默认），然后是UTF-8和其他编码
+                        for encoding in ['gbk', 'gb2312', 'cp936', 'utf-8']:
                             try:
-                                output = stdout.decode(encoding, errors='strict').strip()
-                                break
-                            except (UnicodeDecodeError, LookupError):
+                                # 使用errors='replace'或'ignore'，避免因单个字符解码失败而跳过整个输出
+                                test_output = stdout.decode(encoding, errors='replace').strip()
+                                # 检查解码后的输出是否包含合理的文件路径字符
+                                if test_output and (':' in test_output or '\\' in test_output or '/' in test_output):
+                                    output = test_output
+                                    used_encoding = encoding
+                                    # 记录使用的编码（仅第一次或编码改变时）
+                                    if encoding == 'gbk':
+                                        logger.debug(f"{log_context} 使用GBK编码解码ES输出")
+                                    break
+                            except (UnicodeDecodeError, LookupError) as e:
+                                logger.debug(f"{log_context} 尝试使用{encoding}编码失败: {str(e)}")
                                 continue
                         
-                        # 如果所有编码都失败，使用errors='ignore'的UTF-8作为后备
+                        # 如果所有编码都失败，使用errors='replace'的UTF-8作为后备
                         if output is None:
-                            output = stdout.decode('utf-8', errors='ignore').strip()
-                            logger.warning(f"{log_context} 无法确定ES输出编码，使用UTF-8（忽略错误）")
+                            output = stdout.decode('utf-8', errors='replace').strip()
+                            used_encoding = 'utf-8'
+                            logger.warning(f"{log_context} 无法确定ES输出编码，使用UTF-8（替换错误字符）")
+                        elif used_encoding and used_encoding != 'gbk':
+                            logger.debug(f"{log_context} ES输出编码检测: 使用{used_encoding}编码（非默认GBK）")
                         
                         if output:
                             lines = output.split('\n')
@@ -271,95 +288,143 @@ class ESScanner:
                             
                             if not valid_lines:
                                 # 没有更多结果
+                                logger.debug(f"{log_context} ES命令返回结果为空（第 {page} 页），结束当前路径扫描")
                                 break
                             
+                            logger.debug(f"{log_context} ES命令返回 {len(valid_lines)} 行结果（第 {page} 页）")
+                            
                             # 解析文件信息（TSV格式：文件路径\t文件大小\t修改日期）
+                            # 注意：文件路径可能包含制表符等特殊字符，需要从右向左解析
                             batch = []
+                            parse_errors = 0
+                            parse_success = 0
                             for line in valid_lines:
                                 try:
                                     # ES输出格式（TSV）: "文件路径\t文件大小\t修改日期"
-                                    parts = line.strip().split('\t')
-                                    if len(parts) >= 2:
-                                        file_path = parts[0].strip()
-                                        file_size_str = parts[1].strip()
-                                        
-                                        # 验证文件路径
-                                        if not file_path:
-                                            logger.warning(f"{log_context} 文件路径为空，跳过该行: {repr(line[:100])}")
-                                            continue
-                                        
-                                        # 验证文件大小字符串
-                                        if not file_size_str:
-                                            logger.warning(f"{log_context} 文件大小为空，路径: {file_path[:100]}")
-                                            file_size_str = "0"
-                                        
-                                        # 解析文件大小（字节）
+                                    # 文件路径可能包含制表符，所以从右向左分割：先取最后两个字段，剩余部分就是文件路径
+                                    line_stripped = line.strip()
+                                    
+                                    # 从右向左查找制表符，分割出文件大小和修改日期
+                                    last_tab_index = line_stripped.rfind('\t')
+                                    if last_tab_index == -1:
+                                        # 没有制表符，只有文件路径（不应该发生，但容错处理）
+                                        parse_errors += 1
+                                        if parse_errors <= 3:  # 只记录前3个错误，避免日志过多
+                                            logger.warning(f"{log_context} TSV格式错误，缺少制表符: {repr(line_stripped[:100])}")
+                                        continue
+                                    
+                                    second_last_tab_index = line_stripped.rfind('\t', 0, last_tab_index)
+                                    if second_last_tab_index == -1:
+                                        # 只有一个制表符，只有文件路径和文件大小（没有修改日期）
+                                        # 只移除路径末尾的空白字符，保留路径中间的空格和特殊字符（如 •、? 等）
+                                        file_path = line_stripped[:last_tab_index].rstrip()
+                                        file_size_str = line_stripped[last_tab_index + 1:].strip()
+                                        modified_time_str = None
+                                    else:
+                                        # 有两个或更多制表符：文件路径、文件大小、修改日期
+                                        # 只移除路径末尾的空白字符，保留路径中间的空格和特殊字符（如 •、? 等）
+                                        file_path = line_stripped[:second_last_tab_index].rstrip()
+                                        file_size_str = line_stripped[second_last_tab_index + 1:last_tab_index].strip()
+                                        modified_time_str = line_stripped[last_tab_index + 1:].strip()
+                                    
+                                    # 只移除明确的控制字符（换行符、回车符），这些不应该在文件路径中出现
+                                    # 注意：不要移除制表符、空格等字符，因为它们可能是合法的文件名字符（虽然罕见）
+                                    # 不要移除特殊字符如 •、? 等，这些可能是合法的文件名字符
+                                    # 保留所有Unicode字符，包括全角空格、项目符号等
+                                    # 只移除换行符和回车符，保留所有其他字符（包括制表符、空格、?、• 等）
+                                    file_path = file_path.replace('\r', '').replace('\n', '')
+                                    
+                                    # 不再使用strip()，只移除末尾的空白字符，保留路径中的所有字符
+                                    # 这样可以保留路径中的多个连续空格、•、? 等特殊字符
+                                    file_path = file_path.rstrip()
+                                    
+                                    # 验证文件路径
+                                    if not file_path:
+                                        logger.warning(f"{log_context} 文件路径为空，跳过该行: {repr(line[:100])}")
+                                        continue
+                                    
+                                    # 验证文件大小字符串
+                                    if not file_size_str:
+                                        logger.warning(f"{log_context} 文件大小为空，路径: {file_path[:100]}")
+                                        file_size_str = "0"
+                                    
+                                    # 解析文件大小（字节）
+                                    try:
+                                        file_size = int(file_size_str)
+                                    except ValueError:
+                                        logger.warning(f"{log_context} 文件大小解析失败: {file_size_str}，路径: {file_path[:100]}")
+                                        file_size = 0
+                                    
+                                    # 解析修改日期（ISO-8601格式，如果有）
+                                    from datetime import datetime
+                                    
+                                    if modified_time_str:
                                         try:
-                                            file_size = int(file_size_str)
-                                        except ValueError:
-                                            logger.warning(f"{log_context} 文件大小解析失败: {file_size_str}，路径: {file_path[:100]}")
-                                            file_size = 0
-                                        
-                                        # 解析修改日期（ISO-8601格式，如果有）
-                                        modified_time_str = parts[2].strip() if len(parts) >= 3 else None
-                                        from datetime import datetime
-                                        
-                                        if modified_time_str:
-                                            try:
-                                                # ISO-8601格式: "2025-11-18T12:34:56" 或 "2025-11-18T12:34:56.789"
-                                                # 可能带时区: "2025-11-18T12:34:56+08:00" 或 "2025-11-18T12:34:56Z"
-                                                if modified_time_str.endswith('Z'):
-                                                    modified_time_str = modified_time_str[:-1] + '+00:00'
-                                                
-                                                # 尝试解析ISO-8601格式
-                                                if '+' in modified_time_str or modified_time_str.count('-') > 2:
-                                                    # 带时区的ISO-8601格式
-                                                    modified_time = datetime.fromisoformat(modified_time_str.replace('Z', '+00:00'))
-                                                    # 转换为naive datetime（移除时区信息），与file_scanner一致
-                                                    modified_time = modified_time.replace(tzinfo=None)
-                                                else:
-                                                    # 简单的ISO-8601格式（无时区）
-                                                    modified_time = datetime.fromisoformat(modified_time_str)
-                                            except (ValueError, AttributeError):
-                                                # 解析失败，使用当前时间
-                                                modified_time = datetime.now()
-                                        else:
-                                            # 没有修改日期，使用当前时间
-                                            modified_time = datetime.now()  # naive datetime，不带时区，与file_scanner一致
-                                        
-                                        # 构建文件信息字典（必须与file_scanner格式完全一致）
-                                        # file_scanner返回格式：{'path': str, 'name': str, 'size': int, 
-                                        #                      'modified_time': datetime（naive，不带时区）, 'permissions': str,
-                                        #                      'is_file': bool, 'is_dir': bool, 'is_symlink': bool}
-                                        file_name = os.path.basename(file_path)
-                                        
-                                        # 验证文件名不为空
-                                        if not file_name:
-                                            logger.warning(f"{log_context} 文件名解析失败，路径: {file_path[:100]}")
-                                            file_name = os.path.basename(file_path) or "unknown"
-                                        
-                                        # ES扫描器默认都是文件（因为已经用-a-d参数过滤了目录）
-                                        file_info = {
-                                            'path': file_path,
-                                            'name': file_name,  # 注意：必须是'name'，不是'file_name'，与file_scanner完全一致
-                                            'size': file_size,  # int类型，字节数
-                                            'modified_time': modified_time,  # naive datetime对象，不带时区
-                                            'permissions': None,  # ES扫描不提供权限信息，None与file_scanner的字符串不同，但memory_db_writer可以处理
-                                            'is_file': True,  # ES扫描只返回文件
-                                            'is_dir': False,
-                                            'is_symlink': False
-                                            # 注意：不添加任何额外字段，只保留file_scanner格式中的字段
-                                        }
-                                        
-                                        # 验证file_info关键字段
-                                        if not file_info.get('path'):
-                                            logger.error(f"{log_context} file_info缺少path字段: {file_info}")
-                                            continue
-                                        
-                                        batch.append(file_info)
+                                            # ISO-8601格式: "2025-11-18T12:34:56" 或 "2025-11-18T12:34:56.789"
+                                            # 可能带时区: "2025-11-18T12:34:56+08:00" 或 "2025-11-18T12:34:56Z"
+                                            if modified_time_str.endswith('Z'):
+                                                modified_time_str = modified_time_str[:-1] + '+00:00'
+                                            
+                                            # 尝试解析ISO-8601格式
+                                            if '+' in modified_time_str or modified_time_str.count('-') > 2:
+                                                # 带时区的ISO-8601格式
+                                                modified_time = datetime.fromisoformat(modified_time_str.replace('Z', '+00:00'))
+                                                # 转换为naive datetime（移除时区信息），与file_scanner一致
+                                                modified_time = modified_time.replace(tzinfo=None)
+                                            else:
+                                                # 简单的ISO-8601格式（无时区）
+                                                modified_time = datetime.fromisoformat(modified_time_str)
+                                        except (ValueError, AttributeError):
+                                            # 解析失败，使用当前时间
+                                            modified_time = datetime.now()
+                                    else:
+                                        # 没有修改日期，使用当前时间
+                                        modified_time = datetime.now()  # naive datetime，不带时区，与file_scanner一致
+                                    
+                                    # 构建文件信息字典（必须与file_scanner格式完全一致）
+                                    # file_scanner返回格式：{'path': str, 'name': str, 'size': int, 
+                                    #                      'modified_time': datetime（naive，不带时区）, 'permissions': str,
+                                    #                      'is_file': bool, 'is_dir': bool, 'is_symlink': bool}
+                                    file_name = os.path.basename(file_path)
+                                    
+                                    # 验证文件名不为空
+                                    if not file_name:
+                                        logger.warning(f"{log_context} 文件名解析失败，路径: {file_path[:100]}")
+                                        file_name = os.path.basename(file_path) or "unknown"
+                                    
+                                    # ES扫描器默认都是文件（因为已经用-a-d参数过滤了目录）
+                                    file_info = {
+                                        'path': file_path,
+                                        'name': file_name,  # 注意：必须是'name'，不是'file_name'，与file_scanner完全一致
+                                        'size': file_size,  # int类型，字节数
+                                        'modified_time': modified_time,  # naive datetime对象，不带时区
+                                        'permissions': None,  # ES扫描不提供权限信息，None与file_scanner的字符串不同，但memory_db_writer可以处理
+                                        'is_file': True,  # ES扫描只返回文件
+                                        'is_dir': False,
+                                        'is_symlink': False
+                                        # 注意：不添加任何额外字段，只保留file_scanner格式中的字段
+                                    }
+                                    
+                                    # 验证file_info关键字段
+                                    if not file_info.get('path'):
+                                        logger.error(f"{log_context} file_info缺少path字段: {file_info}")
+                                        continue
+                                    
+                                    batch.append(file_info)
+                                    parse_success += 1
                                 except Exception as e:
-                                    logger.warning(f"{log_context} 解析文件信息失败: {repr(line[:200])}, 错误: {str(e)}", exc_info=True)
+                                    parse_errors += 1
+                                    if parse_errors <= 3:  # 只记录前3个错误，避免日志过多
+                                        logger.warning(f"{log_context} 解析文件信息失败: {repr(line[:200])}, 错误: {str(e)}", exc_info=True)
                                     continue
+                            
+                            # 记录解析统计
+                            if parse_errors > 0 or parse_success == 0:
+                                logger.warning(
+                                    f"{log_context} 第 {page} 页解析统计: "
+                                    f"成功 {parse_success}/{len(valid_lines)} 个文件, "
+                                    f"失败 {parse_errors} 个"
+                                )
                             
                             if batch:
                                 total_files_scanned += len(batch)
@@ -368,6 +433,11 @@ class ESScanner:
                                     f"(累计: {total_files_scanned} 个文件)"
                                 )
                                 yield batch
+                            else:
+                                logger.warning(
+                                    f"{log_context} 第 {page} 页: ES返回 {len(valid_lines)} 行，"
+                                    f"但解析后批次为空（可能解析失败）"
+                                )
                             
                             # 如果当前页少于limit个文件，说明已经到达末尾
                             if len(valid_lines) < limit:

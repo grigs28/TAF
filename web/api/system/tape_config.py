@@ -243,18 +243,15 @@ async def update_tape_config(config: TapeConfig, request: Request):
             "auto_tape_cleanup": settings.AUTO_TAPE_CLEANUP
         }
         
-        # 保存配置到.env文件
-        env_file = Path(".env")
-        env_lines = []
+        # 使用EnvFileManager保存配置到.env文件
+        from config.env_file_manager import get_env_manager
         
-        if env_file.exists():
-            with open(env_file, "r", encoding="utf-8") as f:
-                env_lines = f.readlines()
+        env_manager = get_env_manager()
         
-        # 更新或添加磁带机配置
-        config_keys = {
-            "TAPE_DEVICE_PATH": config.tape_device_path,
-            "TAPE_DRIVE_LETTER": config.tape_drive_letter,
+        # 构建更新字典
+        updates = {
+            "TAPE_DEVICE_PATH": config.tape_device_path or "",
+            "TAPE_DRIVE_LETTER": config.tape_drive_letter or "",
             "DEFAULT_BLOCK_SIZE": str(config.default_block_size),
             "MAX_VOLUME_SIZE": str(config.max_volume_size),
             "TAPE_POOL_SIZE": str(config.tape_pool_size),
@@ -262,23 +259,11 @@ async def update_tape_config(config: TapeConfig, request: Request):
             "AUTO_TAPE_CLEANUP": "true" if config.auto_tape_cleanup else "false"
         }
         
-        # 更新现有配置或添加新配置
-        updated_keys = set()
-        for i, line in enumerate(env_lines):
-            line_stripped = line.strip()
-            for key, value in config_keys.items():
-                if line_stripped.startswith(key + "="):
-                    env_lines[i] = f"{key}={value}\n"
-                    updated_keys.add(key)
+        # 使用EnvFileManager写入文件（自动处理备份和并发问题）
+        success = env_manager.write_env_file(updates, backup=True)
         
-        # 添加未更新的配置
-        for key, value in config_keys.items():
-            if key not in updated_keys:
-                env_lines.append(f"{key}={value}\n")
-        
-        # 写入文件
-        with open(env_file, "w", encoding="utf-8") as f:
-            f.writelines(env_lines)
+        if not success:
+            raise ValueError("写入.env文件失败")
         
         logger.info("磁带机配置已更新")
         
@@ -537,13 +522,71 @@ async def get_tape_drive_history(request: Request, limit: int = 50, offset: int 
         database_url = settings.DATABASE_URL
         
         # 检查是否为openGauss
-        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+        from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
+        
+        if is_redis():
+            # Redis模式：使用Redis查询操作日志
+            from utils.redis_operation_log import query_operation_logs_redis
+            
+            # 查询磁带机相关操作日志（resource_type = 'tape_drive' 或操作名称包含'磁带机'）
+            logs = await query_operation_logs_redis(
+                resource_type=None,  # 先获取所有，然后在Python中过滤
+                operation_name_pattern=None,
+                operation_description_pattern=None,
+                limit=limit * 2,  # 多获取一些，因为可能被过滤掉
+                offset=0
+            )
+            
+            # 过滤磁带机相关的日志
+            history = []
+            for log in logs:
+                if (log.get('resource_type') == 'tape_drive' or
+                    '磁带机' in (log.get('operation_name') or '') or
+                    '磁带机' in (log.get('operation_description') or '')):
+                    history.append({
+                        "id": log.get('id'),
+                        "time": log.get('operation_time'),
+                        "operation": log.get('operation_name') or log.get('operation_description') or "",
+                        "device_name": log.get('resource_name') or "",
+                        "username": log.get('username') or "system",
+                        "success": log.get('success', True),
+                        "message": log.get('result_message') or log.get('error_message') or log.get('operation_description') or "",
+                        "operation_type": log.get('operation_type', '')
+                    })
+            
+            # 应用分页
+            history = history[offset:offset + limit]
+            
+            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            await log_system(
+                level=LogLevel.INFO,
+                category=LogCategory.TAPE,
+                message=f"获取磁带机操作历史成功: {len(history)} 条记录",
+                module="web.api.system.tape_config",
+                function="get_tape_drive_history",
+                duration_ms=duration_ms
+            )
+            
+            return {
+                "success": True,
+                "history": history,
+                "count": len(history)
+            }
         
         if not is_opengauss():
             # 非openGauss数据库，使用SQLAlchemy
             from config.database import db_manager
             from models.system_log import OperationLog
             from sqlalchemy import select, desc, or_
+            
+            # 检查AsyncSessionLocal是否可用
+            if not db_manager.AsyncSessionLocal or not callable(db_manager.AsyncSessionLocal):
+                logger.warning("SQLAlchemy AsyncSessionLocal不可用，返回空列表")
+                return {
+                    "success": True,
+                    "history": [],
+                    "count": 0
+                }
             
             async with db_manager.AsyncSessionLocal() as session:
                 # 查询磁带机相关操作日志（resource_type = 'tape_drive' 或操作名称包含'磁带机'）

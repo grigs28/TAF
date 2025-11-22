@@ -734,16 +734,34 @@ async def insert_backup_files_sqlite(file_dicts: List[Dict]) -> List[int]:
                 max_id_before = max_id_row[0] if max_id_row and max_id_row[0] else 0
             
             # 批量插入（使用 executemany）
-            await conn.executemany("""
-                INSERT INTO backup_files (
-                    backup_set_id, file_path, file_name, directory_path, display_name,
-                    file_type, file_size, compressed_size, file_permissions, file_owner,
-                    file_group, created_time, modified_time, accessed_time, tape_block_start,
-                    tape_block_count, compressed, encrypted, checksum, is_copy_success,
-                    copy_status_at, backup_time, chunk_number, version, file_metadata, tags,
-                    created_by, updated_by
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, insert_data)
+            # 如果数据量很大，分批插入以避免长时间锁定
+            batch_size = 10000  # 每批最多 10000 条
+            if len(insert_data) > batch_size:
+                logger.info(f"[插入文件到SQLite] 数据量较大（{len(insert_data)} 条），将分批插入（每批 {batch_size} 条）")
+                for i in range(0, len(insert_data), batch_size):
+                    batch_data = insert_data[i:i + batch_size]
+                    await conn.executemany("""
+                        INSERT INTO backup_files (
+                            backup_set_id, file_path, file_name, directory_path, display_name,
+                            file_type, file_size, compressed_size, file_permissions, file_owner,
+                            file_group, created_time, modified_time, accessed_time, tape_block_start,
+                            tape_block_count, compressed, encrypted, checksum, is_copy_success,
+                            copy_status_at, backup_time, chunk_number, version, file_metadata, tags,
+                            created_by, updated_by
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, batch_data)
+                    logger.debug(f"[插入文件到SQLite] 已插入批次 {i // batch_size + 1}/{(len(insert_data) + batch_size - 1) // batch_size}，{len(batch_data)} 条")
+            else:
+                await conn.executemany("""
+                    INSERT INTO backup_files (
+                        backup_set_id, file_path, file_name, directory_path, display_name,
+                        file_type, file_size, compressed_size, file_permissions, file_owner,
+                        file_group, created_time, modified_time, accessed_time, tape_block_start,
+                        tape_block_count, compressed, encrypted, checksum, is_copy_success,
+                        copy_status_at, backup_time, chunk_number, version, file_metadata, tags,
+                        created_by, updated_by
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, insert_data)
             
             await conn.commit()
             

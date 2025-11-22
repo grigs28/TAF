@@ -16,7 +16,8 @@ from models.backup import BackupTask, BackupTaskType, BackupTaskStatus
 from config.database import db_manager
 from sqlalchemy import select, and_
 from utils.log_utils import log_system, LogLevel, LogCategory, log_operation, OperationType
-from .db_utils import is_opengauss, get_opengauss_connection
+from .db_utils import is_opengauss, is_redis, get_opengauss_connection
+from .sqlite_utils import is_sqlite
 import json
 
 logger = logging.getLogger(__name__)
@@ -105,6 +106,13 @@ class BackupActionHandler(ActionHandler):
         """
         if not self.system_instance or not self.system_instance.backup_engine:
             raise ValueError("备份引擎未初始化")
+        
+        # 初始化变量，确保在所有异常情况下都有值
+        backup_executed = False
+        backup_task = None
+        resumed_from_existing = False
+        template_task = None
+        task_name = ""
         
         try:
             run_options = run_options or {}
@@ -288,7 +296,38 @@ class BackupActionHandler(ActionHandler):
                             'is_template': row['is_template'],
                             'template_id': row['template_id'],
                         })()
-                else:
+                elif is_redis():
+                    # Redis模式：使用Redis查询
+                    from backup.redis_backup_db import KEY_PREFIX_BACKUP_TASK, _get_redis_key, _ensure_list, _ensure_dict
+                    from config.redis_db import get_redis_client
+                    redis = await get_redis_client()
+                    task_key = _get_redis_key(KEY_PREFIX_BACKUP_TASK, backup_task_id)
+                    task_data = await redis.hgetall(task_key)
+                    if not task_data:
+                        raise ValueError(f"备份任务模板不存在: {backup_task_id}")
+                    task_dict = {k if isinstance(k, str) else k.decode('utf-8'): 
+                               v if isinstance(v, str) else (v.decode('utf-8') if isinstance(v, bytes) else str(v))
+                               for k, v in task_data.items()}
+                    is_template = task_dict.get('is_template', '0') == '1'
+                    if not is_template:
+                        raise ValueError(f"备份任务 {backup_task_id} 不是模板")
+                    # 将字典转换为对象
+                    template_task = type('BackupTask', (), {
+                        'id': int(task_dict.get('id', backup_task_id)),
+                        'task_name': task_dict.get('task_name', ''),
+                        'task_type': _parse_enum(BackupTaskType, task_dict.get('task_type'), None),
+                        'source_paths': _ensure_list(task_dict.get('source_paths', '[]')),
+                        'exclude_patterns': _ensure_list(task_dict.get('exclude_patterns', '[]')),
+                        'compression_enabled': task_dict.get('compression_enabled', '0') == '1',
+                        'encryption_enabled': task_dict.get('encryption_enabled', '0') == '1',
+                        'retention_days': int(task_dict.get('retention_days', 0)),
+                        'description': task_dict.get('description', ''),
+                        'tape_device': task_dict.get('tape_device', ''),
+                        'status': _parse_enum(BackupTaskStatus, task_dict.get('status'), None),
+                        'is_template': True,
+                        'template_id': task_dict.get('template_id'),
+                    })()
+                elif is_sqlite() and db_manager.AsyncSessionLocal and callable(db_manager.AsyncSessionLocal):
                     # 使用SQLAlchemy查询
                     async with db_manager.AsyncSessionLocal() as session:
                         stmt = select(BackupTask).where(
@@ -302,6 +341,8 @@ class BackupActionHandler(ActionHandler):
                         
                         if not template_task:
                             raise ValueError(f"备份任务模板不存在: {backup_task_id}")
+                else:
+                    raise ValueError(f"不支持的数据库类型，无法查询备份任务模板: {backup_task_id}")
             
             # 执行前检查：判断同一个模板的任务是否还在执行中
             if template_task or scheduled_task:
@@ -324,7 +365,33 @@ class BackupActionHandler(ActionHandler):
                                 template_id, 'running'
                             )
                             running_task = dict(running_task_row) if running_task_row else None
-                    else:
+                    elif is_redis():
+                        # Redis模式：使用Redis查询
+                        from backup.redis_backup_db import KEY_PREFIX_BACKUP_TASK, _get_redis_key
+                        from config.redis_db import get_redis_client
+                        redis = await get_redis_client()
+                        # 获取所有任务ID
+                        from backup.redis_backup_db import KEY_INDEX_BACKUP_TASKS
+                        task_ids_bytes = await redis.smembers(KEY_INDEX_BACKUP_TASKS)
+                        running_task = None
+                        for task_id_bytes in task_ids_bytes:
+                            # Redis 客户端设置了 decode_responses=True，所以键值已经是字符串
+                            task_id_str = task_id_bytes if isinstance(task_id_bytes, str) else (task_id_bytes.decode('utf-8') if isinstance(task_id_bytes, bytes) else str(task_id_bytes))
+                            task_id = int(task_id_str)
+                            task_key = _get_redis_key(KEY_PREFIX_BACKUP_TASK, task_id)
+                            task_data = await redis.hgetall(task_key)
+                            if not task_data:
+                                continue
+                            # Redis 客户端设置了 decode_responses=True，所以键值已经是字符串
+                            task_dict = {k if isinstance(k, str) else k.decode('utf-8'): 
+                                       v if isinstance(v, str) else (v.decode('utf-8') if isinstance(v, bytes) else str(v))
+                                       for k, v in task_data.items()}
+                            task_template_id = task_dict.get('template_id', '')
+                            task_status = task_dict.get('status', '').lower()
+                            if task_template_id == str(template_id) and task_status == 'running':
+                                running_task = {'id': task_id, 'started_at': task_dict.get('started_at')}
+                                break
+                    elif is_sqlite() and db_manager.AsyncSessionLocal and callable(db_manager.AsyncSessionLocal):
                         # 使用SQLAlchemy查询
                         async with db_manager.AsyncSessionLocal() as session:
                             stmt = select(BackupTask).where(
@@ -335,6 +402,8 @@ class BackupActionHandler(ActionHandler):
                             )
                             result = await session.execute(stmt)
                             running_task = result.scalar_one_or_none()
+                    else:
+                        running_task = None
                     
                     if running_task:
                         # 检查任务是否在同一时间执行（同一天同一个调度任务）
@@ -376,13 +445,6 @@ class BackupActionHandler(ActionHandler):
                                             f"(任务ID: {running_task.id})"
                                         )
             
-            # 初始化变量，确保在所有异常情况下都有值
-            backup_executed = False
-            backup_task = None
-            resumed_from_existing = False
-            template_task = None
-            task_name = ""
-
             resume_template_id = template_task.id if template_task else backup_task_id
             if scheduled_task and scheduled_task.task_metadata:
                 resume_template_id = scheduled_task.task_metadata.get('backup_task_id') or resume_template_id
@@ -517,7 +579,64 @@ class BackupActionHandler(ActionHandler):
                             'scan_status': 'pending',
                             'backup_set_id': None,
                         })()
-                else:
+                elif is_redis():
+                    # Redis模式：使用备份引擎创建备份任务
+                    # 备份引擎会自动创建备份任务记录
+                    from config.redis_db import get_redis_manager
+                    redis_manager = get_redis_manager()
+                    task_id = await redis_manager.get_next_id('backup_task:id')
+                    
+                    backup_task = type('BackupTask', (), {
+                        'id': task_id,
+                        'task_name': task_name,
+                        'task_type': task_type,
+                        'source_paths': source_paths,
+                        'exclude_patterns': exclude_patterns,
+                        'compression_enabled': compression_enabled,
+                        'encryption_enabled': encryption_enabled,
+                        'retention_days': retention_days,
+                        'description': description,
+                        'tape_device': tape_device,
+                        'status': BackupTaskStatus.PENDING,
+                        'is_template': False,
+                        'template_id': template_task.id if template_task else None,
+                        'created_by': 'scheduled_task',
+                        'scan_status': 'pending',
+                        'backup_set_id': None,
+                    })()
+                    
+                    # 保存到Redis
+                    from backup.redis_backup_db import KEY_PREFIX_BACKUP_TASK, KEY_INDEX_BACKUP_TASKS, _get_redis_key
+                    from config.redis_db import get_redis_client
+                    import json as json_module
+                    
+                    redis = await get_redis_client()
+                    task_key = _get_redis_key(KEY_PREFIX_BACKUP_TASK, task_id)
+                    
+                    await redis.hset(task_key, mapping={
+                        'id': str(task_id),
+                        'task_name': task_name,
+                        'task_type': task_type.value if hasattr(task_type, 'value') else str(task_type),
+                        'source_paths': json_module.dumps(source_paths) if source_paths else '[]',
+                        'exclude_patterns': json_module.dumps(exclude_patterns) if exclude_patterns else '[]',
+                        'compression_enabled': '1' if compression_enabled else '0',
+                        'encryption_enabled': '1' if encryption_enabled else '0',
+                        'retention_days': str(retention_days),
+                        'description': description or '',
+                        'tape_device': tape_device or '',
+                        'status': 'pending',
+                        'is_template': '0',
+                        'template_id': str(template_task.id) if template_task else '',
+                        'created_by': 'scheduled_task',
+                        'scan_status': 'pending',
+                        'backup_set_id': '',
+                        'created_at': now().isoformat(),
+                        'updated_at': now().isoformat(),
+                    })
+                    
+                    # 添加到索引
+                    await redis.sadd(KEY_INDEX_BACKUP_TASKS, str(task_id))
+                elif is_sqlite() and db_manager.AsyncSessionLocal and callable(db_manager.AsyncSessionLocal):
                     async with db_manager.AsyncSessionLocal() as session:
                         backup_task = BackupTask(
                             task_name=task_name,
@@ -539,6 +658,8 @@ class BackupActionHandler(ActionHandler):
                         session.add(backup_task)
                         await session.commit()
                         await session.refresh(backup_task)
+                else:
+                    raise RuntimeError(f"不支持的数据库类型，无法创建备份任务")
             
             if not hasattr(backup_task, 'force_rescan'):
                 backup_task.force_rescan = False
@@ -569,7 +690,20 @@ class BackupActionHandler(ActionHandler):
                                 now(),
                                 backup_task.id
                             )
-                    else:
+                    elif is_redis():
+                        # Redis模式：使用Redis更新
+                        from backup.redis_backup_db import KEY_PREFIX_BACKUP_TASK, _get_redis_key
+                        from config.redis_db import get_redis_client
+                        redis = await get_redis_client()
+                        task_key = _get_redis_key(KEY_PREFIX_BACKUP_TASK, backup_task.id)
+                        description = (backup_task.description if hasattr(backup_task, 'description') and backup_task.description else '') + ' [格式化中]'
+                        await redis.hset(task_key, mapping={
+                            'status': 'running',
+                            'started_at': now().isoformat(),
+                            'description': description,
+                            'updated_at': now().isoformat(),
+                        })
+                    elif is_sqlite() and db_manager.AsyncSessionLocal and callable(db_manager.AsyncSessionLocal):
                         async with db_manager.AsyncSessionLocal() as session:
                             backup_task.status = BackupTaskStatus.RUNNING
                             backup_task.started_at = now()
@@ -579,6 +713,7 @@ class BackupActionHandler(ActionHandler):
                                 backup_task.description = '[格式化中]'
                             await session.commit()
                             await session.refresh(backup_task)
+                    # 其他数据库类型跳过
                     
                     await log_system(
                         level=LogLevel.INFO,
@@ -616,11 +751,23 @@ class BackupActionHandler(ActionHandler):
                                             now(),
                                             backup_task.id
                                         )
-                                else:
+                                elif is_redis():
+                                    # Redis模式：使用Redis更新
+                                    from backup.redis_backup_db import KEY_PREFIX_BACKUP_TASK, _get_redis_key
+                                    from config.redis_db import get_redis_client
+                                    redis = await get_redis_client()
+                                    task_key = _get_redis_key(KEY_PREFIX_BACKUP_TASK, backup_task.id)
+                                    description = (backup_task.description if hasattr(backup_task, 'description') and backup_task.description else '').replace(' [格式化中]', '')
+                                    await redis.hset(task_key, mapping={
+                                        'description': description,
+                                        'updated_at': now().isoformat(),
+                                    })
+                                elif is_sqlite() and db_manager.AsyncSessionLocal and callable(db_manager.AsyncSessionLocal):
                                     async with db_manager.AsyncSessionLocal() as session:
                                         if backup_task.description:
                                             backup_task.description = backup_task.description.replace(' [格式化中]', '')
                                         await session.commit()
+                                # 其他数据库类型跳过
                 except Exception as _:
                     logger.warning("完整备份前格式化异常，将尝试继续执行备份")
                     await log_system(
@@ -730,7 +877,16 @@ class BackupActionHandler(ActionHandler):
             if not row:
                 return None
             return self._build_backup_task_from_row(row)
-        else:
+        elif is_redis():
+            # Redis模式：使用Redis查询
+            from backup.redis_backup_db import get_backup_tasks_redis
+            tasks = await get_backup_tasks_redis(limit=100)  # 获取更多任务以查找未完成的
+            for task_dict in tasks:
+                if task_dict.get('template_id') == template_id and task_dict.get('status') != 'completed':
+                    task = type('BackupTask', (), {**task_dict, 'force_rescan': False})()
+                    return task
+            return None
+        elif is_sqlite() and db_manager.AsyncSessionLocal and callable(db_manager.AsyncSessionLocal):
             async with db_manager.AsyncSessionLocal() as session:
                 stmt = (
                     select(BackupTask)
@@ -748,6 +904,8 @@ class BackupActionHandler(ActionHandler):
                 if task:
                     task.force_rescan = False
                 return task
+        else:
+            return None
 
     async def _cancel_incomplete_backup_task(self, template_id: int) -> Optional[int]:
         """取消并清理未完成的备份任务"""

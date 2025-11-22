@@ -90,6 +90,13 @@ def row_to_task(row) -> ScheduledTask:
 async def load_tasks_from_db(enabled_only: bool = True) -> List[ScheduledTask]:
     """从数据库加载计划任务"""
     try:
+        # 检查是否为Redis模式
+        from utils.scheduler.db_utils import is_redis
+        if is_redis():
+            # Redis版本
+            from utils.scheduler.redis_task_storage import load_tasks_from_db_redis
+            return await load_tasks_from_db_redis(enabled_only)
+        
         if is_opengauss():
             # 使用原生SQL查询
             # 使用连接池
@@ -122,6 +129,14 @@ async def load_tasks_from_db(enabled_only: bool = True) -> List[ScheduledTask]:
 async def record_run_start(task_id: int, execution_id: str, started_at: datetime) -> None:
     """记录任务开始运行（openGauss 原生）"""
     try:
+        # 检查是否为Redis模式
+        from utils.scheduler.db_utils import is_redis
+        if is_redis():
+            # Redis版本
+            from utils.scheduler.redis_task_storage import record_run_start_redis
+            await record_run_start_redis(task_id, execution_id, started_at)
+            return
+        
         if is_opengauss():
             # 使用连接池
             async with get_opengauss_connection() as conn:
@@ -161,6 +176,14 @@ async def record_run_end(execution_id: str, completed_at: datetime, status: str,
                          error_message: Optional[str] = None) -> None:
     """记录任务结束（openGauss 原生）"""
     try:
+        # 检查是否为Redis模式
+        from utils.scheduler.db_utils import is_redis
+        if is_redis():
+            # Redis版本
+            from utils.scheduler.redis_task_storage import record_run_end_redis
+            await record_run_end_redis(execution_id, completed_at, status, result, error_message)
+            return
+        
         if is_opengauss():
             # 使用连接池
             async with get_opengauss_connection() as conn:
@@ -186,6 +209,13 @@ async def record_run_end(execution_id: str, completed_at: datetime, status: str,
 async def acquire_task_lock(task_id: int, execution_id: str) -> bool:
     """尝试获取任务锁（同一任务仅允许一个运行实例）"""
     try:
+        # 检查是否为Redis模式
+        from utils.scheduler.db_utils import is_redis
+        if is_redis():
+            # Redis版本
+            from utils.scheduler.redis_task_storage import acquire_task_lock_redis
+            return await acquire_task_lock_redis(task_id, execution_id)
+        
         if is_opengauss():
             # 使用连接池
             async with get_opengauss_connection() as conn:
@@ -300,6 +330,14 @@ async def acquire_task_lock(task_id: int, execution_id: str) -> bool:
 async def release_task_lock(task_id: int, execution_id: str) -> None:
     """释放任务锁"""
     try:
+        # 检查是否为Redis模式
+        from utils.scheduler.db_utils import is_redis
+        if is_redis():
+            # Redis版本
+            from utils.scheduler.redis_task_storage import release_task_lock_redis
+            await release_task_lock_redis(task_id, execution_id)
+            return
+        
         if is_opengauss():
             # 使用连接池
             async with get_opengauss_connection() as conn:
@@ -322,6 +360,14 @@ async def release_task_lock(task_id: int, execution_id: str) -> None:
 async def release_task_locks_by_task(task_id: int) -> None:
     """释放指定任务的所有活跃锁"""
     try:
+        # 检查是否为Redis模式
+        from utils.scheduler.db_utils import is_redis
+        if is_redis():
+            # Redis版本
+            from utils.scheduler.redis_task_storage import release_task_locks_by_task_redis
+            await release_task_locks_by_task_redis(task_id)
+            return
+        
         if is_opengauss():
             # 使用连接池
             async with get_opengauss_connection() as conn:
@@ -361,6 +407,14 @@ async def release_task_locks_by_task(task_id: int) -> None:
 async def release_all_active_locks() -> None:
     """释放所有活跃的任务锁（用于程序退出时清理）"""
     try:
+        # 检查是否为Redis模式
+        from utils.scheduler.db_utils import is_redis
+        if is_redis():
+            # Redis版本
+            from utils.scheduler.redis_task_storage import release_all_active_locks_redis
+            await release_all_active_locks_redis()
+            return
+        
         if is_opengauss():
             # 使用连接池
             async with get_opengauss_connection() as conn:
@@ -398,6 +452,13 @@ async def release_all_active_locks() -> None:
 async def get_task_by_id(task_id: int) -> Optional[ScheduledTask]:
     """根据ID获取计划任务"""
     try:
+        # 检查是否为Redis模式
+        from utils.scheduler.db_utils import is_redis
+        if is_redis():
+            # Redis版本
+            from utils.scheduler.redis_task_storage import get_task_by_id_redis
+            return await get_task_by_id_redis(task_id)
+        
         if is_opengauss():
             # 使用原生asyncpg查询
             # 使用连接池
@@ -421,6 +482,13 @@ async def get_task_by_id(task_id: int) -> Optional[ScheduledTask]:
 async def get_all_tasks(enabled_only: bool = False) -> List[ScheduledTask]:
     """获取所有计划任务"""
     try:
+        # 检查是否为Redis模式
+        from utils.scheduler.db_utils import is_redis
+        if is_redis():
+            # Redis版本
+            from utils.scheduler.redis_task_storage import get_all_tasks_redis
+            return await get_all_tasks_redis(enabled_only)
+        
         if is_opengauss():
             # 使用原生asyncpg查询
             # 使用连接池
@@ -454,6 +522,13 @@ async def get_all_tasks(enabled_only: bool = False) -> List[ScheduledTask]:
 async def add_task(scheduled_task: ScheduledTask) -> bool:
     """添加计划任务"""
     try:
+        # 检查是否为Redis模式
+        from utils.scheduler.db_utils import is_redis
+        if is_redis():
+            # Redis版本
+            from utils.scheduler.redis_task_storage import add_task_redis
+            return await add_task_redis(scheduled_task)
+        
         if is_opengauss():
             # 使用原生asyncpg插入
             # 使用连接池
@@ -564,6 +639,13 @@ async def add_task(scheduled_task: ScheduledTask) -> bool:
 async def delete_task(task_id: int) -> bool:
     """删除计划任务"""
     try:
+        # 检查是否为Redis模式
+        from utils.scheduler.db_utils import is_redis
+        if is_redis():
+            # Redis版本
+            from utils.scheduler.redis_task_storage import delete_task_redis
+            return await delete_task_redis(task_id)
+        
         if is_opengauss():
             # 使用原生asyncpg删除
             # 使用连接池
@@ -630,6 +712,13 @@ async def update_task(task_id: int, updates: Dict[str, Any], next_run_time: Opti
         更新后的ScheduledTask对象，如果失败则返回None
     """
     try:
+        # 检查是否为Redis模式
+        from utils.scheduler.db_utils import is_redis
+        if is_redis():
+            # Redis版本
+            from utils.scheduler.redis_task_storage import update_task_redis
+            return await update_task_redis(task_id, updates, next_run_time)
+        
         if is_opengauss():
             # 使用原生asyncpg更新
             # 使用连接池

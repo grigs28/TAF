@@ -37,6 +37,7 @@ class SystemEnvConfig(BaseModel):
     db_database: Optional[str] = Field(None, description="数据库名称")
     db_pool_size: Optional[int] = Field(None, description="连接池大小")
     db_max_overflow: Optional[int] = Field(None, description="最大溢出")
+    db_query_dop: Optional[int] = Field(None, description="openGauss查询并行度(1-64，默认16)")
     
     # ITDT工具配置
     itdt_path: Optional[str] = Field(None, description="ITDT可执行文件路径")
@@ -60,6 +61,7 @@ class SystemEnvConfig(BaseModel):
     scan_log_interval_seconds: Optional[int] = Field(None, description="后台扫描进度日志时间间隔（秒）")
     scan_method: Optional[str] = Field(None, description="扫描方法: default (默认) 或 es (Everything搜索工具)")
     es_exe_path: Optional[str] = Field(None, description="Everything搜索工具可执行文件路径")
+    scan_threads: Optional[int] = Field(None, description="目录扫描并发线程数（默认4，建议1-16）")
     use_checkpoint: Optional[bool] = Field(None, description="是否启用检查点文件，默认不启用")
     
     # 内存数据库配置
@@ -131,6 +133,7 @@ async def get_env_config():
             "db_database": env_vars.get("DB_DATABASE", ""),
             "db_pool_size": parse_int(env_vars.get("DB_POOL_SIZE"), 10),
             "db_max_overflow": parse_int(env_vars.get("DB_MAX_OVERFLOW"), 20),
+            "db_query_dop": parse_int(env_vars.get("DB_QUERY_DOP"), 16),  # openGauss 查询并行度
             
             # ITDT工具配置
             "itdt_path": env_vars.get("ITDT_PATH", ""),
@@ -155,6 +158,7 @@ async def get_env_config():
             "scan_log_interval_seconds": parse_int(env_vars.get("SCAN_LOG_INTERVAL_SECONDS"), 60),
             "scan_method": env_vars.get("SCAN_METHOD", "default"),
             "es_exe_path": env_vars.get("ES_EXE_PATH", r"E:\app\TAF\ITDT\ES\es.exe"),
+            "scan_threads": parse_int(env_vars.get("SCAN_THREADS"), 4),
             "use_checkpoint": parse_bool(env_vars.get("USE_CHECKPOINT"), False),
             
             # 内存数据库配置
@@ -226,6 +230,11 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             updates["DB_POOL_SIZE"] = str(config.db_pool_size)
         if config.db_max_overflow is not None:
             updates["DB_MAX_OVERFLOW"] = str(config.db_max_overflow)
+        if config.db_query_dop is not None:
+            # 验证 query_dop 范围 (1-64)
+            if config.db_query_dop < 1 or config.db_query_dop > 64:
+                raise ValueError("DB_QUERY_DOP 必须在 1-64 之间")
+            updates["DB_QUERY_DOP"] = str(config.db_query_dop)
         
         # ITDT工具配置
         if config.itdt_path is not None:
@@ -263,6 +272,8 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             updates["SCAN_METHOD"] = config.scan_method
         if config.es_exe_path is not None:
             updates["ES_EXE_PATH"] = config.es_exe_path
+        if config.scan_threads is not None:
+            updates["SCAN_THREADS"] = str(config.scan_threads)
         if config.use_checkpoint is not None:
             updates["USE_CHECKPOINT"] = str(config.use_checkpoint).lower()
         
@@ -329,12 +340,14 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
         
         logger.info(f"环境配置已更新: {len(updates)} 个配置项")
         
-        # 重新加载配置（注意：这不会影响正在运行的实例，需要重启才能生效）
-        # reload_settings()
+        # 重新加载配置，使后续调用get_settings()能获取最新配置
+        from config.settings import reload_settings
+        reload_settings()
+        logger.info("配置已重新加载，新配置将立即生效")
         
         return {
             "success": True,
-            "message": "环境配置已更新（需要重启服务才能生效）",
+            "message": "环境配置已更新并重新加载，新配置将立即生效",
             "updated_keys": list(updates.keys())
         }
     

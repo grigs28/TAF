@@ -10,13 +10,35 @@ document.addEventListener('DOMContentLoaded', function() {
             const dbTypeVal = this.value;
             const sqliteConfig = document.getElementById('sqliteConfig');
             const serverDbConfig = document.getElementById('serverDbConfig');
+            const redisConfig = document.getElementById('redisConfig');
+            const redisSpecificConfig = document.getElementById('redisSpecificConfig');
+            const dbDatabaseGroup = document.getElementById('dbDatabaseGroup');
+            const dbUserGroup = document.getElementById('dbUserGroup');
+            const dbIndexGroup = document.getElementById('dbIndexGroup');
             
             if (dbTypeVal === 'sqlite') {
                 sqliteConfig.style.display = 'block';
                 serverDbConfig.style.display = 'none';
+                redisConfig.style.display = 'none';
+                if (redisSpecificConfig) redisSpecificConfig.style.display = 'none';
+            } else if (dbTypeVal === 'redis') {
+                sqliteConfig.style.display = 'none';
+                serverDbConfig.style.display = 'none';  // Redis不使用serverDbConfig
+                redisConfig.style.display = 'block';
+                if (redisSpecificConfig) redisSpecificConfig.style.display = 'block';
+                // Redis使用专门的配置项，不使用serverDbConfig
+                if (dbDatabaseGroup) dbDatabaseGroup.style.display = 'none';
+                if (dbUserGroup) dbUserGroup.style.display = 'none';
+                if (dbIndexGroup) dbIndexGroup.style.display = 'none';
             } else {
                 sqliteConfig.style.display = 'none';
                 serverDbConfig.style.display = 'block';
+                redisConfig.style.display = 'none';
+                if (redisSpecificConfig) redisSpecificConfig.style.display = 'none';
+                // 其他数据库需要用户名和数据库名
+                if (dbDatabaseGroup) dbDatabaseGroup.style.display = 'block';
+                if (dbUserGroup) dbUserGroup.style.display = 'block';
+                if (dbIndexGroup) dbIndexGroup.style.display = 'none';
             }
         });
         
@@ -78,6 +100,83 @@ document.addEventListener('DOMContentLoaded', function() {
             });
         }
         
+        // Redis配置文件浏览按钮
+        const browseRedisConfigBtn = document.getElementById('browseRedisConfigBtn');
+        if (browseRedisConfigBtn) {
+            browseRedisConfigBtn.addEventListener('click', function() {
+                // 创建隐藏的文件输入元素
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.accept = '.conf';
+                input.style.display = 'none';
+                
+                input.addEventListener('change', function(e) {
+                    const file = e.target.files[0];
+                    if (file) {
+                        const redisConfigFilePathInput = document.getElementById('redisConfigFilePath');
+                        if (redisConfigFilePathInput) {
+                            // 在浏览器环境中，file.path不可用，使用file.name
+                            // 用户可能需要手动调整路径为服务器端的完整路径
+                            const fileName = file.name;
+                            // 如果当前路径存在，尝试保持目录部分，只替换文件名
+                            const currentPath = redisConfigFilePathInput.value;
+                            if (currentPath && currentPath.includes('\\')) {
+                                const dirPath = currentPath.substring(0, currentPath.lastIndexOf('\\') + 1);
+                                redisConfigFilePathInput.value = dirPath + fileName;
+                            } else if (currentPath && currentPath.includes('/')) {
+                                const dirPath = currentPath.substring(0, currentPath.lastIndexOf('/') + 1);
+                                redisConfigFilePathInput.value = dirPath + fileName;
+                            } else {
+                                // 如果没有当前路径，使用默认路径
+                                redisConfigFilePathInput.value = fileName;
+                            }
+                            // 提示用户可能需要手动调整路径
+                            if (!file.path) {
+                                console.log('提示：请确认文件路径是否正确，必要时请手动编辑为服务器端的完整路径');
+                            }
+                        }
+                    }
+                    // 清理临时元素
+                    document.body.removeChild(input);
+                });
+                
+                // 添加到DOM并触发点击
+                document.body.appendChild(input);
+                input.click();
+            });
+        }
+
+        // Redis配置文件自动检测按钮
+        const detectRedisConfigBtn = document.getElementById('detectRedisConfigBtn');
+        if (detectRedisConfigBtn) {
+            detectRedisConfigBtn.addEventListener('click', async function() {
+                const btn = this;
+                const originalHtml = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = '<i class="bi bi-arrow-clockwise spinner me-1"></i>检测中...';
+                
+                try {
+                    const response = await fetch('/api/system/database/redis/config-file');
+                    const result = await response.json();
+                    
+                    if (result.success && result.config_file_path) {
+                        const redisConfigFilePathInput = document.getElementById('redisConfigFilePath');
+                        if (redisConfigFilePathInput) {
+                            redisConfigFilePathInput.value = result.config_file_path;
+                            alert('✅ Redis配置文件路径已自动检测: ' + result.config_file_path);
+                        }
+                    } else {
+                        alert('⚠️ ' + (result.message || '未找到Redis配置文件，请手动指定路径'));
+                    }
+                } catch (error) {
+                    alert('❌ 自动检测失败：' + error.message);
+                } finally {
+                    btn.disabled = false;
+                    btn.innerHTML = originalHtml;
+                }
+            });
+        }
+
         // 测试数据库连接
         const testDbConnectionBtn = document.getElementById('testDbConnectionBtn');
         if (testDbConnectionBtn) {
@@ -124,6 +223,27 @@ function getDatabaseConfig() {
     
     if (dbType === 'sqlite') {
         config.db_path = document.getElementById('dbPath').value;
+    } else if (dbType === 'redis') {
+        // Redis使用专门的配置项
+        const redisHostElement = document.getElementById('redisHost');
+        const redisPortElement = document.getElementById('redisPort');
+        const redisPasswordElement = document.getElementById('redisPassword');
+        const redisDbIndexElement = document.getElementById('redisDbIndex');
+        const redisConfigFilePathElement = document.getElementById('redisConfigFilePath');
+        
+        config.db_host = redisHostElement ? redisHostElement.value : '';
+        config.db_port = redisPortElement ? parseInt(redisPortElement.value) || 6379 : 6379;
+        config.db_password = redisPasswordElement ? redisPasswordElement.value : '';
+        config.db_index = redisDbIndexElement ? parseInt(redisDbIndexElement.value) || 0 : 0;
+        config.config_file_path = redisConfigFilePathElement ? redisConfigFilePathElement.value : '';
+        
+        // 兼容旧代码：如果没有redisHost，尝试使用dbHost
+        if (!config.db_host) {
+            const dbHostElement = document.getElementById('dbHost');
+            if (dbHostElement && dbHostElement.value) {
+                config.db_host = dbHostElement.value;
+            }
+        }
     } else {
         config.db_host = document.getElementById('dbHost').value;
         config.db_port = parseInt(document.getElementById('dbPort').value);
@@ -150,8 +270,15 @@ async function saveDatabaseConfigSection() {
             console.log('SQLite数据库路径为空，跳过保存数据库配置');
             return true;
         }
+    } else if (config.db_type === 'redis') {
+        // Redis需要主机和端口，密码可选，不需要用户名和数据库名
+        if (!config.db_host || config.db_host.trim() === '' ||
+            !config.db_port) {
+            console.log('Redis数据库配置不完整，跳过保存数据库配置');
+            return true;
+        }
     } else {
-        // 对于服务器数据库，如果任何必填字段为空，也跳过保存
+        // 对于其他服务器数据库，如果任何必填字段为空，也跳过保存
         if (!config.db_host || config.db_host.trim() === '' ||
             !config.db_port ||
             !config.db_user || config.db_user.trim() === '' ||
@@ -191,9 +318,56 @@ async function loadDatabaseConfig() {
                 document.getElementById('dbPath').value = config.db_path || defaultPath;
                 document.getElementById('sqliteConfig').style.display = 'block';
                 document.getElementById('serverDbConfig').style.display = 'none';
+                document.getElementById('redisConfig').style.display = 'none';
                 
                 // 加载 SQLite 配置（从环境配置中加载）
                 loadSQLiteConfig();
+            } else if (config.db_type === 'redis') {
+                // Redis使用专门的配置项
+                const redisHostElement = document.getElementById('redisHost');
+                const redisPortElement = document.getElementById('redisPort');
+                const redisPasswordElement = document.getElementById('redisPassword');
+                const redisDbIndexElement = document.getElementById('redisDbIndex');
+                const redisConfigFilePathElement = document.getElementById('redisConfigFilePath');
+                
+                if (redisHostElement && config.db_host) {
+                    redisHostElement.value = config.db_host;
+                } else if (config.db_host) {
+                    // 兼容旧代码：如果redisHost不存在，使用dbHost
+                    const dbHostElement = document.getElementById('dbHost');
+                    if (dbHostElement) dbHostElement.value = config.db_host;
+                }
+                
+                if (redisPortElement && config.db_port) {
+                    redisPortElement.value = config.db_port;
+                } else if (config.db_port) {
+                    // 兼容旧代码：如果redisPort不存在，使用dbPort
+                    const dbPortElement = document.getElementById('dbPort');
+                    if (dbPortElement) dbPortElement.value = config.db_port;
+                }
+                
+                if (redisPasswordElement && config.db_password) {
+                    redisPasswordElement.value = config.db_password;
+                } else if (config.db_password) {
+                    // 兼容旧代码：如果redisPassword不存在，使用dbPassword
+                    const dbPasswordElement = document.getElementById('dbPassword');
+                    if (dbPasswordElement) dbPasswordElement.value = config.db_password;
+                }
+                
+                if (redisDbIndexElement && config.db_index !== undefined) {
+                    redisDbIndexElement.value = config.db_index;
+                }
+                
+                if (redisConfigFilePathElement && config.config_file_path) {
+                    redisConfigFilePathElement.value = config.config_file_path;
+                }
+                
+                // 显示/隐藏相应配置区域
+                document.getElementById('sqliteConfig').style.display = 'none';
+                document.getElementById('serverDbConfig').style.display = 'none';
+                document.getElementById('redisConfig').style.display = 'block';
+                const redisSpecificConfig = document.getElementById('redisSpecificConfig');
+                if (redisSpecificConfig) redisSpecificConfig.style.display = 'block';
             } else {
                 if (config.db_host) document.getElementById('dbHost').value = config.db_host;
                 if (config.db_port) document.getElementById('dbPort').value = config.db_port;
@@ -738,6 +912,10 @@ async function loadAllSystemConfig() {
                 const esExePathInput = document.getElementById('esExePath');
                 if (esExePathInput) esExePathInput.value = config.es_exe_path;
             }
+            if (config.scan_threads) {
+                const scanThreadsInput = document.getElementById('scanThreads');
+                if (scanThreadsInput) scanThreadsInput.value = config.scan_threads;
+            }
             if (config.use_checkpoint !== undefined) {
                 const useCheckpointInput = document.getElementById('useCheckpoint');
                 if (useCheckpointInput) useCheckpointInput.checked = config.use_checkpoint;
@@ -824,6 +1002,14 @@ async function saveEnvConfigSection() {
             scan_log_interval_seconds: parseInt(document.getElementById('scanLogIntervalSeconds')?.value) || null,
             scan_method: document.getElementById('scanMethod')?.value || null,
             es_exe_path: document.getElementById('esExePath')?.value || null,
+            scan_threads: (() => {
+                const input = document.getElementById('scanThreads');
+                if (!input) return null;
+                const value = input.value;
+                if (value === '' || value === null || value === undefined) return null;
+                const parsed = parseInt(value);
+                return isNaN(parsed) ? null : parsed;
+            })(),
             use_checkpoint: document.getElementById('useCheckpoint')?.checked || null,
             
             // 内存数据库配置

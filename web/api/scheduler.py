@@ -199,8 +199,15 @@ async def create_scheduled_task(task: ScheduledTaskCreate, request: Request = No
         
         # 验证备份任务模板（如果提供了backup_task_id）
         if task.action_type == "backup" and task.backup_task_id:
-            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection, is_redis
             from utils.scheduler.sqlite_utils import get_sqlite_connection
+            
+            # 检查是否为Redis数据库
+            if is_redis():
+                # Redis模式下暂不支持验证备份任务模板
+                logger.warning(f"[Redis模式] 验证备份任务模板暂未实现: {task.backup_task_id}")
+                # 继续执行，不验证模板（或者可以返回错误）
+                # raise HTTPException(status_code=501, detail="Redis模式下暂不支持验证备份任务模板")
             
             if is_opengauss():
                 # 使用原生SQL查询（openGauss）
@@ -220,21 +227,26 @@ async def create_scheduled_task(task: ScheduledTaskCreate, request: Request = No
                         )
             else:
                 # 使用原生SQL查询（SQLite）
-                async with get_sqlite_connection() as conn:
-                    cursor = await conn.execute("""
-                        SELECT id, task_name, task_type, source_paths, exclude_patterns,
-                               compression_enabled, encryption_enabled, retention_days,
-                               description, tape_device, is_template
-                        FROM backup_tasks
-                        WHERE id = ? AND is_template = 1
-                    """, (task.backup_task_id,))
-                    row = await cursor.fetchone()
-                    
-                    if not row:
-                        raise HTTPException(
-                            status_code=404,
-                            detail=f"备份任务模板不存在: {task.backup_task_id}"
-                        )
+                # 检查是否为SQLite数据库
+                if not is_sqlite():
+                    logger.warning(f"[数据库类型错误] 当前数据库类型不支持验证备份任务模板: {task.backup_task_id}")
+                    # 继续执行，不验证模板
+                else:
+                    async with get_sqlite_connection() as conn:
+                        cursor = await conn.execute("""
+                            SELECT id, task_name, task_type, source_paths, exclude_patterns,
+                                   compression_enabled, encryption_enabled, retention_days,
+                                   description, tape_device, is_template
+                            FROM backup_tasks
+                            WHERE id = ? AND is_template = 1
+                        """, (task.backup_task_id,))
+                        row = await cursor.fetchone()
+                        
+                        if not row:
+                            raise HTTPException(
+                                status_code=404,
+                                detail=f"备份任务模板不存在: {task.backup_task_id}"
+                            )
             
             # 将backup_task_id保存到task_metadata中
             if task.task_metadata is None:
@@ -304,6 +316,9 @@ async def create_scheduled_task(task: ScheduledTaskCreate, request: Request = No
         # 重新获取任务（包含ID和时间信息）
         created_task = await scheduler.get_task(scheduled_task.id)
         
+        if not created_task:
+            raise HTTPException(status_code=500, detail="创建计划任务后无法获取任务详情")
+        
         return ScheduledTaskResponse(**created_task.to_dict())
         
     except HTTPException:
@@ -325,6 +340,15 @@ async def _check_tape_label_exists(volume_label: str) -> bool:
         如果存在返回True，否则返回False
     """
     try:
+        # 检查是否为Redis数据库
+        from utils.scheduler.db_utils import is_redis
+        from utils.scheduler.sqlite_utils import is_sqlite
+        
+        if is_redis():
+            # Redis模式下返回False（暂未实现Redis查询磁带）
+            logger.debug(f"[Redis模式] 检查磁带卷标存在性暂未实现: {volume_label}")
+            return False
+        
         if is_opengauss():
             # 使用连接池
             async with get_opengauss_connection() as conn:
@@ -334,10 +358,15 @@ async def _check_tape_label_exists(volume_label: str) -> bool:
                 )
                 return row is not None
         else:
-            # 使用SQLAlchemy
+            # 使用SQLAlchemy（SQLite）
             from config.database import db_manager
             from sqlalchemy import select
             from models.tape import TapeCartridge
+            
+            # 检查是否为SQLite数据库
+            if not is_sqlite() or db_manager.AsyncSessionLocal is None:
+                logger.debug(f"[数据库类型错误] 当前数据库类型不支持检查磁带卷标存在性: {volume_label}")
+                return False
             
             async with db_manager.AsyncSessionLocal() as session:
                 stmt = select(TapeCartridge).where(TapeCartridge.label == volume_label).limit(1)
@@ -359,6 +388,15 @@ async def _generate_serial_number(year: int, month: int) -> str:
         6位序列号，例如：TP1101（11月第一张磁盘）
     """
     try:
+        # 检查是否为Redis数据库
+        from utils.scheduler.db_utils import is_redis
+        from utils.scheduler.sqlite_utils import is_sqlite
+        
+        if is_redis():
+            # Redis模式下返回默认序列号（暂未实现Redis查询磁带）
+            logger.debug(f"[Redis模式] 生成序列号暂未实现，返回默认值: TP{month:02d}01")
+            return f"TP{month:02d}01"
+        
         mm = month
         
         # 查询当前月份已有多少张磁盘（查询TP + 月份开头的序列号）
@@ -376,10 +414,15 @@ async def _generate_serial_number(year: int, month: int) -> str:
                 # 序号从01开始
                 sequence = (count or 0) + 1
         else:
-            # 使用SQLAlchemy
+            # 使用SQLAlchemy（SQLite）
             from config.database import db_manager
             from sqlalchemy import select, func, and_
             from models.tape import TapeCartridge
+            
+            # 检查是否为SQLite数据库
+            if not is_sqlite() or db_manager.AsyncSessionLocal is None:
+                logger.debug(f"[数据库类型错误] 当前数据库类型不支持生成序列号，返回默认值: TP{month:02d}01")
+                return f"TP{month:02d}01"
             
             async with db_manager.AsyncSessionLocal() as session:
                 pattern = f"TP{mm:02d}%"
@@ -428,9 +471,22 @@ async def _format_tape_via_disk_management(
     from utils.log_utils import log_operation
     
     try:
+        # 检查是否为Redis数据库
+        from utils.scheduler.db_utils import is_redis
+        
+        if is_redis():
+            logger.warning(f"[Redis模式] 通过磁盘管理格式化磁带暂未实现: {volume_label}")
+            return False
+        
         # 获取数据库连接信息
         settings = get_settings()
         database_url = settings.DATABASE_URL
+        
+        # 检查是否为 SQLite
+        from utils.scheduler.sqlite_utils import is_sqlite
+        if is_sqlite():
+            logger.warning(f"[SQLite模式] 通过磁盘管理格式化磁带暂未实现: {volume_label}")
+            return False
         
         # 解析URL
         if database_url.startswith("opengauss://"):

@@ -33,6 +33,27 @@ def is_sqlite() -> bool:
 def _get_sqlite_path() -> str:
     """从 DATABASE_URL 获取 SQLite 数据库文件路径"""
     database_url = db_manager.settings.DATABASE_URL
+    
+    # 检查是否为 SQLite URL
+    if not database_url.startswith("sqlite:///") and not database_url.startswith("sqlite+aiosqlite:///"):
+        from utils.scheduler.db_utils import is_redis, is_opengauss
+        
+        # 确定当前数据库类型
+        if is_redis():
+            current_db_type = "Redis"
+        elif is_opengauss():
+            current_db_type = "openGauss"
+        else:
+            current_db_type = "未知类型"
+        
+        error_msg = (
+            f"[数据库类型错误] 当前数据库类型是 {current_db_type}，无法获取 SQLite 路径。"
+            f"请检查代码逻辑，确保在 {current_db_type} 模式下不使用 SQLite 连接。"
+            f"DATABASE_URL: {database_url[:50]}..."
+        )
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    
     # 移除 sqlite:/// 或 sqlite+aiosqlite:/// 前缀
     path = database_url.replace("sqlite+aiosqlite:///", "").replace("sqlite:///", "")
     return path
@@ -93,6 +114,28 @@ async def get_sqlite_connection():
         rows = await cursor.fetchall()
         # 连接自动释放回连接池
     """
+    # 检查当前数据库类型是否为 SQLite
+    if not is_sqlite():
+        from utils.scheduler.db_utils import is_redis, is_opengauss
+        
+        # 确定当前数据库类型
+        if is_redis():
+            current_db_type = "Redis"
+            suggestion = "在 Redis 模式下请使用 Redis 相关函数"
+        elif is_opengauss():
+            current_db_type = "openGauss"
+            suggestion = "在 openGauss 模式下请使用 get_opengauss_connection() 函数"
+        else:
+            current_db_type = "未知类型"
+            suggestion = "请检查数据库配置"
+        
+        error_msg = (
+            f"[数据库类型错误] 当前数据库类型是 {current_db_type}，无法使用 SQLite 连接。"
+            f"{suggestion}。"
+        )
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    
     conn = await _ensure_sqlite_connection()
     try:
         yield conn

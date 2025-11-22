@@ -75,13 +75,22 @@ class FileMoveWorker:
             return None
 
     async def _file_move_worker(self):
-        """独立的文件移动后台任务：扫描 final 目录，发现文件后移动到磁带"""
+        """
+        独立的文件移动后台任务：检索final目录及其子目录，按目录结构移动到磁带
+        
+        新逻辑：
+        1. 检索final目录及其所有子目录
+        2. 找到文件就按目录结构移动到磁带
+        3. 没有其他判断条件（不查询数据库、不验证backup_set等）
+        4. 一一对应，按目录操作（保持目录结构）
+        """
         logger.info("[文件移动线程] ========== 文件移动后台任务已启动 ==========")
+        logger.info("[文件移动线程] 模式：检索final目录及其子目录，按目录结构移动到磁带（无其他判断条件）")
         
         try:
             while self._running:
                 try:
-                    # 扫描 final 目录
+                    # 扫描 final 目录及其所有子目录
                     final_dir = self._get_final_dir()
                     
                     if not final_dir.exists():
@@ -89,166 +98,111 @@ class FileMoveWorker:
                         await asyncio.sleep(self._scan_interval)
                         continue
                     
-                    # 扫描 final 目录下的所有子目录（每个 backup_set.set_id 一个子目录）
-                    found_files = []
-                    for set_id_dir in final_dir.iterdir():
-                        if not set_id_dir.is_dir():
-                            continue
+                    # 检索final目录及其所有子目录中的文件（按目录结构）
+                    found_files = []  # [(相对路径, 文件路径), ...]
+                    
+                    # 递归扫描所有子目录
+                    for root, dirs, files in os.walk(final_dir):
+                        root_path = Path(root)
                         
-                        # 扫描该备份集目录下的所有压缩文件
-                        for file_path in set_id_dir.iterdir():
+                        # 计算相对于final_dir的相对路径
+                        try:
+                            relative_path = root_path.relative_to(final_dir)
+                        except ValueError:
+                            # 如果无法计算相对路径，使用绝对路径的一部分
+                            relative_path = Path(root_path.name)
+                        
+                        # 扫描该目录下的所有文件
+                        for file_name in files:
+                            file_path = root_path / file_name
+                            
                             if not file_path.is_file():
                                 continue
                             
                             # 检查是否是压缩文件（.7z, .tar.gz, .tar, .tar.zst 等）
                             if file_path.suffix in ['.7z', '.gz', '.tar', '.zst'] or file_path.name.endswith('.tar.gz'):
                                 # 检查是否已处理过（避免重复处理）
-                                file_key = f"{set_id_dir.name}/{file_path.name}"
+                                # 使用相对路径作为key，保持目录结构
+                                file_key = str(relative_path / file_name) if relative_path != Path('.') else file_name
                                 if file_key not in self._processed_files:
-                                    found_files.append((set_id_dir.name, file_path))
+                                    found_files.append((relative_path, file_path, file_key))
                     
-                    # 处理找到的文件
+                    # 处理找到的文件（按目录结构移动）
                     if found_files:
-                        logger.info(f"[文件移动线程] 扫描到 {len(found_files)} 个新文件待移动到磁带")
+                        logger.info(f"[文件移动线程] 扫描到 {len(found_files)} 个新文件待移动到磁带（按目录结构）")
                         
-                        for set_id, file_path in found_files:
+                        for relative_dir, file_path, file_key in found_files:
                             if not self._running:
                                 break
-                            
-                            file_key = f"{set_id}/{file_path.name}"
                             
                             try:
                                 # 检查文件是否仍然存在（可能在其他线程中被删除）
                                 if not file_path.exists():
-                                    logger.debug(f"[文件移动线程] 文件已不存在，跳过: {file_path.name}")
+                                    logger.debug(f"[文件移动线程] 文件已不存在，跳过: {file_key}")
                                     self._processed_files.add(file_key)
                                     continue
                                 
-                                logger.info(f"[文件移动线程] 开始处理文件: {file_path.name} (backup_set: {set_id})")
+                                logger.info(f"[文件移动线程] 开始处理文件: {file_key}")
                                 
-                                # 将文件加入磁带移动队列
+                                # 将文件按目录结构移动到磁带（无其他判断条件）
                                 if self.tape_file_mover:
-                                    # 尝试获取 backup_set 对象（需要从数据库查询）
-                                    # 这里简化处理，直接使用 set_id 字符串
-                                    # tape_file_mover 可能需要 backup_set 对象，这里暂时传入 None 或简化处理
+                                    # 直接移动文件，不需要查询数据库、不需要验证backup_set等
+                                    # 按目录结构：保持final目录下的目录结构
+                                    
+                                    # 创建磁带上的目标路径（保持目录结构）
+                                    # 磁带盘符: O:\ 或配置的TAPE_DRIVE_LETTER
+                                    tape_drive = Path(f"{self.settings.TAPE_DRIVE_LETTER}:\\")
+                                    
+                                    # 目标路径：磁带盘符 + 相对路径（保持目录结构）
+                                    if relative_dir != Path('.'):
+                                        tape_target_dir = tape_drive / relative_dir
+                                        tape_target_path = tape_target_dir / file_path.name
+                                    else:
+                                        tape_target_dir = tape_drive
+                                        tape_target_path = tape_target_dir / file_path.name
+                                    
+                                    logger.info(f"[文件移动线程] 准备移动到磁带: {file_key}")
+                                    logger.info(f"[文件移动线程] 源路径: {file_path}")
+                                    logger.info(f"[文件移动线程] 目标路径: {tape_target_path} (保持目录结构: {relative_dir})")
+                                    
+                                    # 确保目标目录存在
                                     try:
-                                        from models.backup import BackupSet, BackupTaskType, BackupSetStatus
-                                        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
-                                        from backup.backup_db import BackupDB
+                                        tape_target_dir.mkdir(parents=True, exist_ok=True)
+                                    except Exception as mkdir_error:
+                                        logger.error(f"[文件移动线程] 创建目标目录失败: {tape_target_dir}, 错误: {mkdir_error}")
+                                        self._processed_files.add(file_key)
+                                        continue
+                                    
+                                    # 使用tape_file_mover移动文件
+                                    # 注意：由于不再需要backup_set，需要修改tape_file_mover或使用shutil直接移动
+                                    # 这里使用简化的移动方式：直接复制到磁带，然后删除源文件
+                                    try:
+                                        loop = asyncio.get_event_loop()
+                                        await loop.run_in_executor(None, shutil.copy2, str(file_path), str(tape_target_path))
                                         
-                                        backup_set = None
-                                        if is_opengauss():
-                                            async with get_opengauss_connection() as conn:
-                                                row = await conn.fetchrow(
-                                                    """
-                                                    SELECT id, set_id, set_name, backup_group, status, backup_task_id, tape_id,
-                                                           backup_type, backup_time, source_info, retention_until, auto_delete,
-                                                           total_files, total_bytes, compressed_bytes, compression_ratio, chunk_count,
-                                                           checksum, verified, verified_at, created_at, updated_at
-                                                    FROM backup_sets
-                                                    WHERE set_id = $1
-                                                    """,
-                                                    set_id
-                                                )
-                                                
-                                                if row:
-                                                    # 解析枚举值
-                                                    backup_type_str = row['backup_type']
-                                                    # BackupTaskType 的值是小写（如 "full", "incremental"）
-                                                    if backup_type_str:
-                                                        try:
-                                                            backup_type = BackupTaskType(backup_type_str.lower())
-                                                        except ValueError:
-                                                            backup_type = BackupTaskType.FULL
-                                                    else:
-                                                        backup_type = BackupTaskType.FULL
-                                                    
-                                                    status_str = row['status']
-                                                    # BackupSetStatus 的值是小写（如 "active", "archived"）
-                                                    if status_str:
-                                                        try:
-                                                            status = BackupSetStatus(status_str.lower())
-                                                        except ValueError:
-                                                            status = BackupSetStatus.ACTIVE
-                                                    else:
-                                                        status = BackupSetStatus.ACTIVE
-                                                    
-                                                    # 解析 source_info JSON
-                                                    import json
-                                                    source_info = json.loads(row['source_info']) if row['source_info'] else None
-                                                    
-                                                    # 创建 BackupSet 对象
-                                                    backup_set = BackupSet(
-                                                        id=row['id'],
-                                                        set_id=row['set_id'],
-                                                        set_name=row['set_name'],
-                                                        backup_group=row['backup_group'],
-                                                        status=status,
-                                                        backup_task_id=row['backup_task_id'],
-                                                        tape_id=row['tape_id'],
-                                                        backup_type=backup_type,
-                                                        backup_time=row['backup_time'],
-                                                        source_info=source_info,
-                                                        retention_until=row['retention_until'],
-                                                        auto_delete=row.get('auto_delete', True),
-                                                        total_files=row.get('total_files', 0),
-                                                        total_bytes=row.get('total_bytes', 0),
-                                                        compressed_bytes=row.get('compressed_bytes', 0),
-                                                        compression_ratio=row.get('compression_ratio'),
-                                                        chunk_count=row.get('chunk_count', 0),
-                                                        checksum=row.get('checksum'),
-                                                        verified=row.get('verified', False),
-                                                        verified_at=row.get('verified_at')
-                                                    )
-                                        else:
-                                            # SQLite 版本：使用 BackupDB 的方法
-                                            backup_db = BackupDB()
-                                            backup_set = await backup_db.get_backup_set_by_set_id(set_id)
-                                        
-                                        if backup_set:
-                                            # 从文件名提取 chunk_number（如果可能）
-                                            # 文件名格式: backup_{set_id}_{timestamp}.{ext}
-                                            # chunk_number 可能需要在文件名中编码，或者从数据库查询
-                                            # 这里暂时使用 0 作为默认值
-                                            chunk_number = 0
-                                            
-                                            # 定义回调函数
-                                            def move_callback(source_path: str, tape_file_path: Optional[str], success: bool, error: Optional[str]):
-                                                """文件移动完成后的回调函数"""
-                                                if success and tape_file_path:
-                                                    logger.info(f"[文件移动线程] 文件已成功移动到磁带机: {tape_file_path}")
-                                                elif not success:
-                                                    logger.error(f"[文件移动线程] 文件移动到磁带机失败: {source_path}, 错误: {error}")
-                                            
-                                            # 将文件加入磁带移动队列
-                                            added = self.tape_file_mover.add_file(
-                                                str(file_path),
-                                                backup_set,
-                                                chunk_number,
-                                                callback=move_callback,
-                                                backup_task=None  # 暂时不传递 backup_task
-                                            )
-                                            
-                                            if added:
-                                                logger.info(f"[文件移动线程] ✅ 文件已加入磁带移动队列: {file_path.name}")
+                                        # 验证移动是否成功（检查目标文件是否存在）
+                                        if tape_target_path.exists():
+                                            # 删除源文件
+                                            try:
+                                                file_path.unlink()
+                                                logger.info(f"[文件移动线程] ✅ 文件已成功移动到磁带: {file_key} -> {tape_target_path}")
                                                 self._processed_files.add(file_key)
-                                            else:
-                                                logger.error(f"[文件移动线程] ❌ 文件加入磁带移动队列失败: {file_path.name}")
+                                            except Exception as del_error:
+                                                logger.error(f"[文件移动线程] 删除源文件失败: {file_path}, 错误: {del_error}")
+                                                # 即使删除失败，也标记为已处理（文件已复制到磁带）
+                                                self._processed_files.add(file_key)
                                         else:
-                                            logger.warning(f"[文件移动线程] 未找到 backup_set (set_id={set_id})，跳过文件: {file_path.name}")
-                                            # 即使找不到 backup_set，也标记为已处理，避免重复扫描
+                                            logger.error(f"[文件移动线程] ❌ 文件复制到磁带后目标文件不存在: {tape_target_path}")
                                             self._processed_files.add(file_key)
-                                    except Exception as e:
-                                        logger.error(f"[文件移动线程] 处理文件时发生错误: {file_path.name}, 错误: {str(e)}", exc_info=True)
-                                        # 发生错误时，标记为已处理，避免无限重试
+                                    except Exception as move_error:
+                                        logger.error(f"[文件移动线程] 移动文件到磁带失败: {file_key}, 错误: {str(move_error)}", exc_info=True)
                                         self._processed_files.add(file_key)
                                 else:
-                                    logger.warning(f"[文件移动线程] 磁带文件移动器未初始化，跳过文件: {file_path.name}")
-                                    # 即使没有 tape_file_mover，也标记为已处理
+                                    logger.warning(f"[文件移动线程] 磁带文件移动器未初始化，跳过文件: {file_key}")
                                     self._processed_files.add(file_key)
                                 
                             except Exception as file_error:
-                                logger.error(f"[文件移动线程] 处理文件失败: {file_path.name}, 错误: {str(file_error)}", exc_info=True)
+                                logger.error(f"[文件移动线程] 处理文件失败: {file_key}, 错误: {str(file_error)}", exc_info=True)
                                 # 发生错误时，标记为已处理，避免无限重试
                                 self._processed_files.add(file_key)
                     else:

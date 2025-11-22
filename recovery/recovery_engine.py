@@ -73,8 +73,101 @@ class RecoveryEngine:
     async def search_backup_sets(self, filters: Dict[str, Any] = None) -> List[Dict]:
         """搜索备份集（从数据库查询真实数据）"""
         try:
+            # 在函数开始处导入所有需要的函数，避免变量未定义错误
+            from utils.scheduler.db_utils import is_redis
+            from utils.scheduler.sqlite_utils import is_sqlite
+            
             backup_sets = []
             filters = filters or {}
+
+            # 检查是否为Redis数据库
+            if is_redis():
+                # Redis 版本：从Redis查询备份集
+                from config.redis_db import get_redis_client
+                from backup.redis_backup_db import KEY_PREFIX_BACKUP_SET, KEY_INDEX_BACKUP_SETS, _parse_datetime_value
+                
+                redis = await get_redis_client()
+                
+                # 获取所有备份集的set_id
+                set_ids_bytes = await redis.smembers(KEY_INDEX_BACKUP_SETS)
+                
+                for set_id_bytes in set_ids_bytes:
+                    # Redis客户端配置了decode_responses=True，返回的已经是字符串
+                    set_id = set_id_bytes if isinstance(set_id_bytes, str) else set_id_bytes.decode('utf-8')
+                    backup_set_key = f"{KEY_PREFIX_BACKUP_SET}:{set_id}"
+                    backup_set_data = await redis.hgetall(backup_set_key)
+                    
+                    if not backup_set_data:
+                        continue
+                    
+                    # 转换为字典（Redis客户端配置了decode_responses=True，键值都是字符串）
+                    backup_set_dict = {k if isinstance(k, str) else k.decode('utf-8'): 
+                                      v if isinstance(v, str) else (v.decode('utf-8') if isinstance(v, bytes) else v)
+                                      for k, v in backup_set_data.items()}
+                    
+                    # 只查询活跃状态的备份集
+                    status = backup_set_dict.get('status', '').upper()
+                    if status != 'ACTIVE':
+                        continue
+                    
+                    # 应用过滤条件
+                    if 'backup_group' in filters and filters['backup_group']:
+                        if backup_set_dict.get('backup_group') != filters['backup_group']:
+                            continue
+                    
+                    if 'tape_id' in filters and filters['tape_id']:
+                        if backup_set_dict.get('tape_id') != filters['tape_id']:
+                            continue
+                    
+                    if 'date_from' in filters and filters['date_from']:
+                        backup_time_str = backup_set_dict.get('backup_time')
+                        if backup_time_str:
+                            backup_time = _parse_datetime_value(backup_time_str)
+                            date_from = _parse_datetime_value(filters['date_from'])
+                            if backup_time and date_from and backup_time < date_from:
+                                continue
+                    
+                    if 'date_to' in filters and filters['date_to']:
+                        backup_time_str = backup_set_dict.get('backup_time')
+                        if backup_time_str:
+                            backup_time = _parse_datetime_value(backup_time_str)
+                            date_to = _parse_datetime_value(filters['date_to'])
+                            if backup_time and date_to and backup_time > date_to:
+                                continue
+                    
+                    # 解析字段
+                    backup_type_str = backup_set_dict.get('backup_type', 'full')
+                    backup_time_str = backup_set_dict.get('backup_time')
+                    backup_time_dt = _parse_datetime_value(backup_time_str) if backup_time_str else None
+                    
+                    backup_set = {
+                        'id': int(backup_set_dict.get('id', 0) or 0),
+                        'set_id': backup_set_dict.get('set_id', set_id),
+                        'set_name': backup_set_dict.get('set_name', ''),
+                        'backup_group': backup_set_dict.get('backup_group', ''),
+                        'backup_type': backup_type_str.lower(),
+                        'backup_time': backup_time_dt.isoformat() if backup_time_dt else None,
+                        'total_files': int(backup_set_dict.get('total_files', 0) or 0),
+                        'total_bytes': int(backup_set_dict.get('total_bytes', 0) or 0),
+                        'compressed_bytes': int(backup_set_dict.get('compressed_bytes', 0) or 0),
+                        'compression_ratio': float(backup_set_dict.get('compression_ratio', 0) or 0) if backup_set_dict.get('compression_ratio') else None,
+                        'tape_id': backup_set_dict.get('tape_id'),
+                        'status': status.lower(),
+                        'created_at': (_parse_datetime_value(backup_set_dict.get('created_at')).isoformat() 
+                                     if backup_set_dict.get('created_at') else None)
+                    }
+                    backup_sets.append(backup_set)
+                
+                # 按备份时间倒序排序
+                backup_sets.sort(key=lambda x: _parse_datetime_value(x.get('backup_time')).timestamp() 
+                               if x.get('backup_time') and _parse_datetime_value(x.get('backup_time')) else 0, 
+                               reverse=True)
+                
+                # 限制100个
+                backup_sets = backup_sets[:100]
+                
+                logger.info(f"[Redis模式] 查询到 {len(backup_sets)} 个备份集")
+                return backup_sets
 
             if is_opengauss():
                 # openGauss 原生SQL查询
@@ -142,6 +235,12 @@ class RecoveryEngine:
                         }
                         backup_sets.append(backup_set)
             else:
+                # 使用SQLite数据库
+                if not is_sqlite():
+                    db_type = "openGauss" if is_opengauss() else "Redis" if is_redis() else "未知类型"
+                    logger.warning(f"[{db_type}模式] 当前数据库类型不支持使用SQLite连接搜索备份集，返回空列表")
+                    return []
+                
                 # 使用原生SQL查询（SQLite）
                 async with get_sqlite_connection() as conn:
                     # 构建WHERE子句
@@ -228,7 +327,104 @@ class RecoveryEngine:
     async def get_backup_set_files(self, backup_set_id: str) -> List[Dict]:
         """获取备份集文件列表（从数据库查询真实数据）"""
         try:
+            from utils.scheduler.db_utils import is_redis
+            from utils.scheduler.sqlite_utils import is_sqlite
+            
             files = []
+
+            if is_redis():
+                # Redis 版本：从Redis查询备份集的所有文件
+                from config.redis_db import get_redis_client
+                from backup.redis_backup_db import (
+                    KEY_PREFIX_BACKUP_FILE, 
+                    KEY_PREFIX_BACKUP_SET,
+                    KEY_INDEX_BACKUP_FILE_BY_SET_ID,
+                    _get_redis_key,
+                    _parse_datetime_value
+                )
+                
+                redis = await get_redis_client()
+                
+                # 首先查找备份集
+                backup_set_key = f"{KEY_PREFIX_BACKUP_SET}:{backup_set_id}"
+                backup_set_data = await redis.hgetall(backup_set_key)
+                
+                if not backup_set_data:
+                    logger.warning(f"[Redis模式] 备份集不存在: {backup_set_id}")
+                    return []
+                
+                # 获取备份集的id（用于构建文件索引键）
+                backup_set_db_id = backup_set_data.get('id', backup_set_id)
+                
+                # 获取该备份集的所有文件ID（使用SSCAN迭代，避免超时）
+                file_index_key = f"{KEY_INDEX_BACKUP_FILE_BY_SET_ID}:{backup_set_db_id}"
+                
+                file_ids = []
+                cursor = 0
+                while True:
+                    cursor, batch = await redis.sscan(file_index_key, cursor, count=1000)
+                    file_ids.extend(batch)
+                    if cursor == 0:
+                        break
+                
+                logger.info(f"[Redis模式] 备份集 {backup_set_id} 包含 {len(file_ids)} 个文件")
+                
+                # 批量获取文件信息（使用pipeline优化性能）
+                batch_size = 1000
+                for i in range(0, len(file_ids), batch_size):
+                    batch_file_ids = file_ids[i:i + batch_size]
+                    
+                    pipe = redis.pipeline()
+                    for file_id in batch_file_ids:
+                        file_key = _get_redis_key(KEY_PREFIX_BACKUP_FILE, file_id)
+                        pipe.hgetall(file_key)
+                    file_data_list = await pipe.execute()
+                    
+                    # 处理每个文件的数据
+                    for file_id, file_data in zip(batch_file_ids, file_data_list):
+                        if not file_data:
+                            continue
+                        
+                        # 只返回已成功复制的文件（is_copy_success = '1'）
+                        is_copy_success = file_data.get('is_copy_success', '0')
+                        if is_copy_success != '1':
+                            continue
+                        
+                        # 转换为字典（Redis客户端配置了decode_responses=True，键值都是字符串）
+                        file_dict = {k: v for k, v in file_data.items()}
+                        
+                        # 处理日期时间
+                        def _format_datetime(dt_str):
+                            if not dt_str:
+                                return None
+                            dt = _parse_datetime_value(dt_str)
+                            return dt.isoformat() if dt else None
+                        
+                        file_info = {
+                            'id': int(file_id) if file_id.isdigit() else file_id,
+                            'file_path': file_dict.get('file_path', ''),
+                            'file_name': file_dict.get('file_name', ''),
+                            'directory_path': file_dict.get('directory_path', ''),
+                            'display_name': file_dict.get('display_name', ''),
+                            'file_type': file_dict.get('file_type', 'file'),
+                            'file_size': int(file_dict.get('file_size', 0) or 0),
+                            'compressed_size': int(file_dict.get('compressed_size', 0) or 0),
+                            'file_permissions': file_dict.get('file_permissions', ''),
+                            'created_time': _format_datetime(file_dict.get('created_time')),
+                            'modified_time': _format_datetime(file_dict.get('modified_time')),
+                            'accessed_time': _format_datetime(file_dict.get('accessed_time')),
+                            'compressed': bool(int(file_dict.get('compressed', 0) or 0)),
+                            'checksum': file_dict.get('checksum'),
+                            'backup_time': _format_datetime(file_dict.get('backup_time')),
+                            'chunk_number': int(file_dict.get('chunk_number', 0) or 0)
+                        }
+                        files.append(file_info)
+                
+                # 按文件路径排序
+                files.sort(key=lambda x: x.get('file_path', ''))
+                
+                logger.info(f"[Redis模式] 查询到 {len(files)} 个已成功复制的文件 (备份集: {backup_set_id})")
+                return files
 
             if is_opengauss():
                 # openGauss 原生SQL查询
@@ -372,8 +568,202 @@ class RecoveryEngine:
             - has_children: 是否有子节点（仅目录）
         """
         try:
+            from utils.scheduler.db_utils import is_redis, is_opengauss
+            from utils.scheduler.sqlite_utils import is_sqlite
+            
             directories = {}
             files = []
+            
+            if is_redis():
+                # Redis 版本：从Redis获取所有文件，在Python中解析顶层目录结构
+                from config.redis_db import get_redis_client
+                from backup.redis_backup_db import (
+                    KEY_PREFIX_BACKUP_FILE, 
+                    KEY_PREFIX_BACKUP_SET,
+                    KEY_INDEX_BACKUP_FILE_BY_SET_ID,
+                    _get_redis_key,
+                    _parse_datetime_value
+                )
+                
+                redis = await get_redis_client()
+                
+                # 首先查找备份集
+                backup_set_key = f"{KEY_PREFIX_BACKUP_SET}:{backup_set_id}"
+                backup_set_data = await redis.hgetall(backup_set_key)
+                
+                if not backup_set_data:
+                    logger.warning(f"[Redis模式] 备份集不存在: {backup_set_id}")
+                    return []
+                
+                # 获取备份集的id（用于构建文件索引键）
+                backup_set_db_id = backup_set_data.get('id', backup_set_id)
+                
+                # 获取该备份集的所有文件ID（使用SSCAN迭代，避免超时）
+                file_index_key = f"{KEY_INDEX_BACKUP_FILE_BY_SET_ID}:{backup_set_db_id}"
+                
+                file_ids = []
+                cursor = 0
+                while True:
+                    cursor, batch = await redis.sscan(file_index_key, cursor, count=1000)
+                    file_ids.extend(batch)
+                    if cursor == 0:
+                        break
+                
+                logger.info(f"[Redis模式] 备份集 {backup_set_id} 包含 {len(file_ids)} 个文件，开始解析顶层目录结构")
+                
+                # 用于存储顶层项的唯一集合
+                first_level_items = {}  # {first_level: {'type': 'file'|'directory', 'sample_path': path, 'file_info': {...}}}
+                
+                # 批量获取文件信息并解析路径
+                batch_size = 1000
+                for i in range(0, len(file_ids), batch_size):
+                    batch_file_ids = file_ids[i:i + batch_size]
+                    
+                    pipe = redis.pipeline()
+                    for file_id in batch_file_ids:
+                        file_key = _get_redis_key(KEY_PREFIX_BACKUP_FILE, file_id)
+                        pipe.hgetall(file_key)
+                    file_data_list = await pipe.execute()
+                    
+                    # 处理每个文件的数据
+                    for file_id, file_data in zip(batch_file_ids, file_data_list):
+                        if not file_data:
+                            continue
+                        
+                        # 只处理已成功复制的文件（is_copy_success = '1'）
+                        is_copy_success = file_data.get('is_copy_success', '0')
+                        if is_copy_success != '1':
+                            continue
+                        
+                        file_path = file_data.get('file_path', '')
+                        if not file_path:
+                            continue
+                        
+                        # 规范化路径（统一使用正斜杠）
+                        normalized_path = file_path.replace('\\', '/')
+                        
+                        # 提取第一级路径
+                        if '/' in normalized_path:
+                            # 有路径分隔符，说明不是顶层文件
+                            first_level = normalized_path.split('/', 1)[0]
+                            item_type = 'directory'
+                        else:
+                            # 没有路径分隔符，说明是顶层文件
+                            first_level = normalized_path
+                            item_type = 'file'
+                        
+                        if not first_level:
+                            continue
+                        
+                        # 如果已存在该顶层项，跳过（只保留第一个样本路径）
+                        if first_level not in first_level_items:
+                            first_level_items[first_level] = {
+                                'type': item_type,
+                                'sample_path': file_path,
+                                'file_id': file_id,
+                                'file_data': file_data
+                            }
+                
+                logger.info(f"[Redis模式] 提取到 {len(first_level_items)} 个唯一的顶层项")
+                
+                # 处理日期时间的辅助函数
+                def _format_datetime(dt_str):
+                    if not dt_str:
+                        return None
+                    dt = _parse_datetime_value(dt_str)
+                    return dt.isoformat() if dt else None
+                
+                # 处理顶层项，区分文件和目录
+                for first_level, item_info in first_level_items.items():
+                    item_type = item_info['type']
+                    sample_path = item_info['sample_path']
+                    file_data = item_info['file_data']
+                    
+                    if item_type == 'file':
+                        # 顶层文件，构建文件信息
+                        file_info = {
+                            'id': int(item_info['file_id']) if item_info['file_id'].isdigit() else item_info['file_id'],
+                            'file_path': file_data.get('file_path', ''),
+                            'file_name': file_data.get('file_name', ''),
+                            'directory_path': file_data.get('directory_path', ''),
+                            'display_name': file_data.get('display_name', ''),
+                            'file_type': file_data.get('file_type', 'file'),
+                            'file_size': int(file_data.get('file_size', 0) or 0),
+                            'compressed_size': int(file_data.get('compressed_size', 0) or 0),
+                            'file_permissions': file_data.get('file_permissions', ''),
+                            'created_time': _format_datetime(file_data.get('created_time')),
+                            'modified_time': _format_datetime(file_data.get('modified_time')),
+                            'accessed_time': _format_datetime(file_data.get('accessed_time')),
+                            'compressed': bool(int(file_data.get('compressed', 0) or 0)),
+                            'checksum': file_data.get('checksum'),
+                            'backup_time': _format_datetime(file_data.get('backup_time')),
+                            'chunk_number': int(file_data.get('chunk_number', 0) or 0)
+                        }
+                        files.append({
+                            'name': first_level,
+                            'type': 'file',
+                            'path': sample_path,
+                            'file': file_info,
+                            'has_children': False
+                        })
+                    else:
+                        # 顶层目录，需要检查是否有子项
+                        # 重新扫描文件，查找是否有该目录下的文件
+                        has_children = False
+                        normalized_dir = first_level.replace('\\', '/')
+                        
+                        # 使用SSCAN再次遍历文件ID，查找子项（只检查前1000个文件作为样本，避免性能问题）
+                        check_count = 0
+                        max_check = min(1000, len(file_ids))
+                        for file_id in file_ids[:max_check]:
+                            file_key = _get_redis_key(KEY_PREFIX_BACKUP_FILE, file_id)
+                            check_file_data = await redis.hgetall(file_key)
+                            
+                            if not check_file_data:
+                                continue
+                            
+                            if check_file_data.get('is_copy_success', '0') != '1':
+                                continue
+                            
+                            check_path = check_file_data.get('file_path', '')
+                            if not check_path:
+                                continue
+                            
+                            check_normalized = check_path.replace('\\', '/')
+                            
+                            # 检查路径是否在该目录下
+                            if check_normalized.startswith(normalized_dir + '/') or check_normalized.startswith(normalized_dir + '\\'):
+                                if check_normalized != normalized_dir:
+                                    has_children = True
+                                    break
+                            
+                            check_count += 1
+                            if check_count >= max_check:
+                                break
+                        
+                        # 如果样本中没有找到子项，默认认为可能有子项（保守策略）
+                        if not has_children and check_count < len(file_ids):
+                            has_children = True
+                        
+                        directories[first_level] = {
+                            'name': first_level,
+                            'type': 'directory',
+                            'path': first_level,
+                            'file': None,
+                            'has_children': has_children
+                        }
+                
+                # 合并目录和文件，目录在前
+                result = list(directories.values()) + files
+                logger.info(f"[Redis模式] 查询到 {len(result)} 个顶层目录项 (备份集: {backup_set_id})，其中目录: {len(directories)}, 文件: {len(files)}")
+                
+                # 如果顶层目录项过多，记录警告并显示前10个示例
+                if len(result) > 1000:
+                    logger.warning(f"[Redis模式] 顶层目录项过多 ({len(result)} 个)，可能存在路径格式问题")
+                    sample_paths = [item['path'] for item in result[:10]]
+                    logger.warning(f"[Redis模式] 前10个顶层项示例: {sample_paths}")
+                
+                return result
             
             if is_opengauss():
                 # 使用连接池
@@ -683,11 +1073,192 @@ class RecoveryEngine:
             - has_children: 是否有子节点（仅目录）
         """
         try:
+            from utils.scheduler.db_utils import is_redis, is_opengauss
+            from utils.scheduler.sqlite_utils import is_sqlite
+            
             # 规范化路径（移除前导和尾随斜杠）
             directory_path = directory_path.strip('/').strip('\\')
             
             directories = {}
             files = []
+            
+            if is_redis():
+                # Redis 版本：从Redis获取所有文件，在Python中过滤指定目录的内容
+                from config.redis_db import get_redis_client
+                from backup.redis_backup_db import (
+                    KEY_PREFIX_BACKUP_FILE, 
+                    KEY_PREFIX_BACKUP_SET,
+                    KEY_INDEX_BACKUP_FILE_BY_SET_ID,
+                    _get_redis_key,
+                    _parse_datetime_value
+                )
+                
+                redis = await get_redis_client()
+                
+                # 首先查找备份集
+                backup_set_key = f"{KEY_PREFIX_BACKUP_SET}:{backup_set_id}"
+                backup_set_data = await redis.hgetall(backup_set_key)
+                
+                if not backup_set_data:
+                    logger.warning(f"[Redis模式] 备份集不存在: {backup_set_id}")
+                    return []
+                
+                # 获取备份集的id（用于构建文件索引键）
+                backup_set_db_id = backup_set_data.get('id', backup_set_id)
+                
+                # 规范化目录路径
+                normalized_dir = directory_path.replace('\\', '/') if directory_path else ''
+                
+                # 获取该备份集的所有文件ID（使用SSCAN迭代，避免超时）
+                file_index_key = f"{KEY_INDEX_BACKUP_FILE_BY_SET_ID}:{backup_set_db_id}"
+                
+                file_ids = []
+                cursor = 0
+                while True:
+                    cursor, batch = await redis.sscan(file_index_key, cursor, count=1000)
+                    file_ids.extend(batch)
+                    if cursor == 0:
+                        break
+                
+                logger.info(f"[Redis模式] 备份集 {backup_set_id} 包含 {len(file_ids)} 个文件，开始过滤目录: {directory_path}")
+                
+                # 用于存储当前目录下的项（去重）
+                current_level_items = {}  # {name: {'type': 'file'|'directory', 'path': path, 'file_info': {...}}}
+                
+                # 处理日期时间的辅助函数
+                def _format_datetime(dt_str):
+                    if not dt_str:
+                        return None
+                    dt = _parse_datetime_value(dt_str)
+                    return dt.isoformat() if dt else None
+                
+                # 批量获取文件信息并过滤
+                batch_size = 1000
+                for i in range(0, len(file_ids), batch_size):
+                    batch_file_ids = file_ids[i:i + batch_size]
+                    
+                    pipe = redis.pipeline()
+                    for file_id in batch_file_ids:
+                        file_key = _get_redis_key(KEY_PREFIX_BACKUP_FILE, file_id)
+                        pipe.hgetall(file_key)
+                    file_data_list = await pipe.execute()
+                    
+                    # 处理每个文件的数据
+                    for file_id, file_data in zip(batch_file_ids, file_data_list):
+                        if not file_data:
+                            continue
+                        
+                        # 只处理已成功复制的文件（is_copy_success = '1'）
+                        is_copy_success = file_data.get('is_copy_success', '0')
+                        if is_copy_success != '1':
+                            continue
+                        
+                        file_path = file_data.get('file_path', '')
+                        if not file_path:
+                            continue
+                        
+                        # 规范化文件路径
+                        normalized_file_path = file_path.replace('\\', '/')
+                        
+                        # 计算相对路径
+                        if directory_path:
+                            # 检查路径是否匹配
+                            if normalized_file_path == normalized_dir:
+                                # 这是目录本身，跳过
+                                continue
+                            if not (normalized_file_path.startswith(normalized_dir + '/') or 
+                                   normalized_file_path.startswith(normalized_dir + '\\')):
+                                continue
+                            
+                            # 提取相对路径
+                            if normalized_file_path.startswith(normalized_dir + '/'):
+                                relative_path = normalized_file_path[len(normalized_dir + '/'):]
+                            elif normalized_file_path.startswith(normalized_dir + '\\'):
+                                relative_path = normalized_file_path[len(normalized_dir + '\\'):]
+                            else:
+                                continue
+                        else:
+                            relative_path = normalized_file_path
+                        
+                        # 分割路径
+                        path_parts = relative_path.split('/')
+                        path_parts = [p for p in path_parts if p]
+                        
+                        if not path_parts:
+                            continue
+                        
+                        # 获取当前层级的内容（第一个部分）
+                        first_part = path_parts[0]
+                        
+                        if len(path_parts) == 1:
+                            # 这是当前目录下的文件
+                            file_info = {
+                                'id': int(file_id) if file_id.isdigit() else file_id,
+                                'file_path': file_data.get('file_path', ''),
+                                'file_name': file_data.get('file_name', ''),
+                                'directory_path': file_data.get('directory_path', ''),
+                                'display_name': file_data.get('display_name', ''),
+                                'file_type': file_data.get('file_type', 'file'),
+                                'file_size': int(file_data.get('file_size', 0) or 0),
+                                'compressed_size': int(file_data.get('compressed_size', 0) or 0),
+                                'file_permissions': file_data.get('file_permissions', ''),
+                                'created_time': _format_datetime(file_data.get('created_time')),
+                                'modified_time': _format_datetime(file_data.get('modified_time')),
+                                'accessed_time': _format_datetime(file_data.get('accessed_time')),
+                                'compressed': bool(int(file_data.get('compressed', 0) or 0)),
+                                'checksum': file_data.get('checksum'),
+                                'backup_time': _format_datetime(file_data.get('backup_time')),
+                                'chunk_number': int(file_data.get('chunk_number', 0) or 0)
+                            }
+                            current_level_items[first_part] = {
+                                'type': 'file',
+                                'path': file_path,
+                                'file_info': file_info
+                            }
+                        else:
+                            # 这是子目录
+                            if first_part not in current_level_items:
+                                # 构建子目录路径，保持与原始路径格式一致
+                                if directory_path:
+                                    if '\\' in directory_path:
+                                        child_path = directory_path + '\\' + first_part
+                                    else:
+                                        child_path = directory_path + '/' + first_part
+                                else:
+                                    child_path = first_part
+                                
+                                current_level_items[first_part] = {
+                                    'type': 'directory',
+                                    'path': child_path,
+                                    'file_info': None
+                                }
+                
+                # 将current_level_items转换为结果格式
+                for name, item_info in current_level_items.items():
+                    if item_info['type'] == 'file':
+                        files.append({
+                            'name': name,
+                            'type': 'file',
+                            'path': item_info['path'],
+                            'file': item_info['file_info'],
+                            'has_children': False
+                        })
+                    else:
+                        # 对于目录，需要检查是否有子项
+                        # 简化处理：如果该目录在current_level_items中，说明至少有一个文件在该目录下或其子目录下
+                        directories[name] = {
+                            'name': name,
+                            'type': 'directory',
+                            'path': item_info['path'],
+                            'file': None,
+                            'has_children': True  # 保守策略，认为有子项
+                        }
+                
+                # 合并目录和文件，目录在前
+                result = list(directories.values()) + files
+                logger.info(f"[Redis模式] 查询到 {len(result)} 个目录项 (备份集: {backup_set_id}, 目录: {directory_path})，其中目录: {len(directories)}, 文件: {len(files)}")
+                
+                return result
             
             if is_opengauss():
                 # 使用连接池
@@ -1486,7 +2057,67 @@ class RecoveryEngine:
     async def get_backup_groups(self) -> List[str]:
         """获取备份组列表（从数据库查询真实数据）"""
         try:
+            # 在函数开始处导入所有需要的函数，避免变量未定义错误
+            from utils.scheduler.db_utils import is_redis
+            from utils.scheduler.sqlite_utils import is_sqlite
+            
             groups = []
+
+            # 检查是否为Redis数据库
+            if is_redis():
+                # Redis 版本：从Redis查询备份组
+                from config.redis_db import get_redis_client
+                from backup.redis_backup_db import KEY_PREFIX_BACKUP_SET, KEY_INDEX_BACKUP_SETS
+                
+                redis = await get_redis_client()
+                
+                # 获取所有备份集的set_id
+                set_ids_bytes = await redis.smembers(KEY_INDEX_BACKUP_SETS)
+                
+                # 用于存储不重复的备份组
+                backup_groups_set = set()
+                
+                for set_id_bytes in set_ids_bytes:
+                    # Redis客户端配置了decode_responses=True，返回的已经是字符串
+                    set_id = set_id_bytes if isinstance(set_id_bytes, str) else set_id_bytes.decode('utf-8')
+                    backup_set_key = f"{KEY_PREFIX_BACKUP_SET}:{set_id}"
+                    backup_set_data = await redis.hgetall(backup_set_key)
+                    
+                    if not backup_set_data:
+                        continue
+                    
+                    # 转换为字典（Redis客户端配置了decode_responses=True，键值都是字符串）
+                    backup_set_dict = {k if isinstance(k, str) else k.decode('utf-8'): 
+                                      v if isinstance(v, str) else (v.decode('utf-8') if isinstance(v, bytes) else v)
+                                      for k, v in backup_set_data.items()}
+                    
+                    # 只查询活跃状态的备份集
+                    status = backup_set_dict.get('status', '').upper()
+                    if status != 'ACTIVE':
+                        continue
+                    
+                    # 提取备份组
+                    backup_group = backup_set_dict.get('backup_group')
+                    if backup_group:
+                        backup_groups_set.add(backup_group)
+                
+                # 转换为列表并按倒序排序
+                groups = sorted(backup_groups_set, reverse=True)
+                
+                # 限制12个
+                groups = groups[:12]
+                
+                # 如果没有查询到数据，返回最近6个月的默认组
+                if not groups:
+                    current_date = datetime.now()
+                    for i in range(6):
+                        date = current_date.replace(month=((current_date.month - i - 1) % 12) + 1,
+                                                   year=current_date.year - ((current_date.month - i - 1) // 12))
+                        group_name = date.strftime('%Y-%m')
+                        groups.append(group_name)
+                
+                logger.info(f"[Redis模式] 查询到 {len(groups)} 个备份组")
+                return groups
 
             if is_opengauss():
                 # openGauss 原生SQL查询
@@ -1503,6 +2134,18 @@ class RecoveryEngine:
                     rows = await conn.fetch(sql)
                     groups = [row['backup_group'] for row in rows]
             else:
+                # 使用SQLite数据库
+                if not is_sqlite():
+                    logger.warning(f"[数据库类型错误] 当前数据库类型不支持使用SQLite连接获取备份组列表，返回默认的最近6个月")
+                    # 返回默认的最近6个月
+                    current_date = datetime.now()
+                    for i in range(6):
+                        date = current_date.replace(month=((current_date.month - i - 1) % 12) + 1,
+                                                   year=current_date.year - ((current_date.month - i - 1) // 12))
+                        group_name = date.strftime('%Y-%m')
+                        groups.append(group_name)
+                    return groups
+                
                 # 使用原生SQL查询（SQLite）
                 async with get_sqlite_connection() as conn:
                     cursor = await conn.execute("""

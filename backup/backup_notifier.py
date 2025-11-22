@@ -57,12 +57,31 @@ class BackupNotifier:
                 with open(env_file, "r", encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
+                        # 跳过注释和空行
+                        if not line or line.startswith('#'):
+                            continue
                         if line.startswith("NOTIFICATION_EVENTS="):
-                            events_json = line.split("=", 1)[1]
-                            events_dict = json.loads(events_json)
-                            self._notification_events_cache = events_dict
-                            self._notification_events_cache_time = current_time
-                            return events_dict
+                            events_json = line.split("=", 1)[1].strip()
+                            # 处理可能的引号（单引号或双引号）
+                            if events_json.startswith('"') and events_json.endswith('"'):
+                                events_json = events_json[1:-1].replace('\\"', '"')
+                            elif events_json.startswith("'") and events_json.endswith("'"):
+                                events_json = events_json[1:-1].replace("\\'", "'")
+                            # 尝试解析 JSON
+                            try:
+                                events_dict = json.loads(events_json)
+                                # 验证是否为字典类型
+                                if isinstance(events_dict, dict):
+                                    self._notification_events_cache = events_dict
+                                    self._notification_events_cache_time = current_time
+                                    return events_dict
+                                else:
+                                    logger.warning(f"NOTIFICATION_EVENTS 配置不是字典类型，使用默认配置")
+                            except json.JSONDecodeError as json_err:
+                                logger.warning(
+                                    f"解析 NOTIFICATION_EVENTS JSON 失败: {str(json_err)}，"
+                                    f"原始值: {events_json[:100]}，使用默认配置"
+                                )
             
             # 如果.env中没有，返回默认配置（所有事件都启用）
             default_events = {

@@ -60,38 +60,23 @@ async def update_notification_config(config: DingTalkConfig, request: Request):
             "dingtalk_default_phone": current_settings.DINGTALK_DEFAULT_PHONE or ""
         }
         
-        # 保存配置到.env文件
-        env_file = Path(".env")
-        env_lines = []
+        # 使用EnvFileManager保存配置到.env文件
+        from config.env_file_manager import get_env_manager
         
-        if env_file.exists():
-            with open(env_file, "r", encoding="utf-8") as f:
-                env_lines = f.readlines()
+        env_manager = get_env_manager()
         
-        # 更新或添加钉钉配置
-        config_keys = {
-            "DINGTALK_API_URL": config.dingtalk_api_url,
-            "DINGTALK_API_KEY": config.dingtalk_api_key,
-            "DINGTALK_DEFAULT_PHONE": config.dingtalk_default_phone
+        # 构建更新字典
+        updates = {
+            "DINGTALK_API_URL": config.dingtalk_api_url or "",
+            "DINGTALK_API_KEY": config.dingtalk_api_key or "",
+            "DINGTALK_DEFAULT_PHONE": config.dingtalk_default_phone or ""
         }
         
-        # 更新现有行或添加新行
-        updated = set()
-        for i, line in enumerate(env_lines):
-            for key, value in config_keys.items():
-                if line.startswith(f"{key}="):
-                    env_lines[i] = f"{key}={value}\n"
-                    updated.add(key)
-                    break
+        # 使用EnvFileManager写入文件（自动处理备份和并发问题）
+        success = env_manager.write_env_file(updates, backup=True)
         
-        # 添加缺失的配置
-        for key, value in config_keys.items():
-            if key not in updated:
-                env_lines.append(f"{key}={value}\n")
-        
-        # 写入.env文件
-        with open(env_file, "w", encoding="utf-8") as f:
-            f.writelines(env_lines)
+        if not success:
+            raise ValueError("写入.env文件失败")
         
         # 记录新值（隐藏敏感信息）
         new_values = {
@@ -269,13 +254,32 @@ async def get_notification_events():
             with open(env_file, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
+                    # 跳过注释和空行
+                    if not line or line.startswith('#'):
+                        continue
                     if line.startswith("NOTIFICATION_EVENTS="):
-                        events_json = line.split("=", 1)[1]
-                        events_dict = json.loads(events_json)
-                        return {
-                            "success": True,
-                            "events": events_dict
-                        }
+                        events_json = line.split("=", 1)[1].strip()
+                        # 处理可能的引号（单引号或双引号）
+                        if events_json.startswith('"') and events_json.endswith('"'):
+                            events_json = events_json[1:-1].replace('\\"', '"')
+                        elif events_json.startswith("'") and events_json.endswith("'"):
+                            events_json = events_json[1:-1].replace("\\'", "'")
+                        # 尝试解析 JSON
+                        try:
+                            events_dict = json.loads(events_json)
+                            # 验证是否为字典类型
+                            if isinstance(events_dict, dict):
+                                return {
+                                    "success": True,
+                                    "events": events_dict
+                                }
+                            else:
+                                logger.warning(f"NOTIFICATION_EVENTS 配置不是字典类型，使用默认配置")
+                        except json.JSONDecodeError as json_err:
+                            logger.warning(
+                                f"解析 NOTIFICATION_EVENTS JSON 失败: {str(json_err)}，"
+                                f"原始值: {events_json[:100]}，使用默认配置"
+                            )
         
         # 如果.env中没有，返回默认配置
         default_events = {
@@ -324,12 +328,21 @@ async def update_notification_events(events: NotificationEvents, request: Reques
         if env_file.exists():
             with open(env_file, "r", encoding="utf-8") as f:
                 for line in f:
-                    if line.startswith("NOTIFICATION_EVENTS="):
+                    line_stripped = line.strip()
+                    # 跳过注释和空行
+                    if not line_stripped or line_stripped.startswith('#'):
+                        continue
+                    if line_stripped.startswith("NOTIFICATION_EVENTS="):
                         try:
-                            events_json = line.split("=", 1)[1].strip()
+                            events_json = line_stripped.split("=", 1)[1].strip()
+                            # 处理可能的引号（单引号或双引号）
+                            if events_json.startswith('"') and events_json.endswith('"'):
+                                events_json = events_json[1:-1].replace('\\"', '"')
+                            elif events_json.startswith("'") and events_json.endswith("'"):
+                                events_json = events_json[1:-1].replace("\\'", "'")
                             old_values = json.loads(events_json)
-                        except:
-                            pass
+                        except Exception as parse_err:
+                            logger.warning(f"解析旧的通知事件配置失败: {str(parse_err)}")
                         break
         
         # 如果未找到旧值，使用默认值
@@ -348,34 +361,31 @@ async def update_notification_events(events: NotificationEvents, request: Reques
                 "notify_system_started": True
             }
         
-        # 保存配置到.env文件
-        env_lines = []
-        
-        if env_file.exists():
-            with open(env_file, "r", encoding="utf-8") as f:
-                env_lines = f.readlines()
-        
         # 将事件配置转换为JSON字符串
         events_dict = events.dict()
         events_json = json.dumps(events_dict, ensure_ascii=False)
         new_values = events_dict
         
-        # 更新或添加通知事件配置
-        key = "NOTIFICATION_EVENTS"
-        updated = False
-        for i, line in enumerate(env_lines):
-            if line.startswith(f"{key}="):
-                env_lines[i] = f"{key}={events_json}\n"
-                updated = True
-                break
+        # 使用EnvFileManager保存配置到.env文件
+        from config.env_file_manager import get_env_manager
         
-        # 如果未找到，添加新行
-        if not updated:
-            env_lines.append(f"{key}={events_json}\n")
+        env_manager = get_env_manager()
         
-        # 写入.env文件
-        with open(env_file, "w", encoding="utf-8") as f:
-            f.writelines(env_lines)
+        # 构建更新字典
+        updates = {
+            "NOTIFICATION_EVENTS": events_json
+        }
+        
+        # 使用EnvFileManager写入文件（自动处理备份和并发问题）
+        success = env_manager.write_env_file(updates, backup=True)
+        
+        if not success:
+            raise ValueError("写入.env文件失败")
+        
+        # 重新加载配置，使后续调用get_settings()能获取最新配置
+        from config.settings import reload_settings
+        reload_settings()
+        logger.info("通知事件配置已重新加载，新配置将立即生效")
         
         # 计算持续时间
         duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
@@ -471,6 +481,15 @@ async def update_notification_events(events: NotificationEvents, request: Reques
 async def get_notification_users(request: Request):
     """获取通知人员列表"""
     try:
+        # 检查是否为Redis数据库
+        from utils.scheduler.db_utils import is_redis
+        from utils.scheduler.sqlite_utils import is_sqlite
+        
+        if is_redis():
+            # Redis模式下返回空列表（暂未实现Redis查询通知人员）
+            logger.debug("[Redis模式] 查询通知人员列表暂未实现，返回空列表")
+            return {"success": True, "users": []}
+        
         if is_opengauss():
             # 使用原生SQL查询
             # 使用连接池
@@ -495,8 +514,14 @@ async def get_notification_users(request: Request):
                     })
                 return {"success": True, "users": users}
         else:
-            # 使用SQLAlchemy查询
+            # 使用SQLAlchemy查询（SQLite）
             from config.database import db_manager
+            
+            # 检查是否为SQLite数据库
+            if not is_sqlite() or db_manager.AsyncSessionLocal is None:
+                logger.debug("[数据库类型错误] 当前数据库类型不支持使用SQLAlchemy会话查询通知人员列表，返回空列表")
+                return {"success": True, "users": []}
+            
             async with db_manager.AsyncSessionLocal() as session:
                 from models.notification_user import NotificationUser as NotificationUserModel
                 from sqlalchemy import select

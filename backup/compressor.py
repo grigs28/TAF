@@ -799,9 +799,14 @@ def _compress_with_zstd(
                                 }
                             last_log_time = current_time
 
-                        if not file_path.exists():
-                            logger.warning(f"[zstd] 文件不存在，跳过: {file_path}")
-                            failed_files.append({'path': str(file_path), 'reason': '文件不存在'})
+                        # 优化：只检查一次文件是否存在，使用 stat() 同时获取大小（避免重复检查）
+                        try:
+                            file_stat = file_path.stat()
+                            file_size = file_stat.st_size
+                            file_size_display = format_bytes(file_size) if file_size > 0 else "未知"
+                        except (OSError, FileNotFoundError) as path_error:
+                            logger.warning(f"[zstd] 文件不存在或无法访问，跳过: {file_path} (错误: {str(path_error)})")
+                            failed_files.append({'path': str(file_path), 'reason': f'文件不存在或无法访问: {str(path_error)}'})
                             continue
 
                         arcname = file_path.name
@@ -816,8 +821,6 @@ def _compress_with_zstd(
 
                         # 记录文件处理开始时间和文件信息
                         file_start_time = time.time()
-                        file_size = file_path.stat().st_size if file_path.exists() else 0
-                        file_size_display = format_bytes(file_size) if file_size > 0 else "未知"
                         
                         # 如果文件很大（超过 100MB），在处理前记录日志
                         if file_size > 100 * 1024 * 1024:
@@ -1440,23 +1443,52 @@ class Compressor:
                 final_archive_path = temp_archive_path
                 logger.info(f"直接压缩到磁带模式：文件保留在临时目录，不移动: {final_archive_path}")
             else:
-                # 非直接压缩模式：压缩完成，将文件从temp目录移动到final目录（同步顺序执行）
+                # 非直接压缩模式：压缩完成，将文件从temp目录移动到final目录（顺序执行，验证成功）
                 if final_dir is None:
                     # 如果final_dir未定义，说明配置有问题，使用temp目录
                     logger.warning("final_dir未定义，使用temp目录中的文件")
                     final_archive_path = temp_archive_path
                 else:
+                    # 确保目标目录存在
+                    final_dir.mkdir(parents=True, exist_ok=True)
                     final_archive_path = final_dir / temp_archive_path.name
                     
-                    # 同步顺序执行：将文件从temp移动到final目录（不阻塞，在同一文件系统上是瞬间完成的）
+                    # 顺序执行：将文件从temp移动到final目录，并验证是否成功
                     try:
-                        logger.info(f"[文件移动] 开始移动文件到final目录: {temp_archive_path.name}")
+                        # 判断文件名（验证源文件是否存在且名称正确）
+                        if not temp_archive_path.exists():
+                            logger.error(f"[文件移动] 源文件不存在: {temp_archive_path}")
+                            raise FileNotFoundError(f"源文件不存在: {temp_archive_path}")
+                        
+                        source_filename = temp_archive_path.name
+                        target_filename = final_archive_path.name
+                        
+                        logger.info(f"[文件移动] 开始移动文件到final目录")
+                        logger.info(f"[文件移动] 源文件名: {source_filename}, 目标文件名: {target_filename}")
                         logger.info(f"[文件移动] 源路径: {temp_archive_path}, 目标路径: {final_archive_path}")
                         
-                        # 使用异步线程池执行文件移动（虽然在同一文件系统上是瞬间的，但保持异步避免阻塞）
+                        # 验证文件名是否匹配（确保文件名正确）
+                        if source_filename != target_filename:
+                            logger.warning(f"[文件移动] 文件名不匹配: 源={source_filename}, 目标={target_filename}，使用目标文件名")
+                        
+                        # 顺序执行文件移动（在同一文件系统上是瞬间完成的，但需要同步执行以验证结果）
                         loop = asyncio.get_event_loop()
-                        await loop.run_in_executor(None, lambda: shutil.move(str(temp_archive_path), str(final_archive_path)))
-                        logger.info(f"[文件移动] ✅ 文件已移动到final目录: {final_archive_path.name}")
+                        await loop.run_in_executor(None, shutil.move, str(temp_archive_path), str(final_archive_path))
+                        
+                        # 验证移动是否成功：检查目标文件是否存在，源文件是否已删除
+                        if not final_archive_path.exists():
+                            raise FileNotFoundError(f"移动后目标文件不存在: {final_archive_path}")
+                        
+                        if temp_archive_path.exists():
+                            logger.warning(f"[文件移动] 移动后源文件仍存在: {temp_archive_path}，尝试删除")
+                            try:
+                                temp_archive_path.unlink()
+                            except Exception as del_error:
+                                logger.warning(f"[文件移动] 删除源文件失败: {del_error}")
+                        
+                        # 获取目标文件大小，验证移动成功
+                        final_file_size = final_archive_path.stat().st_size
+                        logger.info(f"[文件移动] ✅ 文件已成功移动到final目录: {target_filename}, 大小: {format_bytes(final_file_size)}")
                         
                         # 记录关键阶段：文件移动到final目录
                         if backup_task:
@@ -1464,19 +1496,22 @@ class Compressor:
                             backup_db = BackupDB()
                             backup_db._log_operation_stage_event(
                                 backup_task,
-                                f"[文件已移动到final目录] {final_archive_path.name}，大小: {format_bytes(final_archive_path.stat().st_size)}"
+                                f"[文件已移动到final目录] {target_filename}，大小: {format_bytes(final_file_size)}"
                             )
                             # 同时更新operation_stage和description
                             await backup_db.update_task_stage_with_description(
                                 backup_task,
                                 "compress",
-                                f"[移动完成] 压缩文件已移动到final目录：{final_archive_path.name}"
+                                f"[移动完成] 压缩文件已移动到final目录：{target_filename}"
                             )
                     except Exception as move_error:
                         logger.error(f"[文件移动] 移动文件到final目录失败: {str(move_error)}", exc_info=True)
-                        # 移动失败，继续使用temp路径
+                        # 移动失败，使用temp路径
                         final_archive_path = temp_archive_path
                         logger.warning(f"[文件移动] 移动失败，使用temp路径: {temp_archive_path}")
+                        
+                        # 如果移动失败，记录错误但不抛出异常（允许继续处理）
+                        # 可以选择抛出异常让调用者处理，或记录错误并继续
                     
                     # 获取文件大小（移动完成后应该使用final路径）
                     try:

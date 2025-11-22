@@ -89,9 +89,31 @@ class DatabaseManager:
             # 对于openGauss，需要特殊处理以避免版本解析错误
             is_opengauss = self.is_opengauss_database()
             is_sqlite = raw_database_url.startswith("sqlite:///") or raw_database_url.startswith("sqlite+aiosqlite:///")
+            is_redis = raw_database_url.startswith("redis://") or raw_database_url.startswith("rediss://")
             
+            # 对于Redis，不创建SQLAlchemy引擎，使用原生Redis客户端
+            if is_redis:
+                logger.info("检测到Redis数据库，跳过SQLAlchemy引擎创建，将使用原生Redis客户端")
+                self.engine = None
+                self.async_engine = None
+                self.AsyncSessionLocal = None
+                self.SessionLocal = None
+                
+                # 初始化Redis管理器
+                from config.redis_db import get_redis_manager
+                redis_manager = get_redis_manager()
+                if redis_manager:
+                    await redis_manager.initialize()
+                    logger.info("Redis连接初始化成功")
+                else:
+                    logger.warning("Redis管理器创建失败，请检查DATABASE_URL配置")
+                
+                # Redis不需要创建表
+                self._initialized = True
+                logger.info("Redis数据库初始化完成（跳过表创建）")
+                return
             # 对于openGauss，完全不创建SQLAlchemy引擎，避免版本解析错误
-            if is_opengauss:
+            elif is_opengauss:
                 logger.warning("检测到openGauss数据库，跳过SQLAlchemy引擎创建，将使用原生SQL查询")
                 self.engine = None
                 self.async_engine = None
@@ -202,6 +224,12 @@ class DatabaseManager:
             from models import backup, tape, user, system_log, system_config, scheduled_task
             
             database_url = self.settings.DATABASE_URL
+            
+            # Redis不需要创建表，它是键值存储
+            is_redis = database_url.startswith("redis://") or database_url.startswith("rediss://")
+            if is_redis:
+                logger.info("检测到Redis数据库，跳过表创建（Redis是键值存储）")
+                return
             
             # 检查是否为 SQLite
             if database_url.startswith("sqlite:///") or database_url.startswith("sqlite+aiosqlite:///"):
@@ -465,10 +493,61 @@ class DatabaseManager:
                     logger.error(f"错误信息: {str(text_check_err)}", exc_info=True)
                     logger.error(f"这可能导致长文件名/路径无法同步到数据库！")
                     # 不抛出异常，避免影响表创建流程，但记录详细错误信息
+                
+                # 检查并修改 backup_tasks 表的 total_bytes 字段类型为 NUMERIC（避免 int64 溢出）
+                logger.info("========== 开始检查 backup_tasks 表 total_bytes 字段类型 ==========")
+                try:
+                    cur.execute("""
+                        SELECT 1 FROM information_schema.tables WHERE table_name = 'backup_tasks'
+                    """)
+                    if cur.fetchone():
+                        # 检查 total_bytes 字段类型
+                        cur.execute("""
+                            SELECT data_type FROM information_schema.columns 
+                            WHERE table_name = 'backup_tasks' AND column_name = 'total_bytes'
+                        """)
+                        result = cur.fetchone()
+                        if result:
+                            current_type = result[0]
+                            if current_type in ('bigint', 'integer'):
+                                # 字段是 BIGINT 或 INTEGER，需要改为 NUMERIC
+                                logger.info(f"将 backup_tasks.total_bytes 从 {current_type.upper()} 改为 NUMERIC...")
+                                try:
+                                    cur.execute("""
+                                        ALTER TABLE backup_tasks 
+                                        ALTER COLUMN total_bytes TYPE NUMERIC USING total_bytes::NUMERIC
+                                    """)
+                                    # 验证修改是否成功
+                                    cur.execute("""
+                                        SELECT data_type FROM information_schema.columns 
+                                        WHERE table_name = 'backup_tasks' AND column_name = 'total_bytes'
+                                    """)
+                                    verify_result = cur.fetchone()
+                                    if verify_result and verify_result[0] == 'numeric':
+                                        logger.info("✅ 成功将 backup_tasks.total_bytes 改为 NUMERIC 类型（已验证）")
+                                    else:
+                                        logger.error(f"❌ backup_tasks.total_bytes 修改后验证失败，当前类型: {verify_result[0] if verify_result else 'unknown'}")
+                                except Exception as alter_err:
+                                    logger.error(f"❌ 修改 backup_tasks.total_bytes 失败: {str(alter_err)}", exc_info=True)
+                            elif current_type == 'numeric':
+                                logger.debug("backup_tasks.total_bytes 已是 NUMERIC 类型，无需修改")
+                            else:
+                                logger.warning(f"backup_tasks.total_bytes 类型为 {current_type}，不是 BIGINT 或 NUMERIC")
+                        else:
+                            logger.warning("backup_tasks.total_bytes 字段不存在，跳过类型检查")
+                    else:
+                        logger.info("backup_tasks 表不存在，将在创建时自动设置 total_bytes 为 NUMERIC 类型")
+                except Exception as total_bytes_check_err:
+                    logger.error(f"========== total_bytes 字段类型检查过程发生异常 ==========")
+                    logger.error(f"错误信息: {str(total_bytes_check_err)}", exc_info=True)
+                    # 不抛出异常，避免影响表创建流程
+                
+                # 创建索引（优化查询性能）- 必须在 with 块内，在 cursor 关闭之前
+                self._create_indexes_for_backup_files(cur)
             
-            # 提交所有修改（表创建、字段迁移、字段类型修改）
+            # 提交所有修改（表创建、字段迁移、字段类型修改、索引创建）
             conn.commit()
-            logger.info("使用psycopg2成功创建数据库表并确保字段类型正确")
+            logger.info("使用psycopg2成功创建数据库表、字段迁移、字段类型检查和索引创建完成")
             
         except Exception as e:
             conn.rollback()
@@ -556,6 +635,104 @@ class DatabaseManager:
                 
         except Exception as e:
             logger.warning(f"字段迁移检查失败: {str(e)}，但不影响表创建流程")
+            # 不抛出异常，避免影响主流程
+    
+    def _create_indexes_for_backup_files(self, cur):
+        """为 backup_files 表创建索引（优化查询性能）
+        
+        索引说明：
+        1. idx_backup_files_set_path: 优化 WHERE backup_set_id = ? AND file_path = ANY(?)
+           用于验证查询和 mark_files_as_copied 查询
+        
+        2. idx_backup_files_set_copy_status: 优化 WHERE backup_set_id = ? AND is_copy_success = FALSE
+           用于 fetch_pending_files_grouped_by_size 查询
+        
+        3. idx_backup_files_set_copy_type_id: 复合索引，优化待压缩文件查询
+           用于 fetch_pending_files_grouped_by_size 的分批查询和排序
+        
+        Args:
+            cur: psycopg2 cursor对象
+        """
+        try:
+            # 检查 backup_files 表是否存在
+            cur.execute("""
+                SELECT 1 FROM information_schema.tables WHERE table_name = 'backup_files'
+            """)
+            if not cur.fetchone():
+                logger.debug("backup_files 表不存在，跳过索引创建")
+                return
+            
+            # 定义需要创建的索引
+            indexes = [
+                {
+                    'name': 'idx_backup_files_set_path',
+                    'sql': """
+                        CREATE INDEX IF NOT EXISTS idx_backup_files_set_path 
+                        ON backup_files(backup_set_id, file_path)
+                    """,
+                    'description': '优化验证查询和 mark_files_as_copied 查询（backup_set_id + file_path）'
+                },
+                {
+                    'name': 'idx_backup_files_set_copy_status',
+                    'sql': """
+                        CREATE INDEX IF NOT EXISTS idx_backup_files_set_copy_status 
+                        ON backup_files(backup_set_id, is_copy_success)
+                        WHERE is_copy_success = FALSE OR is_copy_success IS NULL
+                    """,
+                    'description': '部分索引：优化待压缩文件查询（只索引未压缩文件，节省空间）'
+                },
+                {
+                    'name': 'idx_backup_files_set_copy_type_id',
+                    'sql': """
+                        CREATE INDEX IF NOT EXISTS idx_backup_files_set_copy_type_id 
+                        ON backup_files(backup_set_id, is_copy_success, file_type, id)
+                        WHERE (is_copy_success = FALSE OR is_copy_success IS NULL) AND file_type = 'file'::backupfiletype
+                    """,
+                    'description': '部分复合索引：优化 fetch_pending_files_grouped_by_size 的分批查询和排序'
+                }
+            ]
+            
+            created_indexes = []
+            existing_indexes = []
+            error_indexes = []
+            
+            for index_def in indexes:
+                try:
+                    # 检查索引是否已存在
+                    cur.execute("""
+                        SELECT 1 FROM pg_indexes 
+                        WHERE tablename = 'backup_files' AND indexname = %s
+                    """, (index_def['name'],))
+                    if cur.fetchone():
+                        existing_indexes.append(index_def['name'])
+                        logger.debug(f"索引 {index_def['name']} 已存在，跳过")
+                        continue
+                    
+                    # 创建索引
+                    cur.execute(index_def['sql'])
+                    created_indexes.append(index_def['name'])
+                    logger.info(f"✅ 创建索引 {index_def['name']}: {index_def['description']}")
+                    
+                except Exception as index_err:
+                    error_indexes.append(f"{index_def['name']} ({str(index_err)})")
+                    logger.warning(f"创建索引 {index_def['name']} 失败: {str(index_err)}")
+                    # 继续创建其他索引，不中断流程
+            
+            # 汇总输出
+            if created_indexes:
+                logger.info(f"========== 成功创建 {len(created_indexes)} 个索引: {', '.join(created_indexes)} ==========")
+            if existing_indexes:
+                logger.debug(f"跳过 {len(existing_indexes)} 个已存在的索引: {', '.join(existing_indexes)}")
+            if error_indexes:
+                logger.warning(f"========== {len(error_indexes)} 个索引创建失败: ==========")
+                for err_index in error_indexes:
+                    logger.warning(f"   - {err_index}")
+                logger.warning("这可能会影响查询性能，但不会影响功能")
+            else:
+                logger.info("========== 索引创建完成，查询性能已优化 ==========")
+                
+        except Exception as e:
+            logger.warning(f"索引创建过程发生异常: {str(e)}，但不影响表创建流程", exc_info=True)
             # 不抛出异常，避免影响主流程
     
     async def _migrate_missing_columns_postgresql(self):
@@ -978,6 +1155,26 @@ class DatabaseManager:
     async def health_check(self) -> bool:
         """数据库健康检查"""
         try:
+            # Redis使用专门的健康检查
+            raw_database_url = self.settings.DATABASE_URL
+            is_redis = raw_database_url.startswith("redis://") or raw_database_url.startswith("rediss://")
+            if is_redis:
+                # 使用全局Redis管理器进行健康检查，而不是创建临时实例
+                from config.redis_db import get_redis_manager
+                redis_manager = get_redis_manager()
+                if not redis_manager:
+                    logger.warning("Redis管理器未初始化，无法进行健康检查")
+                    return False
+                try:
+                    # 如果未初始化，先初始化
+                    if not redis_manager._initialized:
+                        await redis_manager.initialize()
+                    # 使用管理器的健康检查方法（只ping，不关闭连接）
+                    return await redis_manager.health_check()
+                except Exception as e:
+                    logger.error(f"Redis健康检查失败: {str(e)}")
+                    return False
+            
             if self.is_opengauss_database():
                 import asyncpg
                 import re

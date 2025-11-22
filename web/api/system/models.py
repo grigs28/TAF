@@ -11,13 +11,15 @@ from pydantic import BaseModel, Field
 
 class DatabaseConfig(BaseModel):
     """数据库配置模型"""
-    db_type: str = Field(..., description="数据库类型: sqlite, postgresql, opengauss, mysql")
+    db_type: str = Field(..., description="数据库类型: sqlite, postgresql, opengauss, mysql, redis")
     db_host: Optional[str] = Field(None, description="数据库主机")
     db_port: Optional[int] = Field(None, description="数据库端口")
     db_user: Optional[str] = Field(None, description="数据库用户名")
     db_password: Optional[str] = Field(None, description="数据库密码")
     db_database: Optional[str] = Field(None, description="数据库名称")
     db_path: Optional[str] = Field(None, description="SQLite数据库路径")
+    db_index: Optional[int] = Field(0, description="Redis数据库编号(0-15)")
+    config_file_path: Optional[str] = Field(None, description="Redis配置文件路径")
     pool_size: int = Field(10, description="连接池大小")
     max_overflow: int = Field(20, description="最大溢出连接数")
 

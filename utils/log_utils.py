@@ -77,6 +77,41 @@ async def log_operation(
         是否成功记录日志
     """
     try:
+        # 检查是否为Redis数据库
+        from utils.scheduler.db_utils import is_redis
+        from utils.scheduler.sqlite_utils import is_sqlite
+        
+        if is_redis():
+            # Redis模式：使用Redis存储操作日志
+            from utils.redis_operation_log import create_operation_log_redis
+            try:
+                await create_operation_log_redis(
+                    operation_type=operation_type,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    resource_name=resource_name,
+                    operation_name=operation_name,
+                    operation_description=operation_description,
+                    category=category,
+                    user_id=user_id,
+                    username=username,
+                    success=success,
+                    result_message=result_message,
+                    error_message=error_message,
+                    duration_ms=duration_ms,
+                    old_values=old_values,
+                    new_values=new_values,
+                    changed_fields=changed_fields,
+                    ip_address=ip_address,
+                    request_method=request_method,
+                    request_url=request_url,
+                    **kwargs
+                )
+                return True
+            except Exception as e:
+                logger.error(f"[Redis模式] 记录操作日志失败: {str(e)}", exc_info=True)
+                return False
+        
         operation_time = datetime.now()
         
         if is_opengauss():
@@ -123,7 +158,12 @@ async def log_operation(
                 await conn.execute(sql, *params)
                 return True
         else:
-            # 使用SQLAlchemy插入操作日志
+            # 使用SQLAlchemy插入操作日志（SQLite）
+            # 检查是否为SQLite数据库
+            if not is_sqlite() or db_manager.AsyncSessionLocal is None:
+                logger.debug("[数据库类型错误] 当前数据库类型不支持使用SQLAlchemy会话记录操作日志，跳过记录")
+                return True
+            
             async with db_manager.AsyncSessionLocal() as session:
                 operation_log = OperationLog(
                     user_id=user_id,
@@ -246,9 +286,22 @@ async def log_system(
                 await conn.execute(sql, *params)
                 return True
         else:
+            # 检查是否为Redis数据库，Redis不支持系统日志表，跳过记录
+            from utils.scheduler.db_utils import is_redis
+            if is_redis():
+                # Redis模式下不记录系统日志到数据库（Redis没有对应的表结构）
+                # 日志仍然会通过日志处理器记录到文件
+                logger.debug(f"Redis模式下跳过数据库系统日志记录: {message[:100] if message else ''}")
+                return True
+            
             # 使用原生 SQL 插入系统日志（SQLite 版本，避免 RETURNING 子句问题）
-            from utils.scheduler.sqlite_utils import get_sqlite_connection
+            from utils.scheduler.sqlite_utils import get_sqlite_connection, is_sqlite
             import json
+            
+            # 再次检查是否为SQLite
+            if not is_sqlite():
+                logger.warning(f"当前数据库类型不支持系统日志记录，跳过: {message[:100] if message else ''}")
+                return True
             
             async with get_sqlite_connection() as conn:
                 # 使用原生 SQL 插入，避免 SQLAlchemy 的 RETURNING 子句导致的游标问题

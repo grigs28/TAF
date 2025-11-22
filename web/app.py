@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from config.settings import get_settings
 from utils.logger import get_logger
 from web.api import backup, recovery, tape, system, user, scheduler, tools
-# system和tape现在已经是模块包，直接导入router
+# system、tape 和 backup 现在已经是模块包，直接导入 router
 from web.middleware.auth_middleware import AuthMiddleware
 from web.middleware.logging_middleware import LoggingMiddleware
 

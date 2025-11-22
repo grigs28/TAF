@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     DB_COMMAND_TIMEOUT: float = 60.0  # 命令超时时间（秒）
     DB_ACQUIRE_TIMEOUT: float = 10.0  # 从连接池获取连接的超时时间（秒）
     DB_FLAVOR: Optional[str] = None  # 显式指定数据库类型（如 opengauss/postgresql/sqlite）
+    DB_QUERY_DOP: int = 16  # openGauss 查询并行度（1-64，默认16，用于优化查询性能）
     OG_HEARTBEAT_INTERVAL: int = 30  # openGauss 心跳间隔（秒）
     OG_HEARTBEAT_TIMEOUT: float = 5.0  # 单次心跳超时时间
     OG_OPERATION_TIMEOUT: float = 45.0  # 默认数据库操作超时
@@ -139,12 +140,20 @@ class Settings(BaseSettings):
     ZSTD_THREADS: int = 4  # Zstandard压缩线程数
 
     # 扫描进度更新配置
-    SCAN_UPDATE_INTERVAL: int = 500  # 后台扫描每处理多少个文件更新一次数据库（total_files/total_bytes）
+    SCAN_UPDATE_INTERVAL: int = 2000  # 后台扫描每处理多少个文件更新一次数据库（total_files/total_bytes）
+    # 优化：从500增加到2000，减少数据库写入频率，提升扫描速度
+    # 如需更快速度，可增加到5000（需要更多内存，但写入速度更快）
     SCAN_LOG_INTERVAL_SECONDS: int = 60  # 后台扫描进度日志输出的时间间隔（秒）
     
     # 扫描方法配置
     SCAN_METHOD: str = "default"  # 扫描方法: "default" (默认) 或 "es" (Everything搜索工具)
     ES_EXE_PATH: str = r"E:\app\TAF\ITDT\ES\es.exe"  # Everything搜索工具可执行文件路径
+    
+    # 目录扫描并发配置
+    SCAN_THREADS: int = 4  # 目录扫描并发线程数（默认4线程，可设置为1-16）
+    # 性能优化：使用多线程并发扫描目录，提升扫描速度
+    # 建议值：1-4线程（I/O密集型），4-8线程（CPU密集型），8-16线程（网络路径）
+    # 注意：线程数过多可能导致内存占用增加和性能下降
     
     # 内存数据库配置
     MEMORY_DB_MAX_FILES: int = 5000000  # 内存数据库中最大文件数（500万）

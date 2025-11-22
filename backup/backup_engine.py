@@ -792,7 +792,8 @@ class BackupEngine:
                         logger.warning(f"发送备份失败钉钉通知失败: {str(notify_error)}")
 
             # 保存任务结果 - 使用原生 openGauss SQL
-            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+            from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
+            from utils.scheduler.sqlite_utils import is_sqlite
             
             if is_opengauss():
                 # 使用连接池
@@ -812,10 +813,17 @@ class BackupEngine:
                         datetime.now(),
                         backup_task.id
                     )
-            else:
-                # 非 openGauss 使用 SQLAlchemy
-                async for db in get_db():
-                    await db.commit()
+            elif is_redis():
+                # Redis模式：不需要提交事务，直接跳过
+                pass
+            elif is_sqlite():
+                # SQLite模式：使用 SQLAlchemy
+                from utils.scheduler.sqlite_utils import is_sqlite
+                from config.database import get_db
+                if is_sqlite() and db_manager.AsyncSessionLocal and callable(db_manager.AsyncSessionLocal):
+                    async for db in get_db():
+                        await db.commit()
+                # 其他情况跳过
 
             logger.info(f"========== 备份任务执行完成 ==========")
             logger.info(f"任务名称: {task_name}")

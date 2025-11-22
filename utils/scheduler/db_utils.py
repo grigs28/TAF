@@ -30,6 +30,18 @@ def is_opengauss() -> bool:
     return "opengauss" in str(database_url).lower()
 
 
+def is_redis() -> bool:
+    """检查当前数据库是否为Redis"""
+    database_url = db_manager.settings.DATABASE_URL
+    db_flavor = getattr(db_manager.settings, 'DB_FLAVOR', None)
+    # 优先使用DB_FLAVOR配置
+    if db_flavor and db_flavor.lower() == "redis":
+        return True
+    # 从DATABASE_URL判断
+    url_lower = str(database_url).lower()
+    return url_lower.startswith("redis://") or url_lower.startswith("rediss://")
+
+
 async def _create_opengauss_pool():
     """创建openGauss连接池"""
     import asyncpg
@@ -49,10 +61,21 @@ async def _create_opengauss_pool():
     max_overflow = getattr(db_manager.settings, 'DB_MAX_OVERFLOW', 20)
     pool_timeout = getattr(db_manager.settings, 'DB_POOL_TIMEOUT', 30.0)
     command_timeout = getattr(db_manager.settings, 'DB_COMMAND_TIMEOUT', 60.0)
+    query_dop = getattr(db_manager.settings, 'DB_QUERY_DOP', 16)  # openGauss 查询并行度
     min_size = max(1, pool_size // 2)  # 最小连接数
     max_size = pool_size + max_overflow  # 最大连接数
     
     monitor = get_opengauss_monitor()
+
+    # 连接初始化函数：设置 query_dop
+    async def init_connection(conn):
+        """连接初始化函数：设置 openGauss 查询并行度"""
+        try:
+            await conn.execute(f"SET query_dop = {query_dop};")
+            logger.debug(f"已设置 openGauss 查询并行度: query_dop = {query_dop}")
+        except Exception as e:
+            logger.warning(f"设置 query_dop 失败（可能不是 openGauss 数据库）: {str(e)}")
+            # 不影响连接创建，继续执行
 
     try:
         pool = await asyncpg.create_pool(
@@ -67,8 +90,9 @@ async def _create_opengauss_pool():
             command_timeout=command_timeout,  # 命令超时时间（秒）
             max_queries=50000,  # 每个连接的最大查询数
             max_inactive_connection_lifetime=300.0,  # 非活跃连接的最大生命周期（秒）
+            init=init_connection,  # 连接初始化回调：设置 query_dop
         )
-        logger.info(f"openGauss连接池创建成功: min_size={min_size}, max_size={max_size}, timeout={pool_timeout}s, command_timeout={command_timeout}s")
+        logger.info(f"openGauss连接池创建成功: min_size={min_size}, max_size={max_size}, timeout={pool_timeout}s, command_timeout={command_timeout}s, query_dop={query_dop}")
         if monitor.enabled:
             logger.debug(
                 "openGauss 连接池参数: host=%s port=%s db=%s min=%s max=%s",

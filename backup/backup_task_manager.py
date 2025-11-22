@@ -334,15 +334,39 @@ class BackupTaskManager:
                         logger.info(f"任务已取消: {task_id}")
                         return True
             else:
-                # 非 openGauss 使用 SQLAlchemy
-                async for db in get_db():
-                    backup_task = await db.get(BackupTask, task_id)
-                    if backup_task and backup_task.status == BackupTaskStatus.RUNNING:
-                        backup_task.status = BackupTaskStatus.CANCELLED
-                        backup_task.updated_at = datetime.now()
-                        await db.commit()
-                        logger.info(f"任务已取消: {task_id}")
-                        return True
+                # 检查是否是 Redis 模式
+                from utils.scheduler.db_utils import is_redis
+                from utils.scheduler.sqlite_utils import is_sqlite
+                if is_redis():
+                    # Redis 模式：使用 Redis 更新
+                    from backup.redis_backup_db import KEY_PREFIX_BACKUP_TASK, _get_redis_key, update_task_status_redis
+                    from models.backup import BackupTask
+                    from config.redis_db import get_redis_client
+                    redis = await get_redis_client()
+                    task_key = _get_redis_key(KEY_PREFIX_BACKUP_TASK, task_id)
+                    task_data = await redis.hgetall(task_key)
+                    if task_data:
+                        task_dict = {k if isinstance(k, str) else k.decode('utf-8'): 
+                                    v if isinstance(v, str) else (v.decode('utf-8') if isinstance(v, bytes) else str(v))
+                                    for k, v in task_data.items()}
+                        task_status = task_dict.get('status', '').lower()
+                        if task_status == 'running':
+                            # 创建一个临时的 BackupTask 对象用于更新
+                            backup_task = type('BackupTask', (), {'id': task_id})()
+                            await update_task_status_redis(backup_task, BackupTaskStatus.CANCELLED)
+                            logger.info(f"任务已取消: {task_id}")
+                            return True
+                    return False
+                elif is_sqlite():
+                    # SQLite 版本：使用 SQLAlchemy
+                    async for db in get_db():
+                        backup_task = await db.get(BackupTask, task_id)
+                        if backup_task and backup_task.status == BackupTaskStatus.RUNNING:
+                            backup_task.status = BackupTaskStatus.CANCELLED
+                            backup_task.updated_at = datetime.now()
+                            await db.commit()
+                            logger.info(f"任务已取消: {task_id}")
+                            return True
             
             return False
         except Exception as e:

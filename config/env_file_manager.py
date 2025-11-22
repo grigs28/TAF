@@ -169,9 +169,37 @@ class EnvFileManager:
                     # 如果这个键需要更新
                     if key in updates:
                         value = updates[key]
-                        # 如果值包含空格或特殊字符，使用引号
-                        if ' ' in str(value) or '#' in str(value) or '=' in str(value):
-                            lines[i] = f"{key}=\"{value}\"\n"
+                        # 特殊处理：NOTIFICATION_EVENTS 和 TAPE_DEVICES_CACHE 等 JSON 格式的值
+                        # 这些值需要正确转义内部的双引号
+                        if key in ['NOTIFICATION_EVENTS', 'TAPE_DEVICES_CACHE']:
+                            # JSON 值：需要转义内部双引号并用双引号包裹
+                            import json
+                            try:
+                                # 如果已经是有效的 JSON 字符串，转义内部双引号
+                                if isinstance(value, str):
+                                    # 尝试解析以确保是有效的 JSON
+                                    try:
+                                        json.loads(value)
+                                        # 转义内部的双引号
+                                        escaped_value = value.replace('"', '\\"')
+                                        lines[i] = f'{key}="{escaped_value}"\n'
+                                    except json.JSONDecodeError:
+                                        # 如果不是有效的 JSON，直接转义双引号
+                                        escaped_value = value.replace('"', '\\"')
+                                        lines[i] = f'{key}="{escaped_value}"\n'
+                                else:
+                                    # 如果不是字符串，转换为 JSON 字符串
+                                    json_str = json.dumps(value, ensure_ascii=False)
+                                    escaped_value = json_str.replace('"', '\\"')
+                                    lines[i] = f'{key}="{escaped_value}"\n'
+                            except Exception as e:
+                                logger.warning(f"处理 {key} 的值时出错: {e}，使用简单转义")
+                                escaped_value = str(value).replace('"', '\\"')
+                                lines[i] = f'{key}="{escaped_value}"\n'
+                        elif ' ' in str(value) or '#' in str(value) or '=' in str(value) or '"' in str(value):
+                            # 如果值包含空格、特殊字符或双引号，使用引号并转义双引号
+                            escaped_value = str(value).replace('"', '\\"')
+                            lines[i] = f"{key}=\"{escaped_value}\"\n"
                         else:
                             lines[i] = f"{key}={value}\n"
                         updated_keys.add(key)
@@ -180,9 +208,36 @@ class EnvFileManager:
             # 添加新配置（不在现有文件中的）
             for key, value in updates.items():
                 if key not in updated_keys:
-                    # 如果值包含空格或特殊字符，使用引号
-                    if ' ' in str(value) or '#' in str(value) or '=' in str(value):
-                        lines.append(f"{key}=\"{value}\"\n")
+                    # 特殊处理：NOTIFICATION_EVENTS 和 TAPE_DEVICES_CACHE 等 JSON 格式的值
+                    if key in ['NOTIFICATION_EVENTS', 'TAPE_DEVICES_CACHE']:
+                        # JSON 值：需要转义内部双引号并用双引号包裹
+                        import json
+                        try:
+                            # 如果已经是有效的 JSON 字符串，转义内部双引号
+                            if isinstance(value, str):
+                                # 尝试解析以确保是有效的 JSON
+                                try:
+                                    json.loads(value)
+                                    # 转义内部的双引号
+                                    escaped_value = value.replace('"', '\\"')
+                                    lines.append(f'{key}="{escaped_value}"\n')
+                                except json.JSONDecodeError:
+                                    # 如果不是有效的 JSON，直接转义双引号
+                                    escaped_value = value.replace('"', '\\"')
+                                    lines.append(f'{key}="{escaped_value}"\n')
+                            else:
+                                # 如果不是字符串，转换为 JSON 字符串
+                                json_str = json.dumps(value, ensure_ascii=False)
+                                escaped_value = json_str.replace('"', '\\"')
+                                lines.append(f'{key}="{escaped_value}"\n')
+                        except Exception as e:
+                            logger.warning(f"处理 {key} 的值时出错: {e}，使用简单转义")
+                            escaped_value = str(value).replace('"', '\\"')
+                            lines.append(f'{key}="{escaped_value}"\n')
+                    elif ' ' in str(value) or '#' in str(value) or '=' in str(value) or '"' in str(value):
+                        # 如果值包含空格、特殊字符或双引号，使用引号并转义双引号
+                        escaped_value = str(value).replace('"', '\\"')
+                        lines.append(f"{key}=\"{escaped_value}\"\n")
                     else:
                         lines.append(f"{key}={value}\n")
             

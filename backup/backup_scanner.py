@@ -103,25 +103,27 @@ class BackupScanner:
             # 初始化统计变量
             total_files = 0
             total_bytes = 0
+            # 使用全局settings统一读取配置（仅在开始时读取一次）
+            settings = get_settings()
             # 从配置读取扫描进度更新间隔（.env 中可通过 SCAN_UPDATE_INTERVAL 覆盖）
-            update_interval = self.settings.SCAN_UPDATE_INTERVAL
+            update_interval = settings.SCAN_UPDATE_INTERVAL
             # 进度日志时间间隔（秒），控制"后台扫描任务：已扫描 N 个文件..."的输出频率
-            log_interval_seconds = getattr(self.settings, 'SCAN_LOG_INTERVAL_SECONDS', 60)
+            log_interval_seconds = getattr(settings, 'SCAN_LOG_INTERVAL_SECONDS', 60)
             # 统计用时间基准（用于计算扫描速度）
             scan_start_time = time.time()
             last_log_time = scan_start_time
             last_log_files = 0
             
-            # 检查扫描方法配置
-            scan_method = getattr(self.settings, 'SCAN_METHOD', 'default').lower()
+            # 检查扫描方法配置（实时读取最新配置）
+            scan_method = getattr(settings, 'SCAN_METHOD', 'default').lower()
             use_es_scanner = (scan_method == 'es')
             
             if use_es_scanner:
-                # 使用ES扫描器
+                # 使用ES扫描器（实时读取最新配置）
                 es_scanner_initialized = False
                 try:
                     from backup.es_scanner import ESScanner
-                    es_exe_path = getattr(self.settings, 'ES_EXE_PATH', r'E:\app\TAF\ITDT\ES\es.exe')
+                    es_exe_path = getattr(settings, 'ES_EXE_PATH', r'E:\app\TAF\ITDT\ES\es.exe')
                     es_scanner = ESScanner(es_exe_path=es_exe_path)
                     # 检查ES工具是否可用（在开始扫描前检查）
                     if not es_scanner._check_es_tool():
@@ -132,17 +134,21 @@ class BackupScanner:
                     
                     # 使用批量数据库写入器提升写入性能
                     if backup_set_db_id:
-                        # 使用内存数据库写入器，实现极速写入 + 异步同步
-                        # 从配置读取内存数据库参数
-                        use_memory_db = getattr(self.settings, 'USE_MEMORY_DB', True)
+                        # 检查数据库类型，Redis不使用SQLite内存数据库
+                        from utils.scheduler.db_utils import is_redis
+                        is_redis_db = is_redis()
+                        
+                        # Redis本身是内存数据库，不需要SQLite内存数据库层
+                        # 只有在SQLite/openGauss模式下才使用内存数据库写入器（实时读取最新配置）
+                        use_memory_db = getattr(settings, 'USE_MEMORY_DB', True) and not is_redis_db
 
                         if use_memory_db:
-                            sync_batch_size = getattr(self.settings, 'MEMORY_DB_SYNC_BATCH_SIZE', 5000)
-                            sync_interval = getattr(self.settings, 'MEMORY_DB_SYNC_INTERVAL', 30)
-                            max_memory_files = getattr(self.settings, 'MEMORY_DB_MAX_FILES', 5000000)
-                            checkpoint_interval = getattr(self.settings, 'MEMORY_DB_CHECKPOINT_INTERVAL', 300)
-                            checkpoint_retention_hours = getattr(self.settings, 'MEMORY_DB_CHECKPOINT_RETENTION_HOURS', 24)
-                            enable_checkpoint = getattr(self.settings, 'USE_CHECKPOINT', False)
+                            sync_batch_size = getattr(settings, 'MEMORY_DB_SYNC_BATCH_SIZE', 5000)
+                            sync_interval = getattr(settings, 'MEMORY_DB_SYNC_INTERVAL', 30)
+                            max_memory_files = getattr(settings, 'MEMORY_DB_MAX_FILES', 5000000)
+                            checkpoint_interval = getattr(settings, 'MEMORY_DB_CHECKPOINT_INTERVAL', 300)
+                            checkpoint_retention_hours = getattr(settings, 'MEMORY_DB_CHECKPOINT_RETENTION_HOURS', 24)
+                            enable_checkpoint = getattr(settings, 'USE_CHECKPOINT', False)
 
                             from backup.memory_db_writer import MemoryDBWriter
                             memory_writer = MemoryDBWriter(
@@ -160,9 +166,9 @@ class BackupScanner:
                                 f"sync_batch={sync_batch_size}, interval={sync_interval}s)"
                             )
                         else:
-                            # 回退到批量写入器
-                            batch_size = getattr(self.settings, 'DB_BATCH_SIZE', 1000)
-                            max_queue_size = getattr(self.settings, 'DB_QUEUE_MAX_SIZE', 5000)
+                            # 回退到批量写入器（Redis模式或不使用内存数据库时）（实时读取最新配置）
+                            batch_size = getattr(settings, 'DB_BATCH_SIZE', 5000)
+                            max_queue_size = getattr(settings, 'DB_QUEUE_MAX_SIZE', 50000)
 
                             from backup.backup_db import BatchDBWriter
                             batch_writer = BatchDBWriter(
@@ -171,11 +177,15 @@ class BackupScanner:
                                 max_queue_size=max_queue_size
                             )
                             await batch_writer.start()  # 启动批量写入器
-                            logger.info(f"批量写入器已启动 (batch_size={batch_size}, max_queue={max_queue_size})")
+                            
+                            if is_redis_db:
+                                logger.info(f"[Redis模式] Redis本身是内存数据库，直接使用批量写入器写入Redis (batch_size={batch_size}, max_queue={max_queue_size})")
+                            else:
+                                logger.info(f"批量写入器已启动 (batch_size={batch_size}, max_queue={max_queue_size})")
                     
                     # 使用ES扫描器进行流式扫描
-                    # 批量提交缓冲区：累积文件到 update_interval 后再批量提交
-                    file_buffer = []
+                    # ES扫描器直接顺序写内存数据库：ES扫描器传过来多少写多少，一批次全部写入内存数据库
+                    # 批次数量使用.env的后台扫描进度更新间隔（文件数），ES扫描器传递过来的数据不丢弃
                     
                     async for file_batch in es_scanner.scan_files_streaming(
                         source_paths,
@@ -183,138 +193,122 @@ class BackupScanner:
                         backup_task,
                         log_context="[后台扫描-ES]"
                     ):
-                        # 处理文件批次
+                        # ES扫描器返回的每个批次，直接全部写入内存数据库
+                        if not file_batch:
+                            continue
+                        
+                        # 统计当前批次
+                        batch_size = len(file_batch)
                         for file_info in file_batch:
                             file_size = file_info.get('size', 0) or 0
                             total_files += 1
                             total_bytes += file_size
-                            
-                            # 将文件添加到缓冲区（不立即提交到数据库）
-                            file_buffer.append(file_info)
-                            
-                            # 当缓冲区达到 update_interval 时，批量提交到内存数据库
-                            if len(file_buffer) >= update_interval:
-                                buffer_size = len(file_buffer)
-                                if backup_set_db_id:
+                        
+                        # 直接写入内存数据库（不累积，不丢弃）
+                        if backup_set_db_id:
+                            try:
+                                if use_memory_db and 'memory_writer' in locals():
+                                    # 批量写入内存数据库（使用批量插入优化性能）
+                                    logger.debug(f"[后台扫描-ES] 开始批量写入 {batch_size} 个文件到内存数据库（批次大小由SCAN_UPDATE_INTERVAL控制）...")
                                     try:
-                                        if use_memory_db and 'memory_writer' in locals():
-                                            # 批量写入内存数据库（使用批量插入优化性能）
-                                            logger.debug(f"[后台扫描-ES] 开始批量提交 {buffer_size} 个文件到内存数据库...")
+                                        await memory_writer.add_files_batch(file_batch)
+                                        logger.debug(f"[后台扫描-ES] ✅ 已成功批量写入 {batch_size} 个文件到内存数据库")
+                                    except Exception as batch_error:
+                                        logger.error(f"[后台扫描-ES] ❌ 批量写入失败: {str(batch_error)}，尝试逐个添加（不丢弃数据）", exc_info=True)
+                                        # 回退到逐个添加（容错处理，不丢弃数据）
+                                        success_count = 0
+                                        failed_count = 0
+                                        failed_files = []
+                                        for file_info in file_batch:
                                             try:
-                                                await memory_writer.add_files_batch(file_buffer)
-                                                logger.debug(f"[后台扫描-ES] ✅ 已成功批量提交 {buffer_size} 个文件到内存数据库")
-                                            except Exception as batch_error:
-                                                logger.error(f"[后台扫描-ES] ❌ 批量提交失败: {str(batch_error)}，尝试逐个添加", exc_info=True)
-                                                # 回退到逐个添加（容错处理）
-                                                success_count = 0
-                                                failed_count = 0
-                                                for buffered_file in file_buffer:
-                                                    try:
-                                                        await memory_writer.add_file(buffered_file)
-                                                        success_count += 1
-                                                    except Exception as file_error:
-                                                        failed_count += 1
-                                                        file_path = buffered_file.get('path', 'unknown')
-                                                        logger.warning(f"[后台扫描-ES] 添加文件到内存数据库失败: {file_path[:200]}, 错误: {str(file_error)}")
-                                                if success_count > 0:
-                                                    logger.debug(f"[后台扫描-ES] ✅ 已成功提交 {success_count} 个文件到内存数据库（逐个添加）")
-                                                if failed_count > 0:
-                                                    logger.warning(f"[后台扫描-ES] ⚠️ {failed_count} 个文件添加失败，已跳过")
-                                        else:
-                                            # 批量写入批量写入器
-                                            logger.debug(f"[后台扫描-ES] 开始批量提交 {buffer_size} 个文件到批量写入器...")
-                                            success_count = 0
-                                            failed_count = 0
-                                            for buffered_file in file_buffer:
-                                                try:
-                                                    await batch_writer.add_file(buffered_file)
-                                                    success_count += 1
-                                                except Exception as file_error:
-                                                    failed_count += 1
-                                                    file_path = buffered_file.get('path', 'unknown')
-                                                    logger.warning(f"[后台扫描-ES] 添加文件到批量写入器失败: {file_path[:200]}, 错误: {str(file_error)}")
-                                                    # 继续处理下一个文件，不中断循环
-                                            if success_count > 0:
-                                                logger.debug(f"[后台扫描-ES] ✅ 已成功提交 {success_count} 个文件到批量写入器")
-                                            if failed_count > 0:
-                                                logger.warning(f"[后台扫描-ES] ⚠️ {failed_count} 个文件添加失败，已跳过")
-                                    except asyncio.TimeoutError:
-                                        # 队列已满，记录警告但继续扫描
-                                        logger.warning(f"[后台扫描-ES] ❌ 写入队列已满，跳过 {buffer_size} 个文件")
-                                    except Exception as e:
-                                        # 其他错误，记录但不中断扫描
-                                        logger.error(f"[后台扫描-ES] ❌ 批量写入文件失败: {e}，跳过 {buffer_size} 个文件", exc_info=True)
-                                
-                                # 清空缓冲区
-                                file_buffer.clear()
-                                
-                                # 更新数据库中的统计字段
-                                logger.debug(f"[后台扫描-ES] 更新扫描进度: 已扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)}")
-                                await self.backup_db.update_scan_progress_only(backup_task, total_files, total_bytes)
-                                # 再根据时间间隔决定是否输出一条统计日志
-                                now = time.time()
-                                elapsed_since_last_log = now - last_log_time
-                                if elapsed_since_last_log >= log_interval_seconds:
-                                    elapsed_total = max(now - scan_start_time, 0.001)
-                                    elapsed_window = max(elapsed_since_last_log, 0.001)
-                                    files_total_rate = total_files / elapsed_total
-                                    files_window = total_files - last_log_files
-                                    files_window_rate = files_window / elapsed_window if files_window > 0 else 0.0
-                                    logger.info(
-                                        f"后台扫描任务（ES）：已扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)}，"
-                                        f"平均速度 {files_total_rate:.1f} 个文件/秒，"
-                                        f"最近 {files_window} 个文件用时 {elapsed_window:.1f} 秒，速度 {files_window_rate:.1f} 个文件/秒"
-                                    )
-                                    last_log_time = now
-                                    last_log_files = total_files
-                    
-                    # ES扫描完成，提交缓冲区中剩余的文件（如果有）
-                    if file_buffer and backup_set_db_id:
-                        remaining_count = len(file_buffer)
-                        try:
-                            if use_memory_db and 'memory_writer' in locals():
-                                # 批量写入内存数据库（使用批量插入优化性能）
-                                logger.debug(f"[后台扫描-ES] 提交剩余 {remaining_count} 个文件到内存数据库...")
-                                try:
-                                    await memory_writer.add_files_batch(file_buffer)
-                                    logger.debug(f"[后台扫描-ES] ✅ 已成功批量提交剩余 {remaining_count} 个文件到内存数据库")
-                                except Exception as batch_error:
-                                    logger.error(f"[后台扫描-ES] ❌ 批量提交剩余文件失败: {str(batch_error)}，尝试逐个添加", exc_info=True)
-                                    # 回退到逐个添加（容错处理）
-                                    success_count = 0
-                                    failed_count = 0
-                                    for buffered_file in file_buffer:
+                                                await memory_writer.add_file(file_info)
+                                                success_count += 1
+                                            except Exception as file_error:
+                                                failed_count += 1
+                                                file_path = file_info.get('path', 'unknown')
+                                                failed_files.append((file_path, str(file_error)))
+                                                logger.warning(f"[后台扫描-ES] 添加文件到内存数据库失败: {file_path[:200]}, 错误: {str(file_error)}")
+                                        
+                                        if success_count > 0:
+                                            logger.debug(f"[后台扫描-ES] ✅ 已成功提交 {success_count} 个文件到内存数据库（逐个添加）")
+                                        if failed_count > 0:
+                                            logger.warning(f"[后台扫描-ES] ⚠️ {failed_count} 个文件添加失败，但数据未丢弃，将在下次同步时重试")
+                                            # 记录失败的文件信息，但不中断扫描
+                                            for file_path, error_msg in failed_files[:5]:  # 只记录前5个
+                                                logger.debug(f"[后台扫描-ES] 失败文件: {file_path[:200]}, 错误: {error_msg}")
+                                else:
+                                    # 不使用内存数据库时，使用批量写入器（Redis或openGauss直接写入）
+                                    from utils.scheduler.db_utils import is_redis
+                                    is_redis_db = is_redis()
+                                    
+                                    if is_redis_db:
+                                        # Redis模式：直接批量写入
+                                        logger.debug(f"[Redis批量写入] 一次性写入 {batch_size} 个文件到数据库")
                                         try:
-                                            await memory_writer.add_file(buffered_file)
-                                            success_count += 1
-                                        except Exception as file_error:
-                                            failed_count += 1
-                                            file_path = buffered_file.get('path', 'unknown')
-                                            logger.warning(f"[后台扫描-ES] 添加剩余文件到内存数据库失败: {file_path[:200]}, 错误: {str(file_error)}")
-                                    if success_count > 0:
-                                        logger.debug(f"[后台扫描-ES] ✅ 已成功提交剩余 {success_count} 个文件到内存数据库（逐个添加）")
-                                    if failed_count > 0:
-                                        logger.warning(f"[后台扫描-ES] ⚠️ {failed_count} 个剩余文件添加失败，已跳过")
-                            else:
-                                # 批量写入批量写入器
-                                logger.debug(f"[后台扫描-ES] 提交剩余 {remaining_count} 个文件到批量写入器...")
-                                success_count = 0
-                                failed_count = 0
-                                for buffered_file in file_buffer:
-                                    try:
-                                        await batch_writer.add_file(buffered_file)
-                                        success_count += 1
-                                    except Exception as file_error:
-                                        failed_count += 1
-                                        file_path = buffered_file.get('path', 'unknown')
-                                        logger.warning(f"[后台扫描-ES] 添加剩余文件到批量写入器失败: {file_path[:200]}, 错误: {str(file_error)}")
-                                if success_count > 0:
-                                    logger.debug(f"[后台扫描-ES] ✅ 已成功提交剩余 {success_count} 个文件到批量写入器")
-                                if failed_count > 0:
-                                    logger.warning(f"[后台扫描-ES] ⚠️ {failed_count} 个剩余文件添加失败，已跳过")
-                        except Exception as e:
-                            logger.error(f"[后台扫描-ES] ❌ 批量写入剩余文件失败: {e}，跳过 {remaining_count} 个文件", exc_info=True)
-                        file_buffer.clear()
+                                            await batch_writer._process_batch_redis(file_batch)
+                                            logger.info(f"[Redis批量写入] ✅ 已成功一次性写入 {batch_size} 个文件到数据库")
+                                        except Exception as batch_error:
+                                            logger.error(f"[Redis批量写入] ❌ 一次性写入失败: {str(batch_error)}", exc_info=True)
+                                            # 不清空批次，下次循环会重试（不丢弃数据）
+                                            raise
+                                    else:
+                                        # openGauss模式：使用队列机制
+                                        logger.debug(f"[后台扫描-ES] 开始批量提交 {batch_size} 个文件到批量写入器...")
+                                        success_count = 0
+                                        failed_count = 0
+                                        
+                                        for file_info in file_batch:
+                                            try:
+                                                # 尝试添加文件到队列
+                                                # add_file 内部会处理临时性错误的无限重试
+                                                await batch_writer.add_file(file_info)
+                                                success_count += 1
+                                            except (ValueError, KeyError, TypeError) as file_error:
+                                                # 永久性错误：文件信息格式错误，记录但不丢弃
+                                                file_path = file_info.get('path', 'unknown')
+                                                logger.error(f"[后台扫描-ES] 文件信息格式错误: {file_path[:200]}, 错误: {str(file_error)}")
+                                                failed_count += 1
+                                            except Exception as file_error:
+                                                # 其他错误，记录但不丢弃
+                                                file_path = file_info.get('path', 'unknown')
+                                                error_msg = str(file_error).lower()
+                                                permanent_error_keywords = ['not found', 'does not exist', 'permission denied', 'access denied', 'invalid path', 'invalid file', 'no such file']
+                                                if any(keyword in error_msg for keyword in permanent_error_keywords):
+                                                    logger.error(f"[后台扫描-ES] 永久性错误: {file_path[:200]}, 错误: {str(file_error)}")
+                                                else:
+                                                    logger.error(f"[后台扫描-ES] 添加文件到批量写入器失败: {file_path[:200]}, 错误: {str(file_error)}")
+                                                failed_count += 1
+                                        
+                                        if success_count > 0:
+                                            logger.debug(f"[后台扫描-ES] ✅ 已成功提交 {success_count} 个文件到批量写入器")
+                                        if failed_count > 0:
+                                            logger.warning(f"[后台扫描-ES] ⚠️ {failed_count} 个文件提交失败，但数据未丢弃")
+                            except Exception as e:
+                                # 其他错误，记录但不中断扫描，不丢弃数据
+                                logger.error(f"[后台扫描-ES] ❌ 批量写入文件失败: {e}，数据未丢弃，将在下次同步时重试", exc_info=True)
+                                # 继续处理下一批次，不中断扫描
+                        
+                        # 更新数据库中的统计字段
+                        logger.debug(f"[后台扫描-ES] 更新扫描进度: 已扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)}")
+                        await self.backup_db.update_scan_progress_only(backup_task, total_files, total_bytes)
+                        # 再根据时间间隔决定是否输出一条统计日志
+                        now = time.time()
+                        elapsed_since_last_log = now - last_log_time
+                        if elapsed_since_last_log >= log_interval_seconds:
+                            elapsed_total = max(now - scan_start_time, 0.001)
+                            elapsed_window = max(elapsed_since_last_log, 0.001)
+                            files_total_rate = total_files / elapsed_total
+                            files_window = total_files - last_log_files
+                            files_window_rate = files_window / elapsed_window if files_window > 0 else 0.0
+                            logger.info(
+                                f"后台扫描任务（ES）：已扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)}，"
+                                f"平均速度 {files_total_rate:.1f} 个文件/秒，"
+                                f"最近 {files_window} 个文件用时 {elapsed_window:.1f} 秒，速度 {files_window_rate:.1f} 个文件/秒"
+                            )
+                            last_log_time = now
+                            last_log_files = total_files
+                    
+                    # ES扫描完成，不需要处理剩余文件（每个批次都已直接写入）
                     
                     # ES扫描完成，继续后续处理（与原有逻辑相同）
                     # 等待写入器完成所有文件写入
@@ -399,10 +393,12 @@ class BackupScanner:
             
             if use_streaming and not use_es_scanner:
                 # 重置统计变量（如果ES扫描失败回退到这里）
+                # 使用全局settings获取最新配置
+                settings = get_settings()
                 total_files = 0
                 total_bytes = 0
-                update_interval = self.settings.SCAN_UPDATE_INTERVAL
-                log_interval_seconds = getattr(self.settings, 'SCAN_LOG_INTERVAL_SECONDS', 60)
+                update_interval = settings.SCAN_UPDATE_INTERVAL
+                log_interval_seconds = getattr(settings, 'SCAN_LOG_INTERVAL_SECONDS', 60)
                 scan_start_time = time.time()
                 last_log_time = scan_start_time
                 last_log_files = 0
@@ -410,17 +406,21 @@ class BackupScanner:
                 # 使用批量数据库写入器提升写入性能
 
                 if backup_set_db_id:
-                    # 使用内存数据库写入器，实现极速写入 + 异步同步
-                    # 从配置读取内存数据库参数
-                    use_memory_db = getattr(self.settings, 'USE_MEMORY_DB', True)
+                    # 检查数据库类型，Redis不使用SQLite内存数据库
+                    from utils.scheduler.db_utils import is_redis
+                    is_redis_db = is_redis()
+                    
+                    # Redis本身是内存数据库，不需要SQLite内存数据库层
+                    # 只有在SQLite/openGauss模式下才使用内存数据库写入器（实时读取最新配置）
+                    use_memory_db = getattr(settings, 'USE_MEMORY_DB', True) and not is_redis_db
 
                     if use_memory_db:
-                        sync_batch_size = getattr(self.settings, 'MEMORY_DB_SYNC_BATCH_SIZE', 5000)
-                        sync_interval = getattr(self.settings, 'MEMORY_DB_SYNC_INTERVAL', 30)
-                        max_memory_files = getattr(self.settings, 'MEMORY_DB_MAX_FILES', 100000)
-                        checkpoint_interval = getattr(self.settings, 'MEMORY_DB_CHECKPOINT_INTERVAL', 300)
-                        checkpoint_retention_hours = getattr(self.settings, 'MEMORY_DB_CHECKPOINT_RETENTION_HOURS', 24)
-                        enable_checkpoint = getattr(self.settings, 'USE_CHECKPOINT', False)
+                        sync_batch_size = getattr(settings, 'MEMORY_DB_SYNC_BATCH_SIZE', 5000)
+                        sync_interval = getattr(settings, 'MEMORY_DB_SYNC_INTERVAL', 30)
+                        max_memory_files = getattr(settings, 'MEMORY_DB_MAX_FILES', 100000)
+                        checkpoint_interval = getattr(settings, 'MEMORY_DB_CHECKPOINT_INTERVAL', 300)
+                        checkpoint_retention_hours = getattr(settings, 'MEMORY_DB_CHECKPOINT_RETENTION_HOURS', 24)
+                        enable_checkpoint = getattr(settings, 'USE_CHECKPOINT', False)
 
                         from backup.memory_db_writer import MemoryDBWriter
                         memory_writer = MemoryDBWriter(
@@ -435,9 +435,9 @@ class BackupScanner:
                         await memory_writer.initialize()
                         logger.info(f"内存数据库写入器已启动 (sync_batch={sync_batch_size}, interval={sync_interval}s)")
                     else:
-                        # 回退到批量写入器
-                        batch_size = getattr(self.settings, 'DB_BATCH_SIZE', 1000)
-                        max_queue_size = getattr(self.settings, 'DB_QUEUE_MAX_SIZE', 5000)
+                        # 回退到批量写入器（实时读取最新配置）
+                        batch_size = getattr(settings, 'DB_BATCH_SIZE', 1000)
+                        max_queue_size = getattr(settings, 'DB_QUEUE_MAX_SIZE', 5000)
 
                         from backup.backup_db import BatchDBWriter
                         batch_writer = BatchDBWriter(
@@ -446,31 +446,83 @@ class BackupScanner:
                             max_queue_size=max_queue_size
                         )
                         await batch_writer.start()  # 启动批量写入器
-                        logger.info(f"批量写入器已启动 (batch_size={batch_size}, max_queue={max_queue_size})")
+                        
+                        if is_redis_db:
+                            logger.info(f"[Redis模式] Redis本身是内存数据库，直接使用批量写入器写入Redis (batch_size={batch_size}, max_queue={max_queue_size})")
+                        else:
+                            logger.info(f"批量写入器已启动 (batch_size={batch_size}, max_queue={max_queue_size})")
                 
-                # 批量提交缓冲区：累积文件到 update_interval 后再批量提交
-                file_buffer = []
+                # 文件扫描顺序写入内存数据库：使用SCAN_UPDATE_INTERVAL作为批次大小
+                # 扫描器返回的每个批次大小 = SCAN_UPDATE_INTERVAL，直接写入内存数据库，无需再次累积
+                file_buffer = []  # 用于累积不满一个批次的文件
                 
                 async for file_batch in self.file_scanner.scan_source_files_streaming(
                     source_paths,
                     exclude_patterns,
                     backup_task,
+                    batch_size=update_interval,  # 使用SCAN_UPDATE_INTERVAL作为批次大小
                     log_context="[后台扫描]"
                 ):
+                    # 统计当前批次
                     for file_info in file_batch:
                         file_size = file_info.get('size', 0) or 0
                         total_files += 1
                         total_bytes += file_size
+                    
+                    # 扫描器返回的批次大小 = SCAN_UPDATE_INTERVAL，直接写入内存数据库
+                    if file_batch:
+                        if backup_set_db_id:
+                            try:
+                                if use_memory_db and 'memory_writer' in locals():
+                                    # 直接批量写入内存数据库（批次大小由SCAN_UPDATE_INTERVAL控制）
+                                    try:
+                                        await memory_writer.add_files_batch(file_batch)
+                                        logger.debug(f"[后台扫描] ✅ 已成功批量写入 {len(file_batch)} 个文件到内存数据库（批次大小由SCAN_UPDATE_INTERVAL控制）")
+                                    except Exception as batch_error:
+                                        logger.error(f"[后台扫描] ❌ 批量提交失败: {str(batch_error)}，尝试逐个添加", exc_info=True)
+                                        # 回退到逐个添加（容错处理）
+                                        success_count = 0
+                                        failed_count = 0
+                                        for buffered_file in file_batch:
+                                            try:
+                                                await memory_writer.add_file(buffered_file)
+                                                success_count += 1
+                                            except Exception as file_error:
+                                                failed_count += 1
+                                                file_path = buffered_file.get('path', 'unknown')
+                                                logger.warning(f"[后台扫描] 添加文件到内存数据库失败: {file_path[:200]}, 错误: {str(file_error)}")
+                                        if failed_count > 0:
+                                            logger.warning(f"[后台扫描] ⚠️ {failed_count} 个文件添加失败，已跳过")
+                                else:
+                                    # 批量写入批量写入器
+                                    success_count = 0
+                                    for buffered_file in file_batch:
+                                        try:
+                                            # 尝试添加文件到队列
+                                            # add_file 内部会处理临时性错误的无限重试
+                                            await batch_writer.add_file(buffered_file)
+                                            success_count += 1
+                                        except (ValueError, KeyError, TypeError) as file_error:
+                                            # 永久性错误：文件信息格式错误，记录并跳过
+                                            file_path = buffered_file.get('path', 'unknown')
+                                            logger.error(f"[后台扫描] 文件信息格式错误，跳过: {file_path[:200]}, 错误: {str(file_error)}")
+                                        except Exception as file_error:
+                                            # 其他错误（可能是永久性错误）
+                                            file_path = buffered_file.get('path', 'unknown')
+                                            error_msg = str(file_error).lower()
+                                            permanent_error_keywords = ['not found', 'does not exist', 'permission denied', 'access denied', 'invalid path', 'invalid file', 'no such file']
+                                            if any(keyword in error_msg for keyword in permanent_error_keywords):
+                                                logger.error(f"[后台扫描] 永久性错误，跳过文件: {file_path[:200]}, 错误: {str(file_error)}")
+                                            else:
+                                                logger.error(f"[后台扫描] 添加文件到批量写入器失败（已重试）: {file_path[:200]}, 错误: {str(file_error)}")
+                            except Exception as e:
+                                # 其他错误，记录但保留文件在缓冲区，继续重试
+                                logger.error(f"批量写入文件失败: {e}，保留 {len(file_batch)} 个文件在缓冲区继续重试", exc_info=True)
+                                # 如果写入失败，将文件添加到file_buffer以便后续重试
+                                file_buffer.extend(file_batch)
+                                continue
                         
-                        # 将文件添加到缓冲区（不立即提交到数据库）
-                        file_buffer.append(file_info)
-                        
-                        # 每1000个文件输出一次缓冲区状态（用于调试）
-                        if total_files % 1000 == 0:
-                            logger.debug(f"[后台扫描-ES] 已收集 {total_files} 个文件，缓冲区中有 {len(file_buffer)} 个文件待提交")
-                        
-                        # 当缓冲区达到 update_interval 时，批量提交到内存数据库
-                        if len(file_buffer) >= update_interval:
+                        # 所有文件都成功添加后，更新统计信息
                             if backup_set_db_id:
                                 try:
                                     if use_memory_db and 'memory_writer' in locals():
@@ -495,25 +547,32 @@ class BackupScanner:
                                     else:
                                         # 批量写入批量写入器
                                         success_count = 0
-                                        failed_count = 0
                                         for buffered_file in file_buffer:
                                             try:
+                                                # 尝试添加文件到队列
+                                                # add_file 内部会处理临时性错误的无限重试
                                                 await batch_writer.add_file(buffered_file)
                                                 success_count += 1
-                                            except Exception as file_error:
-                                                failed_count += 1
+                                            except (ValueError, KeyError, TypeError) as file_error:
+                                                # 永久性错误：文件信息格式错误，记录并跳过
                                                 file_path = buffered_file.get('path', 'unknown')
-                                                logger.warning(f"[后台扫描] 添加文件到批量写入器失败: {file_path[:200]}, 错误: {str(file_error)}")
-                                        if failed_count > 0:
-                                            logger.warning(f"[后台扫描] ⚠️ {failed_count} 个文件添加失败，已跳过")
-                                except asyncio.TimeoutError:
-                                    # 队列已满，记录警告但继续扫描
-                                    logger.warning(f"写入队列已满，跳过 {len(file_buffer)} 个文件")
+                                                logger.error(f"[后台扫描] 文件信息格式错误，跳过: {file_path[:200]}, 错误: {str(file_error)}")
+                                            except Exception as file_error:
+                                                # 其他错误（可能是永久性错误）
+                                                file_path = buffered_file.get('path', 'unknown')
+                                                error_msg = str(file_error).lower()
+                                                permanent_error_keywords = ['not found', 'does not exist', 'permission denied', 'access denied', 'invalid path', 'invalid file', 'no such file']
+                                                if any(keyword in error_msg for keyword in permanent_error_keywords):
+                                                    logger.error(f"[后台扫描] 永久性错误，跳过文件: {file_path[:200]}, 错误: {str(file_error)}")
+                                                else:
+                                                    logger.error(f"[后台扫描] 添加文件到批量写入器失败（已重试）: {file_path[:200]}, 错误: {str(file_error)}")
                                 except Exception as e:
-                                    # 其他错误，记录但不中断扫描
-                                    logger.error(f"批量写入文件失败: {e}，跳过 {len(file_buffer)} 个文件")
+                                    # 其他错误，记录但保留文件在缓冲区，继续重试
+                                    logger.error(f"批量写入文件失败: {e}，保留 {len(file_buffer)} 个文件在缓冲区继续重试", exc_info=True)
+                                    # 不清空缓冲区，下次循环会重试
+                                    continue
                             
-                            # 清空缓冲区
+                            # 所有文件都成功添加，清空缓冲区
                             file_buffer.clear()
                             
                             # 更新数据库中的统计字段
@@ -554,10 +613,30 @@ class BackupScanner:
                         else:
                             # 批量写入批量写入器
                             for buffered_file in file_buffer:
-                                await batch_writer.add_file(buffered_file)
+                                try:
+                                    # 尝试添加文件到队列
+                                    # add_file 内部会处理临时性错误的无限重试
+                                    await batch_writer.add_file(buffered_file)
+                                except (ValueError, KeyError, TypeError) as file_error:
+                                    # 永久性错误：文件信息格式错误，记录并跳过
+                                    file_path = buffered_file.get('path', 'unknown')
+                                    logger.error(f"[后台扫描] 剩余文件信息格式错误，跳过: {file_path[:200]}, 错误: {str(file_error)}")
+                                except Exception as file_error:
+                                    # 其他错误（可能是永久性错误）
+                                    file_path = buffered_file.get('path', 'unknown')
+                                    error_msg = str(file_error).lower()
+                                    permanent_error_keywords = ['not found', 'does not exist', 'permission denied', 'access denied', 'invalid path', 'invalid file', 'no such file']
+                                    if any(keyword in error_msg for keyword in permanent_error_keywords):
+                                        logger.error(f"[后台扫描] 剩余文件永久性错误，跳过: {file_path[:200]}, 错误: {str(file_error)}")
+                                    else:
+                                        logger.error(f"[后台扫描] 添加剩余文件到批量写入器失败（已重试）: {file_path[:200]}, 错误: {str(file_error)}")
                     except Exception as e:
-                        logger.error(f"批量写入剩余文件失败: {e}，跳过 {len(file_buffer)} 个文件")
-                    file_buffer.clear()
+                        logger.error(f"批量写入剩余文件失败: {e}，将保留文件继续重试", exc_info=True)
+                        # 不清空缓冲区，让下次循环继续重试
+                        # file_buffer.clear()  # 注释掉，不丢弃文件
+                    else:
+                        # 只有成功时才清空缓冲区
+                        file_buffer.clear()
 
                 # 等待写入器完成所有文件写入
                 if backup_set_db_id:
@@ -614,8 +693,10 @@ class BackupScanner:
             
             total_files = 0  # 总文件数
             total_bytes = 0  # 总字节数
+            # 使用全局settings获取最新配置
+            settings = get_settings()
             # 从配置读取扫描进度更新间隔（.env 中可通过 SCAN_UPDATE_INTERVAL 覆盖）
-            update_interval = self.settings.SCAN_UPDATE_INTERVAL
+            update_interval = settings.SCAN_UPDATE_INTERVAL
             
             # 处理网络路径（UNC路径）
             from utils.network_path import is_unc_path, normalize_unc_path
@@ -712,8 +793,10 @@ class BackupScanner:
                                 Returns:
                                     int: 批次阈值（文件数）
                                 """
+                                # 使用全局settings获取最新配置
+                                settings = get_settings()
                                 # 使用 settings.SCAN_BATCH_SIZE 作为基础值
-                                base_batch_size = self.settings.SCAN_BATCH_SIZE
+                                base_batch_size = settings.SCAN_BATCH_SIZE
                                 
                                 if dir_count >= 50000:
                                     # 目录数量很多（>50000），使用基础值的约1.7%（300/180000）
@@ -728,8 +811,10 @@ class BackupScanner:
                                     # 目录数量少（<1000），使用基础值的约0.56%（1000/180000）
                                     return int(base_batch_size * 0.0056)
                             
+                            # 使用全局settings获取最新配置
+                            settings = get_settings()
                             # 获取批次字节数阈值（与压缩扫描使用相同的参数）
-                            batch_bytes_threshold = self.settings.SCAN_BATCH_SIZE_BYTES
+                            batch_bytes_threshold = settings.SCAN_BATCH_SIZE_BYTES
                             MAX_PATH_DISPLAY = 200  # 日志中显示的最大路径长度（字符）
                             
                             def truncate_path(path_str: str, max_len: int = MAX_PATH_DISPLAY) -> str:

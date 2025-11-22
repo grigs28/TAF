@@ -212,10 +212,15 @@ async def update_compression_config(config: CompressionConfigRequest, request: R
         if updates:
             env_manager.write_env_file(updates)
             logger.info(f"更新压缩配置: {updates}")
+            
+            # 重新加载配置，使后续调用get_settings()能获取最新配置
+            from config.settings import reload_settings
+            reload_settings()
+            logger.info("压缩配置已重新加载，新配置将立即生效")
         
         return {
             "success": True,
-            "message": "压缩配置更新成功",
+            "message": "压缩配置已更新并重新加载，新配置将立即生效",
             "updated": updates
         }
         

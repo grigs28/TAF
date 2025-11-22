@@ -60,14 +60,36 @@
         const end = completedAt ? new Date(completedAt) : new Date();
         const diffMs = end - start;
         if (diffMs <= 0) return null;
-        // 转换为小时
-        const hours = diffMs / (1000 * 60 * 60);
-        if (hours <= 0) return null;
+        // 转换为秒
+        const seconds = diffMs / 1000;
+        if (seconds <= 0) return null;
         // 将字节转换为GB
         const processedGB = processedBytes / (1024 * 1024 * 1024);
-        // 计算每小时处理的GB数
-        const speedGBPerHour = processedGB / hours;
-        return speedGBPerHour.toFixed(2);
+        // 计算每秒处理的GB数
+        const speedGBPerSec = processedGB / seconds;
+        return speedGBPerSec.toFixed(2);
+    }
+    
+    function calculateProcessingSpeedGBPerSec(task) {
+        // 优先使用后端传递的实时速度
+        if (task.compression_speed_gb_per_sec !== null && task.compression_speed_gb_per_sec !== undefined) {
+            return parseFloat(task.compression_speed_gb_per_sec).toFixed(2);
+        }
+        
+        // 如果没有实时速度，计算平均速度（G/秒）
+        if (task.processed_bytes && task.started_at) {
+            const start = new Date(task.started_at);
+            const end = task.completed_at ? new Date(task.completed_at) : new Date();
+            const diffMs = end - start;
+            if (diffMs > 0) {
+                const seconds = diffMs / 1000;
+                const processedGB = task.processed_bytes / (1024 * 1024 * 1024);
+                const speedGBPerSec = processedGB / seconds;
+                return speedGBPerSec.toFixed(2);
+            }
+        }
+        
+        return null;
     }
 
     async function fetchJSON(url, options) {
@@ -144,12 +166,36 @@
         return (value * 100).toFixed(2) + '%';
     }
 
-    function getStageBadgeClass(state, stageCode) {
+    function getStageBadgeClass(state, stageCode, progressPercent = null) {
         switch ((state || '').toLowerCase()) {
             case 'done':
                 return 'bg-success';
             case 'current':
-                // 为不同阶段添加不同的徽章样式和动画
+                // 如果有进度信息，根据进度百分比改变颜色
+                if (progressPercent !== null && progressPercent >= 0) {
+                    // 根据进度百分比设置颜色
+                    // >= 80%: 绿色（接近完成）
+                    // 50-80%: 黄色（进行中）
+                    // < 50%: 蓝色/红色（刚开始）
+                    if (progressPercent >= 80) {
+                        return 'bg-success pulse-badge'; // 接近完成 - 绿色脉冲
+                    } else if (progressPercent >= 50) {
+                        return 'bg-warning text-dark pulse-badge'; // 进行中 - 黄色脉冲
+                    } else {
+                        // 根据阶段类型设置初始颜色
+                        switch (stageCode) {
+                            case 'scan':
+                                return 'bg-info pulse-badge'; // 扫描文件 - 蓝色脉冲
+                            case 'compress':
+                                return 'bg-warning text-dark pulse-badge'; // 压缩文件 - 黄色脉冲
+                            case 'copy':
+                                return 'bg-danger text-white pulse-badge'; // 写入磁带 - 红色脉冲
+                            default:
+                                return 'bg-primary pulse-badge';
+                        }
+                    }
+                }
+                // 没有进度信息时，使用原来的逻辑
                 switch (stageCode) {
                     case 'scan':
                         return 'bg-info pulse-badge'; // 扫描文件 - 蓝色脉冲
@@ -227,6 +273,7 @@
 
         const header = document.createElement('div');
         header.className = 'd-flex justify-content-between align-items-start mb-2';
+        header.style.position = 'relative';
 
         const title = document.createElement('h6');
         title.className = 'card-title mb-0';
@@ -235,41 +282,34 @@
 
         const badgeWrapper = document.createElement('div');
         badgeWrapper.className = 'd-flex align-items-center gap-2';
-        badgeWrapper.innerHTML = buildStatusBadge(task);
 
         if (isRunning && progressInfo) {
-            const progressCircle = document.createElement('div');
-            progressCircle.className = `progress-circle ${getStageProgressCircleClass(task.operation_stage)}`;
-            
-            // 计算处理速度（G/小时），只显示数字
-            const speed = calculateProcessingSpeed(progressInfo.processedBytes, task.started_at, task.completed_at);
-            if (speed !== null) {
-                // 显示处理速度（只显示数字，不带单位）
-                progressCircle.textContent = speed;
-                progressCircle.title = `处理速度: ${speed} G/小时`;
+            // 计算每小时处理GB数
+            const speedGBPerSec = calculateProcessingSpeedGBPerSec(task);
+            if (speedGBPerSec !== null && parseFloat(speedGBPerSec) > 0) {
+                // 计算每小时处理GB数（G/秒 * 3600秒）
+                const speedGBPerHour = parseFloat((parseFloat(speedGBPerSec) * 3600).toFixed(2));
+                
+                // 根据80G基准判断颜色
+                // >= 80G: 绿色（bg-success）- 良好
+                // < 80G: 黄色（bg-warning）- 较慢
+                const badgeClass = speedGBPerHour >= 80 ? 'badge bg-success' : 'badge bg-warning text-dark';
+                
+                // 在右上角徽章中显示每小时处理GB数（只显示数字）
+                const speedBadge = document.createElement('span');
+                speedBadge.className = badgeClass;
+                speedBadge.style.cssText = 'font-size: 0.85rem; font-weight: 600; padding: 0.35em 0.65em;';
+                speedBadge.textContent = speedGBPerHour.toFixed(2);
+                speedBadge.title = `每小时处理: ${speedGBPerHour.toFixed(2)} GB ${speedGBPerHour >= 80 ? '(良好)' : '(较慢)'}`;
+                
+                badgeWrapper.appendChild(speedBadge);
             } else {
-                // 如果无法计算速度，如果是压缩阶段，尝试从 operation_status 中解析压缩进度
-                if (task.operation_stage === 'compress') {
-                    // 尝试从 operation_status 中解析 "压缩文件中 814/1637 个文件 (49.7%)" 格式
-                    const operationStatus = task.operation_status || '';
-                    // 匹配格式: 数字/数字 个文件 (百分比%)
-                    const progressMatch = operationStatus.match(/(\d+)\/(\d+)\s*个文件\s*\(([\d.]+)%\)/);
-                    if (progressMatch) {
-                        const current = parseInt(progressMatch[1], 10);
-                        const total = parseInt(progressMatch[2], 10);
-                        const percent = parseFloat(progressMatch[3]);
-                        progressCircle.textContent = `${current}/${total}`;
-                        progressCircle.title = `压缩进度: ${current}/${total} 个文件 (${percent}%)`;
-                    } else {
-                        // 如果没有解析到进度信息，显示百分比
-                        progressCircle.textContent = `${progressInfo.percent}%`;
-                    }
-                } else {
-                    progressCircle.textContent = `${progressInfo.percent}%`;
-                }
+                // 如果无法计算速度，显示状态徽章
+                badgeWrapper.innerHTML = buildStatusBadge(task);
             }
-            
-            badgeWrapper.appendChild(progressCircle);
+        } else {
+            // 非运行状态，显示状态徽章
+            badgeWrapper.innerHTML = buildStatusBadge(task);
         }
 
         header.appendChild(badgeWrapper);
@@ -289,19 +329,87 @@
         tape.innerHTML = `<small class="text-muted">目标:</small><br><span class="${highlightClass}">${target}</span>`;
         body.appendChild(tape);
 
-        const stageSteps = Array.isArray(task.stage_steps) ? task.stage_steps : [];
+        // 根据 operation_stage 动态构建阶段步骤
+        const operationStage = (task.operation_stage || '').toLowerCase();
+        const isCompleted = (task.status || '').toLowerCase() === 'completed';
+        
+        // 定义阶段顺序和映射
+        const stageOrder = ['scan', 'compress', 'copy', 'finalize'];
+        const stageLabels = {
+            'scan': '扫描文件',
+            'compress': '压缩/打包',
+            'copy': '写入磁带',
+            'finalize': '完成'
+        };
+        
+        // 构建阶段步骤，根据 operation_stage 动态设置状态
+        let stageSteps = [];
+        
+        // 如果后端已经提供了 stage_steps，先使用后端的（但需要转换 status 为 state）
+        if (Array.isArray(task.stage_steps) && task.stage_steps.length > 0) {
+            // 转换后端的 status 字段为前端的 state 字段
+            stageSteps = task.stage_steps.map(step => {
+                // 后端使用 status: "completed"/"active"/"pending"
+                // 前端使用 state: "done"/"current"/"pending"
+                let state = step.state || step.status || 'pending';
+                if (state === 'completed') state = 'done';
+                if (state === 'active') state = 'current';
+                return {
+                    code: step.code,
+                    label: step.label,
+                    state: state
+                };
+            });
+        }
+        
+        // 如果后端没有提供 stage_steps 或为空，根据 operation_stage 动态构建
+        if (stageSteps.length === 0 && operationStage) {
+            if (isCompleted) {
+                // 完成状态：所有阶段都是 done，finalize 是 current
+                stageOrder.forEach(code => {
+                    stageSteps.push({
+                        code: code,
+                        label: stageLabels[code] || code,
+                        state: code === 'finalize' ? 'current' : 'done'
+                    });
+                });
+            } else {
+                // 运行中：根据当前阶段设置状态
+                const currentIndex = stageOrder.indexOf(operationStage);
+                if (currentIndex >= 0) {
+                    stageOrder.forEach((code, index) => {
+                        let state = 'pending';
+                        if (index < currentIndex) {
+                            state = 'done';  // 已完成的阶段
+                        } else if (index === currentIndex) {
+                            state = 'current';  // 当前阶段
+                        } else {
+                            state = 'pending';  // 未开始的阶段
+                        }
+                        stageSteps.push({
+                            code: code,
+                            label: stageLabels[code] || code,
+                            state: state
+                        });
+                    });
+                }
+            }
+        }
+        
+        // 如果仍然没有 stage_steps，使用默认的（所有都是 pending）
+        if (stageSteps.length === 0) {
+            stageOrder.forEach(code => {
+                stageSteps.push({
+                    code: code,
+                    label: stageLabels[code] || code,
+                    state: 'pending'
+                });
+            });
+        }
+        
         if (stageSteps.length) {
             // 检查任务是否完成，如果是完成状态，确保最终阶段徽章高亮
-            const isCompleted = (task.status || '').toLowerCase() === 'completed';
-
-            // 为完成状态添加特殊处理
             if (isCompleted) {
-                // 确保finalize步骤是current状态并带有特殊样式
-                const finalizeStep = stageSteps.find(step => step.code === 'finalize');
-                if (finalizeStep) {
-                    finalizeStep.state = 'current';
-                }
-
                 // 生成完成状态信息
                 const completedLabel = '🎉 备份完成';
                 const currentStageLabel = completedLabel;
@@ -322,6 +430,18 @@
                 const currentStageLabel = task.operation_status
                     || stageSteps.find(step => step.state === 'current')?.label
                     || '-';
+                
+                // 从 currentStageLabel 中解析进度百分比
+                // 格式示例: "压缩文件中 1201/3395 个文件 (35.4%)"
+                let progressPercent = null;
+                const progressMatch = currentStageLabel.match(/\(([\d.]+)%\)/);
+                if (progressMatch) {
+                    progressPercent = parseFloat(progressMatch[1]);
+                } else if (progressInfo && progressInfo.percent) {
+                    // 如果没有从标签中解析到，使用 progressInfo 中的百分比
+                    progressPercent = progressInfo.percent;
+                }
+                
                 const stageSection = document.createElement('div');
                 stageSection.className = 'mb-2';
                 stageSection.innerHTML = `
@@ -330,7 +450,11 @@
                         <small class="text-muted">${currentStageLabel}</small>
                     </div>
                     <div class="d-flex flex-wrap gap-1 mt-1">
-                        ${stageSteps.map(step => `<span class="badge ${getStageBadgeClass(step.state, step.code)}">${step.label}</span>`).join('')}
+                        ${stageSteps.map(step => {
+                            // 如果是当前阶段且有进度信息，传递进度百分比
+                            const progress = (step.state === 'current' && progressPercent !== null) ? progressPercent : null;
+                            return `<span class="badge ${getStageBadgeClass(step.state, step.code, progress)}">${step.label}</span>`;
+                        }).join('')}
                     </div>
                 `;
                 body.appendChild(stageSection);
@@ -340,7 +464,21 @@
         if (isRunning && progressInfo) {
             const progressSection = document.createElement('div');
             progressSection.className = 'mb-2';
+            
+            // 检查是否有批次压缩进度信息
+            let batchProgressHtml = '';
+            if (task.operation_stage === 'compress' && task.current_compression_progress) {
+                const compProg = task.current_compression_progress;
+                batchProgressHtml = `
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                        <small class="text-muted">本批次压缩进度:</small>
+                        <small class="text-muted fw-semibold">${compProg.current}/${compProg.total} 个文件 (${compProg.percent.toFixed(1)}%)</small>
+                    </div>
+                `;
+            }
+            
             progressSection.innerHTML = `
+                ${batchProgressHtml}
                 <div class="d-flex justify-content-between align-items-center">
                     <small class="text-muted">进度:</small>
                     <small class="text-muted">${progressInfo.percent}%</small>

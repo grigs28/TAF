@@ -146,13 +146,27 @@ async def write_tape_label(request: WriteTapeLabelRequest, http_request: Request
         if not system:
             raise HTTPException(status_code=500, detail="系统未初始化")
         
+        # 检查是否为Redis数据库
+        from utils.scheduler.db_utils import is_redis
+        
+        if is_redis():
+            logger.warning(f"[Redis模式] 写入磁带标签暂未实现: {request.tape_id}")
+            raise HTTPException(status_code=501, detail="Redis模式下暂不支持写入磁带标签功能")
+        
         # 从数据库中获取磁带的过期时间等信息
         import psycopg2
         import psycopg2.extras
         from config.settings import get_settings
+        from utils.scheduler.sqlite_utils import is_sqlite
         
         settings = get_settings()
         database_url = settings.DATABASE_URL
+        
+        # 检查是否为 SQLite
+        if is_sqlite():
+            # SQLite 版本暂不支持写入标签（需要实现）
+            logger.warning(f"[SQLite模式] 写入磁带标签暂未实现: {request.tape_id}")
+            raise HTTPException(status_code=501, detail="SQLite模式下暂不支持写入磁带标签功能")
         
         # 解析URL
         if database_url.startswith("opengauss://"):

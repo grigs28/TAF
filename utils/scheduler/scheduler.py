@@ -330,7 +330,14 @@ class TaskScheduler:
                 }
                 
                 # 更新数据库中的下次执行时间
-                if is_opengauss():
+                from utils.scheduler.db_utils import is_redis
+                from utils.scheduler.sqlite_utils import is_sqlite
+                from utils.scheduler.redis_task_storage import update_task_redis
+                
+                if is_redis():
+                    # Redis模式：使用Redis更新函数
+                    await update_task_redis(scheduled_task.id, {'next_run_time': next_run}, next_run_time=next_run)
+                elif is_opengauss():
                     # 使用openGauss原生连接，避免SQLAlchemy版本解析错误
                     # 使用连接池
                     async with get_opengauss_connection() as conn:
@@ -343,8 +350,8 @@ class TaskScheduler:
                             next_run,
                             scheduled_task.id
                         )
-                else:
-                    # 使用SQLAlchemy会话（其他数据库）
+                elif is_sqlite() and db_manager.AsyncSessionLocal and callable(db_manager.AsyncSessionLocal):
+                    # 使用SQLAlchemy会话（SQLite数据库）
                     async with db_manager.AsyncSessionLocal() as session:
                         scheduled_task.next_run_time = next_run
                         session.add(scheduled_task)

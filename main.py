@@ -86,14 +86,18 @@ class TapeBackupSystem:
                 print("   ├─ 初始化数据库连接池...")
                 await self.db_manager.initialize()
                 
-                # 如果是 SQLite 模式，启动 SQLite 操作队列管理器
-                from utils.scheduler.db_utils import is_opengauss
-                if not is_opengauss():
+                # 如果是 SQLite 模式，启动 SQLite 操作队列管理器（Redis模式不需要）
+                from utils.scheduler.db_utils import is_opengauss, is_redis
+                from utils.scheduler.sqlite_utils import is_sqlite
+                
+                if not is_opengauss() and not is_redis() and is_sqlite():
                     print("   ├─ 启动 SQLite 操作队列管理器...")
                     from backup.sqlite_queue_manager import get_sqlite_queue_manager
                     sqlite_queue_manager = get_sqlite_queue_manager()
                     await sqlite_queue_manager.start()
                     logger.info("SQLite 操作队列管理器已启动（写操作优先于同步）")
+                elif is_redis():
+                    logger.info("[Redis模式] Redis本身是内存数据库，不需要SQLite操作队列管理器")
                 
                 step_time = time.time() - step_start
                 safe_print(f"   └─ 数据库初始化完成 (耗时: {step_time:.2f}秒)\n")
@@ -355,11 +359,17 @@ class TapeBackupSystem:
                         await self.opengauss_monitor.stop()
                     await close_opengauss_pool()
                 else:
-                    # 如果是 SQLite 模式，停止 SQLite 操作队列管理器
-                    from backup.sqlite_queue_manager import get_sqlite_queue_manager
-                    sqlite_queue_manager = get_sqlite_queue_manager()
-                    await sqlite_queue_manager.stop()
-                    logger.info("SQLite 操作队列管理器已停止")
+                    # 如果是 SQLite 模式，停止 SQLite 操作队列管理器（Redis模式不需要）
+                    from utils.scheduler.db_utils import is_redis
+                    from utils.scheduler.sqlite_utils import is_sqlite
+                    
+                    if not is_redis() and is_sqlite():
+                        from backup.sqlite_queue_manager import get_sqlite_queue_manager
+                        sqlite_queue_manager = get_sqlite_queue_manager()
+                        await sqlite_queue_manager.stop()
+                        logger.info("SQLite 操作队列管理器已停止")
+                    elif is_redis():
+                        logger.debug("[Redis模式] Redis模式无需停止SQLite操作队列管理器")
             except Exception as e:
                 logger.warning(f"关闭数据库连接池失败: {str(e)}")
 
