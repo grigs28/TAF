@@ -155,6 +155,12 @@ class Settings(BaseSettings):
     # 建议值：1-4线程（I/O密集型），4-8线程（CPU密集型），8-16线程（网络路径）
     # 注意：线程数过多可能导致内存占用增加和性能下降
     
+    # 扫描多线程选项（仅当SCAN_METHOD=default时有效）
+    USE_SCAN_MULTITHREAD: bool = True  # 是否使用多线程扫描（默认启用）
+    # 当SCAN_METHOD=default时：
+    # - USE_SCAN_MULTITHREAD=True: 使用并发目录扫描（ConcurrentDirScanner）
+    # - USE_SCAN_MULTITHREAD=False: 使用顺序目录扫描（SequentialDirScanner，基于os.scandir）
+    
     # 内存数据库配置
     MEMORY_DB_MAX_FILES: int = 5000000  # 内存数据库中最大文件数（500万）
     MEMORY_DB_SYNC_BATCH_SIZE: int = 5000  # 内存数据库同步批次大小

@@ -61,6 +61,7 @@ class SystemEnvConfig(BaseModel):
     scan_log_interval_seconds: Optional[int] = Field(None, description="后台扫描进度日志时间间隔（秒）")
     scan_method: Optional[str] = Field(None, description="扫描方法: default (默认) 或 es (Everything搜索工具)")
     es_exe_path: Optional[str] = Field(None, description="Everything搜索工具可执行文件路径")
+    use_scan_multithread: Optional[bool] = Field(None, description="是否使用多线程扫描（默认启用），仅当scan_method=default时有效")
     scan_threads: Optional[int] = Field(None, description="目录扫描并发线程数（默认4，建议1-16）")
     use_checkpoint: Optional[bool] = Field(None, description="是否启用检查点文件，默认不启用")
     
@@ -158,6 +159,7 @@ async def get_env_config():
             "scan_log_interval_seconds": parse_int(env_vars.get("SCAN_LOG_INTERVAL_SECONDS"), 60),
             "scan_method": env_vars.get("SCAN_METHOD", "default"),
             "es_exe_path": env_vars.get("ES_EXE_PATH", r"E:\app\TAF\ITDT\ES\es.exe"),
+            "use_scan_multithread": parse_bool(env_vars.get("USE_SCAN_MULTITHREAD"), True),
             "scan_threads": parse_int(env_vars.get("SCAN_THREADS"), 4),
             "use_checkpoint": parse_bool(env_vars.get("USE_CHECKPOINT"), False),
             
@@ -272,6 +274,8 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             updates["SCAN_METHOD"] = config.scan_method
         if config.es_exe_path is not None:
             updates["ES_EXE_PATH"] = config.es_exe_path
+        if config.use_scan_multithread is not None:
+            updates["USE_SCAN_MULTITHREAD"] = str(config.use_scan_multithread).lower()
         if config.scan_threads is not None:
             updates["SCAN_THREADS"] = str(config.scan_threads)
         if config.use_checkpoint is not None:

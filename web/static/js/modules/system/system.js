@@ -47,13 +47,34 @@ document.addEventListener('DOMContentLoaded', function() {
         if (scanMethod) {
             scanMethod.addEventListener('change', function() {
                 const esExePathGroup = document.getElementById('esExePathGroup');
+                const scanMultithreadGroup = document.getElementById('scanMultithreadGroup');
+                const scanThreadsGroup = document.getElementById('scanThreadsGroup');
+                const useScanMultithread = document.getElementById('useScanMultithread');
+                
                 if (esExePathGroup) {
                     if (this.value === 'es') {
                         esExePathGroup.style.display = 'block';
+                        // ES方法时隐藏多线程选项
+                        if (scanMultithreadGroup) scanMultithreadGroup.style.display = 'none';
                     } else {
                         esExePathGroup.style.display = 'none';
+                        // 默认方法时显示多线程选项
+                        if (scanMultithreadGroup) scanMultithreadGroup.style.display = 'block';
+                        // 根据多线程选项显示/隐藏线程数输入
+                        if (useScanMultithread && scanThreadsGroup) {
+                            scanThreadsGroup.style.display = useScanMultithread.checked ? 'block' : 'none';
+                        }
                     }
                 }
+            });
+        }
+        
+        // 多线程选项切换
+        const useScanMultithread = document.getElementById('useScanMultithread');
+        const scanThreadsGroup = document.getElementById('scanThreadsGroup');
+        if (useScanMultithread && scanThreadsGroup) {
+            useScanMultithread.addEventListener('change', function() {
+                scanThreadsGroup.style.display = this.checked ? 'block' : 'none';
             });
         }
         
@@ -911,6 +932,14 @@ async function loadAllSystemConfig() {
             if (config.es_exe_path) {
                 const esExePathInput = document.getElementById('esExePath');
                 if (esExePathInput) esExePathInput.value = config.es_exe_path;
+            }
+            if (config.use_scan_multithread !== undefined) {
+                const useScanMultithreadInput = document.getElementById('useScanMultithread');
+                if (useScanMultithreadInput) {
+                    useScanMultithreadInput.checked = config.use_scan_multithread;
+                    // 触发change事件以显示/隐藏线程数输入
+                    useScanMultithreadInput.dispatchEvent(new Event('change'));
+                }
             }
             if (config.scan_threads) {
                 const scanThreadsInput = document.getElementById('scanThreads');

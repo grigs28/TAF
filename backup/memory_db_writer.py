@@ -177,10 +177,10 @@ class MemoryDBWriter:
         # 仅在启用检查点时启动检查点任务
         if self.enable_checkpoint:
             self._checkpoint_task = asyncio.create_task(self._checkpoint_loop())
-            logger.info(f"检查点任务已启动 (间隔: {self.checkpoint_interval}秒)")
+            logger.debug(f"检查点任务已启动 (间隔: {self.checkpoint_interval}秒)")
         else:
             self._checkpoint_task = None
-            logger.info("检查点功能已禁用")
+            logger.debug("检查点功能已禁用")
 
     async def add_file(self, file_info: Dict):
         """添加文件到内存数据库 - 根据文件扫描器输出正确映射（单个文件）"""
@@ -617,47 +617,84 @@ class MemoryDBWriter:
         )
 
     async def _check_sync_need(self):
-        """检查是否需要同步 - 增加超时机制处理剩余少量文件"""
+        """检查是否需要同步 - 优化openGauss模式下的同步触发，尽快复制到openGauss"""
         # 如果同步正在进行中，直接返回，避免重复触发和产生大量日志
         if self._is_syncing:
             return
         
+        # 检查数据库类型，openGauss模式下使用更激进的同步策略
+        from utils.scheduler.db_utils import is_opengauss
+        is_opengauss_mode = is_opengauss()
+        
         current_time = time.time()
         pending_files = await self._get_pending_sync_count()
 
-        # 条件1：文件数量达到批次大小
-        if pending_files >= self.sync_batch_size:
-            await self._trigger_sync("batch_size_reached")
-            return
-
-        # 条件2：达到同步间隔时间
-        if current_time - self._last_sync_time >= self.sync_interval:
-            await self._trigger_sync("interval_reached")
-            return
-
-        # 条件3：内存中文件过多，且有足够待同步文件
-        # 优化：只有在待同步文件超过批次大小的50%时才触发，避免频繁同步少量文件
-        memory_threshold = min(self.max_memory_files, self.sync_batch_size * 2)
-        if (self._stats['total_files'] >= memory_threshold and
-            pending_files >= self.sync_batch_size // 2):
-            await self._trigger_sync("memory_limit_reached")
-            return
-
-        # 条件4：超时机制 - 扫描完成但没有达到批量大小的剩余文件
-        # 如果超过60秒没有新文件添加，且有待同步文件，强制同步
-        time_since_last_file = current_time - self._last_file_added_time
-        if (time_since_last_file >= 60 and pending_files > 0):
-            await self._trigger_sync("scan_completed_timeout")
-            return
-
-        # 条件5：检查扫描是否可能完成 - 通过待同步文件占总文件的比例判断
-        if pending_files > 0:
-            # 如果98%以上的文件都已同步，且距离上次同步超过30秒，强制同步剩余文件
-            sync_ratio = (self._stats['synced_files'] / max(1, self._stats['total_files']))
-            if (sync_ratio >= 0.98 and
-                current_time - self._last_sync_time >= 30):
-                await self._trigger_sync("almost_complete")
+        # openGauss模式优化：使用更短的同步间隔和更小的批次触发阈值
+        if is_opengauss_mode:
+            # 条件1：文件数量达到批次大小的50%（openGauss模式下更积极）
+            if pending_files >= self.sync_batch_size // 2:
+                await self._trigger_sync("batch_size_reached")
                 return
+
+            # 条件2：达到同步间隔时间（openGauss模式下使用更短的间隔检查）
+            # 使用 sync_interval 的一半作为检查间隔，更频繁地触发同步
+            effective_interval = max(5, self.sync_interval // 2)  # 最少5秒
+            if current_time - self._last_sync_time >= effective_interval:
+                await self._trigger_sync("interval_reached")
+                return
+
+            # 条件3：内存中文件过多，且有足够待同步文件（openGauss模式下降低阈值）
+            memory_threshold = min(self.max_memory_files, self.sync_batch_size)
+            if (self._stats['total_files'] >= memory_threshold and
+                pending_files >= self.sync_batch_size // 4):  # 降低到25%
+                await self._trigger_sync("memory_limit_reached")
+                return
+
+            # 条件4：超时机制 - openGauss模式下使用更短的超时（30秒）
+            time_since_last_file = current_time - self._last_file_added_time
+            if (time_since_last_file >= 30 and pending_files > 0):
+                await self._trigger_sync("scan_completed_timeout")
+                return
+
+            # 条件5：检查扫描是否可能完成 - openGauss模式下使用更短的间隔（15秒）
+            if pending_files > 0:
+                sync_ratio = (self._stats['synced_files'] / max(1, self._stats['total_files']))
+                if (sync_ratio >= 0.95 and  # 降低到95%
+                    current_time - self._last_sync_time >= 15):  # 缩短到15秒
+                    await self._trigger_sync("almost_complete")
+                    return
+        else:
+            # SQLite模式：保持原有逻辑
+            # 条件1：文件数量达到批次大小
+            if pending_files >= self.sync_batch_size:
+                await self._trigger_sync("batch_size_reached")
+                return
+
+            # 条件2：达到同步间隔时间
+            if current_time - self._last_sync_time >= self.sync_interval:
+                await self._trigger_sync("interval_reached")
+                return
+
+            # 条件3：内存中文件过多，且有足够待同步文件
+            memory_threshold = min(self.max_memory_files, self.sync_batch_size * 2)
+            if (self._stats['total_files'] >= memory_threshold and
+                pending_files >= self.sync_batch_size // 2):
+                await self._trigger_sync("memory_limit_reached")
+                return
+
+            # 条件4：超时机制 - 扫描完成但没有达到批量大小的剩余文件
+            time_since_last_file = current_time - self._last_file_added_time
+            if (time_since_last_file >= 60 and pending_files > 0):
+                await self._trigger_sync("scan_completed_timeout")
+                return
+
+            # 条件5：检查扫描是否可能完成
+            if pending_files > 0:
+                sync_ratio = (self._stats['synced_files'] / max(1, self._stats['total_files']))
+                if (sync_ratio >= 0.98 and
+                    current_time - self._last_sync_time >= 30):
+                    await self._trigger_sync("almost_complete")
+                    return
 
     async def _get_pending_sync_count(self) -> int:
         """获取待同步文件数量（仅当前备份集）"""
@@ -703,7 +740,7 @@ class MemoryDBWriter:
         # 检查数据库类型以显示正确的日志
         from utils.scheduler.db_utils import is_opengauss
         db_type = "openGauss" if is_opengauss() else "SQLite"
-        logger.info(f"触发同步到{db_type} (原因: {reason})")
+        logger.debug(f"触发同步到{db_type} (原因: {reason})")
         
         # 创建异步任务执行同步，不阻塞当前线程（扫描线程）
         # 这样扫描和同步可以并行执行，互不阻塞
@@ -711,12 +748,15 @@ class MemoryDBWriter:
 
     async def _sync_loop(self):
         """定期同步循环"""
+        from utils.scheduler.db_utils import is_opengauss
+        is_opengauss_mode = is_opengauss()
+        
         logger.info("内存数据库同步循环已启动，等待同步间隔...")
         while True:
             try:
                 await asyncio.sleep(self.sync_interval)
                 
-                logger.info(f"定期同步触发（间隔: {self.sync_interval}秒）")
+                logger.debug(f"定期同步触发（间隔: {self.sync_interval}秒）")
 
                 if not self._is_syncing:
                     await self._sync_to_opengauss("scheduled")
@@ -732,22 +772,22 @@ class MemoryDBWriter:
                         # 如果没有记录开始时间，使用上次完成时间作为参考
                         sync_duration = time.time() - self._last_sync_time if self._last_sync_time > 0 else 0
                     
-                    logger.info(
-                        f"⚠️ 同步正在进行中，跳过本次定期同步 - "
+                    logger.debug(
+                        f"同步正在进行中，跳过本次定期同步 - "
                         f"待同步: {pending_count} 个，"
                         f"累计总扫描: {total_scanned} 个，累计总同步: {total_synced} 个，"
                         f"当前同步已持续: {sync_duration:.1f}秒"
                     )
                     # 如果同步状态持续超过5分钟，记录警告（可能是卡住了）
                     if sync_duration > 300:
-                        logger.info(
+                        logger.debug(
                             f"⚠️⚠️ 警告：同步状态已持续 {sync_duration:.1f} 秒（超过5分钟），"
                             f"可能已卡住！待同步: {pending_count} 个文件。"
-                            f"建议检查 SQLite 队列管理器是否正常工作。"
-                    )
+                            f"建议检查数据库连接是否正常。"
+                        )
 
             except asyncio.CancelledError:
-                logger.info("内存数据库同步循环被取消")
+                logger.debug("内存数据库同步循环被取消")
                 break
             except Exception as e:
                 logger.error(f"同步循环异常: {e}", exc_info=True)
@@ -801,11 +841,11 @@ class MemoryDBWriter:
                 if not files_to_sync:
                     # 没有更多文件需要同步
                     if batch_number == 0:
-                        logger.info("内存数据库中没有文件需要同步到openGauss")
+                        logger.debug("内存数据库中没有文件需要同步到openGauss")
                     break
 
                 batch_number += 1
-                logger.debug(f"[批次 {batch_number}] 开始同步 {len(files_to_sync)} 个文件到openGauss (原因: {reason})")
+                logger.debug(f"[批次 {batch_number}] 开始同步 {len(files_to_sync)} 个文件到openGauss")
 
                 # 批量同步到openGauss
                 synced_count, synced_file_ids = await self._batch_sync_to_opengauss(files_to_sync)
@@ -829,7 +869,7 @@ class MemoryDBWriter:
                 # 如果当前批次中还有未同步的文件，记录警告
                 if synced_count < len(files_to_sync):
                     remaining = len(files_to_sync) - synced_count
-                    logger.info(f"[批次 {batch_number}] ⚠️ 还有 {remaining} 个文件同步失败，将在下次同步时重试")
+                    logger.warning(f"[批次 {batch_number}] ⚠️ 还有 {remaining} 个文件同步失败，将在下次同步时重试")
 
             # 所有批次同步完成
             if batch_number > 0:
@@ -858,7 +898,7 @@ class MemoryDBWriter:
                     sync_ratio = (total_synced_accumulated / total_scanned) * 100
                     if total_synced_accumulated < total_scanned:
                         logger.info(
-                            f"⚠️ 同步进度: {sync_ratio:.1f}% "
+                            f"同步进度: {sync_ratio:.1f}% "
                             f"（总扫描: {total_scanned} 个，总同步: {total_synced_accumulated} 个，"
                             f"待同步: {total_scanned - total_synced_accumulated} 个）"
                         )
@@ -874,8 +914,8 @@ class MemoryDBWriter:
                     # 计算新增的文件数（同步过程中ES扫描器添加的新文件）
                     new_files_during_sync = final_pending_count - (initial_pending_count - total_synced_count)
                     if new_files_during_sync > 0:
-                        logger.info(f"📊 同步过程中新增了 {new_files_during_sync} 个文件（ES扫描器持续添加）")
-                    logger.info(f"⚠️ 仍有 {final_pending_count} 个文件未同步，将在下次同步时重试")
+                        logger.debug(f"同步过程中新增了 {new_files_during_sync} 个文件（ES扫描器持续添加）")
+                    logger.debug(f"仍有 {final_pending_count} 个文件未同步，将在下次同步时重试")
 
         except Exception as e:
             logger.error(f"同步到openGauss数据库失败: {e}", exc_info=True)
@@ -908,8 +948,8 @@ class MemoryDBWriter:
         
         if pending_count > 0:
             logger.debug(
-                f"[同步] 内存数据库中待同步文件: backup_set_id={self.backup_set_db_id}, "
-                f"数量={pending_count}, 其他备份集: {all_pending}"
+                f"内存数据库中待同步文件: backup_set_id={self.backup_set_db_id}, "
+                f"数量={pending_count}"
             )
         
         async with self.memory_db.execute("""
@@ -1048,7 +1088,7 @@ class MemoryDBWriter:
                 continue
 
         if not insert_data:
-            logger.info(f"没有有效的数据可以批量插入，所有 {len(files)} 个文件都在数据准备阶段失败")
+            logger.warning(f"没有有效的数据可以批量插入，所有 {len(files)} 个文件都在数据准备阶段失败")
             return 0, []
 
         # 执行批量插入
@@ -1427,7 +1467,7 @@ class MemoryDBWriter:
             self._last_checkpoint_time = time.time()
             # 记录检查点文件：(文件路径, 创建时间, 最大未同步文件ID)
             self._checkpoint_files.append((checkpoint_file, self._last_checkpoint_time, max_unsynced_id))
-            logger.info(f"检查点已创建: {checkpoint_file} (最大未同步文件ID: {max_unsynced_id})")
+            logger.debug(f"检查点已创建: {checkpoint_file} (最大未同步文件ID: {max_unsynced_id})")
             
             # 清理过期的检查点文件
             await self._cleanup_old_checkpoints()
@@ -1474,7 +1514,7 @@ class MemoryDBWriter:
                         logger.debug(f"清理检查点文件时出错（忽略）: {old_file}, {e}")
                 
                 if cleaned_count > 0:
-                    logger.info(f"启动时已清理 {cleaned_count} 个过期检查点文件")
+                    logger.debug(f"启动时已清理 {cleaned_count} 个过期检查点文件")
             else:
                 # 如果目录不存在，创建它
                 self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -1509,7 +1549,7 @@ class MemoryDBWriter:
                         try:
                             if os.path.exists(checkpoint_file):
                                 os.remove(checkpoint_file)
-                                logger.info(f"检查点文件已完全同步到openGauss，已删除: {checkpoint_file} (检查点最大未同步ID: {max_unsynced_id}, 当前已同步最大ID: {max_synced_id})")
+                                logger.debug(f"检查点文件已完全同步到openGauss，已删除: {checkpoint_file} (检查点最大未同步ID: {max_unsynced_id}, 当前已同步最大ID: {max_synced_id})")
                             files_to_remove.append(checkpoint_info)
                         except Exception as e:
                             logger.warning(f"删除已同步的检查点文件失败: {checkpoint_file}, 错误: {e}")

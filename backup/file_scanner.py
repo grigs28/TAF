@@ -226,7 +226,18 @@ class FileScanner:
                         from utils.scheduler.db_utils import is_opengauss
                         from config.settings import get_settings
                         settings = get_settings()  # 获取最新配置
-                        use_concurrent_scan = is_opengauss() and getattr(settings, 'SCAN_THREADS', 4) > 1
+                        # 检查是否使用多线程扫描
+                        # 条件：1) openGauss模式 2) 扫描方法为default 3) 启用多线程选项 4) 线程数>1
+                        scan_method = getattr(settings, 'SCAN_METHOD', 'default').lower()
+                        use_multithread = getattr(settings, 'USE_SCAN_MULTITHREAD', True)
+                        scan_threads = getattr(settings, 'SCAN_THREADS', 4)
+                        
+                        use_concurrent_scan = (
+                            is_opengauss() and 
+                            scan_method == 'default' and 
+                            use_multithread and 
+                            scan_threads > 1
+                        )
                         
                         if use_concurrent_scan:
                             # 使用并发目录扫描（openGauss模式）
@@ -364,6 +375,130 @@ class FileScanner:
                                     try:
                                         file_info = await self.get_file_info(file_path_item)
                                         if file_info and not self.should_exclude_file(file_info['path'], exclude_patterns):
+                                            file_batch.append(file_info)
+                                            scanned_count += 1
+                                    except Exception as file_error:
+                                        error_count += 1
+                                        continue
+                                
+                                # 返回文件批次
+                                if file_batch:
+                                    yield file_batch
+                            
+                            continue  # 跳过原有的顺序扫描代码
+                        
+                        # 检查是否使用新的顺序扫描器（openGauss模式 + 不启用多线程）
+                        use_sequential_scanner = (
+                            is_opengauss() and 
+                            scan_method == 'default' and 
+                            not use_multithread
+                        )
+                        
+                        if use_sequential_scanner:
+                            # 使用新的顺序扫描器（SequentialDirScanner）
+                            logger.info(f"{log_context or ''} 启用顺序目录扫描（os.scandir，优化版）")
+                            
+                            from backup.sequential_dir_scanner import SequentialDirScanner
+                            
+                            # 创建排除检查函数
+                            def exclude_check(path_str: str) -> bool:
+                                return self.should_exclude_file(path_str, exclude_patterns)
+                            
+                            # 异步生成器遍历目录（使用顺序扫描器）
+                            async def async_sequential_generator(path: Path):
+                                """异步顺序扫描生成器"""
+                                # 获取主事件循环（在启动线程前获取）
+                                try:
+                                    main_loop = asyncio.get_running_loop()
+                                except RuntimeError:
+                                    main_loop = None
+                                
+                                path_queue = asyncio.Queue(maxsize=0)
+                                current_batch = []
+                                
+                                def file_callback(file_path: Path):
+                                    """文件回调：添加到批次"""
+                                    nonlocal current_batch
+                                    current_batch.append(file_path)
+                                    
+                                    # 批次达到阈值，放入队列
+                                    if len(current_batch) >= batch_size and main_loop:
+                                        try:
+                                            asyncio.run_coroutine_threadsafe(
+                                                path_queue.put(current_batch.copy()),
+                                                main_loop
+                                            ).result(timeout=30.0)
+                                            current_batch.clear()
+                                        except Exception as e:
+                                            logger.warning(f"{context_prefix or ''} 顺序扫描：放入队列失败: {str(e)}")
+                                
+                                # 在线程池中执行顺序扫描
+                                def sequential_scan_worker():
+                                    """在线程池中执行顺序扫描"""
+                                    try:
+                                        scanner = SequentialDirScanner(
+                                            context_prefix=context_prefix or "[顺序扫描]"
+                                        )
+                                        scanner.scan_directory_tree(
+                                            root_path=path,
+                                            exclude_check_func=exclude_check,
+                                            file_callback=file_callback
+                                        )
+                                        
+                                        # 处理剩余批次
+                                        if current_batch and main_loop:
+                                            try:
+                                                asyncio.run_coroutine_threadsafe(
+                                                    path_queue.put(current_batch.copy()),
+                                                    main_loop
+                                                ).result(timeout=30.0)
+                                            except Exception:
+                                                pass
+                                        
+                                        # 发送停止信号
+                                        if main_loop:
+                                            try:
+                                                asyncio.run_coroutine_threadsafe(
+                                                    path_queue.put(None),
+                                                    main_loop
+                                                ).result(timeout=10.0)
+                                            except Exception:
+                                                pass
+                                    except Exception as e:
+                                        logger.error(f"{context_prefix or ''} 顺序扫描出错: {str(e)}", exc_info=True)
+                                
+                                # 启动扫描任务
+                                scan_task = asyncio.create_task(
+                                    asyncio.to_thread(sequential_scan_worker)
+                                )
+                                
+                                # 从队列中获取批次
+                                try:
+                                    while True:
+                                        batch = await asyncio.wait_for(path_queue.get(), timeout=5.0)
+                                        if batch is None:
+                                            break
+                                        if batch:
+                                            yield batch
+                                finally:
+                                    if not scan_task.done():
+                                        scan_task.cancel()
+                                        try:
+                                            await scan_task
+                                        except asyncio.CancelledError:
+                                            pass
+                            
+                            # 使用顺序扫描生成器
+                            async for file_path_batch in async_sequential_generator(source_path):
+                                if not file_path_batch:
+                                    continue
+                                
+                                # 将Path对象转换为文件信息
+                                file_batch = []
+                                for file_path_item in file_path_batch:
+                                    try:
+                                        file_info = await self.get_file_info(file_path_item)
+                                        if file_info:
                                             file_batch.append(file_info)
                                             scanned_count += 1
                                     except Exception as file_error:

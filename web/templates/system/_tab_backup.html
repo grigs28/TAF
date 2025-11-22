@@ -44,10 +44,17 @@
                         </select>
                         <small class="text-muted">选择后台扫描任务使用的扫描方法。ES方法需要Everything搜索工具支持</small>
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label">目录扫描并发线程数</label>
-                        <input type="number" class="form-control" id="scanThreads" value="4" min="1" max="16" step="1">
-                        <small class="text-muted">目录扫描时使用的并发线程数（1-16）。默认4线程，建议值：本地磁盘4-8线程，网络路径8-16线程。线程数过多可能导致内存占用增加</small>
+                    <div class="mb-3" id="scanMultithreadGroup">
+                        <div class="form-check form-switch mb-2">
+                            <input class="form-check-input" type="checkbox" id="useScanMultithread">
+                            <label class="form-check-label" for="useScanMultithread">启用多线程扫描</label>
+                            <small class="text-muted d-block">启用后使用并发目录扫描（ConcurrentDirScanner），不启用则使用顺序扫描（SequentialDirScanner，基于os.scandir优化版）。仅当扫描方法为"默认扫描（os.scandir）"时有效</small>
+                        </div>
+                        <div class="mb-2" id="scanThreadsGroup" style="display: none;">
+                            <label class="form-label">目录扫描并发线程数</label>
+                            <input type="number" class="form-control" id="scanThreads" value="4" min="1" max="16" step="1">
+                            <small class="text-muted">目录扫描时使用的并发线程数（1-16）。默认4线程，建议值：本地磁盘4-8线程，网络路径8-16线程。线程数过多可能导致内存占用增加</small>
+                        </div>
                     </div>
                     <div class="mb-3" id="esExePathGroup" style="display: none;">
                         <label class="form-label">ES工具路径</label>

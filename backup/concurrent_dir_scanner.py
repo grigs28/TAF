@@ -176,24 +176,52 @@ class ConcurrentDirScanner:
             batch: 要放入的批次数据
             main_loop: 主事件循环（用于 asyncio.Queue）
         """
-        if main_loop:
-            try:
-                # 检查是否为 asyncio.Queue（put 是协程函数）
-                if hasattr(path_queue, 'put'):
-                    put_method = getattr(path_queue, 'put', None)
-                    if put_method and inspect.iscoroutinefunction(put_method):
-                        # asyncio.Queue：使用 run_coroutine_threadsafe
-                        future = asyncio.run_coroutine_threadsafe(
-                            path_queue.put(batch),
-                            main_loop
-                        )
-                        future.result(timeout=10.0)
-                        return
-            except Exception as e:
-                # 异步提交失败，尝试同步方式
-                logger.debug(f"{self.context_prefix} 异步提交失败，尝试同步: {str(e)}")
+        # 首先检查队列类型
+        is_asyncio_queue = isinstance(path_queue, asyncio.Queue)
         
-        # queue.Queue 或其他类型的队列：直接 put
+        if is_asyncio_queue:
+            # asyncio.Queue：必须使用 run_coroutine_threadsafe
+            if main_loop is None:
+                raise ValueError(f"{self.context_prefix} asyncio.Queue 需要提供 main_loop 参数")
+            
+            # 检查队列大小（如果队列有大小限制）
+            queue_size = path_queue.qsize()
+            maxsize = getattr(path_queue, 'maxsize', 0)
+            if maxsize > 0:
+                # 队列有大小限制，检查是否接近满
+                if queue_size >= maxsize * 0.9:  # 90%满
+                    logger.warning(
+                        f"{self.context_prefix} 队列接近满 (当前: {queue_size}/{maxsize})，"
+                        f"等待消费者处理..."
+                    )
+            
+            try:
+                # 使用更长的超时时间（60秒），因为队列满时需要等待消费者处理
+                # 如果队列无限制（maxsize=0），put 操作通常很快
+                timeout = 60.0 if maxsize > 0 else 30.0
+                
+                future = asyncio.run_coroutine_threadsafe(
+                    path_queue.put(batch),
+                    main_loop
+                )
+                future.result(timeout=timeout)
+                return
+            except TimeoutError:
+                # 超时：队列可能满了，消费者处理太慢
+                queue_size = path_queue.qsize()
+                maxsize = getattr(path_queue, 'maxsize', 0)
+                logger.error(
+                    f"{self.context_prefix} 异步提交到 asyncio.Queue 超时 ({timeout}秒)！"
+                    f"队列大小: {queue_size}" + (f"/{maxsize}" if maxsize > 0 else " (无限制)") +
+                    f"，批次大小: {len(batch)}。"
+                    f"可能原因：1) 队列消费者处理太慢 2) 队列已满且消费者阻塞"
+                )
+                raise
+            except Exception as e:
+                logger.error(f"{self.context_prefix} 异步提交到 asyncio.Queue 失败: {str(e)}", exc_info=True)
+                raise
+        
+        # queue.Queue 或其他类型的队列：直接 put（同步方法）
         try:
             path_queue.put(batch)
         except Exception as e:
