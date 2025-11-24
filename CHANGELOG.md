@@ -1,5 +1,59 @@
 # 更新日志
 
+## [0.1.27] - 2025-11-24
+
+### 新增功能
+
+#### 内存数据库配置选项
+- ✅ 在系统配置页面添加"是否使用内存数据库"选项
+  - 可在 `/system` 页面的"备份策略"标签页中配置
+  - 配置项保存到 `.env` 文件（`USE_MEMORY_DB`）
+  - 默认启用（`USE_MEMORY_DB=True`），性能最优
+  - 禁用后直接写入数据库，按批次顺序写入，不丢弃内容，循环处理
+
+#### 不使用内存数据库时的直接写入模式
+- ✅ 实现不使用内存数据库时的直接写入数据库模式
+  - 当 `USE_MEMORY_DB=False` 时，扫描文件线程直接写入数据库
+  - 批次大小由 `SCAN_UPDATE_INTERVAL` 控制
+  - 按批次顺序写入，不丢弃内容，循环处理
+  - 不使用超时检测，确保数据完整性
+
+### 修复
+
+#### 批量写入数据库字段内容不对
+- ✅ 修复批量写入数据库的字段内容，参照内存数据库的同步
+  - 统一字段映射逻辑，使用 `_build_file_record_fields()` 方法
+  - 确保字段顺序和内容与内存数据库同步完全一致
+  - 包括 `directory_path`、`display_name`、`file_owner`、`file_group`、`version`、`tags` 等字段
+  - 修复 `file_metadata` 和 `tags` 的 JSON 格式处理
+
+#### openGauss 模式下数据未写入问题
+- ✅ 修复 openGauss 模式下数据未写入 `backup_files` 表的问题
+  - 修复 `_process_batch` 中的事务提交逻辑
+  - 验证 `executemany` 执行后的事务状态
+  - 如果状态仍为 `INTRANS`，再次提交确保数据持久化
+  - 修复 `get_opengauss_connection` 的 `finally` 块，避免在 `IDLE` 状态下执行 `rollback()`
+
+#### 保存"使用内存数据库"状态失败
+- ✅ 修复保存"使用内存数据库"状态失败的问题
+  - 修复前端 JavaScript 中 checkbox 值的收集逻辑
+  - 确保 `false` 值能正确传递到后端
+  - 修复后端 API 对 `use_memory_db` 字段的处理
+
+### 改进
+
+#### 批量写入器事务管理优化
+- ✅ 优化 `BatchDBWriter` 的事务管理
+  - 在 `_batch_insert` 和 `_batch_update` 后验证事务状态
+  - 如果 `executemany` 后状态仍为 `INTRANS`，自动重试提交
+  - 添加详细的日志记录，便于调试和排查问题
+
+#### 连接释放逻辑优化
+- ✅ 优化 `get_opengauss_connection` 的连接释放逻辑
+  - 如果状态是 `IDLE`（已提交），不执行 `rollback()`
+  - 只在 `INTRANS` 或 `INERROR` 状态下才清理事务
+  - 避免已提交的数据被回滚
+
 ## [0.1.26] - 2025-11-24
 
 ### 修复
