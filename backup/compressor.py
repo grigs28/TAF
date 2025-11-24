@@ -505,11 +505,14 @@ def _compress_with_pgzip(
                         # 将压缩进度信息存储到 compress_progress 和 backup_task 中
                         compress_progress['current_file_index'] = current_progress
                         compress_progress['total_files_in_group'] = total_files_in_group
+                        # 计算当前文件组的原始总大小（压缩前）
+                        total_group_size = sum(f.get('size', 0) or 0 for f in file_group)
                         if hasattr(backup_task, 'current_compression_progress'):
                             backup_task.current_compression_progress = {
                                 'current': current_progress,
                                 'total': total_files_in_group,
-                                'percent': progress_percent
+                                'percent': progress_percent,
+                                'group_size_bytes': total_group_size  # 文件组的原始总大小（压缩前）
                             }
                         last_log_time = current_time
                     
@@ -792,10 +795,13 @@ def _compress_with_zstd(
                             compress_progress['current_file_index'] = current_progress
                             compress_progress['total_files_in_group'] = total_files_in_group
                             if hasattr(backup_task, 'current_compression_progress'):
+                                # 计算当前文件组的原始总大小（压缩前）
+                                total_group_size = sum(f.get('size', 0) or 0 for f in file_group)
                                 backup_task.current_compression_progress = {
                                     'current': current_progress,
                                     'total': total_files_in_group,
-                                    'percent': progress_percent
+                                    'percent': progress_percent,
+                                    'group_size_bytes': total_group_size  # 文件组的原始总大小（压缩前）
                                 }
                             last_log_time = current_time
 
@@ -869,6 +875,17 @@ def _compress_with_zstd(
                             continue
 
         logger.info(f"[zstd] 压缩完成：{len(successful_files)} 个文件成功，{len(failed_files)} 个失败")
+        
+        # 确保文件完全关闭：with语句退出后，获取最终文件大小
+        # 注意：with语句应该已经关闭了文件，文件句柄释放的等待将在 compress_file_group 中处理
+        try:
+            # 获取最终文件大小
+            if archive_path_abs.exists():
+                final_size = archive_path_abs.stat().st_size
+                logger.debug(f"[zstd] 压缩文件最终大小: {format_bytes(final_size)}")
+        except Exception as size_check_error:
+            logger.warning(f"[zstd] 检查文件大小时出错（不影响主流程）: {size_check_error}")
+        
         compress_progress['completed'] = True
         compress_progress['running'] = False
         compress_progress['bytes_written'] = archive_path_abs.stat().st_size if archive_path_abs.exists() else 0
@@ -1409,6 +1426,10 @@ class Compressor:
                 compress_progress['running'] = False
                 raise
             
+            # 压缩完成后，等待文件完全关闭（Windows上文件句柄释放可能需要时间）
+            logger.debug("[压缩] 压缩函数已完成，等待文件句柄完全释放...")
+            await asyncio.sleep(1.0)  # 等待1秒，确保文件句柄完全释放
+            
             # 确定压缩文件的实际路径（使用压缩函数返回的完整路径）
             archive_path_str = compress_result.get('archive_path')
             if archive_path_str:
@@ -1471,23 +1492,144 @@ class Compressor:
                         if source_filename != target_filename:
                             logger.warning(f"[文件移动] 文件名不匹配: 源={source_filename}, 目标={target_filename}，使用目标文件名")
                         
+                        # 移动前检查：确保文件已经完全关闭且大小稳定
+                        logger.info(f"[文件移动] 移动前检查：确保文件已完全关闭且大小稳定...")
+                        max_wait_seconds = 30  # 最多等待30秒
+                        check_interval = 0.5  # 每0.5秒检查一次
+                        wait_count = 0
+                        max_checks = int(max_wait_seconds / check_interval)
+                        last_size = None
+                        stable_count = 0
+                        stable_required = 3  # 需要连续3次大小不变才认为稳定
+                        
+                        while wait_count < max_checks:
+                            try:
+                                current_size = temp_archive_path.stat().st_size
+                                if last_size is None:
+                                    last_size = current_size
+                                    stable_count = 1
+                                elif current_size == last_size:
+                                    stable_count += 1
+                                    if stable_count >= stable_required:
+                                        logger.info(f"[文件移动] 文件大小已稳定: {format_bytes(current_size)} (连续{stable_count}次检查大小不变)")
+                                        break
+                                else:
+                                    # 大小还在变化，重置计数
+                                    logger.debug(f"[文件移动] 文件大小仍在变化: {format_bytes(last_size)} -> {format_bytes(current_size)}，继续等待...")
+                                    last_size = current_size
+                                    stable_count = 1
+                                
+                                await asyncio.sleep(check_interval)
+                                wait_count += 1
+                            except (OSError, PermissionError) as check_error:
+                                # 文件可能还在被占用，继续等待
+                                logger.debug(f"[文件移动] 文件检查时遇到错误（可能仍在写入）: {check_error}，继续等待...")
+                                await asyncio.sleep(check_interval)
+                                wait_count += 1
+                        
+                        if wait_count >= max_checks:
+                            logger.warning(f"[文件移动] 等待文件稳定超时（{max_wait_seconds}秒），但继续尝试移动")
+                        else:
+                            logger.info(f"[文件移动] 文件大小已稳定，准备移动（等待了 {wait_count * check_interval:.1f} 秒）")
+                        
+                        # 额外等待一小段时间，确保文件句柄完全释放
+                        await asyncio.sleep(0.5)
+                        
+                        # 记录源文件大小，用于验证移动是否成功
+                        source_file_size = temp_archive_path.stat().st_size
+                        logger.debug(f"[文件移动] 源文件大小: {format_bytes(source_file_size)}")
+                        
                         # 顺序执行文件移动（在同一文件系统上是瞬间完成的，但需要同步执行以验证结果）
                         loop = asyncio.get_event_loop()
-                        await loop.run_in_executor(None, shutil.move, str(temp_archive_path), str(final_archive_path))
+                        try:
+                            await loop.run_in_executor(None, shutil.move, str(temp_archive_path), str(final_archive_path))
+                        except Exception as move_exception:
+                            logger.error(f"[文件移动] shutil.move() 抛出异常: {move_exception}", exc_info=True)
+                            raise
                         
                         # 验证移动是否成功：检查目标文件是否存在，源文件是否已删除
                         if not final_archive_path.exists():
                             raise FileNotFoundError(f"移动后目标文件不存在: {final_archive_path}")
                         
-                        if temp_archive_path.exists():
-                            logger.warning(f"[文件移动] 移动后源文件仍存在: {temp_archive_path}，尝试删除")
-                            try:
-                                temp_archive_path.unlink()
-                            except Exception as del_error:
-                                logger.warning(f"[文件移动] 删除源文件失败: {del_error}")
-                        
-                        # 获取目标文件大小，验证移动成功
+                        # 验证目标文件大小是否与源文件一致
                         final_file_size = final_archive_path.stat().st_size
+                        if final_file_size != source_file_size:
+                            logger.error(
+                                f"[文件移动] 文件大小不匹配！源文件: {format_bytes(source_file_size)}, "
+                                f"目标文件: {format_bytes(final_file_size)}"
+                            )
+                            raise ValueError(f"文件移动后大小不匹配: 源={source_file_size}, 目标={final_file_size}")
+                        
+                        # 检查源文件是否仍然存在（shutil.move可能在某些情况下失败但不抛出异常）
+                        if temp_archive_path.exists():
+                            logger.warning(f"[文件移动] ⚠️ 移动后源文件仍存在: {temp_archive_path}")
+                            
+                            # 验证源文件大小是否与目标文件一致（可能是复制而不是移动）
+                            remaining_source_size = temp_archive_path.stat().st_size
+                            if remaining_source_size == final_file_size:
+                                logger.warning(
+                                    f"[文件移动] 源文件和目标文件大小相同，可能是复制操作而非移动。"
+                                    f"源文件大小: {format_bytes(remaining_source_size)}, "
+                                    f"目标文件大小: {format_bytes(final_file_size)}"
+                                )
+                            
+                            # 尝试删除源文件（最多重试3次）
+                            # 注意：如果移动已成功（目标文件存在且大小匹配），删除失败可以跳过
+                            max_delete_retries = 3
+                            delete_retry_count = 0
+                            delete_success = False
+                            
+                            while delete_retry_count < max_delete_retries and not delete_success:
+                                delete_retry_count += 1
+                                try:
+                                    # 等待一小段时间，可能文件句柄还在释放中
+                                    if delete_retry_count > 1:
+                                        await asyncio.sleep(1.0 * delete_retry_count)  # 递增等待时间
+                                    
+                                    temp_archive_path.unlink()
+                                    delete_success = True
+                                    logger.info(f"[文件移动] ✅ 源文件已成功删除（第{delete_retry_count}次尝试）")
+                                except PermissionError as perm_error:
+                                    logger.warning(
+                                        f"[文件移动] 删除源文件失败（第{delete_retry_count}次尝试）: "
+                                        f"权限错误 - {perm_error}。文件可能被其他进程占用。"
+                                    )
+                                    if delete_retry_count >= max_delete_retries:
+                                        # 移动已成功，删除失败可以跳过，只记录警告
+                                        logger.warning(
+                                            f"[文件移动] ⚠️ 无法删除源文件（已重试{max_delete_retries}次），"
+                                            f"但移动已成功（目标文件存在且大小匹配），跳过删除操作。"
+                                            f"源文件: {temp_archive_path}，目标文件: {final_archive_path}。"
+                                            f"可稍后手动删除源文件。"
+                                        )
+                                except OSError as os_error:
+                                    logger.warning(
+                                        f"[文件移动] 删除源文件失败（第{delete_retry_count}次尝试）: "
+                                        f"系统错误 - {os_error}"
+                                    )
+                                    if delete_retry_count >= max_delete_retries:
+                                        # 移动已成功，删除失败可以跳过，只记录警告
+                                        logger.warning(
+                                            f"[文件移动] ⚠️ 无法删除源文件（已重试{max_delete_retries}次），"
+                                            f"但移动已成功（目标文件存在且大小匹配），跳过删除操作。"
+                                            f"源文件: {temp_archive_path}，目标文件: {final_archive_path}。"
+                                            f"可稍后手动删除源文件。"
+                                        )
+                                except Exception as del_error:
+                                    logger.warning(
+                                        f"[文件移动] 删除源文件失败（第{delete_retry_count}次尝试）: {del_error}"
+                                    )
+                                    if delete_retry_count >= max_delete_retries:
+                                        # 移动已成功，删除失败可以跳过，只记录警告
+                                        logger.warning(
+                                            f"[文件移动] ⚠️ 无法删除源文件（已重试{max_delete_retries}次），"
+                                            f"但移动已成功（目标文件存在且大小匹配），跳过删除操作。"
+                                            f"源文件: {temp_archive_path}，目标文件: {final_archive_path}。"
+                                            f"错误: {del_error}，可稍后手动删除源文件。"
+                                        )
+                        else:
+                            logger.debug(f"[文件移动] 源文件已成功删除（shutil.move自动删除）")
+                        
                         logger.info(f"[文件移动] ✅ 文件已成功移动到final目录: {target_filename}, 大小: {format_bytes(final_file_size)}")
                         
                         # 记录关键阶段：文件移动到final目录

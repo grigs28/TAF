@@ -196,9 +196,10 @@ class ConcurrentDirScanner:
                     )
             
             try:
-                # 使用更长的超时时间（60秒），因为队列满时需要等待消费者处理
-                # 如果队列无限制（maxsize=0），put 操作通常很快
-                timeout = 60.0 if maxsize > 0 else 30.0
+                # 使用更长的超时时间（120秒），因为队列满时需要等待消费者处理
+                # 如果队列无限制（maxsize=0），put 操作通常很快，但也要给足够时间
+                # 如果队列有大小限制，需要更长的超时时间等待消费者处理
+                timeout = 120.0 if maxsize > 0 else 60.0
                 
                 future = asyncio.run_coroutine_threadsafe(
                     path_queue.put(batch),
@@ -210,13 +211,26 @@ class ConcurrentDirScanner:
                 # 超时：队列可能满了，消费者处理太慢
                 queue_size = path_queue.qsize()
                 maxsize = getattr(path_queue, 'maxsize', 0)
-                logger.error(
-                    f"{self.context_prefix} 异步提交到 asyncio.Queue 超时 ({timeout}秒)！"
-                    f"队列大小: {queue_size}" + (f"/{maxsize}" if maxsize > 0 else " (无限制)") +
-                    f"，批次大小: {len(batch)}。"
-                    f"可能原因：1) 队列消费者处理太慢 2) 队列已满且消费者阻塞"
-                )
-                raise
+                
+                # 如果队列无限制，超时可能是消费者阻塞，记录错误但不抛出异常
+                # 允许继续处理，避免整个扫描任务失败
+                if maxsize == 0:
+                    logger.error(
+                        f"{self.context_prefix} 异步提交到 asyncio.Queue 超时 ({timeout}秒)！"
+                        f"队列大小: {queue_size} (无限制)，批次大小: {len(batch)}。"
+                        f"可能原因：队列消费者处理太慢或阻塞。"
+                        f"将跳过此批次，继续扫描..."
+                    )
+                    # 无限制队列超时，可能是消费者阻塞，跳过此批次
+                    return
+                else:
+                    # 有大小限制的队列超时，记录错误并抛出异常
+                    logger.error(
+                        f"{self.context_prefix} 异步提交到 asyncio.Queue 超时 ({timeout}秒)！"
+                        f"队列大小: {queue_size}/{maxsize}，批次大小: {len(batch)}。"
+                        f"可能原因：1) 队列消费者处理太慢 2) 队列已满且消费者阻塞"
+                    )
+                    raise
             except Exception as e:
                 logger.error(f"{self.context_prefix} 异步提交到 asyncio.Queue 失败: {str(e)}", exc_info=True)
                 raise

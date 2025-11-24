@@ -120,8 +120,16 @@ class SequentialDirScanner:
                     continue
         
         except Exception as e:
-            logger.error(f"{self.context_prefix} 扫描过程异常: {str(e)}", exc_info=True)
-            raise
+            # 记录错误但不抛出，避免导致整个源路径被跳过
+            # 单个目录的错误已经在内部被处理了（跳过该目录），这里只记录致命错误
+            logger.error(
+                f"{self.context_prefix} 扫描过程异常: {str(e)}，"
+                f"已扫描 {file_count} 个文件。"
+                f"注意：单个目录的错误应该已经在内部被处理，这里不应该抛出异常。",
+                exc_info=True
+            )
+            # 不抛出异常，返回已扫描的文件数
+            # 这样即使发生错误，也不会导致整个源路径被跳过
         
         return file_count
     

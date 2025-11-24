@@ -9,6 +9,7 @@ import logging
 import fnmatch
 import asyncio
 import os
+import time
 import threading
 import queue
 from collections import deque  # 使用deque优化队列操作性能（O(1)复杂度）
@@ -149,8 +150,37 @@ class FileScanner:
         current_batch = []
         total_valid_files = 0  # 累计的有效文件总数
         
+        # 预先判断扫描方式（用于日志前缀）
+        scan_type_info = ""
+        try:
+            from utils.scheduler.db_utils import is_opengauss
+            from config.settings import get_settings
+            settings = get_settings()
+            scan_method = getattr(settings, 'SCAN_METHOD', 'default').lower()
+            use_multithread = getattr(settings, 'USE_SCAN_MULTITHREAD', True)
+            scan_threads = getattr(settings, 'SCAN_THREADS', 4)
+            
+            use_concurrent = (
+                is_opengauss() and 
+                scan_method == 'default' and 
+                use_multithread and 
+                scan_threads > 1
+            )
+            use_sequential = (
+                is_opengauss() and 
+                scan_method == 'default' and 
+                not use_multithread
+            )
+            
+            if use_concurrent:
+                scan_type_info = f"[多线程扫描-{scan_threads}线程]"
+            elif use_sequential:
+                scan_type_info = "[顺序扫描]"
+        except Exception:
+            pass
+        
         for idx, source_path_str in enumerate(source_paths):
-            logger.info(f"扫描源路径 {idx + 1}/{len(source_paths)}: {source_path_str}")
+            logger.info(f"{scan_type_info} 扫描源路径 {idx + 1}/{len(source_paths)}: {source_path_str}")
             
             # 处理 UNC 网络路径
             from utils.network_path import is_unc_path, normalize_unc_path
@@ -242,7 +272,7 @@ class FileScanner:
                         if use_concurrent_scan:
                             # 使用并发目录扫描（openGauss模式）
                             scan_threads = getattr(settings, 'SCAN_THREADS', 4)
-                            logger.info(f"{log_context or ''} 启用并发目录扫描 (线程数: {scan_threads})")
+                            logger.info(f"{log_context or ''} [多线程扫描] 启用并发目录扫描 (线程数: {scan_threads}, ConcurrentDirScanner)")
                             
                             # 异步生成器遍历目录（使用并发扫描）
                             async def async_rglob_generator(path: Path):
@@ -340,8 +370,17 @@ class FileScanner:
                                                     logger.warning(f"{context_prefix or ''} 并发扫描被取消")
                                                     break
                                                 elif signal_type == 'ERROR':
-                                                    logger.error(f"{context_prefix or ''} 并发扫描出错: {error_info}")
-                                                    break
+                                                    # 记录错误，但不中断扫描
+                                                    # 单个目录的错误已经在扫描器内部被处理了（跳过该目录）
+                                                    logger.error(
+                                                        f"{context_prefix or ''} 并发扫描出错: {error_info}，"
+                                                        f"已扫描 {paths_count} 个路径。"
+                                                        f"注意：单个目录的错误应该已经在扫描器内部被处理，这里不应该导致整个源路径被跳过。"
+                                                    )
+                                                    # 不中断，继续处理已扫描的路径
+                                                    total_paths_count = paths_count
+                                                    # 继续循环，等待更多路径或停止信号
+                                                    continue
                                                 total_paths_count = paths_count
                                                 break
                                             else:
@@ -396,7 +435,7 @@ class FileScanner:
                         
                         if use_sequential_scanner:
                             # 使用新的顺序扫描器（SequentialDirScanner）
-                            logger.info(f"{log_context or ''} 启用顺序目录扫描（os.scandir，优化版）")
+                            logger.info(f"{log_context or ''} [顺序扫描] 启用顺序目录扫描（os.scandir优化版，SequentialDirScanner）")
                             
                             from backup.sequential_dir_scanner import SequentialDirScanner
                             
@@ -465,7 +504,14 @@ class FileScanner:
                                             except Exception:
                                                 pass
                                     except Exception as e:
-                                        logger.error(f"{context_prefix or ''} 顺序扫描出错: {str(e)}", exc_info=True)
+                                        # 顺序扫描出错，记录但不抛出异常
+                                        # 单个目录的错误已经在 SequentialDirScanner 内部被处理了
+                                        logger.error(
+                                            f"{context_prefix or ''} 顺序扫描出错: {str(e)}，"
+                                            f"已扫描的文件可能不完整，但不会导致整个源路径被跳过。",
+                                            exc_info=True
+                                        )
+                                        # 不抛出异常，让扫描继续
                                 
                                 # 启动扫描任务
                                 scan_task = asyncio.create_task(
@@ -473,13 +519,60 @@ class FileScanner:
                                 )
                                 
                                 # 从队列中获取批次
+                                # 对于大型目录（50万+子目录），使用智能等待策略：
+                                # 1. 如果扫描任务还在运行，无限等待（不设置超时）
+                                # 2. 定期检查任务状态，避免真的阻塞
+                                # 3. 使用较长的检查间隔（30秒），减少检查频率
+                                last_status_check = time.time()
+                                status_check_interval = 30.0  # 每30秒检查一次任务状态
+                                
                                 try:
                                     while True:
-                                        batch = await asyncio.wait_for(path_queue.get(), timeout=5.0)
-                                        if batch is None:
-                                            break
-                                        if batch:
-                                            yield batch
+                                        # 检查扫描任务状态
+                                        current_time = time.time()
+                                        if current_time - last_status_check >= status_check_interval:
+                                            last_status_check = current_time
+                                            if scan_task.done():
+                                                # 扫描任务已完成，尝试获取剩余数据后退出
+                                                logger.debug(f"{context_prefix or ''} 顺序扫描：扫描任务已完成，获取剩余数据后退出")
+                                                # 尝试获取队列中剩余的所有数据
+                                                try:
+                                                    while True:
+                                                        try:
+                                                            batch = await asyncio.wait_for(path_queue.get_nowait(), timeout=0.1)
+                                                            if batch is None:
+                                                                break
+                                                            if batch:
+                                                                yield batch
+                                                        except asyncio.QueueEmpty:
+                                                            break
+                                                        except asyncio.TimeoutError:
+                                                            break
+                                                except Exception:
+                                                    pass
+                                                break
+                                        
+                                        # 如果任务还在运行，使用较长的超时时间等待队列数据
+                                        # 对于大型目录，可能需要很长时间，使用30分钟超时
+                                        try:
+                                            batch = await asyncio.wait_for(path_queue.get(), timeout=1800.0)  # 30分钟超时
+                                            if batch is None:
+                                                # 收到停止信号
+                                                break
+                                            if batch:
+                                                yield batch
+                                        except asyncio.TimeoutError:
+                                            # 30分钟超时，检查任务状态
+                                            if scan_task.done():
+                                                logger.debug(f"{context_prefix or ''} 顺序扫描：队列获取超时（30分钟），扫描任务已完成，退出循环")
+                                                break
+                                            else:
+                                                # 任务仍在运行，可能是目录非常大，继续等待
+                                                logger.info(
+                                                    f"{context_prefix or ''} 顺序扫描：队列获取超时（30分钟），"
+                                                    f"扫描任务仍在运行，可能目录非常大（50万+子目录），继续等待..."
+                                                )
+                                                continue
                                 finally:
                                     if not scan_task.done():
                                         scan_task.cancel()
@@ -1230,16 +1323,46 @@ class FileScanner:
                         # 扫描目录时的访问错误，记录但继续扫描其他目录
                         error_count += 1
                         error_paths.append(str(source_path_str))
-                        logger.error(f"⚠️ 扫描目录时发生访问错误 {source_path_str}: {str(scan_error)}，跳过该目录，继续扫描其他路径")
+                        # 确保错误路径被完整记录到日志中
+                        error_path_display = format_path_for_log(source_path_str) if 'format_path_for_log' in globals() else source_path_str
+                        logger.error(
+                            f"⚠️ 扫描目录时发生访问错误，跳过目录: {error_path_display}，"
+                            f"错误类型: {type(scan_error).__name__}，错误信息: {str(scan_error)}，继续扫描其他路径"
+                        )
+                        continue
+                    except asyncio.TimeoutError as timeout_error:
+                        # 超时错误：可能是队列操作超时或扫描器阻塞
+                        # 注意：如果目录很大（50万+子目录），可能需要很长时间，这不是真正的错误
+                        error_count += 1
+                        error_paths.append(str(source_path_str))
+                        error_path_display = format_path_for_log(source_path_str) if 'format_path_for_log' in globals() else source_path_str
+                        error_msg = str(timeout_error) if str(timeout_error) else "队列操作或扫描器超时"
+                        logger.error(
+                            f"⚠️ 扫描目录时发生超时错误，跳过目录: {error_path_display}，"
+                            f"错误类型: TimeoutError，错误信息: {error_msg}，"
+                            f"可能原因：1) 目录非常大（50万+子目录）需要更长时间 2) 队列操作超时 3) 扫描器阻塞，继续扫描其他路径"
+                        )
+                        # 记录完整的异常堆栈（DEBUG级别）
+                        logger.debug(f"扫描目录超时错误详情: 目录={error_path_display}", exc_info=True)
                         continue
                     except Exception as e:
                         # 其他扫描错误，记录但继续
                         error_count += 1
                         error_paths.append(str(source_path_str))
-                        logger.error(f"⚠️ 扫描目录时发生错误 {source_path_str}: {str(e)}，跳过该目录，继续扫描其他路径")
+                        # 确保错误路径被完整记录到日志中
+                        error_path_display = format_path_for_log(source_path_str) if 'format_path_for_log' in globals() else source_path_str
+                        error_msg = str(e) if str(e) else f"{type(e).__name__}异常（无详细信息）"
+                        logger.error(
+                            f"⚠️ 扫描目录时发生错误，跳过目录: {error_path_display}，"
+                            f"错误类型: {type(e).__name__}，错误信息: {error_msg}，继续扫描其他路径"
+                        )
+                        # 记录完整的异常堆栈（DEBUG级别）
+                        logger.debug(f"扫描目录错误详情: 目录={error_path_display}", exc_info=True)
                         continue
                     
-                    logger.info(f"目录扫描完成: {source_path_str}, 扫描 {scanned_count} 个文件, 累计有效 {total_valid_files} 个（当前批次: {len(current_batch)} 个）, 排除 {excluded_count} 个文件, 跳过 {skipped_dirs} 个目录/文件, 错误 {error_count} 个, 权限错误: {permission_error_count} 个, 路径过长: {path_too_long_count} 个")
+                    # 根据使用的扫描方式添加前缀
+                    scan_type_prefix = "[多线程扫描]" if use_concurrent_scanner else ("[顺序扫描]" if use_sequential_scanner else "")
+                    logger.info(f"{scan_type_prefix} 目录扫描完成: {source_path_str}, 扫描 {scanned_count} 个文件, 累计有效 {total_valid_files} 个（当前批次: {len(current_batch)} 个）, 排除 {excluded_count} 个文件, 跳过 {skipped_dirs} 个目录/文件, 错误 {error_count} 个, 权限错误: {permission_error_count} 个, 路径过长: {path_too_long_count} 个")
                     if excluded_count > 0 or skipped_dirs > 0:
                         logger.warning(f"⚠️ 注意：已排除 {excluded_count} 个文件，跳过 {skipped_dirs} 个目录/文件（排除规则: {exclude_patterns if exclude_patterns else '无'}）")
                     if error_count > 0 or permission_error_count > 0 or path_too_long_count > 0:
@@ -1267,11 +1390,13 @@ class FileScanner:
             backup_task.progress_percent = 10.0
             await self.update_progress_callback(backup_task, total_scanned, total_scanned, "[准备压缩...]")
         
-        logger.info(f"========== 扫描完成 ==========")
-        logger.info(f"共扫描 {total_scanned} 个文件，找到 {total_valid_files} 个有效文件，总大小 {total_scanned_size:,} 字节")
+        # 根据使用的扫描方式添加前缀
+        scan_type_prefix = scan_type_info if scan_type_info else ""
+        logger.info(f"========== {scan_type_prefix} 扫描完成 ==========")
+        logger.info(f"{scan_type_prefix} 共扫描 {total_scanned} 个文件，找到 {total_valid_files} 个有效文件，总大小 {total_scanned_size:,} 字节")
         if exclude_patterns:
-            logger.info(f"排除规则: {exclude_patterns}")
-        logger.info(f"========== 扫描完成 ==========")
+            logger.info(f"{scan_type_prefix} 排除规则: {exclude_patterns}")
+        logger.info(f"========== {scan_type_prefix} 扫描完成 ==========")
     
     async def scan_source_files(
         self, 
@@ -1603,13 +1728,25 @@ class FileScanner:
                         # 扫描目录时的访问错误，记录但继续扫描其他目录
                         error_count += 1
                         error_paths.append(str(source_path_str))
-                        logger.error(f"⚠️ 扫描目录时发生访问错误 {source_path_str}: {str(scan_error)}，跳过该目录，继续扫描其他路径")
+                        # 确保错误路径被完整记录到日志中
+                        error_path_display = format_path_for_log(source_path_str) if 'format_path_for_log' in globals() else source_path_str
+                        logger.error(
+                            f"⚠️ 扫描目录时发生访问错误，跳过目录: {error_path_display}，"
+                            f"错误类型: {type(scan_error).__name__}，错误信息: {str(scan_error)}，继续扫描其他路径"
+                        )
                         continue
                     except Exception as e:
                         # 其他扫描错误，记录但继续
                         error_count += 1
                         error_paths.append(str(source_path_str))
-                        logger.error(f"⚠️ 扫描目录时发生错误 {source_path_str}: {str(e)}，跳过该目录，继续扫描其他路径")
+                        # 确保错误路径被完整记录到日志中
+                        error_path_display = format_path_for_log(source_path_str) if 'format_path_for_log' in globals() else source_path_str
+                        logger.error(
+                            f"⚠️ 扫描目录时发生错误，跳过目录: {error_path_display}，"
+                            f"错误类型: {type(e).__name__}，错误信息: {str(e)}，继续扫描其他路径"
+                        )
+                        # 记录完整的异常堆栈（DEBUG级别）
+                        logger.debug(f"扫描目录错误详情: 目录={error_path_display}", exc_info=True)
                         continue
                     
                     logger.info(f"目录扫描完成: {source_path_str}, 扫描 {scanned_count} 个文件, 有效 {len(file_list)} 个, 排除 {excluded_count} 个文件, 跳过 {skipped_dirs} 个目录/文件, 错误 {error_count} 个")

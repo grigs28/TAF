@@ -1,5 +1,72 @@
 # 更新日志
 
+## [0.1.25] - 2025-11-24
+
+### 改进
+
+#### openGauss 连接池事务管理优化
+- ✅ 优化 psycopg3 连接池的事务状态管理
+  - 在连接返回池前确保连接处于干净状态（IDLE）
+  - 在 `get_opengauss_connection()` 的 `finally` 块中检查并清理事务状态
+  - 如果检测到 `INTRANS` 状态，先尝试提交而不是直接回滚（避免数据丢失）
+  - 即使状态为 `IDLE`，也执行回滚以确保连接完全干净
+
+#### 只读查询后自动提交事务
+- ✅ 修复 `fetchrow`、`fetch`、`fetchval` 方法的事务处理
+  - 查询完成后检查连接的事务状态
+  - 如果处于 `INTRANS` 状态，自动提交事务（只读查询应自动提交）
+  - 确保连接返回池时处于 `IDLE` 状态，避免连接池警告
+
+#### executemany 事务提交验证
+- ✅ 增强 `executemany` 方法的事务提交验证
+  - 执行前检查事务状态
+  - `commit()` 后等待并验证状态是否变为 `IDLE`
+  - 如果状态仍为 `INTRANS`，重试提交并刷新连接状态
+  - 添加详细的日志记录，便于调试
+
+#### 连接池重置函数优化
+- ✅ 改进连接池的 `reset_connection` 函数
+  - 检测到 `INTRANS` 时先尝试提交，而不是直接回滚
+  - 提交后验证状态，确保已变为 `IDLE`
+  - 添加详细的日志记录（DEBUG 级别）
+
+### 修复
+
+#### psycopg3 连接池警告日志
+- ✅ 降低 psycopg3 连接池的警告日志级别
+  - 将 `psycopg.pool` 的日志级别设置为 `ERROR`
+  - 避免在 INFO 级别时显示连接重置警告
+  - 这些警告是连接池的正常清理行为，不影响功能
+
+#### 设备缓存保存事务提交
+- ✅ 修复 `_save_cached_devices` 方法的事务提交
+  - 在 `INSERT`/`UPDATE` 操作后显式调用 `commit()`
+  - 确保设备缓存正确保存到数据库
+
+#### 连接池 reset_connection 执行顺序问题
+- ✅ 修复连接池 `reset_connection` 的执行时机
+  - psycopg3 内部的 `_reset_connection` 在我们的函数之前执行
+  - 在 `get_opengauss_connection()` 的 `finally` 块中提前清理事务状态
+  - 确保连接返回池前处于干净状态
+
+### 技术细节
+
+#### 事务状态管理
+- psycopg3 默认 `autocommit=False`，即使只读查询也会启动事务
+- 查询后需要显式提交或回滚，否则连接会保持 `INTRANS` 状态
+- 连接返回池时，如果处于 `INTRANS` 状态，连接池会回滚并打印警告
+
+#### 连接池重置流程
+1. `get_opengauss_connection()` 的 `finally` 块：检查并清理事务状态
+2. `conn.release()` 或 `pool.putconn()`：释放连接回池
+3. psycopg3 内部的 `_reset_connection`：再次检查并清理（如果仍有问题会回滚）
+4. 我们的 `reset_connection`：最后清理（此时状态应该已经是 `IDLE`）
+
+#### 日志级别调整
+- `psycopg.pool`：设置为 `ERROR`，避免 WARNING 级别日志
+- `[连接池重置]`：设置为 `DEBUG`，避免 INFO 级别日志
+- 功能不受影响，只是减少了不必要的警告日志
+
 ## [0.1.24] - 2025-11-22
 
 ### 改进

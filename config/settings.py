@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     DB_POOL_TIMEOUT: float = 30.0  # 连接池连接超时时间（秒）
     DB_COMMAND_TIMEOUT: float = 60.0  # 命令超时时间（秒）
     DB_ACQUIRE_TIMEOUT: float = 10.0  # 从连接池获取连接的超时时间（秒）
+    DB_MAX_INACTIVE_CONNECTION_LIFETIME: float = 600.0  # 非活跃连接的最大生命周期（秒，默认10分钟）
+    # 增大此值可以减少连接重建开销，但会占用更多资源
+    # 建议值：300-1800秒（5-30分钟），根据系统负载调整
     DB_FLAVOR: Optional[str] = None  # 显式指定数据库类型（如 opengauss/postgresql/sqlite）
     DB_QUERY_DOP: int = 16  # openGauss 查询并行度（1-64，默认16，用于优化查询性能）
     OG_HEARTBEAT_INTERVAL: int = 30  # openGauss 心跳间隔（秒）

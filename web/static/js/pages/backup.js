@@ -73,19 +73,27 @@
     function calculateProcessingSpeedGBPerSec(task) {
         // 优先使用后端传递的实时速度
         if (task.compression_speed_gb_per_sec !== null && task.compression_speed_gb_per_sec !== undefined) {
-            return parseFloat(task.compression_speed_gb_per_sec).toFixed(2);
+            const speed = parseFloat(task.compression_speed_gb_per_sec);
+            if (!isNaN(speed) && speed > 0) {
+                return speed.toFixed(4); // 保留更多小数位以提高精度
+            }
         }
         
         // 如果没有实时速度，计算平均速度（G/秒）
+        // 使用已处理数据/已用时间来计算
         if (task.processed_bytes && task.started_at) {
             const start = new Date(task.started_at);
             const end = task.completed_at ? new Date(task.completed_at) : new Date();
             const diffMs = end - start;
             if (diffMs > 0) {
                 const seconds = diffMs / 1000;
-                const processedGB = task.processed_bytes / (1024 * 1024 * 1024);
-                const speedGBPerSec = processedGB / seconds;
-                return speedGBPerSec.toFixed(2);
+                if (seconds > 0) {
+                    const processedGB = task.processed_bytes / (1024 * 1024 * 1024);
+                    const speedGBPerSec = processedGB / seconds;
+                    if (!isNaN(speedGBPerSec) && speedGBPerSec > 0) {
+                        return speedGBPerSec.toFixed(4); // 保留更多小数位以提高精度
+                    }
+                }
             }
         }
         
@@ -166,11 +174,28 @@
         return (value * 100).toFixed(2) + '%';
     }
 
-    function getStageBadgeClass(state, stageCode, progressPercent = null) {
+    function getStageBadgeClass(state, stageCode, progressPercent = null, task = null) {
         switch ((state || '').toLowerCase()) {
             case 'done':
                 return 'bg-success';
             case 'current':
+                // 对于写入磁带阶段，需要特殊处理
+                if (stageCode === 'copy') {
+                    // 检查是否正在向磁带移动
+                    const operationStatus = (task?.operation_status || '').toLowerCase();
+                    const isMoving = operationStatus.includes('写入磁带中') || 
+                                     operationStatus.includes('正在写入') ||
+                                     operationStatus.includes('向磁带移动');
+                    
+                    if (isMoving) {
+                        // 正在移动时闪烁
+                        return 'bg-danger text-white pulse-badge';
+                    } else {
+                        // 移动完成但任务未完成时，不闪烁
+                        return 'bg-danger text-white';
+                    }
+                }
+                
                 // 如果有进度信息，根据进度百分比改变颜色
                 if (progressPercent !== null && progressPercent >= 0) {
                     // 根据进度百分比设置颜色
@@ -227,7 +252,7 @@
         }
     }
 
-    function getCompletedStageBadgeClass(state, stageCode) {
+    function getCompletedStageBadgeClass(state, stageCode, task = null) {
         switch ((state || '').toLowerCase()) {
             case 'done':
                 // 完成的阶段根据类型使用不同颜色
@@ -237,7 +262,11 @@
                     case 'compress':
                         return 'bg-warning text-dark'; // 压缩完成 - 黄色
                     case 'copy':
-                        return 'bg-danger text-white'; // 写入磁带完成 - 红色
+                        // 写入磁带完成：如果整个任务完成，显示绿色；否则显示红色（不闪烁）
+                        if (task && task.status && task.status.toLowerCase() === 'completed') {
+                            return 'bg-success'; // 任务完成时亮起绿色
+                        }
+                        return 'bg-danger text-white'; // 写入磁带完成但任务未完成 - 红色（不闪烁）
                     case 'finalize':
                         return 'bg-success pulse-badge'; // 最终完成 - 绿色脉冲
                     default:
@@ -285,22 +314,27 @@
 
         if (isRunning && progressInfo) {
             // 计算每小时处理GB数
+            // 使用已处理数据/已用时间来计算速度
             const speedGBPerSec = calculateProcessingSpeedGBPerSec(task);
             if (speedGBPerSec !== null && parseFloat(speedGBPerSec) > 0) {
                 // 计算每小时处理GB数（G/秒 * 3600秒）
-                const speedGBPerHour = parseFloat((parseFloat(speedGBPerSec) * 3600).toFixed(2));
+                const speedGBPerHour = parseFloat(speedGBPerSec) * 3600;
                 
                 // 根据80G基准判断颜色
                 // >= 80G: 绿色（bg-success）- 良好
                 // < 80G: 黄色（bg-warning）- 较慢
                 const badgeClass = speedGBPerHour >= 80 ? 'badge bg-success' : 'badge bg-warning text-dark';
                 
-                // 在右上角徽章中显示每小时处理GB数（只显示数字）
+                // 在右上角徽章中显示每小时处理GB数（只显示数字，不带单位）
                 const speedBadge = document.createElement('span');
                 speedBadge.className = badgeClass;
                 speedBadge.style.cssText = 'font-size: 0.85rem; font-weight: 600; padding: 0.35em 0.65em;';
-                speedBadge.textContent = speedGBPerHour.toFixed(2);
-                speedBadge.title = `每小时处理: ${speedGBPerHour.toFixed(2)} GB ${speedGBPerHour >= 80 ? '(良好)' : '(较慢)'}`;
+                // 格式化数字：如果 >= 1，显示2位小数；如果 < 1，显示更多小数位
+                const displayValue = speedGBPerHour >= 1 
+                    ? speedGBPerHour.toFixed(2) 
+                    : speedGBPerHour.toFixed(4);
+                speedBadge.textContent = displayValue;
+                speedBadge.title = `每小时处理: ${displayValue} GB (已处理数据: ${formatBytes(progressInfo.processedBytes)} / 已用时间: ${formatElapsedTime(task.started_at, task.completed_at)})`;
                 
                 badgeWrapper.appendChild(speedBadge);
             } else {
@@ -422,7 +456,7 @@
                         <small class="text-success"><strong>${currentStageLabel}</strong></small>
                     </div>
                     <div class="d-flex flex-wrap gap-1 mt-1">
-                        ${stageSteps.map(step => `<span class="badge ${getCompletedStageBadgeClass(step.state, step.code)}">${step.label}</span>`).join('')}
+                        ${stageSteps.map(step => `<span class="badge ${getCompletedStageBadgeClass(step.state, step.code, task)}">${step.label}</span>`).join('')}
                     </div>
                 `;
                 body.appendChild(stageSection);
@@ -442,18 +476,40 @@
                     progressPercent = progressInfo.percent;
                 }
                 
+                // 构建显示文本，添加大小信息
+                let displayLabel = currentStageLabel;
+                const isCompressStage = (task.operation_stage || '').toLowerCase() === 'compress';
+                
+                // 如果是压缩阶段，优先使用当前文件组的总容量（压缩前）
+                if (isCompressStage && task.current_compression_progress && task.current_compression_progress.group_size_bytes) {
+                    const groupSizeBytes = task.current_compression_progress.group_size_bytes;
+                    if (groupSizeBytes > 0) {
+                        const sizeGB = (groupSizeBytes / (1024 * 1024 * 1024)).toFixed(2);
+                        // 在文件数量和百分比后添加大小信息（当前文件组的总容量）
+                        displayLabel = currentStageLabel.replace(/(\([\d.]+%\))/, `$1 ${sizeGB}G`);
+                    }
+                } else if (progressInfo && (progressInfo.processedBytes > 0 || progressInfo.compressedBytes > 0)) {
+                    // 其他阶段或没有文件组大小信息时，使用累计数据
+                    const sizeBytes = isCompressStage ? progressInfo.compressedBytes : progressInfo.processedBytes;
+                    if (sizeBytes > 0) {
+                        const sizeGB = (sizeBytes / (1024 * 1024 * 1024)).toFixed(2);
+                        // 在文件数量和百分比后添加大小信息
+                        displayLabel = currentStageLabel.replace(/(\([\d.]+%\))/, `$1 ${sizeGB}G`);
+                    }
+                }
+                
                 const stageSection = document.createElement('div');
                 stageSection.className = 'mb-2';
                 stageSection.innerHTML = `
                     <div class="d-flex justify-content-between align-items-center">
                         <small class="text-muted">当前阶段:</small>
-                        <small class="text-muted">${currentStageLabel}</small>
+                        <small class="text-muted">${displayLabel}</small>
                     </div>
                     <div class="d-flex flex-wrap gap-1 mt-1">
                         ${stageSteps.map(step => {
                             // 如果是当前阶段且有进度信息，传递进度百分比
                             const progress = (step.state === 'current' && progressPercent !== null) ? progressPercent : null;
-                            return `<span class="badge ${getStageBadgeClass(step.state, step.code, progress)}">${step.label}</span>`;
+                            return `<span class="badge ${getStageBadgeClass(step.state, step.code, progress, task)}">${step.label}</span>`;
                         }).join('')}
                     </div>
                 `;
@@ -469,10 +525,30 @@
             let batchProgressHtml = '';
             if (task.operation_stage === 'compress' && task.current_compression_progress) {
                 const compProg = task.current_compression_progress;
+                // 优先使用文件组的总容量（压缩前）
+                let batchSizeGB = '';
+                if (compProg.group_size_bytes && compProg.group_size_bytes > 0) {
+                    // 使用当前文件组的总容量（压缩前）
+                    const batchSizeGBValue = (compProg.group_size_bytes / (1024 * 1024 * 1024)).toFixed(2);
+                    batchSizeGB = ` ${batchSizeGBValue}G`;
+                } else if (progressInfo && progressInfo.compressedBytes > 0 && progressInfo.processedFiles > 0) {
+                    // 如果没有文件组大小信息，估算：平均每个文件的压缩大小
+                    const avgCompressedSizePerFile = progressInfo.compressedBytes / progressInfo.processedFiles;
+                    // 当前批次的大小
+                    const batchSizeBytes = avgCompressedSizePerFile * compProg.current;
+                    const batchSizeGBValue = (batchSizeBytes / (1024 * 1024 * 1024)).toFixed(2);
+                    batchSizeGB = ` ${batchSizeGBValue}G`;
+                } else if (progressInfo && progressInfo.compressedBytes > 0 && compProg.total > 0) {
+                    // 如果无法用总文件数计算，使用当前批次文件数占比估算
+                    const batchRatio = compProg.current / compProg.total;
+                    const batchSizeBytes = progressInfo.compressedBytes * batchRatio;
+                    const batchSizeGBValue = (batchSizeBytes / (1024 * 1024 * 1024)).toFixed(2);
+                    batchSizeGB = ` ${batchSizeGBValue}G`;
+                }
                 batchProgressHtml = `
                     <div class="d-flex justify-content-between align-items-center mb-1">
                         <small class="text-muted">本批次压缩进度:</small>
-                        <small class="text-muted fw-semibold">${compProg.current}/${compProg.total} 个文件 (${compProg.percent.toFixed(1)}%)</small>
+                        <small class="text-muted fw-semibold">${compProg.current}/${compProg.total} 个文件 (${compProg.percent.toFixed(1)}%)${batchSizeGB}</small>
                     </div>
                 `;
             }

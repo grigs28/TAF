@@ -136,6 +136,19 @@ async def get_backup_tasks(
                         status_value
                     )
                     
+                    # 对于运行中的任务，尝试获取 current_compression_progress
+                    current_compression_progress = None
+                    if status_value and status_value.lower() == 'running':
+                        try:
+                            from web.api.system import get_system_instance
+                            system = get_system_instance(http_request)
+                            if system and system.backup_engine:
+                                task_status = await system.backup_engine.get_task_status(row["id"])
+                                if task_status and 'current_compression_progress' in task_status:
+                                    current_compression_progress = task_status['current_compression_progress']
+                        except Exception as e:
+                            logger.debug(f"获取任务压缩进度失败: {str(e)}")
+                    
                     tasks.append({
                         "task_id": row["id"],
                         "task_name": row["task_name"],
@@ -162,7 +175,8 @@ async def get_backup_tasks(
                         "operation_status": stage_info["operation_status"],
                         "operation_stage": stage_info["operation_stage"],
                         "operation_stage_label": stage_info["operation_stage_label"],
-                        "stage_steps": stage_info["stage_steps"]
+                        "stage_steps": stage_info["stage_steps"],
+                        "current_compression_progress": current_compression_progress
                     })
                 # 追加计划任务（未运行模板）
                 # 仅当无状态过滤或过滤为pending/all时返回
@@ -656,6 +670,19 @@ async def get_backup_task(task_id: int, http_request: Request):
                     row.get("scan_status"),
                     status_value
                 )
+                # 对于运行中的任务，尝试获取 current_compression_progress
+                current_compression_progress = None
+                if status_value and status_value.lower() == 'running':
+                    try:
+                        from web.api.system import get_system_instance
+                        system = get_system_instance(http_request)
+                        if system and system.backup_engine:
+                            task_status = await system.backup_engine.get_task_status(row["id"])
+                            if task_status and 'current_compression_progress' in task_status:
+                                current_compression_progress = task_status['current_compression_progress']
+                    except Exception as e:
+                        logger.debug(f"获取任务压缩进度失败: {str(e)}")
+                
                 return {
                     "task_id": row["id"],
                     "task_name": row["task_name"],
@@ -680,10 +707,11 @@ async def get_backup_task(task_id: int, http_request: Request):
                     "source_paths": source_paths or [],
                     "enabled": row.get("enabled", True),
                     "from_scheduler": False,
-                        "operation_status": stage_info["operation_status"],
+                    "operation_status": stage_info["operation_status"],
                     "operation_stage": stage_info["operation_stage"],
                     "operation_stage_label": stage_info["operation_stage_label"],
-                    "stage_steps": stage_info["stage_steps"]
+                    "stage_steps": stage_info["stage_steps"],
+                    "current_compression_progress": current_compression_progress
                 }
         else:
             # 检查是否为Redis数据库

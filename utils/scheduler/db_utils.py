@@ -61,6 +61,7 @@ async def _create_opengauss_pool():
     max_overflow = getattr(db_manager.settings, 'DB_MAX_OVERFLOW', 20)
     pool_timeout = getattr(db_manager.settings, 'DB_POOL_TIMEOUT', 30.0)
     command_timeout = getattr(db_manager.settings, 'DB_COMMAND_TIMEOUT', 60.0)
+    max_inactive_lifetime = getattr(db_manager.settings, 'DB_MAX_INACTIVE_CONNECTION_LIFETIME', 600.0)
     query_dop = getattr(db_manager.settings, 'DB_QUERY_DOP', 16)  # openGauss 查询并行度
     min_size = max(1, pool_size // 2)  # 最小连接数
     max_size = pool_size + max_overflow  # 最大连接数
@@ -89,10 +90,14 @@ async def _create_opengauss_pool():
             timeout=pool_timeout,  # 连接超时时间（秒）
             command_timeout=command_timeout,  # 命令超时时间（秒）
             max_queries=50000,  # 每个连接的最大查询数
-            max_inactive_connection_lifetime=300.0,  # 非活跃连接的最大生命周期（秒）
+            max_inactive_connection_lifetime=max_inactive_lifetime,  # 非活跃连接的最大生命周期（秒，可配置）
             init=init_connection,  # 连接初始化回调：设置 query_dop
         )
-        logger.info(f"openGauss连接池创建成功: min_size={min_size}, max_size={max_size}, timeout={pool_timeout}s, command_timeout={command_timeout}s, query_dop={query_dop}")
+        logger.info(
+            f"openGauss连接池创建成功: min_size={min_size}, max_size={max_size}, "
+            f"timeout={pool_timeout}s, command_timeout={command_timeout}s, "
+            f"max_inactive_lifetime={max_inactive_lifetime}s, query_dop={query_dop}"
+        )
         if monitor.enabled:
             logger.debug(
                 "openGauss 连接池参数: host=%s port=%s db=%s min=%s max=%s",

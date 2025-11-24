@@ -586,8 +586,36 @@ class BackupScanner:
                                 files_total_rate = total_files / elapsed_total
                                 files_window = total_files - last_log_files
                                 files_window_rate = files_window / elapsed_window if files_window > 0 else 0.0
+                                
+                                # 获取扫描方式标识
+                                scan_type_info = ""
+                                try:
+                                    from utils.scheduler.db_utils import is_opengauss
+                                    scan_method = getattr(self.settings, 'SCAN_METHOD', 'default').lower()
+                                    use_multithread = getattr(self.settings, 'USE_SCAN_MULTITHREAD', True)
+                                    scan_threads = getattr(self.settings, 'SCAN_THREADS', 4)
+                                    
+                                    use_concurrent = (
+                                        is_opengauss() and 
+                                        scan_method == 'default' and 
+                                        use_multithread and 
+                                        scan_threads > 1
+                                    )
+                                    use_sequential = (
+                                        is_opengauss() and 
+                                        scan_method == 'default' and 
+                                        not use_multithread
+                                    )
+                                    
+                                    if use_concurrent:
+                                        scan_type_info = f"[多线程扫描-{scan_threads}线程] "
+                                    elif use_sequential:
+                                        scan_type_info = "[顺序扫描] "
+                                except Exception:
+                                    pass
+                                
                                 logger.info(
-                                    f"后台扫描任务：已扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)}，"
+                                    f"{scan_type_info}后台扫描任务：已扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)}，"
                                     f"平均速度 {files_total_rate:.1f} 个文件/秒，"
                                     f"最近 {files_window} 个文件用时 {elapsed_window:.1f} 秒，速度 {files_window_rate:.1f} 个文件/秒"
                                 )

@@ -1512,9 +1512,27 @@ class BackupDB:
                     )
                 except (AssertionError, asyncio.TimeoutError, ValueError, TypeError, KeyError) as e:
                     # 调试查询失败不影响主流程，只记录警告
+                    error_type = type(e).__name__
+                    error_msg = str(e)
+                    
+                    # 根据错误类型提供更详细的说明
+                    if isinstance(e, AssertionError) and "insufficient data in buffer" in error_msg:
+                        reason = "缓冲区错误（可能是数据库负载高或连接问题）"
+                    elif isinstance(e, asyncio.TimeoutError):
+                        reason = "查询超时（10秒内未完成，可能是数据库负载高）"
+                    elif isinstance(e, (ValueError, TypeError, KeyError)):
+                        reason = "数据解析错误（可能是数据库返回格式异常）"
+                    else:
+                        reason = "未知错误"
+                    
                     logger.warning(
-                        f"[openGauss优化] 统计查询失败（不影响主流程）: {e}, "
-                        f"继续执行主查询"
+                        f"[openGauss优化] 统计查询失败（不影响主流程）: {error_type}: {error_msg}，"
+                        f"原因: {reason}，继续执行主查询"
+                    )
+                    logger.debug(
+                        f"[openGauss优化] 统计查询失败详情: backup_set_id={backup_set_db_id}, "
+                        f"last_processed_id={last_processed_id}",
+                        exc_info=True
                     )
                 
                 # 使用显式类型转换避免 openGauss 缓冲区错误
@@ -1522,7 +1540,7 @@ class BackupDB:
                 retry_delay = 1.0  # 初始重试延迟（秒）
                 max_retry_delay = 30.0  # 最大重试延迟（秒），避免无限增长
                 current_batch_size = batch_size
-                min_batch_size = 100  # 最小批次大小
+                min_batch_size = 50  # 最小批次大小（从100降低到50，避免缓冲区错误）
                 retry_count = 0
                 rows = None
                 
@@ -1561,27 +1579,28 @@ class BackupDB:
                             # 设置失败不影响查询，继续执行
                             logger.debug(f"设置 query_dop 失败（可能不是 openGauss）: {e}")
                         
-                        # 移除超时限制，允许查询无限等待（配合无限重试机制）
+                        # 优化：简化查询字段，减少数据传输量，避免缓冲区错误
+                        # 只查询必要的字段，减少单行数据大小
                         rows = await conn.fetch(
                             """
                             SELECT 
-                                id::BIGINT as id,
-                                file_path::TEXT as file_path,
-                                file_name::TEXT as file_name,
-                                directory_path::TEXT as directory_path,
-                                display_name::TEXT as display_name,
-                                file_type::backupfiletype as file_type,
-                                file_size::BIGINT as file_size,
-                                file_permissions::TEXT as file_permissions,
-                                modified_time::TIMESTAMPTZ as modified_time,
-                                accessed_time::TIMESTAMPTZ as accessed_time
+                                id,
+                                file_path,
+                                file_name,
+                                directory_path,
+                                display_name,
+                                file_type,
+                                file_size,
+                                file_permissions,
+                                modified_time,
+                                accessed_time
                             FROM backup_files
-                            WHERE backup_set_id = $1::INTEGER
+                            WHERE backup_set_id = $1
                               AND (is_copy_success = FALSE OR is_copy_success IS NULL)
-                              AND file_type = 'file'::backupfiletype
-                              AND id > $2::BIGINT
+                              AND file_type = 'file'
+                              AND id > $2
                             ORDER BY id
-                            LIMIT $3::INTEGER
+                            LIMIT $3
                             """,
                             backup_set_db_id,
                             last_processed_id,
@@ -1600,10 +1619,33 @@ class BackupDB:
                         error_msg = str(e)
                         if "insufficient data in buffer" in error_msg:
                             retry_count += 1
+                            
                             logger.warning(
                                 f"[openGauss优化] 缓冲区错误（第 {retry_count} 次重试）: {e}, "
                                 f"当前批次大小={current_batch_size}，将无限重试直到成功"
                             )
+                            
+                            # 如果批次大小还比较大，进一步减小
+                            if current_batch_size > min_batch_size:
+                                # 每次减半，但最小不低于 min_batch_size
+                                new_batch_size = max(min_batch_size, current_batch_size // 2)
+                                if new_batch_size < current_batch_size:
+                                    current_batch_size = new_batch_size
+                                    logger.info(
+                                        f"[openGauss优化] 批次大小已减小至 {current_batch_size} 以避免缓冲区错误"
+                                    )
+                            
+                            # 如果批次大小已经很小但仍然出错，增加等待时间
+                            if current_batch_size <= min_batch_size:
+                                # 每5次重试增加一次等待时间
+                                if retry_count % 5 == 0:
+                                    delay = min(retry_delay * (2 ** min((retry_count // 5) - 1, 3)), max_retry_delay)
+                                    logger.debug(
+                                        f"[openGauss优化] 批次大小已最小（{current_batch_size}），"
+                                        f"增加等待时间至 {delay:.1f} 秒后重试"
+                                    )
+                                    await asyncio.sleep(delay)
+                            
                             continue  # 继续重试
                         else:
                             # 其他 AssertionError，也继续重试（可能是临时错误）

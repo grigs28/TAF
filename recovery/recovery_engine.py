@@ -814,7 +814,52 @@ class RecoveryEngine:
                         GROUP BY first_level, item_type
                         ORDER BY first_level ASC
                     """
-                    rows = await conn.fetch(sql, backup_set_db_id)
+                    # 添加重试机制，避免缓冲区错误
+                    rows = None
+                    retry_count = 0
+                    max_retries = 3
+                    while retry_count < max_retries:
+                        try:
+                            rows = await conn.fetch(sql, backup_set_db_id)
+                            break  # 成功，退出重试循环
+                        except AssertionError as e:
+                            error_msg = str(e)
+                            if "insufficient data in buffer" in error_msg:
+                                retry_count += 1
+                                if retry_count >= max_retries:
+                                    logger.error(
+                                        f"查询顶层目录结构失败（已重试 {max_retries} 次）: {e}，"
+                                        f"备份集ID: {backup_set_db_id}"
+                                    )
+                                    raise  # 主查询失败，抛出异常
+                                else:
+                                    logger.warning(
+                                        f"查询顶层目录结构时缓冲区错误（第 {retry_count} 次重试）: {e}，"
+                                        f"备份集ID: {backup_set_db_id}"
+                                    )
+                                    await asyncio.sleep(1.0 * retry_count)  # 指数退避
+                                    continue
+                            else:
+                                # 其他 AssertionError，也重试
+                                retry_count += 1
+                                if retry_count >= max_retries:
+                                    logger.error(
+                                        f"查询顶层目录结构失败（已重试 {max_retries} 次）: {e}，"
+                                        f"备份集ID: {backup_set_db_id}"
+                                    )
+                                    raise
+                                await asyncio.sleep(1.0 * retry_count)
+                                continue
+                        except Exception as e:
+                            # 其他异常，直接抛出
+                            logger.error(
+                                f"查询顶层目录结构时发生异常: {e}，备份集ID: {backup_set_db_id}"
+                            )
+                            raise
+                    
+                    if rows is None:
+                        logger.error(f"查询顶层目录结构失败，返回空结果，备份集ID: {backup_set_db_id}")
+                        return []
                     
                     logger.info(f"通过SQL查询提取到 {len(rows)} 个唯一的顶层项")
                     
@@ -829,19 +874,65 @@ class RecoveryEngine:
                         
                         if item_type == 'file':
                             # 顶层文件，查询文件详细信息
-                            file_row = await conn.fetchrow(
-                                """
-                                SELECT id, file_path, file_name, file_type, file_size, compressed_size,
-                                       file_permissions, created_time, modified_time, accessed_time,
-                                       compressed, checksum, backup_time, chunk_number
-                                FROM backup_files
-                                WHERE backup_set_id = $1 AND file_path = $2
-                                  AND is_copy_success = TRUE
-                                LIMIT 1
-                                """,
-                                backup_set_db_id,
-                                sample_path
-                            )
+                            # 添加重试机制，避免缓冲区错误
+                            file_row = None
+                            retry_count = 0
+                            max_retries = 3
+                            while retry_count < max_retries:
+                                try:
+                                    # 简化查询，去掉不必要的类型转换
+                                    file_row = await conn.fetchrow(
+                                        """
+                                        SELECT id, file_path, file_name, file_type, file_size, compressed_size,
+                                               file_permissions, created_time, modified_time, accessed_time,
+                                               compressed, checksum, backup_time, chunk_number
+                                        FROM backup_files
+                                        WHERE backup_set_id = $1 AND file_path = $2
+                                          AND is_copy_success = TRUE
+                                        LIMIT 1
+                                        """,
+                                        backup_set_db_id,
+                                        sample_path
+                                    )
+                                    break  # 成功，退出重试循环
+                                except AssertionError as e:
+                                    error_msg = str(e)
+                                    if "insufficient data in buffer" in error_msg:
+                                        retry_count += 1
+                                        if retry_count >= max_retries:
+                                            logger.warning(
+                                                f"查询文件详细信息失败（已重试 {max_retries} 次）: {sample_path}, "
+                                                f"错误: {e}，跳过此文件"
+                                            )
+                                            file_row = None
+                                            break
+                                        else:
+                                            logger.debug(
+                                                f"查询文件详细信息时缓冲区错误（第 {retry_count} 次重试）: "
+                                                f"{sample_path}, 错误: {e}"
+                                            )
+                                            await asyncio.sleep(0.5 * retry_count)  # 指数退避
+                                            continue
+                                    else:
+                                        # 其他 AssertionError，也重试
+                                        retry_count += 1
+                                        if retry_count >= max_retries:
+                                            logger.warning(
+                                                f"查询文件详细信息失败（已重试 {max_retries} 次）: {sample_path}, "
+                                                f"错误: {e}，跳过此文件"
+                                            )
+                                            file_row = None
+                                            break
+                                        await asyncio.sleep(0.5 * retry_count)
+                                        continue
+                                except Exception as e:
+                                    # 其他异常，记录并跳过
+                                    logger.warning(
+                                        f"查询文件详细信息时发生异常: {sample_path}, "
+                                        f"错误: {e}，跳过此文件"
+                                    )
+                                    file_row = None
+                                    break
                             
                             if file_row:
                                 file_info = {
@@ -871,21 +962,78 @@ class RecoveryEngine:
                                 })
                         else:
                             # 顶层目录，检查是否有子项
-                            has_children_sql = """
-                                SELECT COUNT(*) as cnt
-                                FROM backup_files
-                                WHERE backup_set_id = $1 
-                                  AND (
-                                      REPLACE(file_path, '\\', '/') LIKE $2 
-                                      OR REPLACE(file_path, '\\', '/') LIKE $3
-                                  )
-                                  AND REPLACE(file_path, '\\', '/') != $4
-                                  AND is_copy_success = TRUE
-                            """
+                            # 优化：使用 EXISTS 代替 COUNT，减少数据传输量
+                            # 添加重试机制，避免缓冲区错误
                             like_pattern1 = first_level + '/%'
                             like_pattern2 = first_level + '\\%'
-                            count_row = await conn.fetchrow(has_children_sql, backup_set_db_id, like_pattern1, like_pattern2, first_level)
-                            has_children = (count_row['cnt'] > 0) if count_row else True
+                            has_children = True  # 默认值
+                            
+                            retry_count = 0
+                            max_retries = 3
+                            while retry_count < max_retries:
+                                try:
+                                    # 使用 EXISTS 代替 COUNT，只返回布尔值，减少数据传输
+                                    has_children_sql = """
+                                        SELECT EXISTS(
+                                            SELECT 1
+                                            FROM backup_files
+                                            WHERE backup_set_id = $1 
+                                              AND (
+                                                  REPLACE(file_path, '\\', '/') LIKE $2 
+                                                  OR REPLACE(file_path, '\\', '/') LIKE $3
+                                              )
+                                              AND REPLACE(file_path, '\\', '/') != $4
+                                              AND is_copy_success = TRUE
+                                              LIMIT 1
+                                        ) as has_children
+                                    """
+                                    count_row = await conn.fetchrow(
+                                        has_children_sql, 
+                                        backup_set_db_id, 
+                                        like_pattern1, 
+                                        like_pattern2, 
+                                        first_level
+                                    )
+                                    has_children = count_row['has_children'] if count_row else True
+                                    break  # 成功，退出重试循环
+                                except AssertionError as e:
+                                    error_msg = str(e)
+                                    if "insufficient data in buffer" in error_msg:
+                                        retry_count += 1
+                                        if retry_count >= max_retries:
+                                            logger.warning(
+                                                f"检查目录是否有子项失败（已重试 {max_retries} 次）: {first_level}, "
+                                                f"错误: {e}，使用默认值 has_children=True"
+                                            )
+                                            has_children = True  # 使用默认值
+                                            break
+                                        else:
+                                            logger.debug(
+                                                f"检查目录是否有子项时缓冲区错误（第 {retry_count} 次重试）: "
+                                                f"{first_level}, 错误: {e}"
+                                            )
+                                            await asyncio.sleep(0.5 * retry_count)  # 指数退避
+                                            continue
+                                    else:
+                                        # 其他 AssertionError，也重试
+                                        retry_count += 1
+                                        if retry_count >= max_retries:
+                                            logger.warning(
+                                                f"检查目录是否有子项失败（已重试 {max_retries} 次）: {first_level}, "
+                                                f"错误: {e}，使用默认值 has_children=True"
+                                            )
+                                            has_children = True
+                                            break
+                                        await asyncio.sleep(0.5 * retry_count)
+                                        continue
+                                except Exception as e:
+                                    # 其他异常，记录并使用默认值
+                                    logger.warning(
+                                        f"检查目录是否有子项时发生异常: {first_level}, "
+                                        f"错误: {e}，使用默认值 has_children=True"
+                                    )
+                                    has_children = True
+                                    break
                             
                             directories[first_level] = {
                                 'name': first_level,

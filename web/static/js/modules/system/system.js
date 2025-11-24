@@ -1031,6 +1031,7 @@ async function saveEnvConfigSection() {
             scan_log_interval_seconds: parseInt(document.getElementById('scanLogIntervalSeconds')?.value) || null,
             scan_method: document.getElementById('scanMethod')?.value || null,
             es_exe_path: document.getElementById('esExePath')?.value || null,
+            use_scan_multithread: document.getElementById('useScanMultithread')?.checked ?? null,
             scan_threads: (() => {
                 const input = document.getElementById('scanThreads');
                 if (!input) return null;

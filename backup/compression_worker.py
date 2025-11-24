@@ -271,6 +271,15 @@ class CompressionWorker:
                 total_files_in_group = len(file_group)
                 total_size_in_group = sum(f.get('size', 0) or 0 for f in file_group)
                 
+                # 初始化压缩进度信息，包含文件组大小
+                if not hasattr(self.backup_task, 'current_compression_progress'):
+                    self.backup_task.current_compression_progress = None
+                # 在开始压缩前，先设置文件组大小信息
+                if hasattr(self.backup_task, 'current_compression_progress'):
+                    if self.backup_task.current_compression_progress is None:
+                        self.backup_task.current_compression_progress = {}
+                    self.backup_task.current_compression_progress['group_size_bytes'] = total_size_in_group
+                
                 logger.info(
                     f"构建文件组完成：{total_files_in_group} 个文件，"
                     f"总大小 {format_bytes(total_size_in_group)}"
@@ -294,7 +303,9 @@ class CompressionWorker:
                 compression_status = "[压缩文件中...]"
                 if hasattr(self.backup_task, 'current_compression_progress') and self.backup_task.current_compression_progress:
                     comp_prog = self.backup_task.current_compression_progress
-                    compression_status = f"[压缩文件中...] {comp_prog['current']}/{comp_prog['total']} 个文件 ({comp_prog['percent']:.1f}%)"
+                    # 检查必要的键是否存在
+                    if isinstance(comp_prog, dict) and 'current' in comp_prog and 'total' in comp_prog and 'percent' in comp_prog:
+                        compression_status = f"[压缩文件中...] {comp_prog['current']}/{comp_prog['total']} 个文件 ({comp_prog['percent']:.1f}%)"
                 
                 await self.backup_db.update_scan_progress(
                     self.backup_task,
@@ -384,7 +395,11 @@ class CompressionWorker:
                         await asyncio.sleep(2)  # 每2秒更新一次
                         if hasattr(self.backup_task, 'current_compression_progress') and self.backup_task.current_compression_progress:
                             comp_prog = self.backup_task.current_compression_progress
-                            compression_status = f"[压缩文件中...] {comp_prog['current']}/{comp_prog['total']} 个文件 ({comp_prog['percent']:.1f}%)"
+                            # 检查必要的键是否存在
+                            if isinstance(comp_prog, dict) and 'current' in comp_prog and 'total' in comp_prog and 'percent' in comp_prog:
+                                compression_status = f"[压缩文件中...] {comp_prog['current']}/{comp_prog['total']} 个文件 ({comp_prog['percent']:.1f}%)"
+                            else:
+                                compression_status = "[压缩文件中...]"
                             try:
                                 await self.backup_db.update_scan_progress(
                                     self.backup_task,

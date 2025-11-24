@@ -190,6 +190,12 @@ class BackupTaskManager:
             Dict: 任务状态字典，如果任务不存在返回None
         """
         try:
+            # 尝试从运行中的任务对象获取 current_compression_progress
+            current_compression_progress = None
+            if self._current_task and self._current_task.id == task_id:
+                if hasattr(self._current_task, 'current_compression_progress') and self._current_task.current_compression_progress:
+                    current_compression_progress = self._current_task.current_compression_progress
+            
             from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
             if is_opengauss():
@@ -266,7 +272,7 @@ class BackupTaskManager:
                         if backup_task.processed_bytes and backup_task.processed_bytes > 0 and backup_task.compressed_bytes:
                             compression_ratio = float(backup_task.compressed_bytes) / float(backup_task.processed_bytes)
                         
-                        return {
+                        result = {
                             'id': backup_task.id,
                             'task_name': backup_task.task_name,
                             'task_type': backup_task.task_type,
@@ -287,6 +293,10 @@ class BackupTaskManager:
                             'tape_id': backup_task.tape_id,
                             'description': backup_task.description
                         }
+                        # 添加运行时的压缩进度信息
+                        if current_compression_progress:
+                            result['current_compression_progress'] = current_compression_progress
+                        return result
             
             return None
         except Exception as e:

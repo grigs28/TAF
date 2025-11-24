@@ -67,4 +67,5 @@ class BackupTaskResponse(BaseModel):
     operation_stage: Optional[str] = None
     operation_stage_label: Optional[str] = None
     stage_steps: List[Dict[str, Any]] = Field(default_factory=list)
+    current_compression_progress: Optional[Dict[str, Any]] = Field(None, description="当前压缩进度信息（运行时）")
 
