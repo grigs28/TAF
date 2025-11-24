@@ -1,5 +1,31 @@
 # 更新日志
 
+## [0.1.26] - 2025-11-24
+
+### 修复
+
+#### 扫描进度更新事务提交问题
+- ✅ 修复 `update_scan_progress_only` 在 openGauss 模式下缺少显式提交事务的问题
+  - 后台扫描任务更新 `total_files` 和 `total_bytes` 后，其他连接（如 API 查询）无法立即看到更新
+  - 原因：psycopg3 默认 `autocommit=False`，需要显式提交事务
+  - 解决：在 `update_scan_progress_only` 方法中添加显式 `commit()` 调用
+  - 效果：UI 可以实时显示更新后的总文件数和总字节数
+
+#### API 查询缺少 operation_stage 字段
+- ✅ 修复 API 查询中缺少 `operation_stage` 字段的问题
+  - 之前 API 从 `description` 字段解析操作阶段，可能不准确
+  - 解决：在 SQL 查询中添加 `operation_stage` 字段
+  - 优化 `_build_stage_info` 函数，优先使用数据库中的 `operation_stage` 字段
+  - 效果：UI 可以准确接收到"写入磁带"和"完成"等状态更新
+
+### 改进
+
+#### 状态更新流程优化
+- ✅ 优化任务状态更新流程
+  - "写入磁带"状态：由 `TapeFileMover` 或 `CompressionWorker` 更新 `operation_stage = "copy"`
+  - "完成"状态：由 `CompressionWorker._finalize_backup_set_and_notify` 更新 `status = COMPLETED`
+  - 所有状态更新都会显式提交事务，确保 UI 可以实时接收
+
 ## [0.1.25] - 2025-11-24
 
 ### 改进

@@ -63,246 +63,356 @@ async def get_backup_tasks(
                     return value
                 return default
             # 使用原生SQL查询（使用连接池）
-            async with get_opengauss_connection() as conn:
-                # 构建WHERE子句
-                where_clauses = []
-                params = []
-                param_index = 1
-                
-                # 默认返回所有记录（模板+执行记录）；当 status/task_type 为 'all' 或空时不加过滤
-                normalized_status = (status or '').lower()
-                include_not_run = normalized_status in ('not_run', '未运行')
-                if status and normalized_status not in ('all', 'not_run', '未运行'):
-                    # 以文本方式匹配，避免依赖枚举类型存在
-                    where_clauses.append(f"LOWER(status::text) = LOWER(${param_index})")
-                    params.append(status)
-                    param_index += 1
-                # 未运行：仅限从 backup_tasks 侧筛选"未启动"的pending记录
-                if include_not_run:
-                    where_clauses.append("(started_at IS NULL) AND LOWER(status::text)=LOWER('PENDING')")
-                
-                normalized_type = (task_type or '').lower()
-                if task_type and normalized_type != 'all':
-                    # 以文本方式匹配，避免依赖枚举类型存在
-                    where_clauses.append(f"LOWER(task_type::text) = LOWER(${param_index})")
-                    params.append(task_type)
-                    param_index += 1
+            # 构建WHERE子句
+            where_clauses = []
+            params = []
+            param_index = 1
+            
+            # 默认返回所有记录（模板+执行记录）；当 status/task_type 为 'all' 或空时不加过滤
+            normalized_status = (status or '').lower()
+            include_not_run = normalized_status in ('not_run', '未运行')
+            if status and normalized_status not in ('all', 'not_run', '未运行'):
+                # 以文本方式匹配，确保大小写不敏感
+                # 注意：openGauss中status是枚举类型，需要转换为文本进行比较
+                # 同时确保传入的status值也转换为小写进行匹配
+                # 使用bt.status明确指定backup_tasks表的status字段，避免与scheduled_tasks.status冲突
+                status_lower = normalized_status
+                where_clauses.append(f"LOWER(bt.status::text) = LOWER(${param_index}::text)")
+                params.append(status_lower)  # 使用小写值
+                param_index += 1
+            # 未运行：仅限从 backup_tasks 侧筛选"未启动"的pending记录
+            if include_not_run:
+                where_clauses.append("(started_at IS NULL) AND LOWER(bt.status::text)=LOWER('pending')")
+            
+            normalized_type = (task_type or '').lower()
+            if task_type and normalized_type != 'all':
+                # 以文本方式匹配，避免依赖枚举类型存在
+                # 使用bt.task_type明确指定backup_tasks表的task_type字段
+                where_clauses.append(f"LOWER(bt.task_type::text) = LOWER(${param_index})")
+                params.append(task_type)
+                param_index += 1
 
-                if q and q.strip():
-                    where_clauses.append(f"task_name ILIKE ${param_index}")
-                    params.append(f"%{q.strip()}%")
-                    param_index += 1
-                
-                where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
-                
-                # 构建查询（包含模板与执行记录）- 不在SQL层做分页，合并后在内存分页
-                sql = f"""
-                    SELECT id, task_name, task_type, status, progress_percent, total_files, 
-                           processed_files, total_bytes, processed_bytes, compressed_bytes, 
-                           created_at, started_at, completed_at, error_message, is_template, 
-                           tape_device, source_paths, description, result_summary, scan_status
-                    FROM backup_tasks
-                    WHERE {where_sql}
-                    ORDER BY created_at DESC
-                """
-                rows = await conn.fetch(sql, *params)
-                
-                # 转换为响应格式
-                tasks = []
-                for row in rows:
-                    # 解析JSON字段
-                    source_paths = _decode_json_field(row.get("source_paths"), default=[])
+            if q and q.strip():
+                # 使用bt.task_name明确指定backup_tasks表的task_name字段
+                where_clauses.append(f"bt.task_name ILIKE ${param_index}")
+                params.append(f"%{q.strip()}%")
+                param_index += 1
+            
+            where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+            
+            # 构建查询（包含模板与执行记录）- 不在SQL层做分页，合并后在内存分页
+            # 注释掉运行中/失败任务的模板过滤，允许显示模板任务的运行状态
+            # if status and normalized_status in ('running', 'failed'):
+            #     where_sql = f"({where_sql}) AND is_template = false"
+            
+            sql = f"""
+                SELECT bt.id, bt.task_name, bt.task_type,
+                       CASE
+                           WHEN bt.status::text = 'RUNNING' THEN 'running'
+                           WHEN bt.status::text = 'PENDING' THEN 'pending'
+                           WHEN bt.status::text = 'COMPLETED' THEN 'completed'
+                           WHEN bt.status::text = 'FAILED' THEN 'failed'
+                           WHEN bt.status::text = 'CANCELLED' THEN 'cancelled'
+                           WHEN bt.status::text = 'PAUSED' THEN 'paused'
+                           ELSE LOWER(bt.status::text)
+                       END as status,
+                       bt.progress_percent, bt.total_files,
+                       bt.processed_files, bt.total_bytes, bt.processed_bytes, bt.compressed_bytes,
+                       bt.created_at, bt.started_at, bt.completed_at, bt.error_message, bt.is_template,
+                       bt.tape_device, bt.source_paths, bt.description, bt.result_summary, bt.scan_status, bt.operation_stage,
+                       CASE WHEN st.id IS NOT NULL THEN true ELSE false END as from_scheduler,
+                       st.enabled as scheduler_enabled
+                FROM backup_tasks bt
+                LEFT JOIN scheduled_tasks st ON st.backup_task_id = bt.id AND st.action_type = 'backup'
+                WHERE {where_sql}
+                ORDER BY bt.created_at DESC
+            """
+            
+            try:
+                async with get_opengauss_connection() as conn:
+                    # 添加调试日志
+                    logger.debug(f"[任务查询] openGauss查询SQL: {sql}")
+                    logger.debug(f"[任务查询] 查询参数: {params}")
+                    logger.debug(f"[任务查询] 状态过滤: status={status}, normalized_status={normalized_status}")
                     
-                    # 计算压缩率
-                    compression_ratio = 0.0
-                    total_bytes_actual = 0
-                    if row["processed_bytes"] and row["processed_bytes"] > 0 and row["compressed_bytes"]:
-                        compression_ratio = float(row["compressed_bytes"]) / float(row["processed_bytes"])
+                    rows = await conn.fetch(sql, *params)
                     
-                    # 解析result_summary获取预计的压缩包总数
-                    estimated_archive_count = None
-                    result_summary_dict = _decode_json_field(row.get("result_summary"), default={})
-                    if isinstance(result_summary_dict, dict):
-                        estimated_archive_count = result_summary_dict.get('estimated_archive_count')
-                        total_bytes_actual = (
-                            result_summary_dict.get('total_scanned_bytes')
-                            or result_summary_dict.get('total_bytes_actual')
-                            or 0
+                    # 确保rows不是None
+                    if rows is None:
+                        logger.warning("openGauss查询返回了None，返回空列表")
+                        return []
+                    
+                    logger.debug(f"[任务查询] 查询结果数量: {len(rows)}")
+                    if rows:
+                        logger.debug(f"[任务查询] 第一个任务的状态: {rows[0].get('status')}, is_template: {rows[0].get('is_template')}")
+                    
+                    tasks = []
+                    for row in rows:
+                        # 解析JSON字段
+                        source_paths = _decode_json_field(row.get("source_paths"), default=[])
+                        
+                        # 计算压缩率
+                        compression_ratio = 0.0
+                        total_bytes_actual = 0
+                        if row["processed_bytes"] and row["processed_bytes"] > 0 and row["compressed_bytes"]:
+                            compression_ratio = float(row["compressed_bytes"]) / float(row["processed_bytes"])
+                        
+                        # 解析result_summary获取预计的压缩包总数
+                        estimated_archive_count = None
+                        result_summary_dict = _decode_json_field(row.get("result_summary"), default={})
+                        if isinstance(result_summary_dict, dict):
+                            estimated_archive_count = result_summary_dict.get('estimated_archive_count')
+                            total_bytes_actual = (
+                                result_summary_dict.get('total_scanned_bytes')
+                                or result_summary_dict.get('total_bytes_actual')
+                                or 0
+                            )
+                        # 规范化状态值：确保是字符串类型
+                        raw_status = row["status"]
+                        task_id = row["id"]
+                        task_name = row.get("task_name", "")
+                        
+                        # 添加调试日志（对所有任务，特别是最近的任务）
+                        task_name_lower = task_name.lower()
+                        is_recent_task = (
+                            "计划备份-20251123_234825" in task_name or
+                            "计划备份-20251123_222248" in task_name or
+                            task_id >= 26  # 最近的任务ID
                         )
-                    status_value = _normalize_status_value(row["status"])
-                    stage_info = _build_stage_info(
-                        row.get("description"),
-                        row.get("scan_status"),
-                        status_value
-                    )
-                    
-                    # 对于运行中的任务，尝试获取 current_compression_progress
-                    current_compression_progress = None
-                    if status_value and status_value.lower() == 'running':
-                        try:
-                            from web.api.system import get_system_instance
-                            system = get_system_instance(http_request)
-                            if system and system.backup_engine:
-                                task_status = await system.backup_engine.get_task_status(row["id"])
-                                if task_status and 'current_compression_progress' in task_status:
-                                    current_compression_progress = task_status['current_compression_progress']
-                        except Exception as e:
-                            logger.debug(f"获取任务压缩进度失败: {str(e)}")
-                    
-                    tasks.append({
-                        "task_id": row["id"],
-                        "task_name": row["task_name"],
-                        "task_type": row["task_type"].value if hasattr(row["task_type"], "value") else str(row["task_type"]),
-                        "status": status_value,
-                        "progress_percent": float(row["progress_percent"]) if row["progress_percent"] else 0.0,
-                        "total_files": row["total_files"] or 0,  # 总文件数（由后台扫描任务更新）
-                        "processed_files": row["processed_files"] or 0,  # 已处理文件数
-                        "total_bytes": row["total_bytes"] or 0,  # 总字节数（由后台扫描任务更新）
-                        "total_bytes_actual": total_bytes_actual,
-                        "processed_bytes": row["processed_bytes"] or 0,
-                        "compressed_bytes": row["compressed_bytes"] or 0,
-                        "compression_ratio": compression_ratio,
-                        "estimated_archive_count": estimated_archive_count,  # 压缩包数量（从 result_summary.estimated_archive_count 读取）
-                        "created_at": row["created_at"],
-                        "started_at": row["started_at"],
-                        "completed_at": row["completed_at"],
-                        "error_message": row["error_message"],
-                        "is_template": row["is_template"] or False,
-                        "tape_device": row["tape_device"],
-                        "source_paths": source_paths or [],
-                        "description": row["description"] or "",
-                        "from_scheduler": False,
-                        "operation_status": stage_info["operation_status"],
-                        "operation_stage": stage_info["operation_stage"],
-                        "operation_stage_label": stage_info["operation_stage_label"],
-                        "stage_steps": stage_info["stage_steps"],
-                        "current_compression_progress": current_compression_progress
-                    })
-                # 追加计划任务（未运行模板）
-                # 仅当无状态过滤或过滤为pending/all时返回
-                include_sched = (not status) or (normalized_status in ("all", "pending", 'not_run', '未运行'))
-                if include_sched:
-                    sched_where = ["LOWER(action_type::text)=LOWER('BACKUP')"]
-                    sched_params = []
-                    if q and q.strip():
-                        sched_where.append("task_name ILIKE $1")
-                        sched_params.append(f"%{q.strip()}%")
-                    # 任务类型筛选
-                    if task_type and normalized_type != 'all':
-                        # 从 action_config->task_type 里匹配（字符串包含）
-                        # openGauss json 提取可后续增强，这里简化为 ILIKE 检测
-                        if sched_params:
-                            sched_where.append("(action_config::text) ILIKE $2")
-                            sched_params.append(f"%\"task_type\": \"{task_type}\"%")
+                        
+                        if is_recent_task:
+                            logger.debug(f"[任务查询] 任务{task_id} ({task_name}): 原始状态={raw_status}, 类型={type(raw_status)}, repr={repr(raw_status)}, started_at={row.get('started_at')}")
+                        
+                        status_value = _normalize_status_value(raw_status)
+                        
+                        # 如果规范化后还不是字符串，强制转换为字符串并转为小写
+                        if not isinstance(status_value, str):
+                            status_value = str(status_value).lower()
                         else:
-                            sched_where.append("(action_config::text) ILIKE $1")
-                            sched_params.append(f"%\"task_type\": \"{task_type}\"%")
-                    # 未运行：计划任务自然视作未运行
-                    sched_sql = f"""
-                        SELECT id, task_name, status, enabled, created_at, action_config, task_metadata
-                        FROM scheduled_tasks
-                        WHERE {' AND '.join(sched_where)}
-                        ORDER BY created_at DESC
-                    """
-                    sched_rows = await conn.fetch(sched_sql, *sched_params)
-                    template_ids = set()
-                    parsed_sched_rows = []
-                    for srow in sched_rows:
-                        action_cfg = _decode_json_field(srow.get("action_config"), default={})
-                        task_metadata = _decode_json_field(srow.get("task_metadata"), default={})
-                        backup_template_id = None
-                        if isinstance(task_metadata, dict):
-                            backup_template_id = task_metadata.get("backup_task_id")
-                            if backup_template_id:
-                                template_ids.add(int(backup_template_id))
-                        parsed_sched_rows.append((srow, action_cfg, task_metadata, backup_template_id))
-
-                    template_info_map = {}
-                    if template_ids:
-                        template_rows = await conn.fetch(
-                            """
-                            SELECT id, source_paths, tape_device
-                            FROM backup_tasks
-                            WHERE id = ANY($1::int[])
-                            """,
-                            list(template_ids)
+                            status_value = status_value.lower()
+                        
+                        # 添加调试日志（对最近的任务或状态异常的任务）
+                        is_running = status_value == 'running'
+                        has_started = row.get('started_at') is not None
+                        status_mismatch = has_started and status_value == 'pending'
+                        
+                        if is_recent_task or status_mismatch:
+                            logger.debug(
+                                f"[任务查询] 任务{task_id} ({task_name}): "
+                                f"原始状态={raw_status}, 类型={type(raw_status)}, "
+                                f"规范化后={status_value}, is_template={row.get('is_template')}, "
+                                f"started_at={row.get('started_at')}, "
+                                f"状态异常={status_mismatch}"
+                            )
+                        
+                        stage_info = _build_stage_info(
+                            row.get("description"),
+                            row.get("scan_status"),
+                            status_value,
+                            row.get("operation_stage")  # 优先使用数据库中的 operation_stage 字段
                         )
-                        for trow in template_rows:
-                            t_source_paths = _decode_json_field(trow.get('source_paths'), default=[])
-                            template_info_map[trow['id']] = {
-                                "source_paths": t_source_paths or [],
-                                "tape_device": trow.get('tape_device')
-                            }
-                    for srow, acfg, metadata, template_id in parsed_sched_rows:
-                        # 从action_config中提取task_type/tape_device/source_paths
-                        atype = 'full'
-                        tdev = None
-                        spaths: Optional[List[str]] = None
-                        try:
-                            if isinstance(acfg, dict):
-                                atype = acfg.get('task_type') or atype
-                                tdev = acfg.get('tape_device')
-                                cfg_paths = acfg.get('source_paths')
-                                if isinstance(cfg_paths, list):
-                                    spaths = [str(p) for p in cfg_paths if p]
-                                elif isinstance(cfg_paths, str) and cfg_paths.strip():
-                                    spaths = [cfg_paths.strip()]
-                        except Exception as parse_error:
-                            logger.debug(f"解析计划任务 action_config 失败: {parse_error}")
-                        template_fallback = template_info_map.get(int(template_id)) if template_id else None
-                        if (not spaths) and template_fallback:
-                            spaths = template_fallback.get("source_paths") or []
-                        if (not tdev) and template_fallback:
-                            tdev = template_fallback.get("tape_device")
-                        stage_info = _build_stage_info("", None, "pending")
+                        
+                        # 对于运行中的任务，尝试获取 current_compression_progress
+                        current_compression_progress = None
+                        if status_value == 'running':
+                            try:
+                                from web.api.system import get_system_instance
+                                system = get_system_instance(http_request)
+                                if system and system.backup_engine:
+                                    task_status = await system.backup_engine.get_task_status(row["id"])
+                                    if task_status and 'current_compression_progress' in task_status:
+                                        current_compression_progress = task_status['current_compression_progress']
+                            except Exception as e:
+                                logger.debug(f"获取任务压缩进度失败: {str(e)}")
+                        
                         tasks.append({
-                            "task_id": srow["id"],
-                            "task_name": srow["task_name"],
-                            "task_type": atype,
-                            "status": "pending",  # 计划任务视为未运行
-                            "progress_percent": 0.0,
-                            "total_files": 0,
-                            "processed_files": 0,
-                            "total_bytes": 0,
-                            "total_bytes_actual": 0,
-                            "processed_bytes": 0,
-                            "compressed_bytes": 0,
-                            "compression_ratio": 0.0,
-                            "created_at": srow["created_at"],
-                            "started_at": None,
-                            "completed_at": None,
-                            "error_message": None,
-                            "is_template": True,
-                            "tape_device": tdev,
-                            "source_paths": spaths or [],
-                            "from_scheduler": True,
-                            "enabled": srow.get("enabled", True),
-                            "description": "",
-                            "estimated_archive_count": None,
+                            "task_id": row["id"],
+                            "task_name": row["task_name"],
+                            "task_type": row["task_type"].value if hasattr(row["task_type"], "value") else str(row["task_type"]),
+                            "status": status_value,
+                            "progress_percent": float(row["progress_percent"]) if row["progress_percent"] else 0.0,
+                            "total_files": row["total_files"] or 0,  # 总文件数（由后台扫描任务更新）
+                            "processed_files": row["processed_files"] or 0,  # 已处理文件数
+                            "total_bytes": row["total_bytes"] or 0,  # 总字节数（由后台扫描任务更新）
+                            "total_bytes_actual": total_bytes_actual,
+                            "processed_bytes": row["processed_bytes"] or 0,
+                            "compressed_bytes": row["compressed_bytes"] or 0,
+                            "compression_ratio": compression_ratio,
+                            "estimated_archive_count": estimated_archive_count,  # 压缩包数量（从 result_summary.estimated_archive_count 读取）
+                            "created_at": row["created_at"],
+                            "started_at": row["started_at"],
+                            "completed_at": row["completed_at"],
+                            "error_message": row["error_message"],
+                            "is_template": row["is_template"] or False,
+                            "tape_device": row["tape_device"],
+                            "source_paths": source_paths or [],
+                            "description": row["description"] or "",
+                            "from_scheduler": row.get("from_scheduler", False),  # 从JOIN查询中获取正确的值
+                            "enabled": row.get("scheduler_enabled", True),  # 计划任务的启用状态
                             "operation_status": stage_info["operation_status"],
                             "operation_stage": stage_info["operation_stage"],
                             "operation_stage_label": stage_info["operation_stage_label"],
-                            "stage_steps": stage_info["stage_steps"]
+                            "stage_steps": stage_info["stage_steps"],
+                            "current_compression_progress": current_compression_progress
                         })
-                # 合并后排序与分页（统一为时间戳，避免aware/naive比较异常）
-                def _ts(val):
-                    try:
-                        if not val:
+                    
+                    # 追加计划任务（未运行模板）
+                    # 仅当无状态过滤或过滤为pending/all时返回
+                    include_sched = (not status) or (normalized_status in ("all", "pending", 'not_run', '未运行'))
+                    if include_sched:
+                        sched_where = ["LOWER(action_type::text)=LOWER('BACKUP')"]
+                        sched_params = []
+                        if q and q.strip():
+                            sched_where.append("task_name ILIKE $1")
+                            sched_params.append(f"%{q.strip()}%")
+                        # 任务类型筛选
+                        if task_type and normalized_type != 'all':
+                            # 从 action_config->task_type 里匹配（字符串包含）
+                            # openGauss json 提取可后续增强，这里简化为 ILIKE 检测
+                            if sched_params:
+                                sched_where.append("(action_config::text) ILIKE $2")
+                                sched_params.append(f"%\"task_type\": \"{task_type}\"%")
+                            else:
+                                sched_where.append("(action_config::text) ILIKE $1")
+                                sched_params.append(f"%\"task_type\": \"{task_type}\"%")
+                        # 未运行：计划任务自然视作未运行
+                        sched_sql = f"""
+                            SELECT id, task_name, status, enabled, created_at, action_config, task_metadata
+                            FROM scheduled_tasks
+                            WHERE {' AND '.join(sched_where)}
+                            ORDER BY created_at DESC
+                        """
+                        sched_rows = await conn.fetch(sched_sql, *sched_params)
+                        template_ids = set()
+                        parsed_sched_rows = []
+                        for srow in sched_rows:
+                            action_cfg = _decode_json_field(srow.get("action_config"), default={})
+                            task_metadata = _decode_json_field(srow.get("task_metadata"), default={})
+                            backup_template_id = None
+                            if isinstance(task_metadata, dict):
+                                backup_template_id = task_metadata.get("backup_task_id")
+                                if backup_template_id:
+                                    template_ids.add(int(backup_template_id))
+                            parsed_sched_rows.append((srow, action_cfg, task_metadata, backup_template_id))
+
+                        template_info_map = {}
+                        if template_ids:
+                            template_rows = await conn.fetch(
+                                """
+                                SELECT id, source_paths, tape_device
+                                FROM backup_tasks
+                                WHERE id = ANY($1::int[])
+                                """,
+                                list(template_ids)
+                            )
+                            for trow in template_rows:
+                                t_source_paths = _decode_json_field(trow.get('source_paths'), default=[])
+                                template_info_map[trow['id']] = {
+                                    "source_paths": t_source_paths or [],
+                                    "tape_device": trow.get('tape_device')
+                                }
+                        for srow, acfg, metadata, template_id in parsed_sched_rows:
+                            # 从action_config中提取task_type/tape_device/source_paths
+                            atype = 'full'
+                            tdev = None
+                            spaths: Optional[List[str]] = None
+                            try:
+                                if isinstance(acfg, dict):
+                                    atype = acfg.get('task_type') or atype
+                                    tdev = acfg.get('tape_device')
+                                    cfg_paths = acfg.get('source_paths')
+                                    if isinstance(cfg_paths, list):
+                                        spaths = [str(p) for p in cfg_paths if p]
+                                    elif isinstance(cfg_paths, str) and cfg_paths.strip():
+                                        spaths = [cfg_paths.strip()]
+                            except Exception as parse_error:
+                                logger.debug(f"解析计划任务 action_config 失败: {parse_error}")
+                            template_fallback = template_info_map.get(int(template_id)) if template_id else None
+                            if (not spaths) and template_fallback:
+                                spaths = template_fallback.get("source_paths") or []
+                            if (not tdev) and template_fallback:
+                                tdev = template_fallback.get("tape_device")
+                            stage_info = _build_stage_info("", None, "pending")
+                            tasks.append({
+                                "task_id": srow["id"],
+                                "task_name": srow["task_name"],
+                                "task_type": atype,
+                                "status": "pending",  # 计划任务视为未运行
+                                "progress_percent": 0.0,
+                                "total_files": 0,
+                                "processed_files": 0,
+                                "total_bytes": 0,
+                                "total_bytes_actual": 0,
+                                "processed_bytes": 0,
+                                "compressed_bytes": 0,
+                                "compression_ratio": 0.0,
+                                "created_at": srow["created_at"],
+                                "started_at": None,
+                                "completed_at": None,
+                                "error_message": None,
+                                "is_template": True,
+                                "tape_device": tdev,
+                                "source_paths": spaths or [],
+                                "from_scheduler": True,
+                                "enabled": srow.get("enabled", True),
+                                "description": "",
+                                "estimated_archive_count": None,
+                                "operation_status": stage_info["operation_status"],
+                                "operation_stage": stage_info["operation_stage"],
+                                "operation_stage_label": stage_info["operation_stage_label"],
+                                "stage_steps": stage_info["stage_steps"]
+                            })
+                    
+                    # 合并后排序与分页（统一为时间戳，避免aware/naive比较异常）
+                    def _ts(val):
+                        try:
+                            if not val:
+                                return 0.0
+                            if isinstance(val, (int, float)):
+                                return float(val)
+                            # datetime
+                            return val.timestamp()
+                        except Exception:
                             return 0.0
-                        if isinstance(val, (int, float)):
-                            return float(val)
-                        # datetime
-                        return val.timestamp()
-                    except Exception:
-                        return 0.0
-                tasks.sort(key=lambda x: _ts(x.get('created_at')), reverse=True)
-                return tasks[offset:offset+limit]
+
+                    # 修复任务显示优先级：执行记录优先于模板任务
+                    # 模板任务 (is_template=True) 应该排在执行记录后面
+                    def _sort_key(x):
+                        created_ts = _ts(x.get('created_at'))
+                        # 模板任务排在后面：添加一个很大的惩罚值
+                        is_template_penalty = 1000000000 if x.get('is_template') else 0
+                        # 计划任务 (from_scheduler=True) 也稍作调整，让执行记录优先
+                        scheduler_penalty = 100000 if x.get('from_scheduler') and not x.get('is_template') else 0
+                        return created_ts - is_template_penalty - scheduler_penalty
+
+                    tasks.sort(key=_sort_key, reverse=True)
+                    # 确保tasks是列表，避免返回None
+                    if tasks is None:
+                        logger.warning("openGauss路径中tasks为None，返回空列表")
+                        return []
+                    return tasks[offset:offset+limit]
+            except Exception as e:
+                error_msg = str(e)
+                # 如果表不存在，返回空列表
+                if "does not exist" in error_msg.lower() or "relation" in error_msg.lower() or "UndefinedTable" in str(type(e).__name__):
+                    logger.warning(
+                        f"backup_tasks 表不存在，返回空列表（可能是数据库未初始化）: {error_msg}"
+                    )
+                    return []
+                # 其他错误记录并返回空列表
+                logger.error(f"查询备份任务列表失败: {error_msg}", exc_info=True)
+                return []
         else:
             # 检查是否为Redis数据库
             if _is_redis():
                 # Redis版本
                 from backup.redis_backup_db import get_backup_tasks_redis
-                return await get_backup_tasks_redis(status, task_type, q, limit, offset)
+                result = await get_backup_tasks_redis(status, task_type, q, limit, offset)
+                # 确保返回的是列表，避免返回None
+                if result is None:
+                    logger.warning("get_backup_tasks_redis()返回了None，返回空列表")
+                    return []
+                return result
             
             # 检查是否为SQLite（确保只对SQLite使用SQLite连接）
             if not _is_sqlite():
@@ -339,13 +449,16 @@ async def get_backup_tasks(
                 
                 # 构建查询
                 sql = f"""
-                    SELECT id, task_name, task_type, status, progress_percent, total_files, 
-                           processed_files, total_bytes, processed_bytes, compressed_bytes, 
-                           created_at, started_at, completed_at, error_message, is_template, 
-                           tape_device, source_paths, description, result_summary, scan_status
-                    FROM backup_tasks
+                    SELECT bt.id, bt.task_name, bt.task_type, bt.status, bt.progress_percent, bt.total_files,
+                           bt.processed_files, bt.total_bytes, bt.processed_bytes, bt.compressed_bytes,
+                           bt.created_at, bt.started_at, bt.completed_at, bt.error_message, bt.is_template,
+                           bt.tape_device, bt.source_paths, bt.description, bt.result_summary, bt.scan_status, bt.operation_stage,
+                           CASE WHEN st.id IS NOT NULL THEN 1 ELSE 0 END as from_scheduler,
+                           st.enabled as scheduler_enabled
+                    FROM backup_tasks bt
+                    LEFT JOIN scheduled_tasks st ON st.backup_task_id = bt.id AND st.action_type = 'backup'
                     WHERE {where_sql}
-                    ORDER BY created_at DESC
+                    ORDER BY bt.created_at DESC
                 """
                 cursor = await conn.execute(sql, params)
                 rows = await cursor.fetchall()
@@ -420,7 +533,8 @@ async def get_backup_tasks(
                     stage_info = _build_stage_info(
                         row[17] or "",  # description
                         row[19],  # scan_status
-                        status_value
+                        status_value,
+                        row[20] if len(row) > 20 else None  # operation_stage
                     )
                     
                     # 处理task_type
@@ -454,8 +568,8 @@ async def get_backup_tasks(
                         "tape_device": row[15],  # tape_device
                         "source_paths": source_paths or [],
                         "description": row[17] or "",  # description
-                        "from_scheduler": False,
-                        "enabled": True,  # SQLite中没有enabled字段，默认为True
+                        "from_scheduler": bool(row[20]) if len(row) > 20 and row[20] is not None else False,  # from_scheduler
+                        "enabled": row[21] if len(row) > 21 and row[21] is not None else True,  # scheduler_enabled
                         "operation_status": stage_info["operation_status"],
                         "operation_stage": stage_info["operation_stage"],
                         "operation_stage_label": stage_info["operation_stage_label"],
@@ -599,7 +713,22 @@ async def get_backup_tasks(
                         return val.timestamp()
                     except Exception:
                         return 0.0
-                tasks.sort(key=lambda x: _ts(x.get('created_at')), reverse=True)
+
+                # 修复任务显示优先级：执行记录优先于模板任务
+                # 模板任务 (is_template=True) 应该排在执行记录后面
+                def _sort_key(x):
+                    created_ts = _ts(x.get('created_at'))
+                    # 模板任务排在后面：添加一个很大的惩罚值
+                    is_template_penalty = 1000000000 if x.get('is_template') else 0
+                    # 计划任务 (from_scheduler=True) 也稍作调整，让执行记录优先
+                    scheduler_penalty = 100000 if x.get('from_scheduler') and not x.get('is_template') else 0
+                    return created_ts - is_template_penalty - scheduler_penalty
+
+                tasks.sort(key=_sort_key, reverse=True)
+                # 确保tasks是列表，避免返回None
+                if tasks is None:
+                    logger.warning("SQLite路径中tasks为None，返回空列表")
+                    return []
                 return tasks[offset:offset+limit]
 
     except Exception as e:
@@ -619,7 +748,7 @@ async def get_backup_task(task_id: int, http_request: Request):
                     SELECT id, task_name, task_type, status, progress_percent, total_files, 
                            processed_files, total_bytes, processed_bytes, compressed_bytes,
                            created_at, started_at, completed_at, error_message, is_template,
-                           tape_device, source_paths, description, result_summary, enabled
+                           tape_device, source_paths, description, result_summary, scan_status, operation_stage, enabled
                     FROM backup_tasks
                     WHERE id = $1
                     """,
@@ -668,7 +797,8 @@ async def get_backup_task(task_id: int, http_request: Request):
                 stage_info = _build_stage_info(
                     row.get("description"),
                     row.get("scan_status"),
-                    status_value
+                    status_value,
+                    row.get("operation_stage")  # 优先使用数据库中的 operation_stage 字段
                 )
                 # 对于运行中的任务，尝试获取 current_compression_progress
                 current_compression_progress = None
@@ -734,7 +864,7 @@ async def get_backup_task(task_id: int, http_request: Request):
                     SELECT id, task_name, task_type, status, progress_percent, total_files,
                            processed_files, total_bytes, processed_bytes, compressed_bytes,
                            created_at, started_at, completed_at, error_message, is_template,
-                           tape_device, source_paths, description, result_summary, scan_status
+                           tape_device, source_paths, description, result_summary, scan_status, operation_stage
                     FROM backup_tasks
                     WHERE id = ?
                 """, (task_id,))
@@ -859,33 +989,59 @@ async def get_backup_templates(
     """
     try:
         if is_opengauss():
-            # openGauss分支保持不变
-            from config.database import db_manager
-            from sqlalchemy import select, desc
-            from models.backup import BackupTask
-            
-            async with db_manager.AsyncSessionLocal() as session:
-                stmt = select(BackupTask).where(BackupTask.is_template == True)
-                stmt = stmt.order_by(desc(BackupTask.created_at))
-                stmt = stmt.limit(limit).offset(offset)
+            # 使用原生SQL查询（openGauss），严禁SQLAlchemy解析openGauss
+            async with get_opengauss_connection() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, task_name, task_type, description, source_paths, tape_device,
+                           compression_enabled, encryption_enabled, retention_days, exclude_patterns, created_at
+                    FROM backup_tasks
+                    WHERE is_template = TRUE
+                    ORDER BY created_at DESC
+                    LIMIT $1 OFFSET $2
+                    """,
+                    limit, offset
+                )
                 
-                result = await session.execute(stmt)
-                templates = result.scalars().all()
+                # 确保rows不是None
+                if rows is None:
+                    logger.warning("openGauss查询模板返回了None，返回空列表")
+                    return []
                 
                 template_list = []
-                for template in templates:
+                for row in rows:
+                    # 解析 source_paths 和 exclude_patterns（JSON格式）
+                    source_paths = row['source_paths'] if row['source_paths'] else []
+                    exclude_patterns = row['exclude_patterns'] if row['exclude_patterns'] else []
+                    
+                    # 如果 source_paths 是字符串，尝试解析为 JSON
+                    if isinstance(source_paths, str):
+                        try:
+                            import json
+                            source_paths = json.loads(source_paths)
+                        except:
+                            source_paths = []
+                    
+                    # 如果 exclude_patterns 是字符串，尝试解析为 JSON
+                    if isinstance(exclude_patterns, str):
+                        try:
+                            import json
+                            exclude_patterns = json.loads(exclude_patterns)
+                        except:
+                            exclude_patterns = []
+                    
                     template_list.append({
-                        "task_id": template.id,
-                        "task_name": template.task_name,
-                        "task_type": template.task_type.value,
-                        "description": template.description,
-                        "source_paths": template.source_paths or [],
-                        "tape_device": template.tape_device,
-                        "compression_enabled": template.compression_enabled,
-                        "encryption_enabled": template.encryption_enabled,
-                        "retention_days": template.retention_days,
-                        "exclude_patterns": template.exclude_patterns or [],
-                        "created_at": template.created_at
+                        "task_id": row['id'],
+                        "task_name": row['task_name'],
+                        "task_type": row['task_type'].value if hasattr(row['task_type'], 'value') else str(row['task_type']),
+                        "description": row['description'],
+                        "source_paths": source_paths,
+                        "tape_device": row['tape_device'],
+                        "compression_enabled": row['compression_enabled'],
+                        "encryption_enabled": row['encryption_enabled'],
+                        "retention_days": row['retention_days'],
+                        "exclude_patterns": exclude_patterns,
+                        "created_at": row['created_at']
                     })
                 
                 return template_list

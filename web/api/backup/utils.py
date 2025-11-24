@@ -46,13 +46,32 @@ def _normalize_status_value(value: Any) -> str:
     """标准化状态值"""
     if value is None:
         return ""
+    
+    # 如果是枚举类型，获取其value属性
     if hasattr(value, "value"):
-        return value.value
-    return str(value)
+        result = str(value.value).lower()
+        return result
+    
+    # 如果是字符串，直接转为小写
+    if isinstance(value, str):
+        return value.lower()
+    
+    # 其他类型，转换为字符串并转为小写
+    return str(value).lower()
 
 
-def _build_stage_info(description: Optional[str], scan_status: Optional[str], status_value: str) -> Dict[str, Any]:
-    """构建阶段信息"""
+def _build_stage_info(description: Optional[str], scan_status: Optional[str], status_value: str, operation_stage: Optional[str] = None) -> Dict[str, Any]:
+    """构建阶段信息
+    
+    Args:
+        description: 任务描述（包含操作状态信息）
+        scan_status: 扫描状态
+        status_value: 任务状态值
+        operation_stage: 操作阶段代码（优先使用，如果提供则直接使用，不再从description解析）
+    """
+    # 优先使用数据库中的 operation_stage 字段
+    stage_code = operation_stage
+    
     desc = description or ""
     matches = OP_STATUS_PATTERN.findall(desc)
     operation_status = matches[-1] if matches else None
@@ -69,8 +88,8 @@ def _build_stage_info(description: Optional[str], scan_status: Optional[str], st
                 # 如果方括号后有文本，将其追加到 operation_status
                 operation_status = operation_status + " " + remaining_text
 
-    stage_code = None
-    if operation_status:
+    # 如果没有从数据库获取到 stage_code，则从 operation_status 中解析
+    if not stage_code and operation_status:
         lowered = operation_status.lower()
         for keyword, code in OP_STAGE_KEYWORDS:
             if keyword.lower() in lowered:
