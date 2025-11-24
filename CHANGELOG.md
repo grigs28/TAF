@@ -1,5 +1,35 @@
 # 更新日志
 
+## [0.1.28] - 2025-11-24
+
+### 修复
+
+#### recovery 页面数据库读取问题（openGauss 模式）
+- ✅ 修复 recovery 页面在 openGauss 模式下的数据库读取问题
+  - 修复 `fetchval` 方法缺少错误状态检查的问题
+  - 添加连接错误状态（INERROR）检查，确保查询前连接处于正常状态
+  - 改进所有 recovery 查询方法的错误处理和日志记录
+  - 添加详细的异常捕获和错误日志，便于排查问题
+
+#### recovery 页面无法显示已扫描文件
+- ✅ 修复 recovery 页面无法显示已扫描文件的问题
+  - 问题原因：查询条件要求 `is_copy_success = TRUE`，但扫描阶段写入的文件 `is_copy_success = False`
+  - 解决方案：移除所有 recovery 查询中的 `is_copy_success` 限制条件
+  - 修复范围：
+    - `get_backup_set_files()` - openGauss 和 SQLite 模式
+    - `get_top_level_directories()` - openGauss 和 SQLite 模式（3处）
+    - `get_directory_contents()` - openGauss 和 SQLite 模式（2处）
+  - 效果：recovery 页面现在可以显示所有已扫描的文件，无论是否已复制到磁带
+
+### 改进
+
+#### recovery 查询错误处理优化
+- ✅ 优化 recovery 引擎的查询错误处理
+  - 为所有数据库查询添加异常捕获和详细日志
+  - 区分查询失败和数据不存在的情况
+  - 查询失败时返回合理的默认值（空列表），避免页面崩溃
+  - 添加错误堆栈记录，便于快速定位问题
+
 ## [0.1.27] - 2025-11-24
 
 ### 新增功能
