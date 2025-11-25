@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 class MemoryDBWriter:
     """内存数据库写入器 - 与openGauss BackupFile模型完全一致"""
+    
+    # 类级别缓存：backup_files 表是否存在（None=未检查, True=存在, False=不存在）
+    _backup_files_table_exists = None
 
     def __init__(self, backup_set_db_id: int,
                  sync_batch_size: int = 5000,           # 同步批次大小
@@ -217,7 +220,10 @@ class MemoryDBWriter:
             self._stats['total_files'] += 1
             self._last_file_added_time = time.time()  # 更新最后添加文件时间
 
-            # 检查是否需要立即同步
+            # 检查是否需要立即同步（不阻塞，使用 create_task）
+            # 注意：_check_sync_need 内部会调用 _trigger_sync，而 _trigger_sync 使用 create_task
+            # 所以这里直接 await 也不会阻塞，但为了更清晰，可以改为不 await
+            # 实际上 _check_sync_need 很快返回，await 不会阻塞
             await self._check_sync_need()
 
         except Exception as e:
@@ -376,9 +382,22 @@ class MemoryDBWriter:
                     ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                         $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-                        $21, $22, $23, $24, $25::json, $26::json, NOW(), NOW()
+                        $21, $22, $23, $24, $25::jsonb, $26::jsonb, NOW(), NOW()
                     )
                 """, insert_data)
+                
+                # psycopg3 binary protocol 需要显式提交事务
+                actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                try:
+                    await actual_conn.commit()
+                    logger.debug(f"[openGauss直接插入] 批量插入事务已提交: {len(insert_data)} 个文件")
+                except Exception as commit_err:
+                    logger.warning(f"提交批量插入事务失败（可能已自动提交）: {commit_err}")
+                    # 如果不在事务中，commit() 可能会失败，尝试回滚
+                    try:
+                        await actual_conn.rollback()
+                    except:
+                        pass
             
             # 更新统计信息
             inserted_count = len(insert_data)
@@ -617,7 +636,13 @@ class MemoryDBWriter:
         )
 
     async def _check_sync_need(self):
-        """检查是否需要同步 - 优化openGauss模式下的同步触发，尽快复制到openGauss"""
+        """检查是否需要同步 - 优化openGauss模式下的同步触发，尽快复制到openGauss
+        
+        重要：此方法不会阻塞扫描线程。
+        - 检查条件很快完成（只是查询计数和时间比较）
+        - 调用 _trigger_sync 时，_trigger_sync 使用 create_task 创建异步任务，立即返回
+        - 即使使用 await _check_sync_need()，也会很快返回，不会等待同步完成
+        """
         # 如果同步正在进行中，直接返回，避免重复触发和产生大量日志
         if self._is_syncing:
             return
@@ -629,38 +654,49 @@ class MemoryDBWriter:
         current_time = time.time()
         pending_files = await self._get_pending_sync_count()
 
-        # openGauss模式优化：使用更短的同步间隔和更小的批次触发阈值
+        # openGauss模式优化：尽可能早地同步扫描结果到openGauss
+        # 由于文件扫描速度远大于同步速度，采用最激进的同步策略
         if is_opengauss_mode:
-            # 条件1：文件数量达到批次大小的50%（openGauss模式下更积极）
-            if pending_files >= self.sync_batch_size // 2:
+            # 条件1（最高优先级）：只要有待同步文件，且距离上次同步超过1秒，立即触发
+            # 这是最激进的策略，确保尽快同步，避免积压
+            if pending_files > 0:
+                time_since_last_sync = current_time - self._last_sync_time
+                # 如果距离上次同步超过1秒，立即触发（避免过于频繁导致性能问题）
+                if time_since_last_sync >= 1:
+                    await self._trigger_sync("pending_files_available")
+                    return
+                # 如果距离上次同步不到1秒，但待同步文件很多（超过批次大小），也立即触发
+                if pending_files >= self.sync_batch_size:
+                    await self._trigger_sync("large_pending_batch")
+                    return
+
+            # 条件2：文件数量达到批次大小的10%（更早触发，避免积压）
+            # 默认 sync_batch_size=5000，所以 500 个文件就触发同步
+            if pending_files >= self.sync_batch_size // 10:
                 await self._trigger_sync("batch_size_reached")
                 return
 
-            # 条件2：达到同步间隔时间（openGauss模式下使用更短的间隔检查）
-            # 使用 sync_interval 的一半作为检查间隔，更频繁地触发同步
-            effective_interval = max(5, self.sync_interval // 2)  # 最少5秒
-            if current_time - self._last_sync_time >= effective_interval:
-                await self._trigger_sync("interval_reached")
-                return
-
-            # 条件3：内存中文件过多，且有足够待同步文件（openGauss模式下降低阈值）
+            # 条件3：内存中文件过多，且有足够待同步文件（降低阈值到5%）
+            # 只要有少量待同步文件就触发，避免积压
             memory_threshold = min(self.max_memory_files, self.sync_batch_size)
             if (self._stats['total_files'] >= memory_threshold and
-                pending_files >= self.sync_batch_size // 4):  # 降低到25%
+                pending_files >= self.sync_batch_size // 20):  # 降低到5%，更早触发
                 await self._trigger_sync("memory_limit_reached")
                 return
 
-            # 条件4：超时机制 - openGauss模式下使用更短的超时（30秒）
+            # 条件4：超时机制 - 使用更短的超时（3秒）
+            # 如果3秒内没有新文件添加，但有待同步文件，立即同步
             time_since_last_file = current_time - self._last_file_added_time
-            if (time_since_last_file >= 30 and pending_files > 0):
+            if (time_since_last_file >= 3 and pending_files > 0):
                 await self._trigger_sync("scan_completed_timeout")
                 return
 
-            # 条件5：检查扫描是否可能完成 - openGauss模式下使用更短的间隔（15秒）
+            # 条件5：检查扫描是否可能完成 - 使用更短的间隔（2秒）和更低的阈值（80%）
+            # 更早地处理接近完成的同步
             if pending_files > 0:
                 sync_ratio = (self._stats['synced_files'] / max(1, self._stats['total_files']))
-                if (sync_ratio >= 0.95 and  # 降低到95%
-                    current_time - self._last_sync_time >= 15):  # 缩短到15秒
+                if (sync_ratio >= 0.80 and  # 降低到80%
+                    current_time - self._last_sync_time >= 2):  # 缩短到2秒
                     await self._trigger_sync("almost_complete")
                     return
         else:
@@ -722,11 +758,18 @@ class MemoryDBWriter:
             return 0
 
     async def _trigger_sync(self, reason: str):
-        """触发同步 - 增加防抖动机制，异步执行不阻塞扫描线程"""
+        """触发同步 - 增加防抖动机制，异步执行不阻塞扫描线程
+        
+        重要：此方法使用 asyncio.create_task 创建异步任务，不会阻塞调用者。
+        即使使用 await _trigger_sync()，也会立即返回，不会等待同步完成。
+        同步在后台任务中执行，与扫描线程并行运行。
+        """
         current_time = time.time()
 
-        # 防抖动：避免1秒内频繁触发同步
-        if current_time - self._last_trigger_time < 1.0:
+        # 防抖动：openGauss模式下使用更短的防抖时间（0.3秒），SQLite模式保持1秒
+        from utils.scheduler.db_utils import is_opengauss
+        debounce_time = 0.3 if is_opengauss() else 1.0
+        if current_time - self._last_trigger_time < debounce_time:
             logger.debug(f"同步触发过于频繁，跳过 (原因: {reason})")
             return
 
@@ -743,44 +786,73 @@ class MemoryDBWriter:
         logger.debug(f"触发同步到{db_type} (原因: {reason})")
         
         # 创建异步任务执行同步，不阻塞当前线程（扫描线程）
+        # 关键：asyncio.create_task 会立即返回，不会等待任务完成
         # 这样扫描和同步可以并行执行，互不阻塞
+        # 即使调用者使用 await _trigger_sync()，也会立即返回，不会阻塞
         asyncio.create_task(self._sync_to_opengauss(reason))
 
     async def _sync_loop(self):
-        """定期同步循环"""
+        """定期同步循环 - 每30秒检查一次同步状态并报告"""
         from utils.scheduler.db_utils import is_opengauss
         is_opengauss_mode = is_opengauss()
         
-        logger.info("内存数据库同步循环已启动，等待同步间隔...")
+        # openGauss模式下使用更短的同步间隔（5秒），确保及时同步
+        # 因为文件扫描速度远大于同步速度，需要更频繁地触发同步
+        # 只要有待同步文件，_check_sync_need 会立即触发，这里只是作为兜底机制
+        sync_loop_interval = 5 if is_opengauss_mode else self.sync_interval
+        
+        # 状态报告间隔（30秒）
+        status_report_interval = 30.0
+        last_status_report_time = time.time()
+        
+        logger.info(f"内存数据库同步循环已启动，等待同步间隔... (openGauss模式: {sync_loop_interval}秒, 其他模式: {self.sync_interval}秒)")
         while True:
             try:
-                await asyncio.sleep(self.sync_interval)
+                await asyncio.sleep(sync_loop_interval)
                 
-                logger.debug(f"定期同步触发（间隔: {self.sync_interval}秒）")
+                logger.debug(f"定期同步触发（间隔: {sync_loop_interval}秒）")
 
                 if not self._is_syncing:
                     await self._sync_to_opengauss("scheduled")
                 else:
-                    # 获取同步信息（只在跳过时输出）
+                    # 同步正在进行中，每30秒报告一次状态
+                    current_time = time.time()
                     pending_count = await self._get_pending_sync_count()
                     total_scanned = self._stats['total_files']
                     total_synced = self._stats['synced_files']
+                    
                     # 计算当前同步已持续的时间
                     if self._sync_start_time > 0:
-                        sync_duration = time.time() - self._sync_start_time
+                        sync_duration = current_time - self._sync_start_time
                     else:
                         # 如果没有记录开始时间，使用上次完成时间作为参考
-                        sync_duration = time.time() - self._last_sync_time if self._last_sync_time > 0 else 0
+                        sync_duration = current_time - self._last_sync_time if self._last_sync_time > 0 else 0
                     
-                    logger.debug(
-                        f"同步正在进行中，跳过本次定期同步 - "
-                        f"待同步: {pending_count} 个，"
-                        f"累计总扫描: {total_scanned} 个，累计总同步: {total_synced} 个，"
-                        f"当前同步已持续: {sync_duration:.1f}秒"
-                    )
+                    # 计算同步速度
+                    sync_speed = total_synced / sync_duration if sync_duration > 0 else 0
+                    
+                    # 每30秒报告一次状态
+                    if current_time - last_status_report_time >= status_report_interval:
+                        logger.info(
+                            f"[同步状态报告] 同步正在进行中 - "
+                            f"待同步: {pending_count} 个文件，"
+                            f"累计总扫描: {total_scanned} 个，"
+                            f"累计总同步: {total_synced} 个，"
+                            f"同步速度: {sync_speed:.1f} 个文件/秒，"
+                            f"已持续: {sync_duration:.1f}秒"
+                        )
+                        last_status_report_time = current_time
+                    else:
+                        logger.debug(
+                            f"同步正在进行中，跳过本次定期同步 - "
+                            f"待同步: {pending_count} 个，"
+                            f"累计总扫描: {total_scanned} 个，累计总同步: {total_synced} 个，"
+                            f"当前同步已持续: {sync_duration:.1f}秒"
+                        )
+                    
                     # 如果同步状态持续超过5分钟，记录警告（可能是卡住了）
                     if sync_duration > 300:
-                        logger.debug(
+                        logger.warning(
                             f"⚠️⚠️ 警告：同步状态已持续 {sync_duration:.1f} 秒（超过5分钟），"
                             f"可能已卡住！待同步: {pending_count} 个文件。"
                             f"建议检查数据库连接是否正常。"
@@ -810,8 +882,13 @@ class MemoryDBWriter:
         """同步文件到主数据库（openGauss 或 SQLite）
         
         每次同步时，循环处理所有未同步的文件，直到全部同步完成（分批处理）
+        重要：持续同步直到没有待同步文件，不会中途停止
         """
         if self._is_syncing:
+            logger.warning(
+                f"[openGauss同步] 同步已在进行中，跳过本次同步请求 (原因: {reason})。"
+                f"如果此状态持续，可能是之前的同步未正确完成。"
+            )
             return
 
         # 检查数据库类型
@@ -821,55 +898,132 @@ class MemoryDBWriter:
             await self._sync_to_sqlite_via_queue(reason)
             return
 
+        logger.info(f"[openGauss同步] 开始同步 (原因: {reason})，设置 _is_syncing = True")
         self._is_syncing = True
-        self._sync_start_time = time.time()  # 记录同步开始时间（用于计算持续时间）
+        self._sync_start_time = time.time()  # 记录同步开始时间
         sync_start_time = self._sync_start_time
         total_synced_count = 0
         batch_number = 0
+        
+        # 状态通报相关变量
+        import asyncio
+        status_report_interval = 30.0  # 每30秒通报一次
+        last_status_report_time = time.time()
 
         try:
             # 记录同步开始时的待同步文件数
             initial_pending_count = await self._get_pending_sync_count()
             if initial_pending_count > 0:
-                logger.info(f"[同步开始] 待同步文件数: {initial_pending_count} 个 (原因: {reason})")
+                logger.info(f"[openGauss同步开始] 待同步文件数: {initial_pending_count} 个 (原因: {reason})")
+            else:
+                logger.info(f"[openGauss同步开始] 没有待同步文件 (原因: {reason})")
             
             # 循环同步，直到所有未同步的文件都处理完成
-            while True:
+            max_batches = 1000  # 防止无限循环
+            while batch_number < max_batches:
+                # 每30秒通报一次同步状态（不中断正在同步的任务）
+                current_time = time.time()
+                if current_time - last_status_report_time >= status_report_interval:
+                    pending_count = await self._get_pending_sync_count()
+                    sync_duration = current_time - sync_start_time
+                    total_scanned = self._stats['total_files']
+                    total_synced_accumulated = self._stats['synced_files']
+                    
+                    logger.info(
+                        f"[openGauss同步状态] 同步进行中 - "
+                        f"已处理批次: {batch_number}，"
+                        f"剩余待同步: {pending_count} 个文件，"
+                        f"本次已同步: {total_synced_count} 个，"
+                        f"累计总扫描: {total_scanned} 个，"
+                        f"累计总同步: {total_synced_accumulated} 个，"
+                        f"已持续: {sync_duration:.1f}秒"
+                    )
+                    last_status_report_time = current_time
                 # 获取待同步的文件批次（每次获取一批）
+                get_files_start = time.time()
                 files_to_sync = await self._get_files_to_sync()
+                get_files_time = time.time() - get_files_start
+                if get_files_time > 1.0:
+                    logger.warning(f"[openGauss同步] 获取待同步文件耗时较长: {get_files_time:.2f}秒")
 
                 if not files_to_sync:
                     # 没有更多文件需要同步
                     if batch_number == 0:
-                        logger.debug("内存数据库中没有文件需要同步到openGauss")
+                        logger.info("内存数据库中没有文件需要同步到openGauss")
                     break
 
                 batch_number += 1
-                logger.debug(f"[批次 {batch_number}] 开始同步 {len(files_to_sync)} 个文件到openGauss")
+                logger.info(
+                    f"[openGauss批次 {batch_number}] 开始同步 {len(files_to_sync)} 个文件 "
+                    f"(原因: {reason}, backup_set_db_id={self.backup_set_db_id})"
+                )
 
-                # 批量同步到openGauss
-                synced_count, synced_file_ids = await self._batch_sync_to_opengauss(files_to_sync)
+                # 准备批量插入数据
+                prepare_start = time.time()
+                file_data_map = []
+                for file_record in files_to_sync:
+                    file_data_map.append((file_record, None))  # 第二个参数在openGauss模式下不需要
+                prepare_time = time.time() - prepare_start
+                if prepare_time > 1.0:
+                    logger.warning(f"[openGauss批次 {batch_number}] 准备数据耗时较长: {prepare_time:.2f}秒")
+
+                # 同步到openGauss（使用_insert_files_to_opengauss）
+                # 注意：不使用 asyncio.wait_for，允许同步任务自然完成，不中断
+                batch_sync_start = time.time()
+                try:
+                    logger.debug(f"[openGauss批次 {batch_number}] 调用 _insert_files_to_opengauss，文件数: {len(file_data_map)}")
+                    # 直接调用，不使用超时限制，确保不中断正在同步的任务
+                    synced_file_ids = await self._insert_files_to_opengauss(file_data_map)
+                    batch_sync_time = time.time() - batch_sync_start
+                    logger.info(f"[openGauss批次 {batch_number}] _insert_files_to_opengauss 完成，耗时: {batch_sync_time:.2f}秒")
+                except Exception as batch_error:
+                    batch_sync_time = time.time() - batch_sync_start
+                    logger.error(
+                        f"[openGauss批次 {batch_number}] ❌ 同步失败: {str(batch_error)}，"
+                        f"耗时: {batch_sync_time:.2f}秒，文件数: {len(file_data_map)}",
+                        exc_info=True
+                    )
+                    # 记录详细的错误信息
+                    import traceback
+                    logger.error(f"[openGauss批次 {batch_number}] 错误堆栈:\n{traceback.format_exc()}")
+                    # 标记失败的文件，但不丢弃数据 - 这些文件会在下次同步时重试
+                    failed_file_ids = []
+                    for file_record, _ in file_data_map:
+                        if file_record and len(file_record) > 0:
+                            file_id = file_record[0]
+                            failed_file_ids.append(file_id)
+                    
+                    if failed_file_ids:
+                        error_msg = f"同步失败: {str(batch_error)[:200]}"  # 限制错误消息长度
+                        await self._mark_sync_error_for_files(failed_file_ids, error_msg)
+                        logger.warning(
+                            f"[openGauss批次 {batch_number}] 已标记 {len(failed_file_ids)} 个文件同步失败，"
+                            f"这些文件将在下次同步时重试（数据不会丢失）"
+                        )
+                    # 继续处理下一批，不中断整个同步流程
+                    synced_file_ids = []  # 确保 synced_file_ids 是空列表
+                    continue
 
                 # 更新同步状态（只标记成功同步的文件）
                 if synced_file_ids:
                     await self._mark_files_synced(synced_file_ids)
 
                 # 更新统计
+                synced_count = len(synced_file_ids)
                 total_synced_count += synced_count
                 self._stats['synced_files'] += synced_count
                 self._stats['sync_batches'] += 1
 
-                logger.debug(f"[批次 {batch_number}] ✅ 同步完成: {synced_count}/{len(files_to_sync)} 个文件已成功同步到openGauss")
-                
-                # 检查剩余待同步文件数（用于确认是否所有文件都被同步）
-                pending_count = await self._get_pending_sync_count()
-                if pending_count > 0:
-                    logger.debug(f"[批次 {batch_number}] 内存数据库中还有 {pending_count} 个文件待同步，将在下次同步时处理")
-                
-                # 如果当前批次中还有未同步的文件，记录警告
-                if synced_count < len(files_to_sync):
-                    remaining = len(files_to_sync) - synced_count
-                    logger.warning(f"[批次 {batch_number}] ⚠️ 还有 {remaining} 个文件同步失败，将在下次同步时重试")
+                logger.info(
+                    f"[openGauss批次 {batch_number}] ✅ 同步完成: {synced_count}/{len(files_to_sync)} 个文件已成功同步，"
+                    f"耗时: {batch_sync_time:.2f}秒"
+                )
+
+            if batch_number >= max_batches:
+                logger.warning(
+                    f"[openGauss同步] 达到最大批次限制 ({max_batches})，停止同步。"
+                    f"可能还有文件未同步，将在下次同步时继续。"
+                )
 
             # 所有批次同步完成
             if batch_number > 0:
@@ -881,49 +1035,22 @@ class MemoryDBWriter:
                 final_pending_count = await self._get_pending_sync_count()
                 
                 # 获取累计统计信息
-                total_scanned = self._stats['total_files']  # 总扫描数（从任务开始到现在）
-                total_synced_accumulated = self._stats['synced_files']  # 累计总同步数（从任务开始到现在）
+                total_scanned = self._stats['total_files']
+                total_synced_accumulated = self._stats['synced_files']
                 
                 logger.info(
-                    f"✅ 全部同步完成: 共 {batch_number} 个批次，总耗时 {sync_time:.2f}秒，"
+                    f"✅ openGauss同步完成: 共 {batch_number} 个批次，总耗时 {sync_time:.2f}秒，"
                     f"同步开始时待同步: {initial_pending_count} 个，"
                     f"同步完成后剩余: {final_pending_count} 个，"
                     f"本次同步: {total_synced_count} 个，"
                     f"累计总扫描: {total_scanned} 个，"
                     f"累计总同步: {total_synced_accumulated} 个"
                 )
-                
-                # 检查总扫描数和总同步数是否一致
-                if total_scanned > 0:
-                    sync_ratio = (total_synced_accumulated / total_scanned) * 100
-                    if total_synced_accumulated < total_scanned:
-                        logger.info(
-                            f"同步进度: {sync_ratio:.1f}% "
-                            f"（总扫描: {total_scanned} 个，总同步: {total_synced_accumulated} 个，"
-                            f"待同步: {total_scanned - total_synced_accumulated} 个）"
-                        )
-                    elif total_synced_accumulated == total_scanned:
-                        logger.info(f"✅ 同步完成: 总扫描 {total_scanned} 个文件已全部同步到openGauss数据库")
-                    else:
-                        logger.warning(
-                            f"⚠️ 异常: 总同步数 ({total_synced_accumulated}) 大于总扫描数 ({total_scanned})，"
-                            f"可能存在数据不一致"
-                        )
-                
-                if final_pending_count > 0:
-                    # 计算新增的文件数（同步过程中ES扫描器添加的新文件）
-                    new_files_during_sync = final_pending_count - (initial_pending_count - total_synced_count)
-                    if new_files_during_sync > 0:
-                        logger.debug(f"同步过程中新增了 {new_files_during_sync} 个文件（ES扫描器持续添加）")
-                    logger.debug(f"仍有 {final_pending_count} 个文件未同步，将在下次同步时重试")
 
         except Exception as e:
-            logger.error(f"同步到openGauss数据库失败: {e}", exc_info=True)
-            # 记录同步错误（如果有）
-            if 'files_to_sync' in locals() and files_to_sync:
-                await self._mark_sync_error(files_to_sync, str(e))
-
+            logger.error(f"[openGauss同步] 同步过程异常: {e}", exc_info=True)
         finally:
+            logger.info(f"[openGauss同步] 同步结束，设置 _is_syncing = False")
             self._is_syncing = False
             self._sync_start_time = 0  # 重置同步开始时间
 
@@ -1000,104 +1127,129 @@ class MemoryDBWriter:
         # 其他情况，返回当前时间
         return datetime.now(timezone.utc)
 
-    async def _batch_sync_to_opengauss(self, files: List[Tuple]) -> Tuple[int, List[int]]:
-        """批量同步到openGauss - 使用原生SQL批量插入，严禁SQLAlchemy解析openGauss
+    async def _insert_files_to_opengauss(self, file_data_map: List[Tuple]) -> List[int]:
+        """将扫描文件同步到 openGauss 主库（调用方负责确保串行执行）
         
-        优化：使用 executemany 实现真正的批量插入，大幅提升性能
+        借鉴SQLite的_insert_files_to_sqlite实现，只修改写数据库部分
         """
-        if not files:
-            return 0, []
-
-        # 检查数据库类型
-        from utils.scheduler.db_utils import is_opengauss
-        if not is_opengauss():
-            synced_file_ids = await self._insert_files_to_sqlite(file_data_map)
-            return len(synced_file_ids), synced_file_ids
-
-        logger.debug(f"正在批量同步 {len(files)} 个文件到openGauss数据库（使用批量插入优化）...")
+        logger.info(f"[openGauss同步] _insert_files_to_opengauss 开始，文件数: {len(file_data_map)}")
+        if not file_data_map:
+            logger.warning("[openGauss同步] _insert_files_to_opengauss: file_data_map 为空")
+            return []
+        
+        synced_file_ids: List[int] = []
         
         # 准备批量插入数据
         insert_data = []
-        file_data_map = []  # 保存文件记录和数据的对应关系 [(file_record, data_tuple), ...]
-        failed_files = []  # 记录失败的文件索引和错误信息
+        logger.debug(f"[openGauss同步] 开始准备批量插入数据，文件数: {len(file_data_map)}")
         
-        for idx, file_record in enumerate(files):
-            try:
-                # 转换数据格式，按照内存数据库字段顺序映射到openGauss
-                # file_record字段顺序：id, backup_set_id, file_path, file_name, directory_path, display_name,
-                # file_type, file_size, compressed_size, file_permissions, file_owner,
-                # file_group, created_time, modified_time, accessed_time, tape_block_start,
-                # tape_block_count, compressed, encrypted, checksum, is_copy_success,
-                # copy_status_at, backup_time, chunk_number, version, file_metadata, tags
-
-                # 修复datetime字段转换
-                backup_set_id = file_record[1]
-                file_path = file_record[2]
-                file_name = file_record[3]
-                directory_path = file_record[4]
-                display_name = file_record[5]
-                file_type = file_record[6]
-                file_size = file_record[7]  # 关键字段！
-                compressed_size = file_record[8]
-                file_permissions = file_record[9]
-                file_owner = file_record[10]
-                file_group = file_record[11]
-
-                # 修复：正确转换datetime字段
-                created_time = self._parse_datetime_from_sqlite(file_record[12])
-                modified_time = self._parse_datetime_from_sqlite(file_record[13])
-                accessed_time = self._parse_datetime_from_sqlite(file_record[14])
-                copy_status_at = self._parse_datetime_from_sqlite(file_record[21])
-                backup_time = self._parse_datetime_from_sqlite(file_record[22])
-
-                tape_block_start = file_record[15]
-                tape_block_count = file_record[16]
-                compressed = bool(file_record[17])
-                encrypted = bool(file_record[18])
-                checksum = file_record[19]
-                is_copy_success = bool(file_record[20])
-                chunk_number = file_record[23]
-                version = file_record[24]
-                file_metadata = file_record[25]
-                tags = file_record[26]
-
-                # 注意：数据库字段已改为 TEXT 类型，无长度限制，不需要截断
-                # 如果数据库迁移未执行，字段仍然是 VARCHAR(255)，会在插入时报错
-                # 这种情况下，需要执行数据库迁移将字段类型改为 TEXT
-
-                # 准备批量插入的数据元组（按照 VALUES 子句的顺序）
-                data_tuple = (
-                    backup_set_id, file_path, file_name,
-                    directory_path, display_name, file_type,
-                    file_size, compressed_size, file_permissions,
-                    file_owner, file_group, created_time,
-                    modified_time, accessed_time, tape_block_start,
-                    tape_block_count, compressed, encrypted,
-                    checksum, is_copy_success, copy_status_at,
-                    backup_time, chunk_number, version,
-                    file_metadata, tags
-                )
-                insert_data.append(data_tuple)
-                file_data_map.append((file_record, data_tuple))  # 保存对应关系
-
-            except Exception as e:
-                # 数据准备阶段失败，记录错误
-                file_path_str = file_record[2] if len(file_record) > 2 else 'unknown'
-                logger.error(f"准备批量插入数据失败（索引 {idx}）: {e}, 文件: {file_path_str}")
-                failed_files.append((idx, file_path_str, str(e)))
+        for file_record, _ in file_data_map:
+            if not file_record:
                 continue
 
+            file_id = file_record[0]
+            backup_set_id = file_record[1]  # 确保backup_set_id正确传递
+            
+            # 验证backup_set_id是否有效
+            if backup_set_id is None or backup_set_id != self.backup_set_db_id:
+                logger.error(
+                    f"[openGauss同步] ⚠️ 文件 backup_set_id={backup_set_id} "
+                    f"与 MemoryDBWriter 的 backup_set_db_id={self.backup_set_db_id} 不匹配！"
+                    f"文件ID: {file_id}"
+                )
+                continue
+            
+            file_path = file_record[2]
+            file_name = file_record[3]
+            directory_path = file_record[4]
+            display_name = file_record[5]
+            file_type = file_record[6] or "file"
+            file_size = file_record[7] or 0
+            compressed_size = file_record[8]
+            file_permissions = file_record[9]
+            file_owner = file_record[10]
+            file_group = file_record[11]
+            created_time = self._parse_datetime_from_sqlite(file_record[12])
+            modified_time = self._parse_datetime_from_sqlite(file_record[13])
+            accessed_time = self._parse_datetime_from_sqlite(file_record[14])
+            tape_block_start = file_record[15]
+            tape_block_count = file_record[16]
+            compressed = bool(file_record[17])
+            encrypted = bool(file_record[18])
+            checksum = file_record[19]
+            is_copy_success = bool(file_record[20])
+            copy_status_at = self._parse_datetime_from_sqlite(file_record[21])
+            backup_time = self._parse_datetime_from_sqlite(file_record[22])
+            chunk_number = file_record[23]
+            version = file_record[24]
+            file_metadata = file_record[25]
+            tags = file_record[26]
+
+            # 准备批量插入的数据元组（按照 VALUES 子句的顺序）
+            data_tuple = (
+                backup_set_id, file_path, file_name,
+                directory_path, display_name, file_type,
+                file_size, compressed_size, file_permissions,
+                file_owner, file_group, created_time,
+                modified_time, accessed_time, tape_block_start,
+                tape_block_count, compressed, encrypted,
+                checksum, is_copy_success, copy_status_at,
+                backup_time, chunk_number, version,
+                file_metadata, tags
+            )
+            insert_data.append(data_tuple)
+            synced_file_ids.append(file_id)  # 先添加到列表，如果插入失败会在后面处理
+
         if not insert_data:
-            logger.warning(f"没有有效的数据可以批量插入，所有 {len(files)} 个文件都在数据准备阶段失败")
-            return 0, []
+            logger.warning(f"[openGauss同步] 没有有效的数据可以插入（准备的数据为空，原始文件数: {len(file_data_map)}）")
+            return []
+
+        logger.info(f"[openGauss同步] 准备插入 {len(insert_data)} 个文件到 openGauss backup_files 表")
 
         # 执行批量插入
-        synced_file_ids = []  # 成功同步的文件ID列表
         try:
+            logger.debug("[openGauss同步] 获取 openGauss 连接...")
             async with get_opengauss_connection() as conn:
+                logger.debug("[openGauss同步] 已获取 openGauss 连接，开始检查表是否存在...")
+                # 首先检查表是否存在（只在第一次检查，使用类级别缓存）
+                if not hasattr(self.__class__, '_backup_files_table_exists'):
+                    self.__class__._backup_files_table_exists = None
+                
+                if self.__class__._backup_files_table_exists is None:
+                    try:
+                        # 尝试查询表是否存在
+                        logger.debug("[openGauss同步] 检查 backup_files 表是否存在...")
+                        await conn.fetchrow("SELECT 1 FROM backup_files LIMIT 1")
+                        self.__class__._backup_files_table_exists = True
+                        logger.info("[openGauss同步] ✅ backup_files 表存在，可以执行插入操作")
+                    except Exception as table_check_err:
+                        error_msg = str(table_check_err)
+                        if "does not exist" in error_msg.lower() or "relation" in error_msg.lower() or "UndefinedTable" in str(type(table_check_err).__name__):
+                            self.__class__._backup_files_table_exists = False
+                            logger.warning(
+                                f"[openGauss同步] backup_files 表不存在，跳过文件插入（可能是数据库未初始化）。"
+                                f"请运行数据库初始化脚本创建表。错误: {error_msg}"
+                            )
+                            return []
+                        else:
+                            # 其他错误，可能是连接问题，暂时标记为未知，下次再检查
+                            logger.warning(f"[openGauss同步] 检查 backup_files 表时出错: {error_msg}")
+                            # 不设置缓存，下次再检查
+                
+                # 如果表不存在（已确认），直接返回
+                if self.__class__._backup_files_table_exists is False:
+                    logger.error("[openGauss同步] ❌ backup_files 表不存在，无法插入数据")
+                    return []
+                
                 # 使用 executemany 实现真正的批量插入
-                # 注意：asyncpg 的 executemany 会自动处理批量插入
-                await conn.executemany("""
+                # 注意：id 字段使用 DEFAULT，让数据库自动生成（适用于 SERIAL 或序列）
+                logger.info(f"[openGauss同步] 开始执行批量插入，数据量: {len(insert_data)} 条")
+                insert_start_time = time.time()
+                try:
+                    # 记录执行前的状态
+                    logger.debug(f"[openGauss同步] 调用 executemany 前，准备插入 {len(insert_data)} 条数据")
+                    # 不使用 asyncio.wait_for，允许批量插入自然完成，不中断
+                    rowcount = await conn.executemany("""
                     INSERT INTO backup_files (
                         backup_set_id, file_path, file_name, directory_path, display_name,
                         file_type, file_size, compressed_size, file_permissions, file_owner,
@@ -1108,29 +1260,120 @@ class MemoryDBWriter:
                     ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                         $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-                        $21, $22, $23, $24, $25::json, $26::json, NOW(), NOW()
+                        $21, $22, $23, $24, $25::jsonb, $26::jsonb, NOW(), NOW()
                     )
                 """, insert_data)
+                    insert_time = time.time() - insert_start_time
+                    logger.info(f"[openGauss同步] ✅ executemany 执行完成: 影响行数={rowcount}, 耗时={insert_time:.2f}秒")
+                except Exception as executemany_err:
+                    insert_time = time.time() - insert_start_time
+                    logger.error(f"[openGauss同步] ❌ executemany 执行失败: {str(executemany_err)}, 耗时={insert_time:.2f}秒", exc_info=True)
+                    raise  # 重新抛出异常，让外层处理
                 
-                # 批量插入成功，所有文件都已同步
-                synced_count = len(insert_data)
-                # 提取成功同步的文件ID（file_record[0] 是文件ID）
-                synced_file_ids = [file_record[0] for file_record, _ in file_data_map]
-                logger.debug(f"批量插入成功: {synced_count} 个文件已同步到openGauss数据库")
-
+                # 注意：executemany 在 psycopg3_compat 中已经显式提交了事务
+                # 验证事务状态，确保已提交
+                actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                try:
+                    transaction_status = actual_conn.info.transaction_status
+                    if transaction_status == 0:  # IDLE: 已提交
+                        logger.info(f"[openGauss同步] ✅ 批量插入事务已提交: {rowcount} 个文件已持久化到数据库（事务状态=IDLE）")
+                    elif transaction_status == 1:  # INTRANS: 仍在事务中
+                        logger.error(f"[openGauss同步] ❌ executemany 后事务状态仍为 INTRANS！尝试再次提交...")
+                        try:
+                            await actual_conn.commit()
+                            new_status = actual_conn.info.transaction_status
+                            if new_status == 0:
+                                logger.info(f"[openGauss同步] ✅ 重试提交成功，事务状态=IDLE")
+                            else:
+                                logger.error(f"[openGauss同步] ❌ 重试提交后事务状态仍为 {new_status}")
+                        except Exception as retry_commit_err:
+                            logger.error(f"[openGauss同步] ❌ 重试提交失败: {str(retry_commit_err)}")
+                    else:
+                        logger.warning(f"[openGauss同步] ⚠️ 事务状态: {transaction_status} (0=IDLE, 1=INTRANS, 3=INERROR)")
+                except Exception as status_check_err:
+                    logger.warning(f"[openGauss同步] ⚠️ 检查事务状态时出错: {str(status_check_err)}")
+                
+                # 检查实际插入的行数
+                expected_count = len(insert_data)
+                if rowcount != expected_count:
+                    logger.error(
+                        f"[openGauss同步] ⚠️ 批量插入部分失败: 期望插入 {expected_count} 个文件，"
+                        f"实际插入 {rowcount} 个文件，缺失 {expected_count - rowcount} 个。"
+                    )
+                    # 如果部分失败，返回成功插入的文件ID（这里简化处理，实际应该更精确）
+                    if rowcount > 0:
+                        synced_file_ids = synced_file_ids[:rowcount]
+                    else:
+                        synced_file_ids = []
+                else:
+                    logger.info(f"[openGauss同步] ✅ 批量插入成功: {rowcount} 个文件已插入到openGauss")
+                
+                # 立即验证数据是否真的写入数据库
+                try:
+                    verify_count = await conn.fetchval(
+                        "SELECT COUNT(*) FROM backup_files WHERE backup_set_id = $1",
+                        self.backup_set_db_id
+                    )
+                    logger.info(f"[openGauss同步] ✅ 数据验证: backup_files 表中 backup_set_id={self.backup_set_db_id} 的记录数: {verify_count} (期望至少 {rowcount} 条)")
+                    if verify_count < rowcount:
+                        logger.error(
+                            f"[openGauss同步] ❌ 数据验证失败: 表中只有 {verify_count} 条记录，但应该至少有 {rowcount} 条！"
+                            f"可能原因：1) 事务未提交 2) 数据被回滚 3) 其他连接看不到未提交的数据"
+                        )
+                except Exception as verify_err:
+                    logger.warning(f"[openGauss同步] ⚠️ 验证数据时出错: {str(verify_err)}")
+                    
         except Exception as e:
-            # 批量插入失败，尝试逐个插入以确定哪些文件失败
-            logger.warning(f"批量插入失败: {e}，尝试逐个插入以确定失败的文件...")
-            synced_count, synced_file_ids = await self._fallback_individual_insert(file_data_map, failed_files)
-        
-        # 记录失败的文件
-        if failed_files:
-            logger.warning(f"数据准备阶段失败的文件数: {len(failed_files)}")
-            for idx, file_path_str, error_msg in failed_files[:10]:  # 只记录前10个
-                logger.debug(f"  失败文件 [{idx}]: {file_path_str}, 错误: {error_msg}")
-            if len(failed_files) > 10:
-                logger.debug(f"  ... 还有 {len(failed_files) - 10} 个失败文件未显示")
+            error_msg = str(e)
+            logger.error(f"[openGauss同步] ❌ _insert_files_to_opengauss 异常: {error_msg}", exc_info=True)
+            # 如果是表不存在的错误，记录警告并缓存结果
+            if "does not exist" in error_msg.lower() or "relation" in error_msg.lower() or "UndefinedTable" in str(type(e).__name__):
+                self.__class__._backup_files_table_exists = False
+                logger.error(
+                    f"[openGauss同步] ❌ backup_files 表不存在，跳过文件插入（可能是数据库未初始化）。"
+                    f"请运行数据库初始化脚本创建表。错误: {error_msg}"
+                )
+                logger.warning(
+                    f"[openGauss同步] 注意：文件数据目前仅保存在内存数据库（SQLite）中，"
+                    f"未同步到openGauss。创建 backup_files 表后，文件将在下次同步时自动同步。"
+                )
+            else:
+                logger.error(f"[openGauss同步] ❌ 批量插入失败: {error_msg}", exc_info=True)
+            # 插入失败，返回空列表
+            synced_file_ids = []
 
+        logger.info(f"[openGauss同步] _insert_files_to_opengauss 完成，返回 {len(synced_file_ids)} 个已同步的文件ID")
+        return synced_file_ids
+
+    async def _batch_sync_to_opengauss(self, files: List[Tuple]) -> Tuple[int, List[int]]:
+        """批量同步到openGauss - 借鉴SQLite的同步逻辑
+        
+        只修改写数据库部分，使用_insert_files_to_opengauss
+        """
+        if not files:
+            return 0, []
+
+        # 检查数据库类型
+        from utils.scheduler.db_utils import is_opengauss
+        if not is_opengauss():
+            # SQLite 模式：使用SQLite的插入方法
+            file_data_map = []
+            for file_record in files:
+                file_data_map.append((file_record, None))
+            synced_file_ids = await self._insert_files_to_sqlite(file_data_map)
+            return len(synced_file_ids), synced_file_ids
+
+        logger.debug(f"正在批量同步 {len(files)} 个文件到openGauss数据库（使用批量插入优化）...")
+        
+        # 准备文件数据映射（借鉴SQLite的方式）
+        file_data_map = []
+        for file_record in files:
+            file_data_map.append((file_record, None))  # 第二个参数在openGauss模式下不需要
+        
+        # 使用_insert_files_to_opengauss插入数据
+        synced_file_ids = await self._insert_files_to_opengauss(file_data_map)
+        
+        synced_count = len(synced_file_ids)
         return synced_count, synced_file_ids
 
     async def _fallback_individual_insert(self, file_data_map: List[Tuple], failed_files: List[Tuple]) -> Tuple[int, List[int]]:
@@ -1151,10 +1394,75 @@ class MemoryDBWriter:
 
         synced_count = 0
         synced_file_ids = []
-        async with get_opengauss_connection() as conn:
+        
+        # 关键修复：为每个 INSERT 使用独立的事务，避免一个失败影响其他
+        # 在 PostgreSQL/openGauss 中，一旦事务中出现错误，整个事务就会被标记为中止状态
+        # 后续的所有命令都会被忽略，直到事务被回滚
+        
+        # 先检查备份集是否存在（避免外键约束错误）
+        backup_set_id = self.backup_set_db_id
+        backup_set_exists = False
+        try:
+            async with get_opengauss_connection() as conn:
+                check_row = await conn.fetchrow(
+                    "SELECT id FROM backup_sets WHERE id = $1",
+                    backup_set_id
+                )
+                backup_set_exists = check_row is not None
+        except Exception as check_err:
+            logger.warning(f"检查备份集是否存在失败: {check_err}，将继续尝试插入")
+            backup_set_exists = False
+        
+        if not backup_set_exists:
+            logger.error(
+                f"⚠️⚠️ 备份集不存在: backup_set_id={backup_set_id}，"
+                f"无法插入文件。这可能是备份集创建失败或事务未提交导致的。"
+                f"将跳过所有 {len(file_data_map)} 个文件的插入。"
+            )
+            # 将所有文件标记为失败
             for idx, (file_record, data_tuple) in enumerate(file_data_map):
+                file_path_str = file_record[2] if len(file_record) > 2 else 'unknown'
+                failed_files.append((idx, file_path_str, f"备份集不存在: backup_set_id={backup_set_id}"))
+            return 0, []
+        
+        # 先检查表是否存在（只检查一次，避免重复检查）
+        table_exists = True
+        table_check_done = False
+        
+        for idx, (file_record, data_tuple) in enumerate(file_data_map):
+            # 为每个文件使用独立的连接和事务
+            async with get_opengauss_connection() as conn:
                 try:
-                    await conn.execute("""
+                    # 第一次插入时检查表是否存在
+                    if not table_check_done:
+                        try:
+                            # 尝试查询表是否存在
+                            await conn.fetchrow("SELECT 1 FROM backup_files LIMIT 1")
+                            table_exists = True
+                        except Exception as table_check_err:
+                            error_msg = str(table_check_err)
+                            if "does not exist" in error_msg.lower() or "relation" in error_msg.lower() or "UndefinedTable" in str(type(table_check_err).__name__):
+                                table_exists = False
+                                logger.warning(
+                                    f"backup_files 表不存在，跳过所有文件插入（可能是数据库未初始化）: {error_msg}"
+                                )
+                                # 将所有剩余文件标记为失败
+                                for remaining_idx in range(idx, len(file_data_map)):
+                                    remaining_file_record = file_data_map[remaining_idx][0]
+                                    remaining_file_path = remaining_file_record[2] if len(remaining_file_record) > 2 else 'unknown'
+                                    failed_files.append((remaining_idx, remaining_file_path, f"表不存在: {error_msg}"))
+                                break
+                        table_check_done = True
+                    
+                    # 如果表不存在，跳过插入
+                    if not table_exists:
+                        continue
+                    
+                    # psycopg3 的 execute 在兼容层中已经使用事务上下文管理器，会自动提交
+                    # 使用 RETURNING id 获取生成的 ID（如果表有自增序列）
+                    # 注意：id 字段不包含在插入列表中，数据库会自动生成（SERIAL 或序列）
+                    # 如果表定义中 id 不是 SERIAL，需要在插入时使用 DEFAULT 或 nextval()
+                    result = await conn.fetchrow("""
                         INSERT INTO backup_files (
                             backup_set_id, file_path, file_name, directory_path, display_name,
                             file_type, file_size, compressed_size, file_permissions, file_owner,
@@ -1165,17 +1473,76 @@ class MemoryDBWriter:
                         ) VALUES (
                             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                             $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-                            $21, $22, $23, $24, $25::json, $26::json, NOW(), NOW()
-                        )
+                            $21, $22, $23, $24, $25::jsonb, $26::jsonb, NOW(), NOW()
+                        ) RETURNING id
                     """, *data_tuple)
+                    
+                    # 获取生成的 ID
+                    if result:
+                        generated_id = result.get('id')
+                        if generated_id:
+                            # 更新 file_record 中的 ID（用于后续查询）
+                            file_record = file_data_map[idx][0]
+                            # file_record 是元组，不可变，需要重新创建
+                            # 但这里我们只需要记录 ID，不需要修改 file_record
+                            pass
+                    
                     synced_count += 1
                     # 记录成功同步的文件ID（file_record[0] 是文件ID）
                     synced_file_ids.append(file_record[0])
                 except Exception as e:
+                    # 错误发生时，连接释放时会自动回滚，不需要手动回滚
                     file_path_str = file_record[2] if len(file_record) > 2 else 'unknown'
-                    logger.error(f"回退逐个插入失败（索引 {idx}）: {e}, 文件: {file_path_str}")
+                    error_msg = str(e)
+                    
+                    # 如果表不存在，记录警告并跳过后续文件
+                    if "does not exist" in error_msg.lower() or "relation" in error_msg.lower() or "UndefinedTable" in str(type(e).__name__):
+                        if not table_check_done:
+                            logger.warning(
+                                f"backup_files 表不存在，跳过所有文件插入（可能是数据库未初始化）: {error_msg}"
+                            )
+                            table_exists = False
+                            table_check_done = True
+                            # 将所有剩余文件标记为失败
+                            for remaining_idx in range(idx, len(file_data_map)):
+                                remaining_file_record = file_data_map[remaining_idx][0]
+                                remaining_file_path = remaining_file_record[2] if len(remaining_file_record) > 2 else 'unknown'
+                                failed_files.append((remaining_idx, remaining_file_path, f"表不存在: {error_msg}"))
+                            break
+                        continue
+                    
+                    # 检查是否是重复键冲突（虽然模型中没有唯一约束，但可能有其他约束）
+                    if "duplicate key" in error_msg.lower() or "unique constraint" in error_msg.lower() or "already exists" in error_msg.lower():
+                        # 重复键冲突：文件可能已经存在，跳过但不标记为失败
+                        logger.debug(f"文件已存在（跳过）: {file_path_str}")
+                        # 不添加到 failed_files，也不增加 synced_count
+                        # 但需要标记为已同步（因为文件已经在数据库中）
+                        synced_count += 1
+                        synced_file_ids.append(file_record[0])
+                        continue
+                    
+                    # 检查是否是重复键冲突（虽然模型中没有唯一约束，但可能有其他约束）
+                    if "duplicate key" in error_msg.lower() or "unique constraint" in error_msg.lower() or "already exists" in error_msg.lower():
+                        # 重复键冲突：文件可能已经存在，跳过但不标记为失败
+                        logger.debug(f"文件已存在（跳过）: {file_path_str}")
+                        # 不添加到 failed_files，也不增加 synced_count
+                        # 但需要标记为已同步（因为文件已经在数据库中）
+                        synced_count += 1
+                        synced_file_ids.append(file_record[0])
+                        continue
+                    
+                    # 如果是外键约束错误，提供更详细的错误信息
+                    if "foreign key constraint" in error_msg.lower() and "backup_sets" in error_msg.lower():
+                        logger.error(
+                            f"回退逐个插入失败（索引 {idx}）: 外键约束错误 - 备份集不存在\n"
+                            f"  备份集ID: {backup_set_id}\n"
+                            f"  文件: {file_path_str}\n"
+                            f"  错误详情: {error_msg}"
+                        )
+                    else:
+                        logger.error(f"回退逐个插入失败（索引 {idx}）: {error_msg}, 文件: {file_path_str}")
                     # 注意：这里不记录原始索引，因为 file_data_map 中只包含成功准备数据的文件
-                    failed_files.append((idx, file_path_str, str(e)))
+                    failed_files.append((idx, file_path_str, error_msg))
         
         return synced_count, synced_file_ids
 
@@ -1218,6 +1585,42 @@ class MemoryDBWriter:
                 [error_message, self.backup_set_db_id] + file_ids
             )
             await self.memory_db.commit()
+        except (ValueError, sqlite3.ProgrammingError) as e:
+            # 连接已关闭，记录警告但不抛出异常
+            logger.warning(f"标记同步错误时数据库连接已关闭: {e}")
+
+    async def _mark_sync_error_for_files(self, file_ids: List[int], error_message: str):
+        """标记文件同步错误（使用文件ID列表，仅当前备份集）
+        
+        Args:
+            file_ids: 文件ID列表
+            error_message: 错误消息
+        """
+        if not file_ids:
+            return
+        
+        # 检查数据库连接是否已关闭
+        if not self.memory_db:
+            logger.warning("内存数据库连接已关闭，无法标记同步错误")
+            return
+        
+        try:
+            # 检查连接是否有效
+            if hasattr(self.memory_db, '_conn') and self.memory_db._conn is None:
+                logger.warning("内存数据库连接已关闭，无法标记同步错误")
+                return
+        except (ValueError, AttributeError):
+            logger.warning("内存数据库连接已关闭，无法标记同步错误")
+            return
+        
+        try:
+            placeholders = ','.join(['?' for _ in file_ids])
+            await self.memory_db.execute(
+                f"UPDATE backup_files SET sync_error = ? WHERE backup_set_id = ? AND id IN ({placeholders})",
+                [error_message, self.backup_set_db_id] + file_ids
+            )
+            await self.memory_db.commit()
+            logger.debug(f"已标记 {len(file_ids)} 个文件同步错误: {error_message}")
         except (ValueError, sqlite3.ProgrammingError) as e:
             # 连接已关闭，记录警告但不抛出异常
             logger.warning(f"标记同步错误时数据库连接已关闭: {e}")

@@ -951,6 +951,14 @@ async function loadAllSystemConfig() {
             }
             
             // 内存数据库配置
+            if (config.use_memory_db !== undefined) {
+                const useMemoryDbCheckbox = document.getElementById('useMemoryDb');
+                if (useMemoryDbCheckbox) {
+                    useMemoryDbCheckbox.checked = config.use_memory_db;
+                    // 触发change事件以显示/隐藏配置项
+                    useMemoryDbCheckbox.dispatchEvent(new Event('change'));
+                }
+            }
             if (config.memory_db_max_files) {
                 const memoryDbMaxFilesInput = document.getElementById('memoryDbMaxFiles');
                 if (memoryDbMaxFilesInput) memoryDbMaxFilesInput.value = config.memory_db_max_files;
@@ -1043,6 +1051,12 @@ async function saveEnvConfigSection() {
             use_checkpoint: document.getElementById('useCheckpoint')?.checked || null,
             
             // 内存数据库配置
+            use_memory_db: (() => {
+                const checkbox = document.getElementById('useMemoryDb');
+                if (!checkbox) return undefined;
+                // 明确返回布尔值，确保 false 也能被发送
+                return checkbox.checked === true;
+            })(),
             memory_db_max_files: parseInt(document.getElementById('memoryDbMaxFiles')?.value) || null,
             memory_db_sync_batch_size: parseInt(document.getElementById('memoryDbSyncBatchSize')?.value) || null,
             memory_db_sync_interval: parseInt(document.getElementById('memoryDbSyncInterval')?.value) || null,

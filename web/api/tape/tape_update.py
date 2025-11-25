@@ -152,30 +152,10 @@ async def update_tape(tape_id: str, request: UpdateTapeRequest, http_request: Re
             logger.warning(f"[SQLite模式] 更新磁带暂未实现: {tape_id}")
             raise HTTPException(status_code=501, detail="SQLite模式下暂不支持更新磁带功能")
 
-        # 使用psycopg2直接连接，避免openGauss版本解析问题
-        import psycopg2
-        import psycopg2.extras
+        # 使用统一的连接辅助函数（支持 psycopg2 和 psycopg3）
+        from utils.db_connection_helper import get_psycopg_connection_from_url
         
-        # 解析URL
-        if database_url.startswith("opengauss://"):
-            database_url = database_url.replace("opengauss://", "postgresql://", 1)
-        
-        pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
-        match = re.match(pattern, database_url)
-        
-        if not match:
-            raise ValueError("无法解析数据库连接URL")
-        
-        username, password, host, port, database = match.groups()
-        
-        # 连接数据库
-        conn = psycopg2.connect(
-            host=host,
-            port=port,
-            user=username,
-            password=password,
-            database=database
-        )
+        conn, is_psycopg3 = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
         
         old_values = {}
         new_values = {}
@@ -395,14 +375,8 @@ async def update_tape(tape_id: str, request: UpdateTapeRequest, http_request: Re
                         try:
                             from utils.tape_tools import tape_tools_manager
                             # 重新连接数据库（因为原连接已关闭）
-                            import psycopg2
-                            db_conn = psycopg2.connect(
-                                host=host,
-                                port=port,
-                                user=username,
-                                password=password,
-                                database=database
-                            )
+                            from utils.db_connection_helper import get_psycopg_connection_from_url
+                            db_conn, _ = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
                             
                             try:
                                 # 使用保存的system实例
@@ -537,14 +511,8 @@ async def update_tape(tape_id: str, request: UpdateTapeRequest, http_request: Re
                             logger.error(f"后台格式化磁盘异常: {str(e)}", exc_info=True)
                             # 异常时也要将状态改为ERROR
                             try:
-                                import psycopg2
-                                db_conn = psycopg2.connect(
-                                    host=host,
-                                    port=port,
-                                    user=username,
-                                    password=password,
-                                    database=database
-                                )
+                                from utils.db_connection_helper import get_psycopg_connection_from_url
+                                db_conn, _ = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
                                 with db_conn.cursor() as db_cur:
                                     db_cur.execute("UPDATE tape_cartridges SET status = %s WHERE tape_id = %s", 
                                                 ('ERROR', background_tape_id))

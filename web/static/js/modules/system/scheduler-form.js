@@ -189,6 +189,8 @@ export class FormManager {
             return true;
         } catch (error) {
             console.error('保存任务失败:', error);
+            // SchedulerAPI.saveTask 已经显示了错误信息，这里不需要再次显示
+            // 但确保错误被正确抛出，以便调用者知道保存失败
             return false;
         }
     }

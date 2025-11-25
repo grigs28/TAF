@@ -585,6 +585,19 @@ async def add_task(scheduled_task: ScheduledTask) -> bool:
                     datetime.now()
                 )
                 
+                # psycopg3 binary protocol 需要显式提交事务
+                actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                try:
+                    await actual_conn.commit()
+                    logger.debug(f"计划任务插入事务已提交: task_id={task_id}")
+                except Exception as commit_err:
+                    logger.warning(f"提交计划任务插入事务失败（可能已自动提交）: {commit_err}")
+                    # 如果不在事务中，commit() 可能会失败，尝试回滚
+                    try:
+                        await actual_conn.rollback()
+                    except:
+                        pass
+                
                 scheduled_task.id = task_id
                 logger.info(f"使用原生SQL插入计划任务成功: {scheduled_task.task_name} (ID: {task_id})")
                 
@@ -677,6 +690,16 @@ async def delete_task(task_id: int) -> bool:
                 
                 # 删除任务
                 await conn.execute("DELETE FROM scheduled_tasks WHERE id = $1", task_id)
+                
+                # 提交事务（psycopg3 需要显式提交，否则连接释放时会回滚）
+                actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                if hasattr(actual_conn, 'commit'):
+                    try:
+                        await actual_conn.commit()
+                        logger.debug(f"计划任务 {task_id} 删除事务已提交")
+                    except Exception as commit_err:
+                        logger.warning(f"提交删除事务失败（可能已自动提交）: {commit_err}")
+                
                 logger.info(f"使用原生SQL删除计划任务成功: {task_name} (ID: {task_id})")
                 return True
         else:

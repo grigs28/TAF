@@ -6,6 +6,7 @@ Schedule Time Calculator
 """
 
 import logging
+import calendar
 from datetime import datetime, timedelta
 from typing import Optional
 from croniter import croniter
@@ -108,6 +109,19 @@ def calculate_next_run_time(scheduled_task: ScheduledTask) -> Optional[datetime]
         elif schedule_type == ScheduleType.MONTHLY:
             # 每月任务：每月固定日期的固定时间
             day_of_month = config.get('day_of_month', 1)
+            # 确保 day_of_month 是整数类型
+            try:
+                day_of_month = int(day_of_month)
+            except (ValueError, TypeError):
+                logger.error(f"无效的 day_of_month 值: {day_of_month}，使用默认值 1")
+                day_of_month = 1
+            
+            # 限制 day_of_month 在有效范围内
+            if day_of_month < 1:
+                day_of_month = 1
+            elif day_of_month > 31:
+                day_of_month = 31
+            
             time_str = config.get('time', '02:00:00')
             # 支持 HH:MM 和 HH:MM:SS 格式
             time_parts = time_str.split(':')
@@ -115,13 +129,34 @@ def calculate_next_run_time(scheduled_task: ScheduledTask) -> Optional[datetime]
             minute = int(time_parts[1]) if len(time_parts) > 1 else 0
             second = int(time_parts[2]) if len(time_parts) > 2 else 0
             
-            next_time = current_time.replace(day=day_of_month, hour=hour, minute=minute, second=second, microsecond=0)
+            # 安全地计算下次执行时间，处理月份天数不一致的情况
+            try:
+                # 先尝试在当前月份设置日期
+                next_time = current_time.replace(day=day_of_month, hour=hour, minute=minute, second=second, microsecond=0)
+            except ValueError:
+                # 如果当前月份没有该日期（例如11月没有31日），使用该月的最后一天
+                last_day = calendar.monthrange(current_time.year, current_time.month)[1]
+                actual_day = min(day_of_month, last_day)
+                next_time = current_time.replace(day=actual_day, hour=hour, minute=minute, second=second, microsecond=0)
+            
             if next_time <= current_time:
                 # 如果本月的日期已过，执行下个月的
                 if next_time.month == 12:
-                    next_time = next_time.replace(year=next_time.year + 1, month=1)
+                    next_year = next_time.year + 1
+                    next_month = 1
                 else:
-                    next_time = next_time.replace(month=next_time.month + 1)
+                    next_year = next_time.year
+                    next_month = next_time.month + 1
+                
+                # 确保下个月有该日期，如果没有则使用该月的最后一天
+                last_day = calendar.monthrange(next_year, next_month)[1]
+                actual_day = min(day_of_month, last_day)
+                
+                try:
+                    next_time = next_time.replace(year=next_year, month=next_month, day=actual_day)
+                except ValueError:
+                    # 如果仍然失败，使用该月的最后一天
+                    next_time = next_time.replace(year=next_year, month=next_month, day=last_day)
             
             return next_time
             
@@ -129,6 +164,22 @@ def calculate_next_run_time(scheduled_task: ScheduledTask) -> Optional[datetime]
             # 每年任务：每年固定月日的固定时间
             month = config.get('month', 1)
             day = config.get('day', 1)
+            
+            # 确保 month 和 day 是整数类型
+            try:
+                month = int(month)
+                day = int(day)
+            except (ValueError, TypeError):
+                logger.error(f"无效的 month 或 day 值: month={month}, day={day}，使用默认值")
+                month = 1
+                day = 1
+            
+            # 限制 month 和 day 在有效范围内
+            if month < 1 or month > 12:
+                month = 1
+            if day < 1 or day > 31:
+                day = 1
+            
             time_str = config.get('time', '02:00:00')
             # 支持 HH:MM 和 HH:MM:SS 格式
             time_parts = time_str.split(':')
@@ -136,10 +187,27 @@ def calculate_next_run_time(scheduled_task: ScheduledTask) -> Optional[datetime]
             minute = int(time_parts[1]) if len(time_parts) > 1 else 0
             second = int(time_parts[2]) if len(time_parts) > 2 else 0
             
-            next_time = current_time.replace(month=month, day=day, hour=hour, minute=minute, second=second, microsecond=0)
+            # 安全地计算下次执行时间，处理2月29日等特殊情况
+            try:
+                next_time = current_time.replace(month=month, day=day, hour=hour, minute=minute, second=second, microsecond=0)
+            except ValueError:
+                # 如果当前年份的该月没有该日期（例如2月29日在非闰年），使用该月的最后一天
+                last_day = calendar.monthrange(current_time.year, month)[1]
+                actual_day = min(day, last_day)
+                next_time = current_time.replace(month=month, day=actual_day, hour=hour, minute=minute, second=second, microsecond=0)
+            
             if next_time <= current_time:
                 # 如果今年的日期已过，执行明年的
-                next_time = next_time.replace(year=next_time.year + 1)
+                next_year = next_time.year + 1
+                # 确保明年该月有该日期，如果没有则使用该月的最后一天
+                last_day = calendar.monthrange(next_year, month)[1]
+                actual_day = min(day, last_day)
+                
+                try:
+                    next_time = next_time.replace(year=next_year, day=actual_day)
+                except ValueError:
+                    # 如果仍然失败，使用该月的最后一天
+                    next_time = next_time.replace(year=next_year, day=last_day)
             
             return next_time
             

@@ -165,7 +165,7 @@ async def delete_backup_task(task_id: int, http_request: Request):
                 backup_sets_row = await _opengauss_query_with_retry(
                     conn,
                     conn.fetchrow,
-                    "SELECT COUNT(*)::BIGINT as count FROM backup_sets WHERE backup_task_id = $1",
+                    "SELECT COUNT(*) as count FROM backup_sets WHERE backup_task_id = $1",
                     task_id,
                     operation_name="查询备份集数量"
                 )
@@ -191,11 +191,10 @@ async def delete_backup_task(task_id: int, http_request: Request):
                             files_count = 0
                             query_success = False
                             try:
-                                # 使用原生 openGauss SQL，添加显式类型转换和超时设置
-                                await conn.execute("SET LOCAL statement_timeout = '30s'")
+                                # 使用原生 openGauss SQL 查询文件数量
                                 count_row = await asyncio.wait_for(
                                     conn.fetchrow(
-                                        "SELECT COUNT(*)::BIGINT as count FROM backup_files WHERE backup_set_id = $1",
+                                        "SELECT COUNT(*) as count FROM backup_files WHERE backup_set_id = $1",
                                         backup_set_id
                                     ),
                                     timeout=30.0
@@ -210,8 +209,8 @@ async def delete_backup_task(task_id: int, http_request: Request):
                                 )
                             
                             # 执行删除操作（无论查询是否成功都执行）
+                            # execute 方法会自动创建新事务，即使前面的查询失败也不会影响
                             try:
-                                await conn.execute("SET LOCAL statement_timeout = '300s'")
                                 await conn.execute(
                                     "DELETE FROM backup_files WHERE backup_set_id = $1",
                                     backup_set_id
@@ -224,22 +223,43 @@ async def delete_backup_task(task_id: int, http_request: Request):
                                 else:
                                     logger.debug(f"已删除备份集 {backup_set_id} 的文件记录（数量未知）")
                             except Exception as delete_error:
-                                logger.error(
-                                    f"删除备份集 {backup_set_id} 的文件记录失败: {str(delete_error)}",
-                                    exc_info=True
-                                )
+                                error_msg = str(delete_error)
+                                # 如果表不存在，记录警告但不报错（可能是数据库未初始化）
+                                if "does not exist" in error_msg.lower() or "relation" in error_msg.lower():
+                                    logger.warning(
+                                        f"备份集 {backup_set_id} 的文件表不存在，跳过删除（可能是数据库未初始化）: {error_msg}"
+                                    )
+                                else:
+                                    logger.error(
+                                        f"删除备份集 {backup_set_id} 的文件记录失败: {error_msg}",
+                                        exc_info=True
+                                    )
                                 # 删除失败不影响流程，继续处理其他备份集
                                 continue
                         
                         if total_files_deleted > 0:
-                            logger.info(f"已删除 {total_files_deleted} 个备份文件记录")
+                            logger.debug(f"已删除 {total_files_deleted} 个备份文件记录")
                     
                     # 再删除备份集
-                    await conn.execute(
-                        "DELETE FROM backup_sets WHERE backup_task_id = $1",
-                        task_id
-                    )
-                    logger.info(f"已删除 {backup_sets_count} 个关联的备份集")
+                    try:
+                        await conn.execute(
+                            "DELETE FROM backup_sets WHERE backup_task_id = $1",
+                            task_id
+                        )
+                        logger.debug(f"已删除 {backup_sets_count} 个关联的备份集")
+                    except Exception as delete_sets_error:
+                        error_msg = str(delete_sets_error)
+                        # 如果表不存在，记录警告但不报错
+                        if "does not exist" in error_msg.lower() or "relation" in error_msg.lower():
+                            logger.warning(
+                                f"备份集表不存在，跳过删除（可能是数据库未初始化）: {error_msg}"
+                            )
+                        else:
+                            logger.error(
+                                f"删除备份集失败: {error_msg}",
+                                exc_info=True
+                            )
+                            raise
                 
                 # 检查是否有执行记录引用此模板（template_id外键）
                 if is_template:
@@ -248,7 +268,7 @@ async def delete_backup_task(task_id: int, http_request: Request):
                     child_tasks_row = await _opengauss_query_with_retry(
                         conn,
                         conn.fetchrow,
-                        "SELECT COUNT(*)::BIGINT as count FROM backup_tasks WHERE template_id = $1",
+                        "SELECT COUNT(*) as count FROM backup_tasks WHERE template_id = $1",
                         task_id,
                         operation_name="查询子任务数量"
                     )
@@ -276,21 +296,42 @@ async def delete_backup_task(task_id: int, http_request: Request):
                             # 先删除备份文件（通过备份集）
                             if backup_sets_for_child:
                                 for bs_row in backup_sets_for_child:
-                                    await conn.execute(
-                                        "DELETE FROM backup_files WHERE backup_set_id = $1",
-                                        bs_row['id']
-                                    )
+                                    try:
+                                        await conn.execute(
+                                            "DELETE FROM backup_files WHERE backup_set_id = $1",
+                                            bs_row['id']
+                                        )
+                                    except Exception as delete_files_error:
+                                        error_msg = str(delete_files_error)
+                                        # 如果表不存在，记录警告但继续
+                                        if "does not exist" in error_msg.lower() or "relation" in error_msg.lower():
+                                            logger.warning(
+                                                f"备份文件表不存在，跳过删除（可能是数据库未初始化）: {error_msg}"
+                                            )
+                                        else:
+                                            logger.error(f"删除备份文件失败: {error_msg}")
+                                            raise
                                 # 再删除备份集
-                                await conn.execute(
-                                    "DELETE FROM backup_sets WHERE backup_task_id = $1",
-                                    child_task_id
-                                )
+                                try:
+                                    await conn.execute(
+                                        "DELETE FROM backup_sets WHERE backup_task_id = $1",
+                                        child_task_id
+                                    )
+                                except Exception as delete_sets_error:
+                                    error_msg = str(delete_sets_error)
+                                    if "does not exist" in error_msg.lower() or "relation" in error_msg.lower():
+                                        logger.warning(
+                                            f"备份集表不存在，跳过删除（可能是数据库未初始化）: {error_msg}"
+                                        )
+                                    else:
+                                        logger.error(f"删除备份集失败: {error_msg}")
+                                        raise
                             # 最后删除执行记录
                             await conn.execute(
                                 "DELETE FROM backup_tasks WHERE id = $1",
                                 child_task_id
                             )
-                        logger.info(f"已删除 {child_tasks_count} 个关联的执行记录")
+                        logger.debug(f"已删除 {child_tasks_count} 个关联的执行记录")
                 
                 # 执行删除操作
                 # asyncpg的execute返回字符串格式，如 "DELETE 1" 或 "DELETE 0"
@@ -301,6 +342,7 @@ async def delete_backup_task(task_id: int, http_request: Request):
                     )
                     
                     # 解析删除结果
+                    # psycopg3 返回整数（受影响的行数），asyncpg 返回字符串（如 "DELETE 1"）
                     deleted_count = 0
                     if isinstance(result, str):
                         if result.startswith("DELETE"):
@@ -311,9 +353,12 @@ async def delete_backup_task(task_id: int, http_request: Request):
                         else:
                             # 可能返回其他格式，尝试解析
                             logger.warning(f"删除操作返回未知格式: {result}")
+                    elif isinstance(result, int):
+                        # psycopg3 返回整数（受影响的行数）
+                        deleted_count = result
                     else:
-                        # 如果不是字符串，尝试其他方式
-                        logger.warning(f"删除操作返回非字符串类型: {type(result)}")
+                        # 如果不是字符串或整数，尝试其他方式
+                        logger.warning(f"删除操作返回非预期类型: {type(result)}, 值: {result}")
                     
                     # 检查是否真的删除了记录
                     if deleted_count == 0:
@@ -329,6 +374,16 @@ async def delete_backup_task(task_id: int, http_request: Request):
                             raise HTTPException(status_code=400, detail="删除失败：可能存在外键约束或其他限制")
                         else:
                             raise HTTPException(status_code=404, detail="备份任务不存在或已被删除")
+                    
+                    # 提交事务（psycopg3 需要显式提交，否则连接释放时会回滚，参考 SQLite 模式的 commit）
+                    actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                    if hasattr(actual_conn, 'commit'):
+                        try:
+                            await actual_conn.commit()
+                            logger.debug(f"备份任务 {task_id} 删除事务已提交")
+                        except Exception as commit_err:
+                            logger.warning(f"提交删除事务失败（可能已自动提交）: {commit_err}")
+                    
                 except HTTPException:
                     raise
                 except Exception as db_error:

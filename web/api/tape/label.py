@@ -154,10 +154,9 @@ async def write_tape_label(request: WriteTapeLabelRequest, http_request: Request
             raise HTTPException(status_code=501, detail="Redis模式下暂不支持写入磁带标签功能")
         
         # 从数据库中获取磁带的过期时间等信息
-        import psycopg2
-        import psycopg2.extras
         from config.settings import get_settings
         from utils.scheduler.sqlite_utils import is_sqlite
+        from utils.db_connection_helper import get_psycopg_connection_from_url
         
         settings = get_settings()
         database_url = settings.DATABASE_URL
@@ -168,25 +167,8 @@ async def write_tape_label(request: WriteTapeLabelRequest, http_request: Request
             logger.warning(f"[SQLite模式] 写入磁带标签暂未实现: {request.tape_id}")
             raise HTTPException(status_code=501, detail="SQLite模式下暂不支持写入磁带标签功能")
         
-        # 解析URL
-        if database_url.startswith("opengauss://"):
-            database_url = database_url.replace("opengauss://", "postgresql://", 1)
-        
-        import re
-        pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
-        match = re.match(pattern, database_url)
-        
-        if not match:
-            raise ValueError("无法解析数据库连接URL")
-        
-        username, password, host, port, database = match.groups()
-        conn = psycopg2.connect(
-            host=host,
-            port=port,
-            database=database,
-            user=username,
-            password=password
-        )
+        # 使用统一的连接辅助函数（支持 psycopg2 和 psycopg3）
+        conn, is_psycopg3 = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
         try:
             cur = conn.cursor()
             

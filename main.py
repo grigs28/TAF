@@ -580,6 +580,32 @@ if __name__ == "__main__":
         safe_print(f"   当前版本: Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\n")
         sys.exit(1)
 
+    # Windows 平台：设置事件循环策略（psycopg3 需要）
+    # psycopg3 在 Windows 上不能使用 ProactorEventLoop，必须使用 SelectorEventLoop
+    if sys.platform == "win32":
+        try:
+            # 检查是否安装了 psycopg3（尝试导入 psycopg_pool）
+            try:
+                import psycopg_pool
+                # 如果安装了 psycopg3，设置事件循环策略
+                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+                safe_print("Windows 事件循环策略已设置为 SelectorEventLoop（psycopg3 兼容）")
+            except ImportError:
+                # 如果未安装 psycopg3，检查是否使用 openGauss（可能使用 psycopg3）
+                # 为了兼容性，如果使用 openGauss，也设置 SelectorEventLoop
+                try:
+                    from config.database import db_manager
+                    database_url = str(db_manager.settings.DATABASE_URL).lower()
+                    if "opengauss" in database_url or "postgresql" in database_url:
+                        # 使用 PostgreSQL/openGauss，设置 SelectorEventLoop（兼容 psycopg3）
+                        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+                        safe_print("Windows 事件循环策略已设置为 SelectorEventLoop（PostgreSQL/openGauss 兼容）")
+                except Exception:
+                    # 如果无法检查，使用默认策略
+                    pass
+        except Exception as e:
+            safe_print(f"设置事件循环策略时出错: {e}，将使用默认策略")
+
     safe_print("\nPython 版本: " + sys.version.split()[0])
     safe_print("工作目录: " + os.getcwd())
     

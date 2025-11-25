@@ -66,6 +66,7 @@ class SystemEnvConfig(BaseModel):
     use_checkpoint: Optional[bool] = Field(None, description="是否启用检查点文件，默认不启用")
     
     # 内存数据库配置
+    use_memory_db: Optional[bool] = Field(None, description="是否使用内存数据库（默认启用，性能最优）")
     memory_db_max_files: Optional[int] = Field(None, description="内存数据库中最大文件数（默认500万）")
     memory_db_sync_batch_size: Optional[int] = Field(None, description="内存数据库同步批次大小（默认5000）")
     memory_db_sync_interval: Optional[int] = Field(None, description="内存数据库同步间隔（秒，默认30）")
@@ -164,6 +165,7 @@ async def get_env_config():
             "use_checkpoint": parse_bool(env_vars.get("USE_CHECKPOINT"), False),
             
             # 内存数据库配置
+            "use_memory_db": parse_bool(env_vars.get("USE_MEMORY_DB"), True),
             "memory_db_max_files": parse_int(env_vars.get("MEMORY_DB_MAX_FILES"), 5000000),
             "memory_db_sync_batch_size": parse_int(env_vars.get("MEMORY_DB_SYNC_BATCH_SIZE"), 5000),
             "memory_db_sync_interval": parse_int(env_vars.get("MEMORY_DB_SYNC_INTERVAL"), 30),
@@ -282,6 +284,8 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             updates["USE_CHECKPOINT"] = str(config.use_checkpoint).lower()
         
         # 内存数据库配置
+        if config.use_memory_db is not None:
+            updates["USE_MEMORY_DB"] = str(config.use_memory_db).lower()
         if config.memory_db_max_files is not None:
             updates["MEMORY_DB_MAX_FILES"] = str(config.memory_db_max_files)
         if config.memory_db_sync_batch_size is not None:

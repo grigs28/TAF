@@ -240,6 +240,9 @@ class BackupEngine:
                 raise RuntimeError(error_msg)
 
             self._current_task = backup_task
+            
+            # 清零压缩进度信息（新任务开始时）
+            backup_task.current_compression_progress = None
 
             # 0. 获取备份策略参数（从tapedrive和system配置）
             logger.info("========== 获取备份策略参数 ==========")
@@ -670,13 +673,15 @@ class BackupEngine:
                 logger.info(f"执行耗时: {duration_seconds:.2f} 秒")
                 logger.info(f"完成时间: {format_datetime(task_end_time)}")
                 
-                # 更新最终状态
+                # 注意：不再在这里标记任务状态为 COMPLETED
+                # 只有文件压缩任务可以标记任务集状态为完成并发钉钉
+                # 压缩任务会在收不到队列且任务集完成标记为 completed 时自动调用 _finalize_backup_set_and_notify
+                # 这里只更新操作阶段描述
                 await self.backup_db.update_task_stage_with_description(
                     backup_task,
                     "finalize",
                     f"[备份完成] 处理了 {processed_files} 个文件，总大小 {format_bytes(processed_bytes)}"
                 )
-                await self.backup_db.update_task_status(backup_task, BackupTaskStatus.COMPLETED)
 
                 # 使用后台任务记录日志，避免阻塞
                 asyncio.create_task(log_operation(
@@ -708,27 +713,9 @@ class BackupEngine:
                     }
                 ))
                 
-                # 发送成功通知（检查钉钉通知配置中的通知事件）
-                if self.dingtalk_notifier:
-                    try:
-                        # 检查钉钉通知配置中的通知事件
-                        notification_events = await self._get_notification_events()
-                        if notification_events.get("notify_backup_success", True):
-                            logger.info("发送备份成功钉钉通知...")
-                            await self.dingtalk_notifier.send_backup_notification(
-                                backup_task.task_name,
-                                "success",
-                                {
-                                    'size': format_bytes(processed_bytes),
-                                    'file_count': processed_files,
-                                    'duration': f"{duration_seconds:.2f} 秒"
-                                }
-                            )
-                            logger.info("备份成功钉钉通知发送成功")
-                        else:
-                            logger.debug("通知事件配置中备份成功通知已禁用，跳过发送")
-                    except Exception as notify_error:
-                        logger.warning(f"发送备份成功钉钉通知失败: {str(notify_error)}")
+                # 注意：不再在这里发送钉钉通知
+                # 只有文件压缩任务可以标记任务集状态为完成并发钉钉
+                # 压缩任务会在收不到队列且任务集完成标记为 completed 时自动调用 _finalize_backup_set_and_notify
             else:
                 error_msg = getattr(backup_task, 'error_message', '未知错误')
                 logger.error("========== 备份任务执行失败 ==========")
@@ -792,27 +779,30 @@ class BackupEngine:
                         logger.warning(f"发送备份失败钉钉通知失败: {str(notify_error)}")
 
             # 保存任务结果 - 使用原生 openGauss SQL
-            from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
-            from utils.scheduler.sqlite_utils import is_sqlite
-            
-            if is_opengauss():
-                # 使用连接池
-                async with get_opengauss_connection() as conn:
-                    await conn.execute(
-                        """
-                        UPDATE backup_tasks
-                        SET status = $1::backuptaskstatus,
-                            completed_at = $2,
-                            error_message = $3,
-                            updated_at = $4
-                        WHERE id = $5
-                        """,
-                        (BackupTaskStatus.COMPLETED.value if success else BackupTaskStatus.FAILED.value),
-                        backup_task.completed_at,
-                        getattr(backup_task, 'error_message', None),  # 安全获取 error_message
-                        datetime.now(),
-                        backup_task.id
-                    )
+            # 注意：只有文件压缩任务可以标记任务状态为 COMPLETED
+            # 这里只处理失败情况，成功情况由压缩任务处理
+            if not success:
+                from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
+                from utils.scheduler.sqlite_utils import is_sqlite
+                
+                if is_opengauss():
+                    # 使用连接池
+                    async with get_opengauss_connection() as conn:
+                        await conn.execute(
+                            """
+                            UPDATE backup_tasks
+                            SET status = $1::backuptaskstatus,
+                                completed_at = $2,
+                                error_message = $3,
+                                updated_at = $4
+                            WHERE id = $5
+                            """,
+                            BackupTaskStatus.FAILED.value,
+                            backup_task.completed_at,
+                            getattr(backup_task, 'error_message', None),  # 安全获取 error_message
+                            datetime.now(),
+                            backup_task.id
+                        )
             elif is_redis():
                 # Redis模式：不需要提交事务，直接跳过
                 pass
@@ -961,6 +951,9 @@ class BackupEngine:
             backup_task.processed_bytes = 0  # 原始文件的总大小（未压缩）
             backup_task.total_files = 0  # total_files: 总文件数（由后台扫描任务更新）
             backup_task.total_bytes = 0  # total_bytes: 总字节数（由后台扫描任务更新）
+            
+            # 清零压缩进度信息（新任务开始时）
+            backup_task.current_compression_progress = None
             
             # 1. 检查磁带盘符是否可用（简单检查）
             logger.info("检查磁带盘符...")
@@ -1121,6 +1114,21 @@ class BackupEngine:
             file_move_worker = FileMoveWorker(tape_file_mover=self.tape_file_mover)
             file_move_worker.start()
             
+            # ========== openGauss模式：创建文件组预取器 ==========
+            file_group_prefetcher = None
+            from utils.scheduler.db_utils import is_opengauss
+            if is_opengauss():
+                from backup.file_group_prefetcher import FileGroupPrefetcher
+                logger.info("[备份引擎] openGauss模式：创建文件组预取器，实现压缩和搜索并行执行")
+                file_group_prefetcher = FileGroupPrefetcher(
+                    backup_db=self.backup_db,
+                    backup_set=backup_set,
+                    backup_task=backup_task
+                )
+                # 在压缩任务开始前启动预取器
+                file_group_prefetcher.start()
+                logger.info("[备份引擎] 文件组预取器已启动，开始预取文件组...")
+            
             # ========== 创建压缩循环后台任务（独立线程，顺序执行） ==========
             compression_worker = CompressionWorker(
                 backup_db=self.backup_db,
@@ -1130,7 +1138,8 @@ class BackupEngine:
                 settings=self.settings,
                 file_move_worker=None,  # 不再向 file_move_worker 发送消息，它独立扫描 final 目录
                 backup_notifier=self.backup_notifier,
-                tape_file_mover=self.tape_file_mover
+                tape_file_mover=self.tape_file_mover,
+                file_group_prefetcher=file_group_prefetcher  # openGauss模式下的预取器
             )
             compression_worker.start()
 
@@ -1153,21 +1162,20 @@ class BackupEngine:
                     pass
                 raise
             finally:
-                # 停止压缩循环和文件移动任务
+                # 停止压缩循环、文件移动任务和预取器
                 await compression_worker.stop()
                 await file_move_worker.stop()
+                if file_group_prefetcher:
+                    await file_group_prefetcher.stop()
             
             logger.info(f"========== 数据库压缩完成，共处理 {compression_worker.group_idx} 个文件组 ==========")
 
-            # 5. 完成备份集
-            await self.backup_db.finalize_backup_set(backup_set, processed_files, total_size)
+            # 注意：不再在这里调用 finalize_backup_set
+            # 只有文件压缩任务（compression_worker）可以标记任务集状态为完成并发钉钉
+            # 压缩任务会在收不到队列且任务集完成标记为 completed 时自动调用 _finalize_backup_set_and_notify
             
-            # 注意：不再更新 total_files 字段（压缩包数量）
-            # 压缩包数量存储在 result_summary.estimated_archive_count 中
-            # total_files 和 total_bytes 字段由独立的后台扫描任务 _scan_for_progress_update 负责更新（总文件数和总字节数）
-            
-            # 更新操作状态为完成
-            await self.backup_db.update_scan_progress(backup_task, processed_files, backup_task.total_files, "[完成备份集...]")
+            # 更新操作状态
+            await self.backup_db.update_scan_progress(backup_task, processed_files, backup_task.total_files, "[压缩完成...]")
 
             logger.info(f"备份完成，共处理 {processed_files} 个文件，总大小 {format_bytes(total_size)}")
             return True

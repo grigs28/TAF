@@ -159,6 +159,7 @@ const SchedulerManager = {
             if (button.classList.contains('btn-action-run')) {
                 e.preventDefault();
                 e.stopPropagation();
+                e.stopImmediatePropagation(); // 阻止其他监听器处理
                 const taskId = parseInt(button.getAttribute('data-task-id'));
                 if (!isNaN(taskId)) {
                     this.runTask(taskId);
@@ -214,6 +215,7 @@ const SchedulerManager = {
             if (button.classList.contains('btn-action-delete')) {
                 e.preventDefault();
                 e.stopPropagation();
+                e.stopImmediatePropagation(); // 阻止其他监听器处理
                 const taskId = parseInt(button.getAttribute('data-task-id'));
                 if (!isNaN(taskId)) {
                     this.deleteTask(taskId);
@@ -635,16 +637,24 @@ const SchedulerManager = {
      * 保存任务
      */
     async saveTask() {
-        const success = await FormManager.saveTask(this.currentTask, this.pathManager);
-        if (success) {
-            // 关闭模态框
-            const modalEl = document.getElementById('scheduledTaskModal');
-            const modal = bootstrap.Modal.getInstance(modalEl);
-            if (modal) {
-                modal.hide();
+        try {
+            const success = await FormManager.saveTask(this.currentTask, this.pathManager);
+            if (success) {
+                // 关闭模态框
+                const modalEl = document.getElementById('scheduledTaskModal');
+                const modal = bootstrap.Modal.getInstance(modalEl);
+                if (modal) {
+                    modal.hide();
+                }
+                // 刷新任务列表
+                await this.loadTasks();
+            } else {
+                // 保存失败，但不关闭模态框，让用户看到错误信息
+                console.warn('保存任务失败，请检查错误信息');
             }
-            // 刷新任务列表
-            await this.loadTasks();
+        } catch (error) {
+            console.error('保存任务时发生异常:', error);
+            // 确保错误信息已显示（SchedulerAPI.saveTask 会显示）
         }
     },
     
@@ -658,9 +668,11 @@ const SchedulerManager = {
         
         try {
             await SchedulerAPI.deleteTask(taskId);
+            alert('任务已删除');
             await this.loadTasks();
         } catch (error) {
             console.error('删除任务失败:', error);
+            alert('删除任务失败: ' + (error.message || '未知错误'));
         }
     },
     

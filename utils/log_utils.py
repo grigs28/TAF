@@ -156,6 +156,20 @@ async def log_operation(
                 ]
                 
                 await conn.execute(sql, *params)
+                
+                # psycopg3 binary protocol 需要显式提交事务
+                actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                try:
+                    await actual_conn.commit()
+                    logger.debug("操作日志插入事务已提交")
+                except Exception as commit_err:
+                    logger.warning(f"提交操作日志插入事务失败（可能已自动提交）: {commit_err}")
+                    # 如果不在事务中，commit() 可能会失败，尝试回滚
+                    try:
+                        await actual_conn.rollback()
+                    except:
+                        pass
+                
                 return True
         else:
             # 使用SQLAlchemy插入操作日志（SQLite）
@@ -284,6 +298,20 @@ async def log_system(
                 ]
                 
                 await conn.execute(sql, *params)
+                
+                # psycopg3 binary protocol 需要显式提交事务
+                actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                try:
+                    await actual_conn.commit()
+                    logger.debug("系统日志插入事务已提交")
+                except Exception as commit_err:
+                    logger.warning(f"提交系统日志插入事务失败（可能已自动提交）: {commit_err}")
+                    # 如果不在事务中，commit() 可能会失败，尝试回滚
+                    try:
+                        await actual_conn.rollback()
+                    except:
+                        pass
+                
                 return True
         else:
             # 检查是否为Redis数据库，Redis不支持系统日志表，跳过记录

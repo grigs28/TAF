@@ -9,9 +9,9 @@ import asyncio
 import logging
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from models.backup import BackupTask, BackupSet, BackupFile, BackupTaskStatus, BackupFileType, BackupSetStatus
 from utils.datetime_utils import now, format_datetime
@@ -22,19 +22,19 @@ logger = logging.getLogger(__name__)
 class BatchDBWriter:
     """批量数据库写入器 - 保持所有原有字段，提升写入性能"""
 
-    def __init__(self, backup_set_db_id: int, batch_size: int = 5000, max_queue_size: int = 20000, timeout: int = 5):
+    def __init__(self, backup_set_db_id: int, batch_size: int = 5000, max_queue_size: int = 20000, timeout: Optional[int] = 5):
         self.backup_set_db_id = backup_set_db_id
-        # 优化：增大批次大小，提升批量写入效率（从2000增加到5000）
+        # 批次大小（用于统计，实际批次大小由调用者决定）
         self.batch_size = batch_size
-        # 优化：增大队列大小，支持更大量数据（从5000增加到10000）
+        # 保留参数以兼容现有代码，但不再使用队列
         self.max_queue_size = max_queue_size
-        self.timeout = timeout
+        self.timeout = timeout  # None 表示不使用超时检测
 
-        # 使用限制大小的队列，防止内存溢出
-        self.file_queue = asyncio.Queue(maxsize=max_queue_size)
+        # 不再使用队列，直接同步写入
+        # self.file_queue = asyncio.Queue(maxsize=max_queue_size)  # 已移除队列
         self._batch_buffer = []
         self._is_running = False
-        self._worker_task = None
+        self._worker_task = None  # 不再使用后台worker
         self._stats = {
             'total_files': 0,
             'batch_count': 0,
@@ -44,13 +44,14 @@ class BatchDBWriter:
         self._file_path_cache = {}
 
     async def start(self):
-        """启动批量写入器"""
+        """启动批量写入器（顺序执行模式：不使用队列和worker）"""
         if self._is_running:
             return
 
         self._is_running = True
-        self._worker_task = asyncio.create_task(self._batch_worker())
-        logger.info(f"批量数据库写入器已启动 (batch_size={self.batch_size}, max_queue={self.max_queue_size})")
+        # 顺序执行模式：不使用队列和worker，直接同步写入
+        # self._worker_task = asyncio.create_task(self._batch_worker())  # 已移除worker
+        logger.info(f"批量数据库写入器已启动（顺序执行模式，不使用队列）(batch_size={self.batch_size})")
 
     async def add_file(self, file_info: Dict):
         """添加文件到批量写入队列（可阻塞，只对临时性错误无限重试）"""
@@ -90,6 +91,21 @@ class BatchDBWriter:
                 if retry_count % 100 == 0:
                     logger.warning(f"批量写入队列未知错误，重试第 {retry_count} 次: {file_info.get('path', 'unknown')[:200]}, 错误: {str(e)}")
                 await asyncio.sleep(0.1)
+    
+    async def write_batch_sync(self, file_batch: List[Dict]):
+        """同步写入一个批次（顺序执行模式：扫描完写数据库，全部写入后再继续扫描）
+        
+        不使用队列，直接同步写入数据库，等待全部写入完成后再返回
+        """
+        if not file_batch:
+            return
+        
+        # 更新统计信息
+        self._stats['total_files'] += len(file_batch)
+        self._stats['batch_count'] += 1
+        
+        # 直接调用 _process_batch，不使用队列，同步等待写入完成
+        await self._process_batch(file_batch)
 
     async def _batch_worker(self):
         """批量写入worker"""
@@ -107,10 +123,14 @@ class BatchDBWriter:
 
                 # 收集批次数据（优化：快速收集，不等待）
                 try:
-                    # 等待第一个文件（超时时间短）
-                    first_file = await asyncio.wait_for(
-                        self.file_queue.get(), timeout=1.0
-                    )
+                    # 等待第一个文件（如果设置了超时则使用超时，否则无限等待）
+                    if self.timeout is not None:
+                        first_file = await asyncio.wait_for(
+                            self.file_queue.get(), timeout=float(self.timeout)
+                        )
+                    else:
+                        # 不使用超时检测，无限等待直到有文件
+                        first_file = await self.file_queue.get()
                     batch.append(first_file)
                     self.file_queue.task_done()
 
@@ -211,11 +231,39 @@ class BatchDBWriter:
                         insert_data.append(insert_params)
 
                 # 执行批量操作
+                # 注意：executemany 内部已经调用了 commit()，这里不需要再次提交
+                # 但是为了确保数据持久化，我们验证事务状态
                 if insert_data:
                     await self._batch_insert(conn, insert_data)
+                    # executemany 内部已经提交，验证状态
+                    actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                    transaction_status = actual_conn.info.transaction_status
+                    if transaction_status == 1:  # INTRANS: 仍在事务中，说明提交失败
+                        logger.warning(f"[批量写入] ⚠️ executemany 后事务状态仍为 INTRANS，尝试再次提交")
+                        try:
+                            await actual_conn.commit()
+                            logger.info(f"[批量写入] ✅ 已成功提交插入事务: {len(insert_data)} 个文件")
+                        except Exception as commit_err:
+                            logger.error(f"[批量写入] ❌ 提交插入事务失败: {commit_err}", exc_info=True)
+                            raise
+                    else:
+                        logger.debug(f"[批量写入] ✅ 插入事务已提交: {len(insert_data)} 个文件，状态={transaction_status}")
 
                 if update_data:
                     await self._batch_update(conn, update_data)
+                    # executemany 内部已经提交，验证状态
+                    actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                    transaction_status = actual_conn.info.transaction_status
+                    if transaction_status == 1:  # INTRANS: 仍在事务中，说明提交失败
+                        logger.warning(f"[批量写入] ⚠️ executemany 后事务状态仍为 INTRANS，尝试再次提交")
+                        try:
+                            await actual_conn.commit()
+                            logger.info(f"[批量写入] ✅ 已成功提交更新事务: {len(update_data)} 个文件")
+                        except Exception as commit_err:
+                            logger.error(f"[批量写入] ❌ 提交更新事务失败: {commit_err}", exc_info=True)
+                            raise
+                    else:
+                        logger.debug(f"[批量写入] ✅ 更新事务已提交: {len(update_data)} 个文件，状态={transaction_status}")
         elif is_sqlite():
             # SQLite 版本：使用原生 SQL
             from backup.sqlite_backup_db import insert_backup_files_sqlite
@@ -551,62 +599,228 @@ class BatchDBWriter:
         except Exception as e:
             logger.error(f"[Redis模式] 批量处理文件失败: {str(e)}", exc_info=True)
 
-    def _prepare_insert_params(self, file_info: Dict) -> tuple:
-        """准备插入参数（保持所有原有字段）"""
-        from datetime import timezone
+    def _build_file_record_fields(self, file_info: Dict) -> Dict[str, Any]:
+        """根据扫描器数据构建与 backup_files 表一致的字段"""
+
+        def ensure_datetime(value, fallback=None):
+            if isinstance(value, datetime):
+                return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+            return fallback
 
         file_path = file_info.get('path', '')
         file_stat = file_info.get('file_stat')
         file_name = file_info.get('name') or Path(file_path).name
-        directory_path = str(Path(file_path).parent) if file_path else None
 
-        # 保持所有原有的元数据处理逻辑
-        metadata = file_info.get('file_metadata') or {}
-        metadata.update({'scanned_at': datetime.now().isoformat()})
+        directory_path = None
+        if file_path:
+            parent = Path(file_path).parent
+            anchor = Path(file_path).anchor
+            parent_str = str(parent)
+            if parent_str and parent_str != anchor:
+                directory_path = parent_str
 
-        current_time = datetime.now()
-        current_time_tz = current_time.replace(tzinfo=timezone.utc)
+        display_name = file_info.get('display_name') or file_name
 
-        # 完整的18个字段参数（与原upsert_scanned_file_record保持一致）
+        file_type = (file_info.get('file_type') or '').lower()
+        if file_type not in {'file', 'directory', 'symlink'}:
+            if file_info.get('is_file', True):
+                file_type = 'file'
+            elif file_info.get('is_dir', False):
+                file_type = 'directory'
+            elif file_info.get('is_symlink', False):
+                file_type = 'symlink'
+            else:
+                file_type = 'file'
+
+        file_size = file_info.get('size')
+        if file_size is None and file_stat and hasattr(file_stat, 'st_size'):
+            file_size = file_stat.st_size
+        file_size = int(file_size or 0)
+
+        compressed_size = file_info.get('compressed_size')
+        file_permissions = file_info.get('permissions')
+        if not file_permissions and file_stat and hasattr(file_stat, 'st_mode'):
+            file_permissions = oct(file_stat.st_mode)[-3:]
+
+        file_owner = file_info.get('file_owner')
+        file_group = file_info.get('file_group')
+
+        created_time = ensure_datetime(
+            file_info.get('created_time'),
+            datetime.fromtimestamp(file_stat.st_ctime, tz=timezone.utc) if file_stat and hasattr(file_stat, 'st_ctime') else datetime.now(timezone.utc)
+        )
+        modified_time = ensure_datetime(
+            file_info.get('modified_time'),
+            datetime.fromtimestamp(file_stat.st_mtime, tz=timezone.utc) if file_stat and hasattr(file_stat, 'st_mtime') else created_time
+        )
+        accessed_time = ensure_datetime(
+            file_info.get('accessed_time'),
+            datetime.fromtimestamp(file_stat.st_atime, tz=timezone.utc) if file_stat and hasattr(file_stat, 'st_atime') else modified_time
+        )
+
+        tape_block_start = file_info.get('tape_block_start')
+        tape_block_count = file_info.get('tape_block_count')
+        compressed = bool(file_info.get('compressed', False))
+        encrypted = bool(file_info.get('encrypted', False))
+        checksum = file_info.get('checksum')
+        is_copy_success = bool(file_info.get('is_copy_success', False))
+        copy_status_at = ensure_datetime(file_info.get('copy_status_at'))
+        backup_time = ensure_datetime(file_info.get('backup_time'), datetime.now(timezone.utc))
+        chunk_number = file_info.get('chunk_number')
+        version = file_info.get('version', 1)
+
+        metadata_input = file_info.get('file_metadata')
+        if isinstance(metadata_input, str) and metadata_input.strip():
+            # 验证是否为有效的 JSON 字符串
+            try:
+                json.loads(metadata_input)  # 验证 JSON 格式
+                file_metadata = metadata_input
+            except (json.JSONDecodeError, TypeError):
+                # 如果不是有效的 JSON，重新构建
+                file_metadata = json.dumps({'scanned_at': datetime.now(timezone.utc).isoformat(), 'scanner_source': 'batch_db_writer'})
+        else:
+            metadata = {}
+            if isinstance(metadata_input, dict):
+                metadata.update(metadata_input)
+            metadata.setdefault('scanned_at', datetime.now(timezone.utc).isoformat())
+            metadata.setdefault('scanner_source', 'batch_db_writer')
+            file_metadata = json.dumps(metadata)
+        
+        # 确保 file_metadata 是字符串类型（不是 None）
+        if not file_metadata or not isinstance(file_metadata, str):
+            file_metadata = json.dumps({'scanned_at': datetime.now(timezone.utc).isoformat(), 'scanner_source': 'batch_db_writer'})
+
+        tags_input = file_info.get('tags')
+        if isinstance(tags_input, str) and tags_input.strip():
+            # 验证是否为有效的 JSON 字符串
+            try:
+                json.loads(tags_input)  # 验证 JSON 格式
+                tags = tags_input
+            except (json.JSONDecodeError, TypeError):
+                # 如果不是有效的 JSON，重新构建
+                tags = json.dumps({'status': 'scanned'})
+        else:
+            tags_data = {'status': 'scanned'}
+            if isinstance(tags_input, dict):
+                tags_data.update(tags_input)
+            tags = json.dumps(tags_data)
+        
+        # 确保 tags 是字符串类型（不是 None）
+        if not tags or not isinstance(tags, str):
+            tags = json.dumps({'status': 'scanned'})
+
+        return {
+            'backup_set_id': self.backup_set_db_id,
+            'file_path': file_path,
+            'file_name': file_name,
+            'directory_path': directory_path,
+            'display_name': display_name,
+            'file_type': file_type,
+            'file_size': file_size,
+            'compressed_size': compressed_size,
+            'file_permissions': file_permissions,
+            'file_owner': file_owner,
+            'file_group': file_group,
+            'created_time': created_time,
+            'modified_time': modified_time,
+            'accessed_time': accessed_time,
+            'tape_block_start': tape_block_start,
+            'tape_block_count': tape_block_count,
+            'compressed': compressed,
+            'encrypted': encrypted,
+            'checksum': checksum,
+            'is_copy_success': is_copy_success,
+            'copy_status_at': copy_status_at,
+            'backup_time': backup_time,
+            'chunk_number': chunk_number,
+            'version': version,
+            'file_metadata': file_metadata,
+            'tags': tags
+        }
+
+    def _prepare_insert_params(self, file_info: Dict) -> tuple:
+        """准备插入参数（保持与内存数据库同步字段一致）"""
+        fields = self._build_file_record_fields(file_info)
+
         return (
-            self.backup_set_db_id,                                      # $1 backup_set_id
-            file_path,                                                  # $2 file_path
-            file_name,                                                  # $3 file_name
-            'file',                                                     # $4 file_type (as enum)
-            file_stat.st_size if file_stat else 0,                      # $5 file_size
-            None,                                                       # $6 compressed_size
-            oct(file_stat.st_mode)[-3:] if file_stat else None,         # $7 file_permissions
-            datetime.fromtimestamp(file_stat.st_ctime, tz=timezone.utc) if file_stat else None,  # $8 created_time
-            datetime.fromtimestamp(file_stat.st_mtime, tz=timezone.utc) if file_stat else None,  # $9 modified_time
-            datetime.fromtimestamp(file_stat.st_atime, tz=timezone.utc) if file_stat else None,  # $10 accessed_time
-            False,                                                      # $11 compressed
-            None,                                                       # $12 checksum
-            current_time_tz,                                           # $13 backup_time
-            None,                                                       # $14 chunk_number
-            None,                                                       # $15 tape_block_start
-            json.dumps(metadata),                                      # $16 file_metadata (JSON)
-            False,                                                      # $17 is_copy_success
-            None                                                        # $18 copy_status_at
+            fields['backup_set_id'],
+            fields['file_path'],
+            fields['file_name'],
+            fields['directory_path'],
+            fields['display_name'],
+            fields['file_type'],
+            fields['file_size'],
+            fields['compressed_size'],
+            fields['file_permissions'],
+            fields['file_owner'],
+            fields['file_group'],
+            fields['created_time'],
+            fields['modified_time'],
+            fields['accessed_time'],
+            fields['tape_block_start'],
+            fields['tape_block_count'],
+            fields['compressed'],
+            fields['encrypted'],
+            fields['checksum'],
+            fields['is_copy_success'],
+            fields['copy_status_at'],
+            fields['backup_time'],
+            fields['chunk_number'],
+            fields['version'],
+            fields['file_metadata'],
+            fields['tags']
         )
 
     def _prepare_update_params(self, file_info: Dict, existing_id: int) -> tuple:
-        """准备更新参数（保持所有原有字段）"""
-        # 获取插入参数，但替换ID用于WHERE条件
-        insert_params = self._prepare_insert_params(file_info)
-        return (existing_id, *insert_params[1:])  # id + 其他17个字段
+        """准备更新参数"""
+        fields = self._build_file_record_fields(file_info)
+
+        return (
+            existing_id,
+            fields['file_name'],
+            fields['directory_path'],
+            fields['display_name'],
+            fields['file_type'],
+            fields['file_size'],
+            fields['compressed_size'],
+            fields['file_permissions'],
+            fields['file_owner'],
+            fields['file_group'],
+            fields['created_time'],
+            fields['modified_time'],
+            fields['accessed_time'],
+            fields['tape_block_start'],
+            fields['tape_block_count'],
+            fields['compressed'],
+            fields['encrypted'],
+            fields['checksum'],
+            fields['is_copy_success'],
+            fields['copy_status_at'],
+            fields['backup_time'],
+            fields['chunk_number'],
+            fields['version'],
+            fields['file_metadata'],
+            fields['tags']
+        )
 
     async def _batch_insert(self, conn, insert_data: List[tuple]):
         """批量插入文件记录"""
         await conn.executemany(
             """
             INSERT INTO backup_files (
-                backup_set_id, file_path, file_name, file_type, file_size,
-                compressed_size, file_permissions, created_time, modified_time,
-                accessed_time, compressed, checksum, backup_time, chunk_number,
-                tape_block_start, file_metadata, is_copy_success, copy_status_at
+                backup_set_id, file_path, file_name, directory_path, display_name,
+                file_type, file_size, compressed_size, file_permissions, file_owner,
+                file_group, created_time, modified_time, accessed_time, tape_block_start,
+                tape_block_count, compressed, encrypted, checksum, is_copy_success,
+                copy_status_at, backup_time, chunk_number, version, file_metadata, tags,
+                created_at, updated_at
             ) VALUES (
-                $1, $2, $3, $4::backupfiletype, $5, $6, $7, $8, $9,
-                $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18
+                $1, $2, $3, $4, $5,
+                $6::backupfiletype, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15,
+                $16, $17, $18, $19, $20,
+                $21, $22, $23, $24, CAST($25 AS jsonb), CAST($26 AS jsonb),
+                NOW(), NOW()
             )
             """,
             insert_data
@@ -618,12 +832,31 @@ class BatchDBWriter:
         await conn.executemany(
             """
             UPDATE backup_files
-            SET file_name = $2, directory_path = $3, file_type = $4::backupfiletype,
-                file_size = $5, compressed_size = $6, file_permissions = $7,
-                created_time = $8, modified_time = $9, accessed_time = $10,
-                compressed = $11, checksum = $12, backup_time = $13, chunk_number = $14,
-                tape_block_start = $15, file_metadata = $16::jsonb, copy_status_at = $17,
-                updated_at = $18
+            SET file_name = $2,
+                directory_path = $3,
+                display_name = $4,
+                file_type = $5::backupfiletype,
+                file_size = $6,
+                compressed_size = $7,
+                file_permissions = $8,
+                file_owner = $9,
+                file_group = $10,
+                created_time = $11,
+                modified_time = $12,
+                accessed_time = $13,
+                tape_block_start = $14,
+                tape_block_count = $15,
+                compressed = $16,
+                encrypted = $17,
+                checksum = $18,
+                is_copy_success = $19,
+                copy_status_at = $20,
+                backup_time = $21,
+                chunk_number = $22,
+                version = $23,
+                file_metadata = $24::jsonb,
+                tags = $25::jsonb,
+                updated_at = NOW()
             WHERE id = $1
             """,
             update_data
@@ -2621,7 +2854,14 @@ class BackupDB:
                     'original_path': file_path
                 })
                 
-                metadata_json = json.dumps(metadata)
+                # 确保 metadata_json 是有效的 JSON 字符串
+                try:
+                    metadata_json = json.dumps(metadata) if metadata else '{}'
+                    # 验证 JSON 格式
+                    json.loads(metadata_json)
+                except (TypeError, ValueError) as json_error:
+                    logger.warning(f"[mark_files_as_copied] metadata JSON 序列化失败: {json_error}, 使用空对象")
+                    metadata_json = '{}'
                 
                 if file_path in existing_map:
                     # 批量更新（通过 id）
@@ -2704,12 +2944,13 @@ class BackupDB:
                                         backup_time = $5,
                                         chunk_number = $6,
                                         tape_block_start = $7,
-                                        file_metadata = $8::jsonb,
+                                        file_metadata = CAST($8 AS jsonb),
                                         is_copy_success = TRUE,
                                         copy_status_at = $9
                                     WHERE backup_set_id = $10 AND file_path = $1
                                     """,
-                                    [(row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], backup_set_db_id) for row in batch_update]
+                                    # 参数顺序必须按照 SQL 中占位符出现的顺序：$2, $3, $4, $5, $6, $7, $8, $9, $10, $1
+                                    [(row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], backup_set_db_id, row[0]) for row in batch_update]
                                 ),
                                 timeout=300.0  # 300秒超时
                             )
@@ -2725,12 +2966,13 @@ class BackupDB:
                                         backup_time = $5,
                                         chunk_number = $6,
                                         tape_block_start = $7,
-                                        file_metadata = $8::jsonb,
+                                        file_metadata = CAST($8 AS jsonb),
                                         is_copy_success = TRUE,
                                         copy_status_at = $9
                                     WHERE id = $1
                                     """,
-                                    batch_update
+                                    # 参数顺序必须按照 SQL 中占位符出现的顺序：$2, $3, $4, $5, $6, $7, $8, $9, $1
+                                    [(row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[0]) for row in batch_update]
                                 ),
                                 timeout=300.0  # 300秒超时（增加超时时间）
                             )
@@ -2762,7 +3004,7 @@ class BackupDB:
                                     backup_time = $5,
                                     chunk_number = $6,
                                     tape_block_start = $7,
-                                    file_metadata = $8::jsonb,
+                                    file_metadata = CAST($8 AS jsonb),
                                     is_copy_success = TRUE,
                                     copy_status_at = $9
                                 WHERE backup_set_id = $10 AND file_path = $1
@@ -2783,12 +3025,13 @@ class BackupDB:
                                     backup_time = $5,
                                     chunk_number = $6,
                                     tape_block_start = $7,
-                                    file_metadata = $8::jsonb,
+                                    file_metadata = CAST($8 AS jsonb),
                                     is_copy_success = TRUE,
                                     copy_status_at = $9
                                 WHERE id = $1
                                 """,
-                                update_data
+                                # 参数顺序必须按照 SQL 中占位符出现的顺序：$2, $3, $4, $5, $6, $7, $8, $9, $1
+                                [(row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[0]) for row in update_data]
                             ),
                             timeout=300.0  # 300秒超时（增加超时时间）
                         )

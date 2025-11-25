@@ -111,7 +111,7 @@ class BackupTaskManager:
                         (task_name, task_type, description, status, source_paths, exclude_patterns,
                          compression_enabled, encryption_enabled, retention_days, scheduled_time,
                          created_by, created_at, updated_at)
-                        VALUES ($1, $2::backuptasktype, $3, $4::backuptaskstatus, $5::json, $6::json,
+                        VALUES ($1, $2::backuptasktype, $3, $4::backuptaskstatus, $5::jsonb, $6::jsonb,
                                 $7, $8, $9, $10, $11, $12, $13)
                         RETURNING id
                         """,

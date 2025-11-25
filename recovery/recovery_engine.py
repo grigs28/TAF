@@ -430,19 +430,23 @@ class RecoveryEngine:
                 # openGauss 原生SQL查询
                 # 使用连接池
                 async with get_opengauss_connection() as conn:
-                    # 首先根据 set_id 查找备份集的 id
-                    backup_set_row = await conn.fetchrow(
-                        "SELECT id FROM backup_sets WHERE set_id = $1",
-                        backup_set_id
-                    )
+                    try:
+                        # 首先根据 set_id 查找备份集的 id
+                        backup_set_row = await conn.fetchrow(
+                            "SELECT id FROM backup_sets WHERE set_id = $1",
+                            backup_set_id
+                        )
+                    except Exception as query_error:
+                        logger.error(f"[openGauss] 查询备份集ID失败: backup_set_id={backup_set_id}, 错误: {str(query_error)}", exc_info=True)
+                        return []
                     
                     if not backup_set_row:
-                        logger.warning(f"备份集不存在: {backup_set_id}")
+                        logger.warning(f"[openGauss] 备份集不存在: {backup_set_id}")
                         return []
 
                     backup_set_db_id = backup_set_row['id']
 
-                    # 查询该备份集的所有文件
+                    # 查询该备份集的所有文件（恢复时应该显示所有已扫描的文件，不管是否已复制到磁带）
                     sql = """
                         SELECT id, file_path, file_name, directory_path, display_name,
                                file_type, file_size, compressed_size,
@@ -450,10 +454,13 @@ class RecoveryEngine:
                                compressed, checksum, backup_time, chunk_number
                         FROM backup_files
                         WHERE backup_set_id = $1
-                          AND is_copy_success = TRUE
                         ORDER BY file_path ASC
                     """
-                    rows = await conn.fetch(sql, backup_set_db_id)
+                    try:
+                        rows = await conn.fetch(sql, backup_set_db_id)
+                    except Exception as query_error:
+                        logger.error(f"[openGauss] 查询备份集文件列表失败: backup_set_id={backup_set_id}, backup_set_db_id={backup_set_db_id}, 错误: {str(query_error)}", exc_info=True)
+                        return []
 
                     # 转换为字典格式
                     for row in rows:
@@ -492,13 +499,13 @@ class RecoveryEngine:
                     
                     backup_set_db_id = row[0]
                     
-                    # 查询该备份集的所有文件
+                    # 查询该备份集的所有文件（恢复时应该显示所有已扫描的文件，不管是否已复制到磁带）
                     cursor = await conn.execute("""
                         SELECT id, file_path, file_name, directory_path, display_name, file_type,
                                file_size, compressed_size, file_permissions, created_time, modified_time,
                                accessed_time, compressed, checksum, backup_time, chunk_number
                         FROM backup_files
-                        WHERE backup_set_id = ? AND is_copy_success = 1
+                        WHERE backup_set_id = ?
                         ORDER BY file_path
                     """, (backup_set_db_id,))
                     rows = await cursor.fetchall()
@@ -790,7 +797,6 @@ class RecoveryEngine:
                                 REPLACE(file_path, '\\', '/') as normalized_path
                             FROM backup_files
                             WHERE backup_set_id = $1
-                              AND is_copy_success = TRUE
                         ),
                         first_levels AS (
                             SELECT 
@@ -888,7 +894,6 @@ class RecoveryEngine:
                                                compressed, checksum, backup_time, chunk_number
                                         FROM backup_files
                                         WHERE backup_set_id = $1 AND file_path = $2
-                                          AND is_copy_success = TRUE
                                         LIMIT 1
                                         """,
                                         backup_set_db_id,
@@ -983,7 +988,6 @@ class RecoveryEngine:
                                                   OR REPLACE(file_path, '\\', '/') LIKE $3
                                               )
                                               AND REPLACE(file_path, '\\', '/') != $4
-                                              AND is_copy_success = TRUE
                                               LIMIT 1
                                         ) as has_children
                                     """
@@ -1067,7 +1071,6 @@ class RecoveryEngine:
                                 REPLACE(file_path, '\\', '/') as normalized_path
                             FROM backup_files
                             WHERE backup_set_id = ?
-                              AND is_copy_success = 1
                         ),
                         first_levels AS (
                             SELECT 
@@ -1112,7 +1115,7 @@ class RecoveryEngine:
                                        file_size, compressed_size, file_permissions, created_time, modified_time,
                                        accessed_time, compressed, checksum, backup_time, chunk_number
                                 FROM backup_files
-                                WHERE backup_set_id = ? AND file_path = ? AND is_copy_success = 1
+                                WHERE backup_set_id = ? AND file_path = ?
                                 LIMIT 1
                             """, (backup_set_db_id, sample_path))
                             file_row = await file_cursor.fetchone()
@@ -1174,7 +1177,6 @@ class RecoveryEngine:
                                       OR REPLACE(file_path, '\\', '/') LIKE ?
                                   )
                                   AND REPLACE(file_path, '\\', '/') != ?
-                                  AND is_copy_success = 1
                             """, (backup_set_db_id, like_pattern1, like_pattern2, first_level))
                             child_row = await child_cursor.fetchone()
                             has_children = (child_row[0] > 0) if child_row else True
@@ -1411,14 +1413,18 @@ class RecoveryEngine:
             if is_opengauss():
                 # 使用连接池
                 async with get_opengauss_connection() as conn:
-                    # 首先根据 set_id 查找备份集的 id
-                    backup_set_row = await conn.fetchrow(
-                        "SELECT id FROM backup_sets WHERE set_id = $1",
-                        backup_set_id
-                    )
+                    try:
+                        # 首先根据 set_id 查找备份集的 id
+                        backup_set_row = await conn.fetchrow(
+                            "SELECT id FROM backup_sets WHERE set_id = $1",
+                            backup_set_id
+                        )
+                    except Exception as query_error:
+                        logger.error(f"[openGauss] 查询备份集ID失败: backup_set_id={backup_set_id}, 错误: {str(query_error)}", exc_info=True)
+                        return []
                     
                     if not backup_set_row:
-                        logger.warning(f"备份集不存在: {backup_set_id}")
+                        logger.warning(f"[openGauss] 备份集不存在: {backup_set_id}")
                         return []
                     
                     backup_set_db_id = backup_set_row['id']
@@ -1436,7 +1442,6 @@ class RecoveryEngine:
                                    compressed, checksum, backup_time, chunk_number
                             FROM backup_files
                             WHERE backup_set_id = $1
-                              AND is_copy_success = TRUE
                               AND (
                                   REPLACE(file_path, '\\', '/') = $2
                                   OR REPLACE(file_path, '\\', '/') LIKE $3
@@ -1447,7 +1452,11 @@ class RecoveryEngine:
                         # 匹配模式：D:/ 或 D:\ 开头的路径
                         like_pattern1 = normalized_dir + '/%'
                         like_pattern2 = normalized_dir + '\\%'
-                        rows = await conn.fetch(sql, backup_set_db_id, normalized_dir, like_pattern1, like_pattern2)
+                        try:
+                            rows = await conn.fetch(sql, backup_set_db_id, normalized_dir, like_pattern1, like_pattern2)
+                        except Exception as query_error:
+                            logger.error(f"[openGauss] 查询目录内容失败: backup_set_id={backup_set_id}, directory_path={directory_path}, 错误: {str(query_error)}", exc_info=True)
+                            return []
                     else:
                         # 根目录
                         sql = """
@@ -1457,10 +1466,13 @@ class RecoveryEngine:
                                    compressed, checksum, backup_time, chunk_number
                             FROM backup_files
                             WHERE backup_set_id = $1
-                              AND is_copy_success = TRUE
                             ORDER BY file_path ASC
                         """
-                        rows = await conn.fetch(sql, backup_set_db_id)
+                        try:
+                            rows = await conn.fetch(sql, backup_set_db_id)
+                        except Exception as query_error:
+                            logger.error(f"[openGauss] 查询根目录内容失败: backup_set_id={backup_set_id}, 错误: {str(query_error)}", exc_info=True)
+                            return []
                     
                     # 处理查询结果
                     normalized_dir = directory_path.replace('\\', '/') if directory_path else ''
@@ -1574,7 +1586,7 @@ class RecoveryEngine:
                                    file_size, compressed_size, file_permissions, created_time, modified_time,
                                    accessed_time, compressed, checksum, backup_time, chunk_number
                             FROM backup_files
-                            WHERE backup_set_id = ? AND is_copy_success = 1
+                            WHERE backup_set_id = ?
                               AND (
                                   REPLACE(file_path, '\\', '/') = ?
                                   OR REPLACE(file_path, '\\', '/') LIKE ?
@@ -1588,7 +1600,7 @@ class RecoveryEngine:
                                    file_size, compressed_size, file_permissions, created_time, modified_time,
                                    accessed_time, compressed, checksum, backup_time, chunk_number
                             FROM backup_files
-                            WHERE backup_set_id = ? AND is_copy_success = 1
+                            WHERE backup_set_id = ?
                             ORDER BY file_path
                         """, (backup_set_db_id,))
                     
@@ -1919,32 +1931,41 @@ class RecoveryEngine:
                 # openGauss 原生SQL查询
                 # 使用连接池
                 async with get_opengauss_connection() as conn:
-                    row = await conn.fetchrow(
-                        """
-                        SELECT id, set_id, set_name, backup_group, backup_type, backup_time,
-                               total_files, total_bytes, compressed_bytes, tape_id, status
-                        FROM backup_sets
-                        WHERE set_id = $1
-                        """,
-                        backup_set_id
-                    )
+                    try:
+                        row = await conn.fetchrow(
+                            """
+                            SELECT id, set_id, set_name, backup_group, backup_type, backup_time,
+                                   total_files, total_bytes, compressed_bytes, tape_id, status
+                            FROM backup_sets
+                            WHERE set_id = $1
+                            """,
+                            backup_set_id
+                        )
+                    except Exception as query_error:
+                        logger.error(f"[openGauss] 查询备份集信息失败: backup_set_id={backup_set_id}, 错误: {str(query_error)}", exc_info=True)
+                        raise
                     
                     if not row:
+                        logger.debug(f"[openGauss] 备份集不存在: backup_set_id={backup_set_id}")
                         return None
                     
-                    return {
-                        'id': row['id'],
-                        'set_id': row['set_id'],
-                        'set_name': row['set_name'],
-                        'backup_group': row['backup_group'],
-                        'backup_type': row['backup_type'].value if hasattr(row['backup_type'], 'value') else str(row['backup_type']),
-                        'backup_time': row['backup_time'].isoformat() if isinstance(row['backup_time'], datetime) else str(row['backup_time']),
-                        'total_files': row['total_files'] or 0,
-                        'total_bytes': row['total_bytes'] or 0,
-                        'compressed_bytes': row['compressed_bytes'] or 0,
-                        'tape_id': row['tape_id'],
-                        'status': row['status'].value if hasattr(row['status'], 'value') else str(row['status'])
-                    }
+                    try:
+                        return {
+                            'id': row['id'],
+                            'set_id': row['set_id'],
+                            'set_name': row['set_name'],
+                            'backup_group': row['backup_group'],
+                            'backup_type': row['backup_type'].value if hasattr(row['backup_type'], 'value') else str(row['backup_type']),
+                            'backup_time': row['backup_time'].isoformat() if isinstance(row['backup_time'], datetime) else str(row['backup_time']),
+                            'total_files': row['total_files'] or 0,
+                            'total_bytes': row['total_bytes'] or 0,
+                            'compressed_bytes': row['compressed_bytes'] or 0,
+                            'tape_id': row['tape_id'],
+                            'status': row['status'].value if hasattr(row['status'], 'value') else str(row['status'])
+                        }
+                    except Exception as parse_error:
+                        logger.error(f"[openGauss] 解析备份集信息失败: backup_set_id={backup_set_id}, 错误: {str(parse_error)}", exc_info=True)
+                        raise
             else:
                 # 使用原生SQL查询（SQLite）
                 async with get_sqlite_connection() as conn:
@@ -2271,16 +2292,20 @@ class RecoveryEngine:
                 # openGauss 原生SQL查询
                 # 使用连接池
                 async with get_opengauss_connection() as conn:
-                    # 查询所有不重复的备份组，按时间倒序
-                    sql = """
-                        SELECT DISTINCT backup_group
-                        FROM backup_sets
-                        WHERE LOWER(status::text) = LOWER('ACTIVE')
-                        ORDER BY backup_group DESC
-                        LIMIT 12
-                    """
-                    rows = await conn.fetch(sql)
-                    groups = [row['backup_group'] for row in rows]
+                    try:
+                        # 查询所有不重复的备份组，按时间倒序
+                        sql = """
+                            SELECT DISTINCT backup_group
+                            FROM backup_sets
+                            WHERE LOWER(status::text) = LOWER('ACTIVE')
+                            ORDER BY backup_group DESC
+                            LIMIT 12
+                        """
+                        rows = await conn.fetch(sql)
+                        groups = [row['backup_group'] for row in rows]
+                    except Exception as query_error:
+                        logger.error(f"[openGauss] 查询备份组列表失败: 错误: {str(query_error)}", exc_info=True)
+                        groups = []
             else:
                 # 使用SQLite数据库
                 if not is_sqlite():

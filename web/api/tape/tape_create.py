@@ -11,6 +11,7 @@ import json
 import re
 import os
 import asyncio
+import threading
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Request, Depends, BackgroundTasks
@@ -136,6 +137,7 @@ async def create_tape(request: CreateTapeRequest, http_request: Request, backgro
 
         from config.settings import get_settings
         from utils.scheduler.db_utils import is_redis
+        from utils.db_connection_helper import get_psycopg_connection_from_url
         
         settings = get_settings()
         database_url = settings.DATABASE_URL
@@ -143,8 +145,9 @@ async def create_tape(request: CreateTapeRequest, http_request: Request, backgro
         # 检查是否为 Redis
         is_redis_mode = is_redis()
         
-        # 检查是否为 SQLite
-        is_sqlite = database_url.startswith("sqlite:///") or database_url.startswith("sqlite+aiosqlite:///")
+        # 检查是否为 SQLite（使用不同的变量名，避免覆盖导入的函数）
+        from utils.scheduler.sqlite_utils import is_sqlite as is_sqlite_func
+        is_sqlite_mode = is_sqlite_func() or database_url.startswith("sqlite:///") or database_url.startswith("sqlite+aiosqlite:///")
         
         # 统一生成卷标与盘符
         current_datetime = datetime.now()
@@ -168,33 +171,22 @@ async def create_tape(request: CreateTapeRequest, http_request: Request, backgro
             from backup.redis_tape_db import check_tape_exists_redis, check_tape_label_exists_redis
             tape_exists = await check_tape_exists_redis(tape_id_value)
             label_exists = await check_tape_label_exists_redis(final_label)
-        elif is_sqlite:
+        elif is_opengauss():
+            # 使用openGauss连接查询
+            from utils.scheduler.db_utils import get_opengauss_connection
+            async with get_opengauss_connection() as conn:
+                # 检查tape_id是否存在
+                tape_id_row = await conn.fetchrow("SELECT 1 FROM tape_cartridges WHERE tape_id = $1", tape_id_value)
+                tape_exists = tape_id_row is not None
+                # 检查label是否存在
+                label_row = await conn.fetchrow("SELECT 1 FROM tape_cartridges WHERE label = $1", final_label)
+                label_exists = label_row is not None
+        elif is_sqlite_mode:
             # 使用 SQLAlchemy 查询 SQLite
             tape_exists, label_exists = await check_tape_exists_sqlite(db_manager, tape_id_value, final_label)
         else:
-            # 使用 psycopg2 查询 PostgreSQL/openGauss
-            import psycopg2
-            import psycopg2.extras
-            
-            # 解析URL
-            if database_url.startswith("opengauss://"):
-                database_url = database_url.replace("opengauss://", "postgresql://", 1)
-            pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
-            match = re.match(pattern, database_url)
-            
-            if not match:
-                raise ValueError("无法解析数据库连接URL")
-            
-            username, password, host, port, database = match.groups()
-            db_connect_kwargs = {
-                "host": host,
-                "port": port,
-                "user": username,
-                "password": password,
-                "database": database
-            }
-            
-            conn = psycopg2.connect(**db_connect_kwargs)
+            # 使用统一的连接辅助函数（支持 psycopg2 和 psycopg3）
+            conn, is_psycopg3 = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
             try:
                 with conn.cursor() as cur:
                     # 检查tape_id是否存在
@@ -234,13 +226,13 @@ async def create_tape(request: CreateTapeRequest, http_request: Request, backgro
                 sequence = count + 1
                 generated_serial = f"TP{mm:02d}{sequence:02d}"
                 logger.info(f"[Redis模式] 自动生成序列号: {generated_serial} (创建年份={year}, 创建月份={month}, 序号={sequence}, 卷标={final_label})")
-            elif is_sqlite:
+            elif is_sqlite_mode:
                 count = await count_serial_numbers_sqlite(db_manager, f"TP{mm:02d}%")
                 sequence = count + 1
                 generated_serial = f"TP{mm:02d}{sequence:02d}"
                 logger.info(f"自动生成序列号: {generated_serial} (创建年份={year}, 创建月份={month}, 序号={sequence}, 卷标={final_label})")
             else:
-                conn = psycopg2.connect(**db_connect_kwargs)
+                conn, _ = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
                 try:
                     with conn.cursor() as cur:
                         # 查询当前月份已有多少张磁盘（查询TP + 月份开头的序列号）
@@ -294,7 +286,7 @@ async def create_tape(request: CreateTapeRequest, http_request: Request, backgro
                         serial_param = generated_serial
                         request.serial_number = generated_serial
                         logger.info(f"[Redis模式] 重新生成序列号: {generated_serial} (创建年份={expected_year}, 创建月份={expected_month}, 序号={sequence})")
-                    elif is_sqlite:
+                    elif is_sqlite_mode:
                         count = await count_serial_numbers_sqlite(db_manager, f"TP{mm:02d}%")
                         sequence = count + 1
                         generated_serial = f"TP{mm:02d}{sequence:02d}"
@@ -302,7 +294,7 @@ async def create_tape(request: CreateTapeRequest, http_request: Request, backgro
                         request.serial_number = generated_serial
                         logger.info(f"重新生成序列号: {generated_serial} (创建年份={expected_year}, 创建月份={expected_month}, 序号={sequence})")
                     else:
-                        conn = psycopg2.connect(**db_connect_kwargs)
+                        conn, _ = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
                         try:
                             with conn.cursor() as cur:
                                 cur.execute("""
@@ -347,14 +339,14 @@ async def create_tape(request: CreateTapeRequest, http_request: Request, backgro
                     serial_param = generated_serial
                     request.serial_number = generated_serial
                     logger.info(f"[Redis模式] 自动生成序列号: {generated_serial} (创建年份={year}, 创建月份={month}, 序号={sequence}, 卷标={final_label})")
-                elif is_sqlite:
+                elif is_sqlite_mode:
                     count = await count_serial_numbers_sqlite(db_manager, f"TP{mm:02d}%")
                     sequence = count + 1
                     generated_serial = f"TP{mm:02d}{sequence:02d}"
                     serial_param = generated_serial
                     request.serial_number = generated_serial
                 else:
-                    conn = psycopg2.connect(**db_connect_kwargs)
+                    conn, _ = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
                     try:
                         with conn.cursor() as cur:
                             cur.execute("""
@@ -376,203 +368,344 @@ async def create_tape(request: CreateTapeRequest, http_request: Request, backgro
             format_tape = True
             logger.info(f"数据库中没有卷标 {final_label}，将格式化磁盘并添加卷标和SN: {serial_param}")
         
-        # 先更新数据库，格式化在后台执行（避免阻塞前端）
+        # 如果选择格式化，不在前面写数据库，在线程中顺序执行：LTFS格式化 -> 获取卷标 -> 写数据库
+        # 只有格式化成功且读取卷标成功后才写数据库
         if format_tape:
             operation_desc = "更新已有记录并" if tape_exists else "创建新记录并"
             logger.info(
-                "%s使用 LtfsCmdFormat.exe 格式化磁带（后台执行）: tape_id=%s, drive=%s, label=%s", 
+                "%s使用 LtfsCmdFormat.exe 格式化磁带（线程执行）: tape_id=%s, drive=%s, label=%s", 
                 operation_desc, tape_id_value, drive_letter, final_label
             )
             
-            # 在后台执行格式化任务，不阻塞API响应
-            async def format_tape_background():
-                """后台格式化任务"""
+            # 标记：需要格式化，将在线程中执行
+            need_format = True
+            
+            # 使用线程异步执行格式化任务，顺序执行：LTFS格式化 -> 获取卷标 -> 更新数据库
+            def format_tape_thread():
+                """线程中执行格式化任务（顺序执行：格式化 -> 获取卷标 -> 写数据库）"""
                 try:
-                    format_result = await tape_tools_manager.format_tape_ltfs(
-                        drive_letter=drive_letter,
-                        volume_label=final_label,
-                        serial=serial_param,
-                        eject_after=False
-                    )
+                    # 创建新的事件循环用于线程（用于异步操作如读取卷标、写数据库）
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
                     
-                    if format_result.get("success"):
-                        logger.info("LtfsCmdFormat 格式化成功: tape_id=%s, label=%s", tape_id_value, final_label)
-                        
-                        # 格式化成功后，从磁盘读取实际的卷标和SN，然后更新数据库
+                    async def format_tape_async():
+                        """异步格式化任务"""
                         try:
-                            import asyncio
+                            # 步骤1: LTFS格式化（使用同步版本，避免Windows线程限制）
+                            logger.info(f"[线程] 步骤1: 开始LTFS格式化 - tape_id={tape_id_value}, drive={drive_letter}, label={final_label}")
+                            format_result = tape_tools_manager.format_tape_ltfs_sync(
+                                drive_letter=drive_letter,
+                                volume_label=final_label,
+                                serial=serial_param,
+                                eject_after=False
+                            )
+                            
+                            if not format_result.get("success"):
+                                error_detail = format_result.get("stderr") or format_result.get("stdout") or "LtfsCmdFormat执行失败"
+                                logger.error(f"[线程] LTFS格式化失败: {error_detail}")
+                                
+                                # 格式化失败，不写数据库，直接返回
+                                logger.warning(f"[线程] 格式化失败，不写入数据库 - tape_id={tape_id_value}")
+                                
+                                # 发送钉钉通知
+                                try:
+                                    if system and hasattr(system, 'dingtalk_notifier') and system.dingtalk_notifier:
+                                        await system.dingtalk_notifier.send_tape_format_notification(
+                                            tape_id=tape_id_value,
+                                            status="failed",
+                                            error_detail=error_detail,
+                                            volume_label=final_label,
+                                            serial_number=serial_param
+                                        )
+                                except Exception as notify_error:
+                                    logger.error(f"发送格式化失败钉钉通知异常: {str(notify_error)}", exc_info=True)
+                                
+                                await log_operation(
+                                    operation_type=OperationType.CREATE,
+                                    resource_type="tape",
+                                    resource_id=tape_id_value,
+                                    resource_name=final_label,
+                                    operation_name="磁带格式化",
+                                    operation_description=f"LtfsCmdFormat 格式化磁带 {tape_id_value} 失败（线程执行）",
+                                    category="tape",
+                                    success=False,
+                                    error_message=error_detail,
+                                    ip_address=ip_address,
+                                    request_method=request_method,
+                                    request_url=request_url
+                                )
+                                return
+                            
+                            logger.info(f"[线程] 步骤1完成: LTFS格式化成功 - tape_id={tape_id_value}")
+                            
+                            # 步骤2: 获取卷标
+                            logger.info(f"[线程] 步骤2: 开始获取卷标 - tape_id={tape_id_value}")
                             # 等待几秒，确保 LTFS 自动挂载完成
                             await asyncio.sleep(3)
                             
                             # 确认盘符挂载，如果尚未挂载则尝试重新分配
                             drive_with_colon = drive_letter if drive_letter.endswith(':') else f"{drive_letter}:"
                             if not os.path.exists(drive_with_colon):
-                                logger.info(f"LTFS盘符 {drive_with_colon} 暂未挂载，尝试重新分配")
+                                logger.info(f"[线程] LTFS盘符 {drive_with_colon} 暂未挂载，尝试重新分配")
                                 assign_result = await tape_tools_manager.assign_tape_ltfs(drive_letter)
                                 if not assign_result.get("success"):
-                                    logger.warning(f"重新分配 {drive_with_colon} 失败，错误: {assign_result.get('error')}, 暂不读取卷标")
+                                    logger.warning(f"[线程] 重新分配 {drive_with_colon} 失败，错误: {assign_result.get('error')}, 暂不读取卷标")
                                     label_result = None
                                 else:
                                     await asyncio.sleep(1)  # 再给 1 秒钟完成挂载
+                                    # 使用同步版本读取卷标（避免Windows线程中的asyncio问题）
                                     try:
-                                        label_result = await asyncio.wait_for(
-                                            tape_tools_manager.read_tape_label_windows(),
-                                            timeout=60.0
-                                        )
-                                    except asyncio.TimeoutError:
-                                        logger.warning("读取磁带卷标超时（60秒）")
-                                        label_result = {"success": False, "error": "读取卷标超时（60秒）"}
+                                        label_result = tape_tools_manager.read_tape_label_windows_sync(drive_letter)
+                                    except Exception as e:
+                                        logger.error(f"[线程] 读取卷标异常: {str(e)}", exc_info=True)
+                                        label_result = {"success": False, "error": f"读取卷标异常: {str(e)}"}
                             else:
+                                # 使用同步版本读取卷标（避免Windows线程中的asyncio问题）
                                 try:
-                                    label_result = await asyncio.wait_for(
-                                        tape_tools_manager.read_tape_label_windows(),
-                                        timeout=60.0
-                                    )
-                                except asyncio.TimeoutError:
-                                    logger.warning("读取磁带卷标超时（60秒）")
-                                    label_result = {"success": False, "error": "读取卷标超时（60秒）"}
+                                    label_result = tape_tools_manager.read_tape_label_windows_sync(drive_letter)
+                                except Exception as e:
+                                    logger.error(f"[线程] 读取卷标异常: {str(e)}", exc_info=True)
+                                    label_result = {"success": False, "error": f"读取卷标异常: {str(e)}"}
                             
-                            if label_result and label_result.get("success"):
-                                actual_label = label_result.get("volume_name", "").strip()
-                                actual_serial = label_result.get("serial_number", "").strip()
+                            if not label_result or not label_result.get("success"):
+                                error_msg = label_result.get('error', '未知错误') if label_result else '无结果'
+                                logger.error(f"[线程] 步骤2失败: 读取磁盘卷标失败 - {error_msg}")
                                 
-                                logger.info(f"从磁盘读取到实际值: 卷标={actual_label}, SN={actual_serial}")
+                                # 读取卷标失败，不写数据库
+                                logger.warning(f"[线程] 读取卷标失败，不写入数据库 - tape_id={tape_id_value}")
                                 
-                                # 如果读取到的值与预期值不同，更新数据库
-                                if actual_label or actual_serial:
-                                    # 重新连接数据库
-                                    if is_redis_mode:
-                                        # Redis模式：更新磁带记录
-                                        from backup.redis_tape_db import update_tape_redis
-                                        update_data = {}
-                                        if actual_label and actual_label != final_label:
-                                            update_data["label"] = actual_label
-                                            logger.info(f"[Redis模式] 更新数据库卷标: {final_label} -> {actual_label}")
-                                        if actual_serial and actual_serial != request.serial_number:
-                                            update_data["serial_number"] = actual_serial
-                                            logger.info(f"[Redis模式] 更新数据库序列号: {request.serial_number} -> {actual_serial}")
-                                        if update_data:
-                                            await update_tape_redis(tape_id=tape_id_value, **update_data)
-                                            logger.info(f"[Redis模式] 已根据磁盘实际值更新数据库: tape_id={tape_id_value}")
-                                    elif is_sqlite:
-                                        # 使用原生SQL更新 SQLite
-                                        from utils.scheduler.sqlite_utils import get_sqlite_connection
-                                        
-                                        async with get_sqlite_connection() as db_conn:
-                                            # 查询磁带是否存在
-                                            cursor = await db_conn.execute(
-                                                "SELECT tape_id FROM tape_cartridges WHERE tape_id = ?",
-                                                (tape_id_value,)
-                                            )
-                                            row = await cursor.fetchone()
-                                            
-                                            if row:
-                                                # 更新卷标（如果读取到的值与数据库中的不同）
-                                                if actual_label and actual_label != final_label:
-                                                    await db_conn.execute(
-                                                        "UPDATE tape_cartridges SET label = ? WHERE tape_id = ?",
-                                                        (actual_label, tape_id_value)
-                                                    )
-                                                    logger.info(f"更新数据库卷标: {final_label} -> {actual_label}")
-                                                
-                                                # 更新序列号（如果读取到的值与数据库中的不同）
-                                                if actual_serial and actual_serial != request.serial_number:
-                                                    await db_conn.execute(
-                                                        "UPDATE tape_cartridges SET serial_number = ? WHERE tape_id = ?",
-                                                        (actual_serial, tape_id_value)
-                                                    )
-                                                    logger.info(f"更新数据库序列号: {request.serial_number} -> {actual_serial}")
-                                                
-                                                await db_conn.commit()
-                                                logger.info(f"已根据磁盘实际值更新数据库: tape_id={tape_id_value}")
-                                    else:
-                                        db_conn = psycopg2.connect(**db_connect_kwargs)
-                                        try:
-                                            with db_conn.cursor() as db_cur:
-                                                update_fields = []
-                                                update_values = []
-                                                
-                                                # 更新卷标（如果读取到的值与数据库中的不同）
-                                                if actual_label and actual_label != final_label:
-                                                    update_fields.append("label = %s")
-                                                    update_values.append(actual_label)
-                                                    logger.info(f"更新数据库卷标: {final_label} -> {actual_label}")
-                                                
-                                                # 更新序列号（如果读取到的值与数据库中的不同）
-                                                if actual_serial and actual_serial != request.serial_number:
-                                                    update_fields.append("serial_number = %s")
-                                                    update_values.append(actual_serial)
-                                                    logger.info(f"更新数据库序列号: {request.serial_number} -> {actual_serial}")
-                                                
-                                                # 如果有需要更新的字段，执行更新
-                                                if update_fields:
-                                                    update_values.append(tape_id_value)
-                                                    update_sql = f"""
-                                                        UPDATE tape_cartridges
-                                                        SET {', '.join(update_fields)}, updated_at = NOW()
-                                                        WHERE tape_id = %s
-                                                    """
-                                                    db_cur.execute(update_sql, update_values)
-                                                    db_conn.commit()
-                                                    logger.info(f"已根据磁盘实际值更新数据库: tape_id={tape_id_value}")
-                                        finally:
-                                            db_conn.close()
-                                else:
-                                    logger.warning("从磁盘读取到的卷标或序列号为空，跳过数据库更新")
-                            else:
-                                logger.warning(f"读取磁盘卷标失败: {label_result.get('error', '未知错误')}")
-                        except Exception as read_error:
-                            logger.error(f"读取磁盘卷标并更新数据库时出错: {str(read_error)}", exc_info=True)
-                        
-                        await log_operation(
-                            operation_type=OperationType.UPDATE if tape_exists else OperationType.CREATE,
-                            resource_type="tape",
-                            resource_id=tape_id_value,
-                            resource_name=final_label,
-                            operation_name="磁带格式化",
-                            operation_description=f"LtfsCmdFormat 格式化磁带 {tape_id_value} 成功（后台执行）",
-                            category="tape",
-                            success=True,
-                            ip_address=ip_address,
-                            request_method=request_method,
-                            request_url=request_url
-                        )
-                    else:
-                        error_detail = format_result.get("stderr") or format_result.get("stdout") or "LtfsCmdFormat执行失败"
-                        logger.error("LtfsCmdFormat 格式化磁带失败（后台执行）: %s", error_detail)
-                        
-                        # 发送钉钉通知
-                        try:
-                            if system and hasattr(system, 'dingtalk_notifier') and system.dingtalk_notifier:
-                                await system.dingtalk_notifier.send_tape_format_notification(
-                                    tape_id=tape_id_value,
-                                    status="failed",
-                                    error_detail=error_detail,
-                                    volume_label=final_label,
-                                    serial_number=serial_param
+                                await log_operation(
+                                    operation_type=OperationType.CREATE,
+                                    resource_type="tape",
+                                    resource_id=tape_id_value,
+                                    resource_name=final_label,
+                                    operation_name="磁带格式化",
+                                    operation_description=f"格式化成功但读取卷标失败: {error_msg}（线程执行）",
+                                    category="tape",
+                                    success=False,
+                                    error_message=f"读取卷标失败: {error_msg}",
+                                    ip_address=ip_address,
+                                    request_method=request_method,
+                                    request_url=request_url
                                 )
-                        except Exception as notify_error:
-                            logger.error(f"发送格式化失败钉钉通知异常: {str(notify_error)}", exc_info=True)
-                        
-                        await log_operation(
-                            operation_type=OperationType.UPDATE if tape_exists else OperationType.CREATE,
-                            resource_type="tape",
-                            resource_id=tape_id_value,
-                            resource_name=final_label,
-                            operation_name="磁带格式化",
-                            operation_description=f"LtfsCmdFormat 格式化磁带 {tape_id_value} 失败（后台执行）",
-                            category="tape",
-                            success=False,
-                            error_message=error_detail,
-                            ip_address=ip_address,
-                            request_method=request_method,
-                            request_url=request_url
-                        )
+                                return
+                            
+                            # 读取卷标成功，核对信息
+                            actual_label = label_result.get("volume_name", "").strip()
+                            actual_serial = label_result.get("serial_number", "").strip()
+                            logger.info(f"[线程] 步骤2完成: 获取卷标成功 - 卷标={actual_label}, SN={actual_serial}")
+                            
+                            # 核对卷标和序列号
+                            if actual_label and actual_label != final_label:
+                                logger.warning(f"[线程] 卷标不匹配: 预期={final_label}, 实际={actual_label}，使用实际值")
+                            if actual_serial and actual_serial != serial_param:
+                                logger.warning(f"[线程] 序列号不匹配: 预期={serial_param}, 实际={actual_serial}，使用实际值")
+                            
+                            # 步骤3: 写数据库（使用实际读取到的值）
+                            logger.info(f"[线程] 步骤3: 开始写数据库 - tape_id={tape_id_value}")
+                            
+                            # 计算容量与有效期（在线程中也需要这些值）
+                            capacity_bytes = request.capacity_gb * (1024 ** 3) if request.capacity_gb else 18 * 1024 * (1024 ** 3)
+                            created_date = datetime(target_year, target_month, 1)
+                            expiry_year = created_date.year
+                            expiry_month = created_date.month + request.retention_months
+                            while expiry_month > 12:
+                                expiry_year += 1
+                                expiry_month -= 12
+                            expiry_date = datetime(expiry_year, expiry_month, 1)
+                            
+                            # 使用实际读取到的卷标和序列号
+                            final_actual_label = actual_label if actual_label else final_label
+                            final_actual_serial = actual_serial if actual_serial else (serial_param if serial_param else request.serial_number)
+                            
+                            if is_redis_mode:
+                                # Redis模式：创建/更新磁带记录
+                                from backup.redis_tape_db import create_tape_redis, update_tape_redis
+                                media_type_str = request.media_type.value if hasattr(request.media_type, 'value') else str(request.media_type)
+                                
+                                if tape_exists:
+                                    await update_tape_redis(
+                                        tape_id=tape_id_value,
+                                        label=final_actual_label,
+                                        status="available",
+                                        media_type=media_type_str,
+                                        generation=request.generation,
+                                        serial_number=final_actual_serial,
+                                        location=request.location,
+                                        capacity_bytes=capacity_bytes,
+                                        retention_months=request.retention_months,
+                                        notes=request.notes,
+                                        manufactured_date=created_date,
+                                        expiry_date=expiry_date
+                                    )
+                                    logger.info(f"[线程] 步骤3完成: [Redis模式] 已更新数据库 - tape_id={tape_id_value}")
+                                else:
+                                    result = await create_tape_redis(
+                                        tape_id=tape_id_value,
+                                        label=final_actual_label,
+                                        status="available",
+                                        media_type=media_type_str,
+                                        generation=request.generation,
+                                        serial_number=final_actual_serial,
+                                        location=request.location,
+                                        capacity_bytes=capacity_bytes,
+                                        retention_months=request.retention_months,
+                                        notes=request.notes,
+                                        manufactured_date=created_date,
+                                        expiry_date=expiry_date,
+                                        auto_erase=True,
+                                        health_score=100
+                                    )
+                                    if result.get("success"):
+                                        logger.info(f"[线程] 步骤3完成: [Redis模式] 已创建数据库记录 - tape_id={tape_id_value}")
+                                    else:
+                                        logger.error(f"[线程] [Redis模式] 创建数据库记录失败 - tape_id={tape_id_value}")
+                            elif is_sqlite_mode:
+                                # 使用原生SQL操作 SQLite
+                                from utils.scheduler.sqlite_utils import get_sqlite_connection
+                                from models.tape import TapeStatus
+                                
+                                async with get_sqlite_connection() as db_conn:
+                                    if tape_exists:
+                                        await db_conn.execute("""
+                                            UPDATE tape_cartridges
+                                            SET label = ?, status = ?, media_type = ?, generation = ?,
+                                                serial_number = ?, location = ?, capacity_bytes = ?,
+                                                retention_months = ?, notes = ?, manufactured_date = ?,
+                                                expiry_date = ?
+                                            WHERE tape_id = ?
+                                        """, (
+                                            final_actual_label,
+                                            TapeStatus.AVAILABLE.value,
+                                            request.media_type.value if hasattr(request.media_type, 'value') else str(request.media_type),
+                                            request.generation,
+                                            final_actual_serial,
+                                            request.location,
+                                            capacity_bytes,
+                                            request.retention_months,
+                                            request.notes,
+                                            created_date,
+                                            expiry_date,
+                                            tape_id_value
+                                        ))
+                                        logger.info(f"[线程] 步骤3完成: 已更新数据库记录 - tape_id={tape_id_value}")
+                                    else:
+                                        await db_conn.execute("""
+                                            INSERT INTO tape_cartridges (
+                                                tape_id, label, status, media_type, generation,
+                                                serial_number, location, capacity_bytes, used_bytes,
+                                                retention_months, notes, manufactured_date, expiry_date,
+                                                auto_erase, health_score
+                                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                        """, (
+                                            tape_id_value,
+                                            final_actual_label,
+                                            TapeStatus.AVAILABLE.value,
+                                            request.media_type.value if hasattr(request.media_type, 'value') else str(request.media_type),
+                                            request.generation,
+                                            final_actual_serial,
+                                            request.location,
+                                            capacity_bytes,
+                                            0,  # used_bytes
+                                            request.retention_months,
+                                            request.notes,
+                                            created_date,
+                                            expiry_date,
+                                            True,  # auto_erase
+                                            100  # health_score
+                                        ))
+                                        logger.info(f"[线程] 步骤3完成: 已创建数据库记录 - tape_id={tape_id_value}")
+                                    
+                                    await db_conn.commit()
+                            else:
+                                # openGauss/PostgreSQL模式
+                                db_conn, _ = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
+                                try:
+                                    with db_conn.cursor() as db_cur:
+                                        if tape_exists:
+                                            db_cur.execute("""
+                                                UPDATE tape_cartridges
+                                                SET label = %s, status = %s, media_type = %s, generation = %s,
+                                                    serial_number = %s, location = %s, capacity_bytes = %s,
+                                                    retention_months = %s, notes = %s, manufactured_date = %s,
+                                                    expiry_date = %s, updated_at = NOW()
+                                                WHERE tape_id = %s
+                                            """, (
+                                                final_actual_label,
+                                                'available',
+                                                request.media_type,
+                                                request.generation,
+                                                final_actual_serial,
+                                                request.location,
+                                                capacity_bytes,
+                                                request.retention_months,
+                                                request.notes,
+                                                created_date,
+                                                expiry_date,
+                                                tape_id_value
+                                            ))
+                                            logger.info(f"[线程] 步骤3完成: 已更新数据库记录 - tape_id={tape_id_value}")
+                                        else:
+                                            db_cur.execute("""
+                                                INSERT INTO tape_cartridges 
+                                                (tape_id, label, status, media_type, generation, serial_number, location,
+                                                 capacity_bytes, used_bytes, retention_months, notes, manufactured_date, expiry_date, auto_erase, health_score)
+                                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                            """, (
+                                                tape_id_value,
+                                                final_actual_label,
+                                                'available',
+                                                request.media_type,
+                                                request.generation,
+                                                final_actual_serial,
+                                                request.location,
+                                                capacity_bytes,
+                                                0,
+                                                request.retention_months,
+                                                request.notes,
+                                                created_date,
+                                                expiry_date,
+                                                True,
+                                                100
+                                            ))
+                                            logger.info(f"[线程] 步骤3完成: 已创建数据库记录 - tape_id={tape_id_value}")
+                                        
+                                        db_conn.commit()
+                                finally:
+                                    db_conn.close()
+                            
+                            # 记录操作日志
+                            await log_operation(
+                                operation_type=OperationType.UPDATE if tape_exists else OperationType.CREATE,
+                                resource_type="tape",
+                                resource_id=tape_id_value,
+                                resource_name=final_label,
+                                operation_name="磁带格式化",
+                                operation_description=f"LtfsCmdFormat 格式化磁带 {tape_id_value} 成功（线程执行）",
+                                category="tape",
+                                success=True,
+                                ip_address=ip_address,
+                                request_method=request_method,
+                                request_url=request_url
+                            )
+                            logger.info(f"[线程] 格式化任务完成 - tape_id={tape_id_value}")
+                        except Exception as e:
+                            logger.error(f"[线程] 格式化任务异常: {str(e)}", exc_info=True)
+                    
+                    # 在线程中运行异步任务
+                    loop.run_until_complete(format_tape_async())
                 except Exception as e:
-                    logger.error(f"后台格式化任务异常: {str(e)}", exc_info=True)
+                    logger.error(f"[线程] 线程执行异常: {str(e)}", exc_info=True)
+                finally:
+                    # 关闭事件循环
+                    try:
+                        loop.close()
+                    except:
+                        pass
             
-            # 启动后台任务，不等待完成
-            background_tasks.add_task(format_tape_background)
+            # 启动线程，不阻塞API响应
+            format_thread = threading.Thread(target=format_tape_thread, daemon=True, name=f"FormatTape-{tape_id_value}")
+            format_thread.start()
             
             logger.info("格式化任务已在后台启动，API立即返回")
         else:
@@ -596,7 +729,7 @@ async def create_tape(request: CreateTapeRequest, http_request: Request, backgro
         new_values = {
             "tape_id": tape_id_value,
             "label": final_label,
-            "status": "AVAILABLE",
+            "status": "available",  # 枚举值必须是小写
             "media_type": request.media_type,
             "generation": request.generation,
             "serial_number": request.serial_number,
@@ -608,8 +741,11 @@ async def create_tape(request: CreateTapeRequest, http_request: Request, backgro
             "expiry_date": expiry_date.isoformat()
         }
         
-        # 写入或更新数据库
-        if is_redis_mode:
+        # 写入或更新数据库（仅在不需要格式化时执行，如果需要格式化则在线程中执行）
+        if format_tape:
+            # 如果需要格式化，跳过这里的数据库写入，在线程中格式化成功并读取卷标后再写数据库
+            logger.info(f"磁带 {tape_id_value} 需要格式化，数据库写入将在格式化成功后在线程中执行")
+        elif is_redis_mode:
             # Redis模式：使用Redis创建/更新磁带
             from backup.redis_tape_db import create_tape_redis, update_tape_redis
             
@@ -621,7 +757,7 @@ async def create_tape(request: CreateTapeRequest, http_request: Request, backgro
                 success = await update_tape_redis(
                     tape_id=tape_id_value,
                     label=final_label,
-                    status="AVAILABLE",
+                    status="available",  # 枚举值必须是小写
                     media_type=media_type_str,
                     generation=request.generation,
                     serial_number=request.serial_number,
@@ -637,7 +773,7 @@ async def create_tape(request: CreateTapeRequest, http_request: Request, backgro
                 result = await create_tape_redis(
                     tape_id=tape_id_value,
                     label=final_label,
-                    status="AVAILABLE",
+                    status="available",  # 枚举值必须是小写
                     media_type=media_type_str,
                     generation=request.generation,
                     serial_number=request.serial_number,
@@ -654,7 +790,7 @@ async def create_tape(request: CreateTapeRequest, http_request: Request, backgro
             
             if not success:
                 raise Exception(f"[Redis模式] 创建/更新磁带失败: {tape_id_value}")
-        elif is_sqlite:
+        elif is_sqlite_mode:
             # 使用原生SQL操作 SQLite
             from utils.scheduler.sqlite_utils import get_sqlite_connection
             from models.tape import TapeStatus
@@ -713,7 +849,7 @@ async def create_tape(request: CreateTapeRequest, http_request: Request, backgro
                 
                 await conn.commit()
         else:
-            conn = psycopg2.connect(**db_connect_kwargs)
+            conn, _ = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
             try:
                 with conn.cursor() as cur:
                     if tape_exists:
@@ -737,7 +873,7 @@ async def create_tape(request: CreateTapeRequest, http_request: Request, backgro
                             """,
                             (
                                 final_label,
-                                'AVAILABLE',
+                                'available',  # 枚举值必须是小写
                                 request.media_type,
                                 request.generation,
                                 request.serial_number,
@@ -762,7 +898,7 @@ async def create_tape(request: CreateTapeRequest, http_request: Request, backgro
                             (
                                 tape_id_value,
                                 final_label,
-                                'AVAILABLE',
+                                'available',  # 枚举值必须是小写
                                 request.media_type,
                                 request.generation,
                                 request.serial_number,

@@ -45,37 +45,106 @@ class ITDTInterface:
 		else:
 			candidates.append("/usr/local/itdt/itdt")
 
-		# 选择第一个存在的路径
+		# 选择第一个存在的路径（不区分大小写）
 		for p in candidates:
-			if p and os.path.exists(p):
-				self.itdt_path = p
-				break
-		# 如果都不存在，仍然使用首个候选以便日志提示
+			if p:
+				# 检查路径是否存在（不区分大小写）
+				if os.path.exists(p):
+					self.itdt_path = p
+					break
+				# 尝试不区分大小写的路径匹配（Windows）
+				if self.system == "Windows" and os.path.exists(p.upper()) and p.upper() != p:
+					self.itdt_path = p.upper()
+					break
+				if self.system == "Windows" and os.path.exists(p.lower()) and p.lower() != p:
+					self.itdt_path = p.lower()
+					break
+		
+		# 如果都不存在，使用配置的 ITDT_PATH 或首个候选路径
 		if not self.itdt_path:
-			self.itdt_path = candidates[0] if candidates else None
+			# 优先使用配置的 ITDT_PATH
+			if itdt_path:
+				self.itdt_path = itdt_path
+				logger.info(f"使用配置的 ITDT_PATH: {self.itdt_path}")
+			else:
+				# 如果没有配置，使用首个候选路径（即使文件不存在也使用，后续执行时再报错）
+				self.itdt_path = candidates[0] if candidates else None
+				if self.itdt_path:
+					logger.warning(f"未找到 ITDT 文件，将使用路径: {self.itdt_path}（执行命令时如果文件不存在会报错）")
+				else:
+					raise FileNotFoundError(
+						"未找到 ITDT 可执行文件，且未配置 ITDT_PATH。\n"
+						"请通过 ITDT_PATH 配置项指定正确的路径。"
+					)
 
-		if not await self._check_itdt_available():
-			raise FileNotFoundError(f"未找到 ITDT 可执行文件: {self.itdt_path}")
-
+		# 不再进行可用性检查，直接使用配置的路径
+		# 如果文件不存在或无法执行，在执行命令时会报错
 		self._initialized = True
-		logger.info("ITDT 接口初始化完成: %s", self.itdt_path)
+		logger.info("ITDT 接口初始化完成: %s（跳过可用性检查，直接使用配置路径）", self.itdt_path)
 
 	async def _check_itdt_available(self) -> bool:
+		"""检查 ITDT 是否可用（执行 itdt.exe -version 命令，10秒超时）"""
 		try:
+			# 首先检查文件是否存在
+			if not os.path.exists(self.itdt_path):
+				logger.error(f"ITDT 文件不存在: {self.itdt_path}")
+				return False
+			
+			# 执行 itdt.exe -version 命令来验证 ITDT 是否可用
 			proc = await asyncio.create_subprocess_exec(
 				self.itdt_path, "-version",
 				stdout=asyncio.subprocess.PIPE,
 				stderr=asyncio.subprocess.PIPE,
 				stdin=asyncio.subprocess.DEVNULL,  # 防止子进程等待输入导致阻塞
 			)
-			stdout, stderr = await proc.communicate()
+			
+			# 等待最多 10 秒，如果 10 秒内没有输出则超时
+			try:
+				stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+			except asyncio.TimeoutError:
+				# 超时：尝试终止进程
+				logger.warning(f"ITDT 可用性检查超时（10秒），正在终止进程: {self.itdt_path}")
+				try:
+					proc.kill()
+					await proc.wait()
+				except Exception:
+					pass
+				logger.error(f"ITDT 可用性检查失败: 10秒内未收到输出，路径: {self.itdt_path}")
+				return False
+			
+			# 记录输出信息（用于调试）
+			has_output = False
 			if stdout:
-				logger.debug("[ITDT] %s", stdout.decode(errors="ignore").strip())
+				output_text = stdout.decode(errors="ignore").strip()
+				if output_text:
+					logger.debug("[ITDT] %s", output_text)
+					has_output = True
 			if stderr:
-				logger.debug("[ITDT-ERR] %s", stderr.decode(errors="ignore").strip())
-			return proc.returncode == 0
+				error_text = stderr.decode(errors="ignore").strip()
+				if error_text:
+					logger.debug("[ITDT-ERR] %s", error_text)
+					has_output = True
+			
+			# 检查是否有输出（10秒内出现信息）
+			if not has_output:
+				logger.error(f"ITDT 可用性检查失败: 10秒内未收到任何输出，路径: {self.itdt_path}")
+				return False
+			
+			# 返回码为 0 表示成功
+			if proc.returncode == 0:
+				logger.debug(f"ITDT 可用性检查成功: {self.itdt_path}")
+				return True
+			else:
+				logger.warning(f"ITDT 命令返回非零退出码: {proc.returncode}, 路径: {self.itdt_path}")
+				return False
+		except FileNotFoundError as e:
+			logger.error(f"ITDT 文件未找到: {self.itdt_path}, 错误: {str(e)}")
+			return False
+		except PermissionError as e:
+			logger.error(f"ITDT 文件权限不足: {self.itdt_path}, 错误: {str(e)}")
+			return False
 		except Exception as e:
-			logger.error("检查 ITDT 可用性失败: %s", str(e))
+			logger.error(f"检查 ITDT 可用性失败: {self.itdt_path}, 错误类型: {type(e).__name__}, 错误信息: {str(e)}", exc_info=True)
 			return False
 
 	def _resolve_device(self, device_path: Optional[str]) -> str:
@@ -88,7 +157,11 @@ class ITDTInterface:
 		return "\\\\.\\tape0" if self.system == "Windows" else "/dev/IBMtape0"
 
 	async def _run_itdt(self, args: List[str]) -> Dict[str, Any]:
-		"""运行 ITDT 命令，整合日志并返回结果。"""
+		"""运行 ITDT 命令，整合日志并返回结果。
+		
+		注意：在 Windows 上使用 WindowsSelectorEventLoopPolicy 时，asyncio.create_subprocess_exec 不支持。
+		因此改用同步的 subprocess.run，通过 asyncio.to_thread 在线程中执行。
+		"""
 		if not self._initialized:
 			raise RuntimeError("ITDT 接口未初始化")
 
@@ -101,24 +174,51 @@ class ITDTInterface:
 		# 只记录日志，不输出到终端（避免Windows终端暂停）
 		logger.info("[ITDT] 执行: %s", cmd_str)
 
-		proc = await asyncio.create_subprocess_exec(
-			*cmd,
-			stdout=asyncio.subprocess.PIPE,
-			stderr=asyncio.subprocess.PIPE,
-			stdin=asyncio.subprocess.DEVNULL,  # 防止子进程等待输入导致阻塞
-		)
+		# 使用同步 subprocess.run，通过 asyncio.to_thread 在线程中执行
+		# 这样可以避免 WindowsSelectorEventLoopPolicy 不支持异步子进程的问题
+		import subprocess
+		
+		def run_subprocess():
+			"""在线程中运行同步 subprocess"""
+			try:
+				result = subprocess.run(
+					cmd,
+					stdout=subprocess.PIPE,
+					stderr=subprocess.PIPE,
+					stdin=subprocess.DEVNULL,  # 防止子进程等待输入导致阻塞
+					timeout=None,  # 不设置超时，由调用方控制
+					encoding='utf-8',
+					errors='ignore',
+					text=True
+				)
+				return {
+					"success": result.returncode == 0,
+					"returncode": result.returncode,
+					"stdout": result.stdout or "",
+					"stderr": result.stderr or "",
+				}
+			except Exception as e:
+				logger.error(f"执行 ITDT 命令失败: {str(e)}", exc_info=True)
+				return {
+					"success": False,
+					"returncode": -1,
+					"stdout": "",
+					"stderr": str(e),
+				}
+		
+		# 在线程中执行同步 subprocess
+		result = await asyncio.to_thread(run_subprocess)
 
-		stdout, stderr = await proc.communicate()
-
-		out_text = stdout.decode(errors="ignore") if stdout else ""
-		err_text = stderr.decode(errors="ignore") if stderr else ""
+		out_text = result.get("stdout", "")
+		err_text = result.get("stderr", "")
+		returncode = result.get("returncode", -1)
 
 		# 只记录日志，不输出到终端（避免Windows终端暂停）
 		if out_text.strip():
 			logger.debug("[ITDT] 标准输出: %s", out_text)
 		if err_text.strip():
 			logger.debug("[ITDT] 标准错误: %s", err_text)
-		logger.debug("[ITDT] 退出码: %s", proc.returncode)
+		logger.debug("[ITDT] 退出码: %s", returncode)
 
 		for line in out_text.splitlines():
 			if line.strip():
@@ -127,12 +227,7 @@ class ITDTInterface:
 			if line.strip():
 				logger.warning("[ITDT] %s", line.strip())
 
-		return {
-			"success": proc.returncode == 0,
-			"returncode": proc.returncode,
-			"stdout": out_text,
-			"stderr": err_text,
-		}
+		return result
 
 	# 基础操作封装
 	async def test_unit_ready(self, device_path: Optional[str] = None) -> bool:

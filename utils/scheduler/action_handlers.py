@@ -543,7 +543,7 @@ class BackupActionHandler(ActionHandler):
                                 $1, $2::backuptasktype, $3, $4,
                                 $5, $6, $7,
                                 $8, $9, $10::backuptaskstatus, FALSE, $11,
-                                $12, $13, $13, 'pending'
+                                $12, $13, $14, 'pending'
                             ) RETURNING id
                             """,
                             task_name,
@@ -558,8 +558,19 @@ class BackupActionHandler(ActionHandler):
                             'pending',
                             template_task.id if template_task else None,
                             'scheduled_task',
-                            now()
+                            now(),  # $13: created_at
+                            now()   # $14: updated_at (之前错误地使用了 $13)
                         )
+                        
+                        # 确保事务已提交（psycopg3 需要显式提交，否则其他连接看不到数据）
+                        # 获取实际连接对象
+                        actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                        if hasattr(actual_conn, 'commit'):
+                            try:
+                                await actual_conn.commit()
+                                logger.debug(f"备份任务 {backup_task_id} 已提交到数据库")
+                            except Exception as commit_err:
+                                logger.warning(f"提交备份任务事务失败（可能已自动提交）: {commit_err}")
                         
                         backup_task = type('BackupTask', (), {
                             'id': backup_task_id,

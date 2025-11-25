@@ -767,30 +767,34 @@ class TapeOperations:
                         logger.warning(f"驱动器 {drive_with_colon} 不存在或未挂载")
                         return None
                     
-                    # 使用fsutil获取卷信息
-                    proc = await asyncio.create_subprocess_shell(
-                        f"fsutil fsinfo volumeinfo {drive_with_colon}",
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        stdin=asyncio.subprocess.DEVNULL  # 防止子进程等待输入导致阻塞
-                    )
+                    # 使用fsutil获取卷信息（使用同步subprocess，通过asyncio.to_thread执行）
+                    import subprocess
                     
-                    # 添加超时处理，避免阻塞
-                    try:
-                        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
-                    except asyncio.TimeoutError:
-                        logger.warning(f"fsutil命令执行超时，尝试终止进程...")
-                        if proc.returncode is None:
-                            proc.kill()
-                            await proc.wait()
-                        stdout = b""
-                        stderr = b""
-                        logger.error("fsutil命令执行超时")
-                        return None
+                    def run_fsutil():
+                        """在线程中运行同步 subprocess"""
+                        try:
+                            result = subprocess.run(
+                                f"fsutil fsinfo volumeinfo {drive_with_colon}",
+                                shell=True,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                stdin=subprocess.DEVNULL,
+                                timeout=10,
+                                encoding='gbk',
+                                errors='ignore'
+                            )
+                            return result.stdout, result.stderr, result.returncode
+                        except subprocess.TimeoutExpired:
+                            logger.error("fsutil命令执行超时")
+                            return "", "", -1
+                        except Exception as e:
+                            logger.error(f"fsutil命令执行失败: {str(e)}")
+                            return "", str(e), -1
                     
-                    stdout_str = stdout.decode('gbk', errors='ignore') if stdout else ""
+                    # 在线程中执行同步 subprocess
+                    stdout_str, stderr_str, returncode = await asyncio.to_thread(run_fsutil)
                     
-                    if proc.returncode == 0:
+                    if returncode == 0:
                         # 解析fsutil输出
                         volume_info = {}
                         for line in stdout_str.split('\n'):
@@ -816,7 +820,7 @@ class TapeOperations:
                             logger.warning("fsutil未返回卷标信息")
                             return None
                     else:
-                        logger.warning(f"fsutil执行失败，返回码: {proc.returncode}")
+                        logger.warning(f"fsutil执行失败，返回码: {returncode}")
                         return None
                         
                 except Exception as e:
@@ -852,33 +856,39 @@ class TapeOperations:
                     
                     logger.info(f"使用label命令设置卷标: {label} 到驱动器 {drive_with_colon}")
                     
-                    # 使用label命令设置卷标
+                    # 使用label命令设置卷标（使用同步subprocess，通过asyncio.to_thread执行）
                     # 格式: echo label_name | label drive:
-                    proc = await asyncio.create_subprocess_shell(
-                        f'echo {label}| label {drive_with_colon}',
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        stdin=asyncio.subprocess.DEVNULL  # 防止子进程等待输入导致阻塞
-                    )
+                    import subprocess
                     
-                    # 添加超时处理，避免阻塞
-                    try:
-                        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
-                    except asyncio.TimeoutError:
-                        logger.warning(f"label命令执行超时，尝试终止进程...")
-                        if proc.returncode is None:
-                            proc.kill()
-                            await proc.wait()
-                        logger.error("label命令执行超时")
-                        return False
-                    stdout_str = stdout.decode('gbk', errors='ignore') if stdout else ""
-                    stderr_str = stderr.decode('gbk', errors='ignore') if stderr else ""
+                    def run_label():
+                        """在线程中运行同步 subprocess"""
+                        try:
+                            result = subprocess.run(
+                                f'echo {label}| label {drive_with_colon}',
+                                shell=True,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                stdin=subprocess.DEVNULL,
+                                timeout=10,
+                                encoding='gbk',
+                                errors='ignore'
+                            )
+                            return result.stdout, result.stderr, result.returncode
+                        except subprocess.TimeoutExpired:
+                            logger.error("label命令执行超时")
+                            return "", "", -1
+                        except Exception as e:
+                            logger.error(f"label命令执行失败: {str(e)}")
+                            return "", str(e), -1
                     
-                    if proc.returncode == 0:
+                    # 在线程中执行同步 subprocess
+                    stdout_str, stderr_str, returncode = await asyncio.to_thread(run_label)
+                    
+                    if returncode == 0:
                         logger.info(f"卷标设置成功: {label}")
                         return True
                     else:
-                        logger.warning(f"label命令执行失败，返回码: {proc.returncode}")
+                        logger.warning(f"label命令执行失败，返回码: {returncode}")
                         if stderr_str:
                             logger.warning(f"错误信息: {stderr_str}")
                         return False

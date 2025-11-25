@@ -8,10 +8,13 @@ Database Initialization Module
 import logging
 import re
 from typing import Optional
-import psycopg2
-from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
 from .settings import get_settings
+from utils.db_connection_helper import (
+    get_psycopg_connection_from_url,
+    parse_database_url,
+    set_autocommit
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,31 +35,22 @@ class DatabaseInitializer:
                 logger.debug(f"非PostgreSQL/openGauss数据库，跳过数据库创建: {database_url}")
                 return True
             
-            # 处理opengauss URL
-            if database_url.startswith("opengauss://"):
-                database_url = database_url.replace("opengauss://", "postgresql://", 1)
-            
-            # 使用正则表达式解析URL
-            pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
-            match = re.match(pattern, database_url)
-            
-            if not match:
-                logger.error("无法解析数据库连接URL")
-                return False
-            
-            username, password, host, port, database = match.groups()
+            # 解析URL
+            username, password, host, port, database = parse_database_url(database_url)
             
             logger.info(f"检查数据库 {database} 是否存在...")
             
             # 连接到 postgres 数据库（默认数据库）
-            conn = psycopg2.connect(
+            from utils.db_connection_helper import get_psycopg_connection
+            conn, is_psycopg3 = get_psycopg_connection(
                 host=host,
                 port=port,
                 user=username,
                 password=password,
-                database='postgres'
+                database='postgres',
+                prefer_psycopg3=True
             )
-            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+            set_autocommit(conn, is_psycopg3, autocommit=True)
             cursor = conn.cursor()
             
             # 检查数据库是否已存在
@@ -75,14 +69,15 @@ class DatabaseInitializer:
             conn.close()
             
             # 连接到目标数据库并授予权限
-            conn = psycopg2.connect(
+            conn, is_psycopg3 = get_psycopg_connection(
                 host=host,
                 port=port,
                 user=username,
                 password=password,
-                database=database
+                database=database,
+                prefer_psycopg3=True
             )
-            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+            set_autocommit(conn, is_psycopg3, autocommit=True)
             cursor = conn.cursor()
             
             # 授予用户在 public schema 上的权限
@@ -111,12 +106,13 @@ class DatabaseInitializer:
             
             return True
                 
-        except psycopg2.errors.InsufficientPrivilege as e:
-            # 可能是权限问题
-            logger.error(f"无法创建数据库，可能是权限不足: {str(e)}")
-            logger.info(f"请手动创建数据库并授权")
-            return False
         except Exception as e:
+            # 检查是否是权限错误（兼容 psycopg2 和 psycopg3）
+            error_str = str(e).lower()
+            if 'insufficient' in error_str and 'privilege' in error_str:
+                logger.error(f"无法创建数据库，可能是权限不足: {str(e)}")
+                logger.info(f"请手动创建数据库并授权")
+                return False
             logger.error(f"数据库初始化失败: {str(e)}")
             return False
     

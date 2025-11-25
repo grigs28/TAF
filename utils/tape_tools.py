@@ -7,6 +7,7 @@ Tape Tools Module - 封装 ITDT 和 LTFS 命令行工具
 
 import os
 import asyncio
+import subprocess
 import logging
 from typing import Optional, Dict, Any, List
 from pathlib import Path
@@ -816,6 +817,94 @@ class TapeToolsManager:
         
         return await self.run_command(cmd, timeout=3600, tool_type="LTFS", working_dir=self.ltfs_tools_dir)
     
+    def format_tape_ltfs_sync(self, drive_letter: Optional[str] = None, volume_label: Optional[str] = None,
+                               serial: Optional[str] = None, eject_after: bool = False) -> Dict[str, Any]:
+        """
+        同步版本的LTFS格式化（用于线程中执行）
+        
+        Args:
+            drive_letter: 盘符（大写，不带冒号，如 "O"），如果为None则使用配置的盘符
+            volume_label: 卷标名称
+            serial: 序列号（6位大写字母数字）
+            eject_after: 格式化后是否弹出
+        
+        Returns:
+            包含 success, stdout, stderr, returncode 的字典
+        """
+        # 使用配置的盘符或提供的盘符
+        if not drive_letter:
+            drive_letter = self.drive_letter
+        
+        # 确保盘符不带冒号
+        if drive_letter.endswith(':'):
+            drive_letter = drive_letter[:-1]
+        
+        logger.info(f"[同步] LTFS格式化磁带 (盘符: {drive_letter}, 卷标: {volume_label})...")
+        tool_path = os.path.join(self.ltfs_tools_dir, self.ltfs_tools['format'])
+        
+        # LtfsCmdFormat.exe的参数是盘符（如 "O"），不是驱动器地址
+        cmd = [tool_path, drive_letter]
+        
+        # 添加序列号参数
+        if serial and len(serial) == 6 and serial.isalnum() and serial.isupper():
+            cmd.append(f"/S:{serial}")
+        
+        # 添加卷标参数
+        if volume_label:
+            cmd.append(f"/N:{volume_label}")
+        
+        # 添加格式化后弹出参数
+        if eject_after:
+            cmd.append("/E")
+        
+        # 使用同步 subprocess 执行命令
+        try:
+            logger.info(f"[同步] 执行命令: {' '.join(cmd)}")
+            logger.info(f"[同步] 工作目录: {self.ltfs_tools_dir}")
+            
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                cwd=self.ltfs_tools_dir,
+                timeout=3600,
+                text=False  # 返回 bytes
+            )
+            
+            stdout = result.stdout.decode('utf-8', errors='ignore') if result.stdout else ""
+            stderr = result.stderr.decode('utf-8', errors='ignore') if result.stderr else ""
+            
+            success = result.returncode == 0
+            
+            if success:
+                logger.info(f"[同步] LTFS格式化成功: returncode={result.returncode}")
+            else:
+                logger.error(f"[同步] LTFS格式化失败: returncode={result.returncode}, stderr={stderr[:200]}")
+            
+            return {
+                "success": success,
+                "stdout": stdout,
+                "stderr": stderr,
+                "returncode": result.returncode
+            }
+        except subprocess.TimeoutExpired:
+            logger.error("[同步] LTFS格式化超时（3600秒）")
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": "命令执行超时（3600秒）",
+                "returncode": -1
+            }
+        except Exception as e:
+            logger.error(f"[同步] LTFS格式化异常: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": str(e),
+                "returncode": -1
+            }
+    
     async def format_tape_mkltfs(self, device_id: str, volume_label: Optional[str] = None) -> Dict[str, Any]:
         """使用 mkltfs.exe 格式化磁带（备用方式）"""
         logger.info(f"使用mkltfs格式化磁带 (设备: {device_id}, 卷标: {volume_label})...")
@@ -867,6 +956,84 @@ class TapeToolsManager:
         return await self.run_command(cmd, timeout=300, tool_type="LTFS", working_dir=self.ltfs_tools_dir)
     
     # ===== 卷信息和卷标读取 =====
+    def get_volume_info_sync(self, drive_letter: Optional[str] = None) -> Dict[str, Any]:
+        """
+        同步版本：使用fsutil获取卷信息（包括卷标）
+        适用于在线程中调用，避免 asyncio.create_subprocess_shell 在非主线程的Windows问题。
+        """
+        # 使用配置的盘符或提供的盘符
+        if not drive_letter:
+            drive_letter = self.drive_letter
+        
+        # fsutil需要带冒号的盘符
+        drive_with_colon = f"{drive_letter}:" if not drive_letter.endswith(':') else drive_letter
+        logger.info(f"[同步] 使用fsutil获取 {drive_with_colon} 卷信息...")
+        
+        # 检查驱动器是否存在
+        if not os.path.exists(drive_with_colon):
+            return {
+                "success": False,
+                "error": f"驱动器 {drive_with_colon} 不存在或未分配"
+            }
+        
+        cmd = f"fsutil fsinfo volumeinfo {drive_with_colon}"
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                timeout=10,
+                shell=True,
+                text=False  # 返回 bytes
+            )
+            
+            stdout_str = result.stdout.decode('gbk', errors='ignore') if result.stdout else ""
+            
+            if result.returncode == 0:
+                # 解析输出
+                lines = stdout_str.split('\n')
+                volume_info = {}
+                
+                for line in lines:
+                    line = line.strip()
+                    if ':' in line:
+                        key, value = line.split(':', 1)
+                        volume_info[key.strip()] = value.strip()
+                
+                # 提取关键信息
+                result_dict = {
+                    "success": True,
+                    "volume_info": volume_info,
+                    "volume_name": volume_info.get('卷名', volume_info.get('Volume Name', '')),
+                    "serial_number": volume_info.get('卷序列号', volume_info.get('Volume Serial Number', '')),
+                    "file_system": volume_info.get('文件系统名', volume_info.get('File System Name', '')),
+                    "raw_output": stdout_str
+                }
+                
+                logger.info(f"[同步] 成功读取卷标: {result_dict['volume_name']}, 序列号: {result_dict['serial_number']}")
+                return result_dict
+            else:
+                stderr_str = result.stderr.decode('gbk', errors='ignore') if result.stderr else ""
+                logger.error(f"[同步] fsutil执行失败: returncode={result.returncode}, stderr={stderr_str[:200]}")
+                return {
+                    "success": False,
+                    "error": f"无法获取卷信息 (returncode={result.returncode})"
+                }
+        except subprocess.TimeoutExpired:
+            logger.error("[同步] 读取卷信息超时（10秒）")
+            return {
+                "success": False,
+                "error": "读取卷信息超时（fsutil命令执行超过10秒）"
+            }
+        except Exception as e:
+            logger.error(f"[同步] 读取卷信息异常: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
     async def get_volume_info(self) -> Dict[str, Any]:
         """使用fsutil获取卷信息（包括卷标）"""
         # fsutil需要带冒号的盘符
@@ -937,6 +1104,28 @@ class TapeToolsManager:
                 "success": False,
                 "error": "无法获取卷信息"
             }
+    
+    def read_tape_label_windows_sync(self, drive_letter: Optional[str] = None) -> Dict[str, Any]:
+        """
+        同步版本：读取Windows磁带卷标（使用fsutil）
+        适用于在线程中调用，避免 asyncio.create_subprocess_shell 在非主线程的Windows问题。
+        """
+        logger.info("[同步] 读取磁带卷标...")
+        
+        # 使用同步版本获取卷信息
+        volume_info_result = self.get_volume_info_sync(drive_letter)
+        
+        if not volume_info_result.get("success"):
+            return volume_info_result
+        
+        return {
+            "success": True,
+            "volume_name": volume_info_result.get("volume_name", ""),
+            "serial_number": volume_info_result.get("serial_number", ""),
+            "file_system": volume_info_result.get("file_system", ""),
+            "volume_info": volume_info_result.get("volume_info", {}),
+            "raw_output": volume_info_result.get("raw_output", "")
+        }
     
     async def read_tape_label_windows(self) -> Dict[str, Any]:
         """读取Windows磁带卷标（使用fsutil）"""

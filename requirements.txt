@@ -10,7 +10,11 @@ python-multipart==0.0.6
 
 # 数据库
 sqlalchemy==2.0.23
-asyncpg==0.29.0
+# psycopg3：优先使用，修复 BufferError（使用 binary protocol）
+# 如果未安装 psycopg3，会自动回退到 asyncpg
+psycopg[binary,pool]>=3.1.8  # psycopg3 异步版本，修复 openGauss BufferError
+# asyncpg：备用驱动（如果 psycopg3 未安装则使用）
+asyncpg>=0.29.0
 psycopg2-binary==2.9.9
 alembic==1.12.1
 opengauss-sqlalchemy>=2.4.0

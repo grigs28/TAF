@@ -146,6 +146,9 @@ def setup_logging():
     logging.getLogger('sqlalchemy.pool').setLevel(logging.WARNING)
     logging.getLogger('hypercorn').setLevel(logging.WARNING)
     logging.getLogger('websockets').setLevel(logging.WARNING)
+    # 将 psycopg3 连接池的警告日志级别设置为 ERROR，避免在 INFO 级别时显示连接重置警告
+    # 这些警告是正常的连接池清理行为，不影响功能
+    logging.getLogger('psycopg.pool').setLevel(logging.ERROR)
 
     # 记录启动日志
     logger.info("=" * 60)

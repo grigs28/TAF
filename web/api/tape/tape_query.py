@@ -183,30 +183,11 @@ async def get_tape(tape_id: str, request: Request):
                     "tape": tape
                 }
         
-        # 使用psycopg2直接连接
-        import psycopg2
-        import psycopg2.extras
-        
-        # 解析URL
-        if database_url.startswith("opengauss://"):
-            database_url = database_url.replace("opengauss://", "postgresql://", 1)
-        
-        pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
-        match = re.match(pattern, database_url)
-        
-        if not match:
-            raise ValueError("无法解析数据库连接URL")
-        
-        username, password, host, port, database = match.groups()
+        # 使用统一的连接辅助函数（支持 psycopg2 和 psycopg3）
+        from utils.db_connection_helper import get_psycopg_connection_from_url
         
         # 连接数据库
-        conn = psycopg2.connect(
-            host=host,
-            port=port,
-            user=username,
-            password=password,
-            database=database
-        )
+        conn, is_psycopg3 = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
         
         try:
             with conn.cursor() as cur:
@@ -290,30 +271,11 @@ async def update_tape(tape_id: str, request: UpdateTapeRequest, http_request: Re
             logger.warning(f"[SQLite模式] 更新磁带暂未实现: {tape_id}")
             raise HTTPException(status_code=501, detail="SQLite模式下暂不支持更新磁带功能")
 
-        # 使用psycopg2直接连接，避免openGauss版本解析问题
-        import psycopg2
-        import psycopg2.extras
-        
-        # 解析URL
-        if database_url.startswith("opengauss://"):
-            database_url = database_url.replace("opengauss://", "postgresql://", 1)
-        
-        pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
-        match = re.match(pattern, database_url)
-        
-        if not match:
-            raise ValueError("无法解析数据库连接URL")
-        
-        username, password, host, port, database = match.groups()
+        # 使用统一的连接辅助函数（支持 psycopg2 和 psycopg3）
+        from utils.db_connection_helper import get_psycopg_connection_from_url
         
         # 连接数据库
-        conn = psycopg2.connect(
-            host=host,
-            port=port,
-            user=username,
-            password=password,
-            database=database
-        )
+        conn, is_psycopg3 = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
         
         old_values = {}
         new_values = {}
@@ -533,13 +495,14 @@ async def update_tape(tape_id: str, request: UpdateTapeRequest, http_request: Re
                         try:
                             from utils.tape_tools import tape_tools_manager
                             # 重新连接数据库（因为原连接已关闭）
-                            import psycopg2
-                            db_conn = psycopg2.connect(
+                            from utils.db_connection_helper import get_psycopg_connection
+                            db_conn, _ = get_psycopg_connection(
                                 host=host,
                                 port=port,
                                 user=username,
                                 password=password,
-                                database=database
+                                database=database,
+                                prefer_psycopg3=True
                             )
                             
                             try:
@@ -675,13 +638,14 @@ async def update_tape(tape_id: str, request: UpdateTapeRequest, http_request: Re
                             logger.error(f"后台格式化磁盘异常: {str(e)}", exc_info=True)
                             # 异常时也要将状态改为ERROR
                             try:
-                                import psycopg2
-                                db_conn = psycopg2.connect(
+                                from utils.db_connection_helper import get_psycopg_connection
+                                db_conn, _ = get_psycopg_connection(
                                     host=host,
                                     port=port,
                                     user=username,
                                     password=password,
-                                    database=database
+                                    database=database,
+                                    prefer_psycopg3=True
                                 )
                                 with db_conn.cursor() as db_cur:
                                     db_cur.execute("UPDATE tape_cartridges SET status = %s WHERE tape_id = %s", 
@@ -873,30 +837,11 @@ async def check_tape_exists(tape_id: str, request: Request):
                         "exists": False
                     }
         else:
-            # 使用 psycopg2 查询 PostgreSQL/openGauss
-            import psycopg2
-            import psycopg2.extras
-            
-            # 解析URL
-            if database_url.startswith("opengauss://"):
-                database_url = database_url.replace("opengauss://", "postgresql://", 1)
-            
-            pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
-            match = re.match(pattern, database_url)
-            
-            if not match:
-                raise ValueError("无法解析数据库连接URL")
-            
-            username, password, host, port, database = match.groups()
+            # 使用统一的连接辅助函数（支持 psycopg2 和 psycopg3）
+            from utils.db_connection_helper import get_psycopg_connection_from_url
             
             # 连接数据库
-            conn = psycopg2.connect(
-                host=host,
-                port=port,
-                user=username,
-                password=password,
-                database=database
-            )
+            conn, is_psycopg3 = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
             
             try:
                 with conn.cursor() as cur:
@@ -1037,37 +982,68 @@ async def list_tapes(request: Request):
                         "backup_set_count": row[17],
                         "notes": row[18]
                     })
+
+            return {
+                "success": True,
+                "tapes": tapes,
+                "count": len(tapes)
+            }
+        elif is_opengauss():
+            # 使用openGauss连接
+            async with get_opengauss_connection() as conn:
+                rows = await conn.fetch("""
+                    SELECT
+                        tape_id, label, status, media_type, generation,
+                        serial_number, location, capacity_bytes, used_bytes,
+                        write_count, read_count, load_count, health_score,
+                        first_use_date, last_erase_date, expiry_date,
+                        retention_months, backup_set_count, notes
+                    FROM tape_cartridges
+                    ORDER BY tape_id
+                """)
+
+                tapes = []
+                for row in rows:
+                    tapes.append({
+                        "tape_id": row["tape_id"],
+                        "label": row["label"],
+                        "status": row["status"].value if hasattr(row["status"], 'value') else str(row["status"]),
+                        "media_type": row["media_type"],
+                        "generation": row["generation"],
+                        "serial_number": row["serial_number"],
+                        "location": row["location"],
+                        "capacity_bytes": row["capacity_bytes"],
+                        "used_bytes": row["used_bytes"],
+                        "usage_percent": (row["used_bytes"] / row["capacity_bytes"] * 100) if row["capacity_bytes"] > 0 else 0,
+                        "write_count": row["write_count"],
+                        "read_count": row["read_count"],
+                        "load_count": row["load_count"],
+                        "health_score": row["health_score"],
+                        "first_use_date": row["first_use_date"].isoformat() if row["first_use_date"] else None,
+                        "last_erase_date": row["last_erase_date"].isoformat() if row["last_erase_date"] else None,
+                        "expiry_date": row["expiry_date"].isoformat() if row["expiry_date"] else None,
+                        "retention_months": row["retention_months"],
+                        "backup_set_count": row["backup_set_count"],
+                        "notes": row["notes"]
+                    })
+
+            return {
+                "success": True,
+                "tapes": tapes,
+                "count": len(tapes)
+            }
         else:
-            # 使用 psycopg2 查询 PostgreSQL/openGauss
-            import psycopg2
-            
-            # 解析URL
-            if database_url.startswith("opengauss://"):
-                database_url = database_url.replace("opengauss://", "postgresql://", 1)
-            
-            pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
-            match = re.match(pattern, database_url)
-            
-            if not match:
-                raise ValueError("无法解析数据库连接URL")
-            
-            username, password, host, port, database = match.groups()
-            
-            # 直接用psycopg2查询
-            conn = psycopg2.connect(
-                host=host,
-                port=port,
-                user=username,
-                password=password,
-                database=database
-            )
-            
+            # 使用统一的连接辅助函数（支持 psycopg2 和 psycopg3）- 用于其他数据库
+            from utils.db_connection_helper import get_psycopg_connection_from_url
+
+            conn, is_psycopg3 = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
+
             tapes = []
             try:
                 with conn.cursor() as cur:
                     # 查询所有磁带
                     cur.execute("""
-                        SELECT 
+                        SELECT
                             tape_id, label, status, media_type, generation,
                             serial_number, location, capacity_bytes, used_bytes,
                             write_count, read_count, load_count, health_score,
@@ -1076,9 +1052,9 @@ async def list_tapes(request: Request):
                         FROM tape_cartridges
                         ORDER BY tape_id
                     """)
-                    
+
                     rows = cur.fetchall()
-                    
+
                     for row in rows:
                         tapes.append({
                             "tape_id": row[0],
@@ -1186,10 +1162,62 @@ async def get_tape_inventory(request: Request):
                 duration_ms=duration_ms
             )
             return inventory
-        
+
+        # 检查是否为 openGauss
+        if is_opengauss():
+            # 使用openGauss连接查询磁带库存
+            async with get_opengauss_connection() as conn:
+                rows = await conn.fetch("SELECT * FROM tape_cartridges")
+
+                # 计算统计信息
+                from models.tape import TapeStatus
+                from datetime import date
+
+                total_tapes = len(rows)
+                available_tapes = sum(1 for t in rows if t.get('status') == TapeStatus.AVAILABLE)
+                in_use_tapes = sum(1 for t in rows if t.get('status') == TapeStatus.IN_USE)
+                full_tapes = sum(1 for t in rows if t.get('status') == TapeStatus.FULL)
+                expired_tapes = sum(1 for t in rows if t.get('expiry_date') and t.get('expiry_date').date() < date.today())
+                error_tapes = sum(1 for t in rows if t.get('status') == TapeStatus.ERROR)
+                excellent_tapes = sum(1 for t in rows if (t.get('health_score') or 0) >= 80)
+                good_tapes = sum(1 for t in rows if 60 <= (t.get('health_score') or 0) < 80)
+                warning_tapes = sum(1 for t in rows if 40 <= (t.get('health_score') or 0) < 60)
+                critical_tapes = sum(1 for t in rows if (t.get('health_score') or 0) < 40)
+                total_capacity_bytes = sum(t.get('capacity_bytes') or 0 for t in rows)
+                total_used_bytes = sum(t.get('used_bytes') or 0 for t in rows)
+                total_available_bytes = total_capacity_bytes - total_used_bytes
+
+                inventory = {
+                    "total_tapes": total_tapes,
+                    "available_tapes": available_tapes,
+                    "in_use_tapes": in_use_tapes,
+                    "full_tapes": full_tapes,
+                    "expired_tapes": expired_tapes,
+                    "error_tapes": error_tapes,
+                    "excellent_tapes": excellent_tapes,
+                    "good_tapes": good_tapes,
+                    "warning_tapes": warning_tapes,
+                    "critical_tapes": critical_tapes,
+                    "total_capacity_bytes": total_capacity_bytes,
+                    "total_used_bytes": total_used_bytes,
+                    "total_available_bytes": total_available_bytes,
+                    "usage_percent": (total_used_bytes / total_capacity_bytes * 100) if total_capacity_bytes > 0 else 0
+                }
+
+            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            await log_system(
+                level=LogLevel.INFO,
+                category=LogCategory.TAPE,
+                message=f"[openGauss模式] 获取磁带库存统计成功: 总计 {total_tapes} 个磁带",
+                module="web.api.tape.crud",
+                function="get_tape_inventory",
+                duration_ms=duration_ms
+            )
+            return inventory
+
         # 检查是否为 SQLite
         is_sqlite = database_url.startswith("sqlite:///") or database_url.startswith("sqlite+aiosqlite:///")
-        
+
         if is_sqlite:
             # 使用原生SQL查询 SQLite
             from utils.scheduler.sqlite_utils import get_sqlite_connection
@@ -1234,30 +1262,22 @@ async def get_tape_inventory(request: Request):
                     "total_available_bytes": total_available_bytes,
                     "usage_percent": (total_used_bytes / total_capacity_bytes * 100) if total_capacity_bytes > 0 else 0
                 }
-        else:
-            # 使用 psycopg2 查询 PostgreSQL/openGauss
-            import psycopg2
-            
-            # 解析URL
-            if database_url.startswith("opengauss://"):
-                database_url = database_url.replace("opengauss://", "postgresql://", 1)
-            
-            pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
-            match = re.match(pattern, database_url)
-            
-            if not match:
-                raise ValueError("无法解析数据库连接URL")
-            
-            username, password, host, port, database = match.groups()
-            
-            # 连接数据库
-            conn = psycopg2.connect(
-                host=host,
-                port=port,
-                user=username,
-                password=password,
-                database=database
+
+            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            await log_system(
+                level=LogLevel.INFO,
+                category=LogCategory.TAPE,
+                message=f"[SQLite模式] 获取磁带库存统计成功: 总计 {total_tapes} 个磁带",
+                module="web.api.tape.crud",
+                function="get_tape_inventory",
+                duration_ms=duration_ms
             )
+            return inventory
+        else:
+            # 使用统一的连接辅助函数（支持 psycopg2 和 psycopg3）
+            from utils.db_connection_helper import get_psycopg_connection_from_url
+            
+            conn, is_psycopg3 = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
             
             try:
                 with conn.cursor() as cur:

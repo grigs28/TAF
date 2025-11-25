@@ -51,15 +51,11 @@ class DatabaseManager:
             logger.info("通过 DB_FLAVOR 显式配置识别为 openGauss 数据库")
             return True
 
-        try:
-            import psycopg2
-        except ImportError:
-            logger.debug("psycopg2 未安装，无法自动检测 openGauss，默认为非 openGauss")
-            return False
-
+        # 尝试使用 psycopg2 或 psycopg3 检测
         conn = None
         try:
-            conn = psycopg2.connect(self._build_database_url())
+            from utils.db_connection_helper import get_psycopg_connection_from_url
+            conn, is_psycopg3 = get_psycopg_connection_from_url(self._build_database_url(), prefer_psycopg3=True)
             with conn.cursor() as cur:
                 cur.execute("SELECT version()")
                 row = cur.fetchone()
@@ -239,8 +235,18 @@ class DatabaseManager:
                 logger.info("检测到 SQLite 数据库，使用 SQLite 初始化器创建表...")
                 await sqlite_init.create_tables()
             elif self.is_opengauss_database():
-                # 对于openGauss，使用psycopg2直接创建表，避免版本检查问题
-                logger.info("检测到openGauss数据库，使用psycopg2创建表...")
+                # 对于openGauss，使用psycopg3（优先）或psycopg2（回退）直接创建表，避免版本检查问题
+                # 检查实际可用的驱动
+                try:
+                    import psycopg
+                    driver_name = "psycopg3"
+                except ImportError:
+                    try:
+                        import psycopg2
+                        driver_name = "psycopg2"
+                    except ImportError:
+                        driver_name = "psycopg2/psycopg3（未安装）"
+                logger.info(f"检测到openGauss数据库，将使用{driver_name}创建表（优先psycopg3，失败则回退到psycopg2）...")
                 await self._create_tables_with_psycopg2()
             else:
                 # PostgreSQL使用SQLAlchemy引擎来创建表
@@ -258,9 +264,22 @@ class DatabaseManager:
             raise
     
     async def _create_tables_with_psycopg2(self):
-        """使用psycopg2直接连接创建表（解决openGauss版本解析问题）"""
-        import psycopg2
+        """使用psycopg2或psycopg3直接连接创建表（解决openGauss版本解析问题）"""
         import re
+        
+        # 优先尝试使用 psycopg3（同步版本），如果失败则使用 psycopg2
+        use_psycopg3 = False
+        try:
+            import psycopg
+            use_psycopg3 = True
+            logger.info("使用 psycopg3（同步）创建数据库表...")
+        except ImportError:
+            try:
+                import psycopg2
+                logger.info("使用 psycopg2 创建数据库表...")
+            except ImportError:
+                logger.error("psycopg2 和 psycopg3 都未安装，无法创建数据库表")
+                raise ImportError("需要安装 psycopg2 或 psycopg3 来创建数据库表")
         
         # 解析数据库URL获取连接信息
         database_url = self.settings.DATABASE_URL
@@ -274,23 +293,31 @@ class DatabaseManager:
         
         username, password, host, port, database = match.groups()
         
-        # 使用psycopg2直接连接
-        conn = psycopg2.connect(
-            host=host,
-            port=port,
-            user=username,
-            password=password,
-            database=database
-        )
+        # 使用 psycopg3 或 psycopg2 直接连接
+        if use_psycopg3:
+            import psycopg
+            conn = psycopg.connect(
+                host=host,
+                port=port,
+                user=username,
+                password=password,
+                dbname=database
+            )
+        else:
+            import psycopg2
+            conn = psycopg2.connect(
+                host=host,
+                port=port,
+                user=username,
+                password=password,
+                database=database
+            )
         
         try:
-            # 使用SQLAlchemy的Base.metadata.create_all，但通过psycopg2连接
-            # 这样可以避免版本检查，同时保留SQLAlchemy的所有特性
-            from sqlalchemy import create_engine
-            from sqlalchemy.schema import CreateTable
-            
-            # 创建一个临时的PostgreSQL引擎用于生成SQL（指定PostgreSQL dialect）
-            temp_engine = create_engine("postgresql://", pool_pre_ping=False)
+            # 使用原生 SQL 创建表，不依赖 SQLAlchemy（符合规则：严禁 SQLAlchemy 解析 openGauss）
+            # 从模型定义中提取表结构信息，生成原生 SQL
+            from utils.sql_generator import get_table_definition_from_model, generate_create_table_sql
+            from models.base import Base
             
             with conn.cursor() as cur:
                 # 先创建枚举类型（明确定义所有枚举类型）
@@ -299,6 +326,11 @@ class DatabaseManager:
                 from models.backup import BackupTaskType, BackupTaskStatus, BackupFileType
                 
                 # 定义所有需要的枚举类型（确保名称和值正确）
+                from models.system_config import ConfigType, ConfigCategory
+                from models.tape import TapeStatus, TapeOperationType, TapeLogLevel
+                from models.user import UserStatus, PermissionCategory
+                from models.backup import BackupSetStatus
+                
                 enum_definitions = {
                     'scheduletype': [e.value for e in ScheduleType],  # ['once', 'interval', 'daily', 'weekly', 'monthly', 'yearly', 'cron']
                     'scheduledtaskstatus': [e.value for e in ScheduledTaskStatus],  # ['active', 'inactive', 'running', 'paused', 'error']
@@ -309,7 +341,15 @@ class DatabaseManager:
                     'errorlevel': [e.value for e in ErrorLevel],  # ['low', 'medium', 'high', 'critical']
                     'backuptasktype': [e.value for e in BackupTaskType],  # ['full', 'incremental', 'differential', 'monthly_full']
                     'backuptaskstatus': [e.value for e in BackupTaskStatus],  # ['pending', 'running', 'completed', 'failed', 'cancelled', 'paused']
+                    'backupsetstatus': [e.value for e in BackupSetStatus],  # ['active', 'archived', 'corrupted', 'deleted']
                     'backupfiletype': [e.value for e in BackupFileType],  # ['file', 'directory', 'symlink']
+                    'configtype': [e.value for e in ConfigType],  # ['string', 'integer', 'float', 'boolean', 'json', 'encrypted']
+                    'configcategory': [e.value for e in ConfigCategory],  # ['application', 'database', 'web', 'security', 'tape', 'backup', 'scheduler', 'notification', 'performance', 'monitoring', 'storage']
+                    'tapestatus': [e.value for e in TapeStatus],  # ['new', 'available', 'in_use', 'full', 'expired', 'error', 'maintenance', 'retired']
+                    'tapeoperationtype': [e.value for e in TapeOperationType],  # ['load', 'unload', 'write', 'read', 'erase', 'rewind', 'verify', 'clean', 'error', 'maintenance']
+                    'tapeloglevel': [e.value for e in TapeLogLevel],  # ['info', 'warning', 'error', 'debug']
+                    'userstatus': [e.value for e in UserStatus],  # ['active', 'inactive', 'locked', 'suspended']
+                    'permissioncategory': [e.value for e in PermissionCategory],  # ['backup', 'recovery', 'tape', 'system', 'user', 'log', 'config', 'monitor']
                 }
                 
                 # 初始化统计列表
@@ -365,45 +405,180 @@ class DatabaseManager:
                             else:
                                 existing_enums.append(enum_name)
                 
+                # 关键修复：在创建表之前提交枚举类型的创建（openGauss模式下需要显式提交）
+                conn.commit()
+                logger.debug("枚举类型创建已提交")
+                
                 # 创建表
                 created_tables = []
                 existing_tables = []
                 
+                # 遍历所有表，使用原生 SQL 创建
+                # Base.metadata.sorted_tables 已经按照依赖关系排序（被引用的表在前）
+                logger.info(f"开始创建表，Base.metadata 中共有 {len(Base.metadata.sorted_tables)} 个表")
+                table_names = [t.name for t in Base.metadata.sorted_tables]
+                logger.info(f"表创建顺序: {', '.join(table_names)}")
                 for table in Base.metadata.sorted_tables:
+                    logger.debug(f"处理表: {table.name}")
                     # 检查表是否已存在
                     cur.execute("""
                         SELECT 1 FROM information_schema.tables WHERE table_name = %s
                     """, (table.name,))
-                    if not cur.fetchone():
-                        create_sql = str(CreateTable(table).compile(compile_kwargs={"literal_binds": True}, dialect=temp_engine.dialect))
-                        
-                        # 关键修复：将路径、文件名相关字段从 VARCHAR 改为 TEXT
-                        # 确保在创建表时就使用 TEXT 类型，而不是 VARCHAR
-                        if table.name == 'backup_files':
-                            # 替换 file_name, file_path, directory_path, display_name 的 VARCHAR 为 TEXT
-                            create_sql = create_sql.replace('file_name VARCHAR', 'file_name TEXT')
-                            create_sql = create_sql.replace('file_name CHARACTER VARYING', 'file_name TEXT')
-                            create_sql = create_sql.replace('file_path VARCHAR', 'file_path TEXT')
-                            create_sql = create_sql.replace('file_path CHARACTER VARYING', 'file_path TEXT')
-                            create_sql = create_sql.replace('directory_path VARCHAR', 'directory_path TEXT')
-                            create_sql = create_sql.replace('directory_path CHARACTER VARYING', 'directory_path TEXT')
-                            create_sql = create_sql.replace('display_name VARCHAR', 'display_name TEXT')
-                            create_sql = create_sql.replace('display_name CHARACTER VARYING', 'display_name TEXT')
-                            # 处理可能的长度限制（如 VARCHAR(4096) 等）
-                            import re
-                            create_sql = re.sub(r'file_name VARCHAR\([^)]+\)', 'file_name TEXT', create_sql, flags=re.IGNORECASE)
-                            create_sql = re.sub(r'file_name CHARACTER VARYING\([^)]+\)', 'file_name TEXT', create_sql, flags=re.IGNORECASE)
-                            create_sql = re.sub(r'file_path VARCHAR\([^)]+\)', 'file_path TEXT', create_sql, flags=re.IGNORECASE)
-                            create_sql = re.sub(r'file_path CHARACTER VARYING\([^)]+\)', 'file_path TEXT', create_sql, flags=re.IGNORECASE)
-                            create_sql = re.sub(r'directory_path VARCHAR\([^)]+\)', 'directory_path TEXT', create_sql, flags=re.IGNORECASE)
-                            create_sql = re.sub(r'directory_path CHARACTER VARYING\([^)]+\)', 'directory_path TEXT', create_sql, flags=re.IGNORECASE)
-                            create_sql = re.sub(r'display_name VARCHAR\([^)]+\)', 'display_name TEXT', create_sql, flags=re.IGNORECASE)
-                            create_sql = re.sub(r'display_name CHARACTER VARYING\([^)]+\)', 'display_name TEXT', create_sql, flags=re.IGNORECASE)
-                            logger.info(f"已将 backup_files 表的路径、文件名、展示名称相关字段设置为 TEXT 类型")
-                        
-                        cur.execute(create_sql)
-                        created_tables.append(table.name)
+                    table_exists = cur.fetchone()
+                    if not table_exists:
+                        logger.info(f"表 {table.name} 不存在，开始创建...")
+                        # 从模型定义中提取表结构，生成原生 SQL（不依赖 SQLAlchemy 编译）
+                        columns = get_table_definition_from_model(table.name)
+                        if columns:
+                            logger.debug(f"表 {table.name} 成功提取到 {len(columns)} 个列定义")
+                            # 检查是否有唯一约束字段（用于调试）
+                            unique_cols = [col[0] for col in columns if col[4] and 'UNIQUE' in str(col[4])]
+                            if unique_cols:
+                                logger.debug(f"表 {table.name} 的唯一约束字段: {', '.join(unique_cols)}")
+                            try:
+                                create_sql = generate_create_table_sql(table.name, columns)
+                                # 记录生成的 SQL（用于调试，特别是对于有枚举类型的表）
+                                has_enum = False
+                                if columns:
+                                    try:
+                                        has_enum = any(
+                                            col is not None and len(col) > 1 and col[1] is not None and 
+                                            str(col[1]).lower() in ['tapestatus', 'tapeoperationtype', 'tapeloglevel', 
+                                                                      'backuptasktype', 'backuptaskstatus', 'backupsetstatus', 'backupfiletype',
+                                                                      'scheduletype', 'scheduledtaskstatus', 'taskactiontype',
+                                                                      'loglevel', 'logcategory', 'operationtype', 'errorlevel',
+                                                                      'configtype', 'configcategory', 'userstatus', 'permissioncategory']
+                                            for col in columns
+                                        )
+                                    except (TypeError, IndexError) as e:
+                                        logger.warning(f"检查表 {table.name} 的枚举类型时出错: {e}，跳过枚举类型检查")
+                                        has_enum = False
+                                if has_enum:
+                                    logger.info(f"为表 {table.name} 生成的 SQL（包含枚举类型）:\n{create_sql}")
+                                else:
+                                    logger.debug(f"为表 {table.name} 生成的 SQL:\n{create_sql}")
+                                cur.execute(create_sql)
+                                # 关键修复：在创建每个表后立即提交（openGauss模式下需要显式提交）
+                                conn.commit()
+                                created_tables.append(table.name)
+                            except Exception as sql_err:
+                                error_msg = str(sql_err)
+                                logger.error(f"创建表 {table.name} 失败: {error_msg}")
+                                
+                                # 如果是外键约束错误，可能是表创建顺序问题
+                                if "no unique constraint" in error_msg.lower() or "foreign key" in error_msg.lower():
+                                    logger.error(f"外键约束错误，可能是被引用的表 {table.name} 还未创建")
+                                    logger.error(f"请检查表创建顺序，确保被引用的表先创建")
+                                    # 记录所有已创建的表
+                                    logger.error(f"已创建的表: {', '.join(created_tables)}")
+                                
+                                # 如果错误信息包含 "missing FROM-clause"，记录完整的 SQL 以便调试
+                                if "missing FROM-clause" in error_msg.lower() or "FROM-clause entry" in error_msg.lower():
+                                    logger.error(f"生成的 SQL（可能有语法错误）:\n{create_sql if 'create_sql' in locals() else 'N/A'}")
+                                    logger.error(f"列定义详情:")
+                                    for i, col in enumerate(columns):
+                                        logger.error(f"  列 {i+1}: {col}")
+                                
+                                # 记录生成的 SQL 以便调试
+                                if 'create_sql' in locals():
+                                    logger.error(f"生成的 SQL:\n{create_sql}")
+                                
+                                raise
+                        else:
+                            logger.error(f"无法为表 {table.name} 生成 SQL 定义，跳过（这可能导致功能异常）")
+                            logger.error(f"表 {table.name} 的元数据: {table}")
+                            # 尝试从 Base.metadata 直接获取表信息
+                            try:
+                                from models.base import Base
+                                if table.name in Base.metadata.tables:
+                                    logger.error(f"表 {table.name} 存在于 Base.metadata.tables 中")
+                                    logger.error(f"表列: {[col.name for col in Base.metadata.tables[table.name].columns]}")
+                                    # 如果表存在于元数据中但无法生成 SQL，尝试手动创建
+                                    if table.name == 'backup_files':
+                                        logger.warning(f"⚠️ backup_files 表无法自动生成，尝试手动创建...")
+                                        try:
+                                            # 手动创建 backup_files 表
+                                            manual_create_sql = """
+                                            CREATE TABLE backup_files (
+                                                id SERIAL PRIMARY KEY,
+                                                backup_set_id INTEGER NOT NULL REFERENCES backup_sets(id),
+                                                file_path TEXT NOT NULL,
+                                                file_name TEXT NOT NULL,
+                                                directory_path TEXT,
+                                                display_name TEXT,
+                                                file_type backupfiletype NOT NULL DEFAULT 'file',
+                                                file_size BIGINT NOT NULL,
+                                                compressed_size BIGINT,
+                                                file_permissions VARCHAR(20),
+                                                file_owner VARCHAR(100),
+                                                file_group VARCHAR(100),
+                                                created_time TIMESTAMP WITH TIME ZONE,
+                                                modified_time TIMESTAMP WITH TIME ZONE,
+                                                accessed_time TIMESTAMP WITH TIME ZONE,
+                                                tape_block_start BIGINT,
+                                                tape_block_count INTEGER,
+                                                compressed BOOLEAN DEFAULT FALSE,
+                                                encrypted BOOLEAN DEFAULT FALSE,
+                                                checksum VARCHAR(128),
+                                                is_copy_success BOOLEAN DEFAULT FALSE,
+                                                copy_status_at TIMESTAMP WITH TIME ZONE,
+                                                backup_time TIMESTAMP WITH TIME ZONE NOT NULL,
+                                                chunk_number INTEGER,
+                                                version INTEGER DEFAULT 1,
+                                                file_metadata JSONB,
+                                                tags JSONB
+                                                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                                                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                                            )
+                                            """
+                                            cur.execute(manual_create_sql)
+                                            conn.commit()
+                                            logger.info(f"✅ 手动创建 backup_files 表成功")
+                                            created_tables.append(table.name)
+                                            continue
+                                        except Exception as manual_create_err:
+                                            logger.error(f"❌ 手动创建 backup_files 表失败: {str(manual_create_err)}", exc_info=True)
+                                else:
+                                    logger.error(f"表 {table.name} 不存在于 Base.metadata.tables 中")
+                            except Exception as meta_err:
+                                logger.error(f"检查表 {table.name} 元数据时出错: {meta_err}")
+                            existing_tables.append(table.name)
                     else:
+                        # 表已存在，检查是否需要添加唯一约束（特别是对于外键引用的字段）
+                        if table.name == 'tape_cartridges':
+                            logger.info(f"表 {table.name} 已存在，检查 tape_id 字段的唯一约束...")
+                            try:
+                                # 检查 tape_id 字段是否有唯一约束
+                                cur.execute("""
+                                    SELECT COUNT(*) 
+                                    FROM information_schema.table_constraints tc
+                                    JOIN information_schema.constraint_column_usage ccu 
+                                        ON tc.constraint_name = ccu.constraint_name
+                                    WHERE tc.table_name = 'tape_cartridges' 
+                                        AND ccu.column_name = 'tape_id'
+                                        AND tc.constraint_type = 'UNIQUE'
+                                """)
+                                unique_count = cur.fetchone()[0]
+                                if unique_count == 0:
+                                    logger.warning(f"表 {table.name} 的 tape_id 字段缺少唯一约束，正在添加...")
+                                    try:
+                                        # 添加唯一约束
+                                        cur.execute("""
+                                            ALTER TABLE tape_cartridges 
+                                            ADD CONSTRAINT tape_cartridges_tape_id_unique UNIQUE (tape_id)
+                                        """)
+                                        conn.commit()
+                                        logger.info(f"✅ 成功为表 {table.name} 的 tape_id 字段添加唯一约束")
+                                    except Exception as add_unique_err:
+                                        error_msg = str(add_unique_err)
+                                        if "already exists" in error_msg.lower() or "duplicate" in error_msg.lower():
+                                            logger.info(f"表 {table.name} 的 tape_id 字段唯一约束已存在（可能名称不同）")
+                                        else:
+                                            logger.warning(f"为表 {table.name} 添加唯一约束失败: {error_msg}")
+                                else:
+                                    logger.debug(f"表 {table.name} 的 tape_id 字段已有唯一约束")
+                            except Exception as check_err:
+                                logger.warning(f"检查表 {table.name} 的唯一约束时出错: {check_err}")
                         existing_tables.append(table.name)
                 
                 # 汇总输出，减少日志刷屏
@@ -494,6 +669,56 @@ class DatabaseManager:
                     logger.error(f"这可能导致长文件名/路径无法同步到数据库！")
                     # 不抛出异常，避免影响表创建流程，但记录详细错误信息
                 
+                # 检查并修复 backup_files 表的 id 字段（确保是 SERIAL 或使用序列）
+                logger.info("========== 开始检查 backup_files 表 id 字段 ==========")
+                try:
+                    cur.execute("""
+                        SELECT 1 FROM information_schema.tables WHERE table_name = 'backup_files'
+                    """)
+                    if cur.fetchone():
+                        # 检查 id 字段类型和默认值
+                        cur.execute("""
+                            SELECT data_type, column_default, is_nullable
+                            FROM information_schema.columns 
+                            WHERE table_name = 'backup_files' AND column_name = 'id'
+                        """)
+                        result = cur.fetchone()
+                        if result:
+                            data_type, column_default, is_nullable = result
+                            # 检查是否是 SERIAL 类型（SERIAL 类型在 information_schema 中显示为 integer，但默认值是序列）
+                            if column_default and 'nextval' in str(column_default).lower():
+                                logger.debug("backup_files.id 字段已使用序列，无需修复")
+                            elif data_type == 'integer' and is_nullable == 'NO':
+                                # id 字段是 INTEGER NOT NULL 但没有序列，需要创建序列并设置默认值
+                                logger.info("backup_files.id 字段是 INTEGER NOT NULL 但没有序列，正在修复...")
+                                try:
+                                    # 创建序列
+                                    cur.execute("""
+                                        CREATE SEQUENCE IF NOT EXISTS backup_files_id_seq
+                                    """)
+                                    # 设置 id 字段的默认值为序列的 nextval
+                                    cur.execute("""
+                                        ALTER TABLE backup_files 
+                                        ALTER COLUMN id SET DEFAULT nextval('backup_files_id_seq')
+                                    """)
+                                    # 设置序列的所有者为表
+                                    cur.execute("""
+                                        ALTER SEQUENCE backup_files_id_seq OWNED BY backup_files.id
+                                    """)
+                                    # 设置序列的当前值为表中最大 id + 1
+                                    cur.execute("""
+                                        SELECT setval('backup_files_id_seq', COALESCE((SELECT MAX(id) FROM backup_files), 0) + 1, false)
+                                    """)
+                                    logger.info("✅ 成功为 backup_files.id 字段创建序列并设置默认值")
+                                except Exception as seq_err:
+                                    logger.error(f"❌ 修复 backup_files.id 字段失败: {str(seq_err)}", exc_info=True)
+                            else:
+                                logger.debug(f"backup_files.id 字段类型: {data_type}, 默认值: {column_default}, 可为空: {is_nullable}")
+                        else:
+                            logger.warning("backup_files.id 字段不存在，这不应该发生")
+                except Exception as id_check_err:
+                    logger.error(f"检查 backup_files.id 字段失败: {str(id_check_err)}", exc_info=True)
+                
                 # 检查并修改 backup_tasks 表的 total_bytes 字段类型为 NUMERIC（避免 int64 溢出）
                 logger.info("========== 开始检查 backup_tasks 表 total_bytes 字段类型 ==========")
                 try:
@@ -544,10 +769,13 @@ class DatabaseManager:
                 
                 # 创建索引（优化查询性能）- 必须在 with 块内，在 cursor 关闭之前
                 self._create_indexes_for_backup_files(cur)
+                # 关键修复：在创建索引后立即提交（openGauss模式下需要显式提交）
+                conn.commit()
+                logger.debug("索引创建已提交")
             
-            # 提交所有修改（表创建、字段迁移、字段类型修改、索引创建）
-            conn.commit()
-            logger.info("使用psycopg2成功创建数据库表、字段迁移、字段类型检查和索引创建完成")
+            # 最终提交（确保所有修改都已提交）
+            # 注意：由于上面已经在每个关键步骤后提交，这里主要是确保一致性
+            logger.info(f"使用{'psycopg3' if use_psycopg3 else 'psycopg2'}成功创建数据库表、字段迁移、字段类型检查和索引创建完成")
             
         except Exception as e:
             conn.rollback()

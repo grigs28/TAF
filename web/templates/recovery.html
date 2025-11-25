@@ -539,7 +539,7 @@
                 
                 card.innerHTML = `
                     <div class="d-flex justify-content-between align-items-start">
-                        <div>
+                        <div class="flex-grow-1" style="cursor: pointer;">
                             <h6 class="mb-1">${getBackupTypeName(backupSet.backup_type)}</h6>
                             <small class="text-muted">${timeStr}</small>
                             <div class="mt-2">
@@ -553,12 +553,19 @@
                         </div>
                         <div class="text-end">
                             <span class="badge ${getBackupTypeBadge(backupSet.backup_type)}">${getBackupTypeShortName(backupSet.backup_type)}</span>
+                            <button class="btn btn-sm btn-outline-danger mt-2" onclick="event.stopPropagation(); deleteBackupSet('${backupSet.set_id}')" title="删除备份集">
+                                <i class="bi bi-trash"></i>
+                            </button>
                         </div>
                     </div>
                 `;
                 
                 // 点击选择备份集
-                card.addEventListener('click', function() {
+                card.addEventListener('click', function(e) {
+                    // 如果点击的是删除按钮，不触发选择
+                    if (e.target.closest('button')) {
+                        return;
+                    }
                     timeline.querySelectorAll('.backup-set-card.selected').forEach(c=>c.classList.remove('selected'));
                     this.classList.add('selected');
                     currentBackupSetId = backupSet.set_id;
@@ -583,6 +590,49 @@
         } catch (error) {
             console.error('加载备份集失败:', error);
             timeline.innerHTML = '<div class="alert alert-danger">加载备份集失败: ' + error.message + '</div>';
+        }
+    }
+
+    // 删除备份集
+    async function deleteBackupSet(setId) {
+        if (!confirm(`确定要删除备份集 ${setId} 吗？\n\n此操作将删除备份集及其所有文件记录，且不可恢复！`)) {
+            return;
+        }
+        
+        try {
+            const response = await fetch(`/api/backup/backup-sets/${encodeURIComponent(setId)}`, {
+                method: 'DELETE'
+            });
+            
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({ detail: response.statusText }));
+                throw new Error(errorData.detail || `HTTP错误: ${response.status}`);
+            }
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                alert(`备份集 ${setId} 删除成功`);
+                // 重新加载备份集列表
+                const monthSelect = document.getElementById('monthSelect');
+                if (monthSelect && monthSelect.value) {
+                    loadBackupSets(monthSelect.value);
+                }
+                // 清空文件树
+                if (typeof treeRoot !== 'undefined') {
+                    treeRoot.innerHTML = '<div class="text-center text-muted py-3">请选择一个备份集</div>';
+                }
+                // 重置当前备份集
+                currentBackupSetId = null;
+                if (currentBackupNameEl) {
+                    currentBackupNameEl.textContent = '未选择';
+                }
+            } else {
+                alert(`删除失败: ${result.message || '未知错误'}`);
+            }
+        } catch (error) {
+            console.error('删除备份集失败:', error);
+            alert('删除备份集失败: ' + error.message);
         }
     }
 

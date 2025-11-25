@@ -152,7 +152,23 @@ async def get_scheduled_tasks(
         scheduler: TaskScheduler = system.scheduler
         tasks = await scheduler.get_tasks(enabled_only=enabled_only)
         
-        return [ScheduledTaskResponse(**task.to_dict()) for task in tasks]
+        # 确保tasks是列表，避免返回None
+        if tasks is None:
+            logger.warning("scheduler.get_tasks()返回了None，返回空列表")
+            return []
+        
+        # 确保tasks是可迭代的
+        if not isinstance(tasks, (list, tuple)):
+            logger.warning(f"scheduler.get_tasks()返回了非列表类型: {type(tasks)}，返回空列表")
+            return []
+        
+        # 安全地构建响应列表
+        try:
+            result = [ScheduledTaskResponse(**task.to_dict()) for task in tasks]
+            return result
+        except Exception as e:
+            logger.error(f"构建计划任务响应列表失败: {str(e)}", exc_info=True)
+            return []
         
     except HTTPException:
         raise
@@ -319,13 +335,44 @@ async def create_scheduled_task(task: ScheduledTaskCreate, request: Request = No
         if not created_task:
             raise HTTPException(status_code=500, detail="创建计划任务后无法获取任务详情")
         
-        return ScheduledTaskResponse(**created_task.to_dict())
+        # 构建响应对象，确保时间字段是 datetime 对象而不是字符串
+        return ScheduledTaskResponse(
+            id=created_task.id,
+            task_name=created_task.task_name,
+            description=created_task.description,
+            schedule_type=created_task.schedule_type.value if created_task.schedule_type else None,
+            schedule_config=created_task.schedule_config or {},
+            action_type=created_task.action_type.value if created_task.action_type else None,
+            action_config=created_task.action_config or {},
+            status=created_task.status.value if created_task.status else ScheduledTaskStatus.INACTIVE.value,
+            enabled=created_task.enabled,
+            next_run_time=created_task.next_run_time,
+            last_run_time=created_task.last_run_time,
+            last_success_time=created_task.last_success_time,
+            last_failure_time=created_task.last_failure_time,
+            total_runs=getattr(created_task, 'total_runs', 0),
+            success_runs=getattr(created_task, 'success_runs', 0),
+            failure_runs=getattr(created_task, 'failure_runs', 0),
+            average_duration=getattr(created_task, 'average_duration', None),
+            last_error=getattr(created_task, 'last_error', None),
+            tags=created_task.tags or [],
+            task_metadata=created_task.task_metadata or {},
+            created_at=created_task.created_at if hasattr(created_task, 'created_at') and created_task.created_at else datetime.now(),
+            updated_at=created_task.updated_at if hasattr(created_task, 'updated_at') and created_task.updated_at else datetime.now()
+        )
         
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
         logger.error(f"创建计划任务失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"错误详情:\n{error_detail}")
+        # 返回更详细的错误信息（仅用于调试，生产环境可以简化）
+        error_msg = str(e)
+        if "day" in error_msg.lower() or "month" in error_msg.lower() or "date" in error_msg.lower():
+            error_msg = f"日期时间计算错误: {error_msg}"
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 # ===== 辅助函数 =====
@@ -464,11 +511,11 @@ async def _format_tape_via_disk_management(
     Returns:
         成功返回True，失败返回False
     """
-    import psycopg2
     from config.settings import get_settings
     from utils.tape_tools import tape_tools_manager
     from models.system_log import OperationType
     from utils.log_utils import log_operation
+    from utils.db_connection_helper import get_psycopg_connection_from_url
     
     try:
         # 检查是否为Redis数据库
@@ -488,27 +535,9 @@ async def _format_tape_via_disk_management(
             logger.warning(f"[SQLite模式] 通过磁盘管理格式化磁带暂未实现: {volume_label}")
             return False
         
-        # 解析URL
-        if database_url.startswith("opengauss://"):
-            database_url = database_url.replace("opengauss://", "postgresql://", 1)
-        pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
-        match = re.match(pattern, database_url)
-        
-        if not match:
-            raise ValueError("无法解析数据库连接URL")
-        
-        username, password, host, port, database = match.groups()
-        db_connect_kwargs = {
-            "host": host,
-            "port": port,
-            "user": username,
-            "password": password,
-            "database": database
-        }
-        
         # 检查磁带是否存在
         tape_id = volume_label  # 使用卷标作为tape_id
-        conn = psycopg2.connect(**db_connect_kwargs)
+        conn, is_psycopg3 = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
         tape_exists = False
         try:
             with conn.cursor() as cur:
@@ -519,7 +548,7 @@ async def _format_tape_via_disk_management(
         
         # 如果不存在，先创建记录（状态为MAINTENANCE）
         if not tape_exists:
-            conn = psycopg2.connect(**db_connect_kwargs)
+            conn, _ = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
             try:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -535,7 +564,7 @@ async def _format_tape_via_disk_management(
                 conn.close()
         else:
             # 如果存在，更新状态为MAINTENANCE
-            conn = psycopg2.connect(**db_connect_kwargs)
+            conn, _ = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
             try:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -552,7 +581,7 @@ async def _format_tape_via_disk_management(
             """后台格式化任务（复用磁盘管理的格式化逻辑）"""
             try:
                 # 重新连接数据库
-                db_conn = psycopg2.connect(**db_connect_kwargs)
+                db_conn, _ = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
                 
                 try:
                     # 获取盘符
@@ -704,7 +733,7 @@ async def _format_tape_via_disk_management(
                 logger.error(f"后台格式化磁盘异常: {str(e)}", exc_info=True)
                 # 异常时也要将状态改为ERROR
                 try:
-                    db_conn = psycopg2.connect(**db_connect_kwargs)
+                    db_conn, _ = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
                     with db_conn.cursor() as db_cur:
                         db_cur.execute("UPDATE tape_cartridges SET status = %s WHERE tape_id = %s", 
                                     ('ERROR', tape_id))

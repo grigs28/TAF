@@ -72,16 +72,29 @@ class TapeManager:
     async def initialize(self):
         """初始化磁带管理器"""
         try:
-            # 初始化 ITDT 接口
-            await self.itdt_interface.initialize()
-            logger.info("ITDT 接口初始化完成")
+            # 初始化 ITDT 接口（如果失败，只记录警告，不阻止系统启动）
+            try:
+                await self.itdt_interface.initialize()
+                logger.info("ITDT 接口初始化完成")
 
-            # 初始化磁带操作（共享 ITDT 接口，避免重复初始化）
-            await self.tape_operations.initialize(itdt_interface=self.itdt_interface)
-            logger.info("磁带操作模块初始化完成")
+                # 初始化磁带操作（共享 ITDT 接口，避免重复初始化）
+                await self.tape_operations.initialize(itdt_interface=self.itdt_interface)
+                logger.info("磁带操作模块初始化完成")
+            except FileNotFoundError as itdt_error:
+                # ITDT 未找到，记录警告但不阻止系统启动
+                logger.warning(f"ITDT 接口初始化失败（磁带设备管理功能将不可用）: {str(itdt_error)}")
+                logger.warning("提示：如果不需要磁带设备管理功能，可以忽略此警告")
+                logger.warning("如果需要使用磁带设备管理功能，请确保 ITDT 可执行文件存在于以下位置之一：")
+                logger.warning("  - 配置的 ITDT_PATH 路径")
+                logger.warning("  - 项目目录下的 ITDT/itdt.exe")
+                logger.warning("  - C:\\itdt\\itdt.exe")
+                logger.warning("  - C:\\Program Files\\IBM\\ITDT\\itdt.exe")
+                self.itdt_interface = None  # 设置为 None，表示 ITDT 不可用
+                # 不初始化 tape_operations，因为需要 ITDT
+                logger.info("磁带管理器将在无 ITDT 的情况下继续运行（部分功能将不可用）")
 
             # 尝试从配置快速加载设备（不阻塞）
-            cached_devices = self._load_cached_devices()
+            cached_devices = await self._load_cached_devices()
             if cached_devices:
                 logger.info(f"从配置读取到 {len(cached_devices)} 个磁带设备（缓存）")
                 self.cached_devices = cached_devices
@@ -111,17 +124,18 @@ class TapeManager:
             logger.debug("设备扫描已在进行中，跳过")
             return
         
+        # 检查 ITDT 接口是否可用
+        if self.itdt_interface is None:
+            logger.warning("ITDT 接口不可用，跳过设备扫描（磁带设备管理功能将不可用）")
+            return
+        
         self._scan_in_progress = True
         try:
-            # 如果已有缓存设备，先验证
+            # 如果已有缓存设备（从数据库或.env加载），直接使用，不执行扫描
             if hasattr(self, 'cached_devices') and self.cached_devices:
-                logger.info(f"验证缓存设备（{len(self.cached_devices)} 个）...")
-                if await self._verify_devices(self.cached_devices):
-                    logger.info("缓存设备验证通过，无需重新扫描")
-                    # 验证通过，直接返回，不执行扫描
-                    return
-                else:
-                    logger.warning("缓存设备验证失败，重新扫描")
+                logger.info(f"数据库/配置中已有设备缓存（{len(self.cached_devices)} 个），跳过ITDT扫描")
+                # 直接使用缓存，不执行扫描
+                return
             
             # 配置中没有设备或验证失败，执行扫描（60秒超时）
             logger.info("开始后台扫描磁带设备...")
@@ -140,7 +154,7 @@ class TapeManager:
 
             # 保存到配置
             if devices:
-                self._save_cached_devices(devices)
+                await self._save_cached_devices(devices)
                 self.cached_devices = devices
                 logger.info("设备信息已保存到配置")
             else:
@@ -154,64 +168,130 @@ class TapeManager:
         finally:
             self._scan_in_progress = False
 
-    def _load_cached_devices(self) -> List[Dict[str, Any]]:
-        """从配置加载缓存的设备信息"""
+    async def _load_cached_devices(self) -> List[Dict[str, Any]]:
+        """从配置加载缓存的设备信息（openGauss模式从数据库读取，其他模式从.env文件读取）"""
         try:
             import json
-            from pathlib import Path
-            env_file = Path(".env")
-            if not env_file.exists():
-                return []
+            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
-            with open(env_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("TAPE_DEVICES_CACHE="):
-                        devices_json = line.split("=", 1)[1].strip()
-                        if devices_json:
-                            return json.loads(devices_json)
-            return []
+            if is_opengauss():
+                # openGauss模式：从数据库读取
+                try:
+                    async with get_opengauss_connection() as conn:
+                        row = await conn.fetchrow(
+                            "SELECT config_value FROM system_config WHERE config_key = $1",
+                            "TAPE_DEVICES_CACHE"
+                        )
+                        if row and row.get('config_value'):
+                            return json.loads(row['config_value'])
+                    return []
+                except Exception as db_err:
+                    logger.debug(f"从数据库加载缓存设备失败: {str(db_err)}")
+                    return []
+            else:
+                # 非openGauss模式：从.env文件读取
+                from pathlib import Path
+                env_file = Path(".env")
+                if not env_file.exists():
+                    return []
+                
+                with open(env_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("TAPE_DEVICES_CACHE="):
+                            devices_json = line.split("=", 1)[1].strip()
+                            if devices_json:
+                                return json.loads(devices_json)
+                return []
         except Exception as e:
             logger.debug(f"加载缓存设备失败: {str(e)}")
             return []
 
-    def _save_cached_devices(self, devices: List[Dict[str, Any]]):
-        """保存设备信息到配置"""
+    async def _save_cached_devices(self, devices: List[Dict[str, Any]]):
+        """保存设备信息到配置（openGauss模式保存到数据库，其他模式保存到.env文件）"""
         try:
             import json
-            from pathlib import Path
-            env_file = Path(".env")
-            devices_json = json.dumps(devices, ensure_ascii=False)
+            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+            from models.system_config import ConfigType
             
-            # 读取现有.env内容
-            lines = []
-            if env_file.exists():
-                with open(env_file, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-            
-            # 更新或添加 TAPE_DEVICES_CACHE
-            updated = False
-            for i, line in enumerate(lines):
-                if line.strip().startswith("TAPE_DEVICES_CACHE="):
-                    lines[i] = f"TAPE_DEVICES_CACHE={devices_json}\n"
-                    updated = True
-                    break
-            
-            if not updated:
-                lines.append(f"\n# 磁带设备缓存（自动生成，请勿手动修改）\n")
-                lines.append(f"TAPE_DEVICES_CACHE={devices_json}\n")
-            
-            # 写入文件
-            with open(env_file, "w", encoding="utf-8") as f:
-                f.writelines(lines)
-            
-            logger.info(f"已保存 {len(devices)} 个设备到配置")
+            if is_opengauss():
+                # openGauss模式：保存到数据库
+                try:
+                    devices_json = json.dumps(devices, ensure_ascii=False)
+                    
+                    async with get_opengauss_connection() as conn:
+                        # 检查配置是否存在
+                        row = await conn.fetchrow(
+                            "SELECT config_key FROM system_config WHERE config_key = $1",
+                            "TAPE_DEVICES_CACHE"
+                        )
+                        
+                        if row:
+                            # 更新现有配置
+                            await conn.execute(
+                                "UPDATE system_config SET config_value = $1, updated_at = CURRENT_TIMESTAMP WHERE config_key = $2",
+                                devices_json, "TAPE_DEVICES_CACHE"
+                            )
+                        else:
+                            # 插入新配置
+                            await conn.execute(
+                                "INSERT INTO system_config (config_key, config_value, config_type, category, description, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                                "TAPE_DEVICES_CACHE", devices_json, ConfigType.JSON.value, "tape", "磁带设备缓存（自动生成，请勿手动修改）"
+                            )
+                        
+                        # psycopg3 binary protocol 需要显式提交事务
+                        actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                        try:
+                            await actual_conn.commit()
+                            logger.debug(f"设备缓存已提交到数据库")
+                        except Exception as commit_err:
+                            logger.warning(f"提交设备缓存事务失败（可能已自动提交）: {commit_err}")
+                            try:
+                                await actual_conn.rollback()
+                            except:
+                                pass
+                    
+                    logger.info(f"已保存 {len(devices)} 个设备到数据库")
+                except Exception as db_err:
+                    logger.warning(f"保存设备缓存到数据库失败: {str(db_err)}")
+            else:
+                # 非openGauss模式：保存到.env文件
+                from pathlib import Path
+                env_file = Path(".env")
+                devices_json = json.dumps(devices, ensure_ascii=False)
+                
+                # 读取现有.env内容
+                lines = []
+                if env_file.exists():
+                    with open(env_file, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+                
+                # 更新或添加 TAPE_DEVICES_CACHE
+                updated = False
+                for i, line in enumerate(lines):
+                    if line.strip().startswith("TAPE_DEVICES_CACHE="):
+                        lines[i] = f"TAPE_DEVICES_CACHE={devices_json}\n"
+                        updated = True
+                        break
+                
+                if not updated:
+                    lines.append(f"\n# 磁带设备缓存（自动生成，请勿手动修改）\n")
+                    lines.append(f"TAPE_DEVICES_CACHE={devices_json}\n")
+                
+                # 写入文件
+                with open(env_file, "w", encoding="utf-8") as f:
+                    f.writelines(lines)
+                
+                logger.info(f"已保存 {len(devices)} 个设备到配置")
         except Exception as e:
             logger.warning(f"保存设备缓存失败: {str(e)}")
 
     async def _verify_devices(self, devices: List[Dict[str, Any]]) -> bool:
         """验证设备是否可用（至少测试一个设备）"""
         if not devices:
+            return False
+        if self.itdt_interface is None:
+            logger.warning("ITDT 接口不可用，无法验证设备")
             return False
         try:
             # 测试第一个设备是否可用
@@ -241,6 +321,10 @@ class TapeManager:
             return []
         
         # 如果没有缓存且扫描未进行，触发扫描（只在必要时，60秒超时）
+        if self.itdt_interface is None:
+            logger.warning("ITDT 接口不可用，无法扫描设备")
+            return []
+        
         logger.info("缓存为空，触发设备扫描...")
         try:
             try:
@@ -249,9 +333,9 @@ class TapeManager:
                     timeout=60.0
                 )
                 if devices:
-                    self._save_cached_devices(devices)
+                    await self._save_cached_devices(devices)
                     self.cached_devices = devices
-                return devices
+                    return devices
             except asyncio.TimeoutError:
                 logger.error("设备扫描超时（60秒），返回空列表")
                 return []
@@ -751,6 +835,9 @@ class TapeManager:
         """健康检查"""
         try:
             # 检查 ITDT 接口
+            if self.itdt_interface is None:
+                logger.warning("ITDT 接口不可用，健康检查返回 False")
+                return False
             try:
                 ok = await self.itdt_interface.test_unit_ready(None)
                 if not ok:
@@ -775,32 +862,17 @@ class TapeManager:
         try:
             # 优先从数据库获取统计信息
             try:
-                import psycopg2
                 from config.settings import get_settings
                 from datetime import datetime
+                from utils.db_connection_helper import get_psycopg_connection_from_url
                 
                 settings = get_settings()
                 database_url = settings.DATABASE_URL
                 
-                # 解析URL
-                if database_url.startswith("opengauss://"):
-                    database_url = database_url.replace("opengauss://", "postgresql://", 1)
+                # 连接数据库（使用统一的连接辅助函数，支持 psycopg2 和 psycopg3）
+                conn, is_psycopg3 = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
                 
-                import re
-                pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
-                match = re.match(pattern, database_url)
-                
-                if match:
-                    username, password, host, port, database = match.groups()
-                    
-                    # 连接数据库
-                    conn = psycopg2.connect(
-                        host=host,
-                        port=port,
-                        user=username,
-                        password=password,
-                        database=database
-                    )
+                if conn:
                     
                     try:
                         with conn.cursor() as cur:
@@ -870,33 +942,17 @@ class TapeManager:
     async def _update_tape_in_database(self, tape: TapeCartridge):
         """更新数据库中的磁带信息"""
         try:
-            import psycopg2
             from config.settings import get_settings
+            from utils.db_connection_helper import get_psycopg_connection_from_url
             
             settings = get_settings()
             database_url = settings.DATABASE_URL
             
-            # 解析URL
-            if database_url.startswith("opengauss://"):
-                database_url = database_url.replace("opengauss://", "postgresql://", 1)
+            # 连接数据库（使用统一的连接辅助函数，支持 psycopg2 和 psycopg3）
+            conn, is_psycopg3 = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
             
-            import re
-            pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
-            match = re.match(pattern, database_url)
-            
-            if not match:
+            if not conn:
                 return
-            
-            username, password, host, port, database = match.groups()
-            
-            # 连接数据库
-            conn = psycopg2.connect(
-                host=host,
-                port=port,
-                user=username,
-                password=password,
-                database=database
-            )
             
             try:
                 with conn.cursor() as cur:
@@ -920,33 +976,17 @@ class TapeManager:
     async def _update_tape_status_in_database(self, tape_id: str, status: str):
         """更新数据库中的磁带状态"""
         try:
-            import psycopg2
             from config.settings import get_settings
+            from utils.db_connection_helper import get_psycopg_connection_from_url
             
             settings = get_settings()
             database_url = settings.DATABASE_URL
             
-            # 解析URL
-            if database_url.startswith("opengauss://"):
-                database_url = database_url.replace("opengauss://", "postgresql://", 1)
+            # 连接数据库（使用统一的连接辅助函数，支持 psycopg2 和 psycopg3）
+            conn, is_psycopg3 = get_psycopg_connection_from_url(database_url, prefer_psycopg3=True)
             
-            import re
-            pattern = r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)'
-            match = re.match(pattern, database_url)
-            
-            if not match:
+            if not conn:
                 return
-            
-            username, password, host, port, database = match.groups()
-            
-            # 连接数据库
-            conn = psycopg2.connect(
-                host=host,
-                port=port,
-                user=username,
-                password=password,
-                database=database
-            )
             
             try:
                 with conn.cursor() as cur:

@@ -350,6 +350,18 @@ class TaskScheduler:
                             next_run,
                             scheduled_task.id
                         )
+                        # psycopg3 binary protocol 需要显式提交事务
+                        actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                        try:
+                            await actual_conn.commit()
+                            logger.debug(f"任务 {scheduled_task.id} next_run_time 更新已提交到数据库")
+                        except Exception as commit_err:
+                            logger.warning(f"提交任务 next_run_time 更新事务失败（可能已自动提交）: {commit_err}")
+                            # 如果不在事务中，commit() 可能会失败，尝试回滚
+                            try:
+                                await actual_conn.rollback()
+                            except:
+                                pass
                 elif is_sqlite() and db_manager.AsyncSessionLocal and callable(db_manager.AsyncSessionLocal):
                     # 使用SQLAlchemy会话（SQLite数据库）
                     async with db_manager.AsyncSessionLocal() as session:

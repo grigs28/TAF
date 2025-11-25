@@ -1387,7 +1387,7 @@ class Compressor:
             logger.info(f"[压缩] 压缩任务已提交到线程池，等待完成...")
 
             # 等待压缩完成，设置超时以避免无限等待
-            timeout_seconds = 1200  # 20分钟超时
+            timeout_seconds = 3600  # 60分钟超时
             try:
                 # 等待压缩线程完成（支持取消）
                 logger.info(f"[压缩] 开始等待压缩线程完成（超时: {timeout_seconds}秒）")

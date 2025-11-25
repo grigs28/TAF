@@ -17,6 +17,7 @@ from backup.backup_db import BackupDB
 from backup.backup_notifier import BackupNotifier
 from backup.utils import format_bytes
 from config.settings import get_settings
+from utils.scheduler.db_utils import is_opengauss
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,8 @@ class CompressionWorker:
         settings: Any,
         file_move_worker: Any = None,  # FileMoveWorker
         backup_notifier: Optional[BackupNotifier] = None,
-        tape_file_mover: Any = None  # TapeFileMover
+        tape_file_mover: Any = None,  # TapeFileMover
+        file_group_prefetcher: Any = None  # FileGroupPrefetcher (openGauss模式)
     ):
         self.backup_db = backup_db
         self.compressor = compressor
@@ -43,6 +45,10 @@ class CompressionWorker:
         self.file_move_worker = file_move_worker
         self.backup_notifier = backup_notifier
         self.tape_file_mover = tape_file_mover
+        self.file_group_prefetcher = file_group_prefetcher  # openGauss模式下的预取器
+        
+        # 检查是否使用预取模式（openGauss模式且有预取器）
+        self.use_prefetcher = is_opengauss() and file_group_prefetcher is not None
         
         self.compression_task: Optional[asyncio.Task] = None
         self._running = False
@@ -59,6 +65,7 @@ class CompressionWorker:
         self.max_wait_retries = 6  # 最多循环6次等待文件
         
         # 关键修复：维护最后处理的文件ID，避免重复查询相同的文件
+        # 注意：在预取模式下，last_processed_file_id 由预取器管理
         self.last_processed_file_id = 0  # 上次处理的最后一个文件ID
 
     def start(self):
@@ -140,87 +147,188 @@ class CompressionWorker:
                     logger.info("压缩循环：收到停止信号")
                     break
 
-                # ========== 步骤1：检索所有非is_copy_success的文件，超阈值的跳过不修改is_copy ==========
-                # 新策略：调用数据库函数获取压缩组
-                # 数据库函数内部已处理6次重试机制
-                # fetch_pending_files_grouped_by_size 会自动：
-                #   - 检索所有 is_copy_success = FALSE 的文件
-                #   - 累积文件直到达到 max_file_size 阈值
-                #   - 超过阈值的文件跳过（保持 FALSE 状态，下次仍可检索，不修改is_copy_success）
-                logger.info(f"[压缩循环] [步骤1-检索文件] 开始检索下一批待压缩文件（文件组索引: {self.group_idx + 1}）...")
-                # 实时读取最新配置
-                settings = get_settings()
-                logger.info(
-                    f"[压缩循环] [步骤1-检索文件] 检索参数: backup_set_id={self.backup_set.id}, "
-                    f"max_file_size={settings.MAX_FILE_SIZE}, "
-                    f"should_wait={self.wait_retry_count < self.max_wait_retries}, "
-                    f"wait_retry_count={self.wait_retry_count}/{self.max_wait_retries}"
-                )
+                # ========== 步骤1：获取待压缩文件组 ==========
+                # openGauss模式：从预取器获取文件组（并行搜索）
+                # 其他模式：直接调用数据库函数获取压缩组
+                logger.info(f"[压缩循环] [步骤1-获取文件组] 开始获取下一批待压缩文件（文件组索引: {self.group_idx + 1}）...")
                 
-                try:
-                    import time
-                    retrieval_start_time = time.time()
-                    # 添加日志：记录查询参数
-                    logger.info(
-                        f"[压缩循环] [步骤1-检索文件] 开始检索下一批待压缩文件（文件组索引: {self.group_idx + 1}）... "
-                        f"start_from_id={self.last_processed_file_id}, "
-                        f"wait_retry_count={self.wait_retry_count}/{self.max_wait_retries}"
-                    )
-                    result = await self.backup_db.fetch_pending_files_grouped_by_size(
-                        self.backup_set.id,
-                        settings.MAX_FILE_SIZE,
-                        self.backup_task.id,
-                        should_wait_if_small=(self.wait_retry_count < self.max_wait_retries),
-                        start_from_id=self.last_processed_file_id  # 关键修复：从上次处理的文件ID开始查询，避免重复
-                    )
-                    # 处理新的返回格式：(file_groups, last_processed_id)
-                    if isinstance(result, tuple) and len(result) == 2:
-                        file_groups, last_processed_id = result
-                        # 更新最后处理的文件ID，即使返回空列表也要更新
-                        old_last_processed_id = self.last_processed_file_id
+                file_groups = None
+                last_processed_id = 0
+                
+                if self.use_prefetcher:
+                    # openGauss模式：从预取器队列获取文件组（无数据时等待）
+                    try:
+                        logger.info(
+                            f"[压缩循环] [步骤1-获取文件组] 从预取器队列获取文件组（openGauss模式），"
+                            f"文件组索引: {self.group_idx + 1}..."
+                        )
                         
-                        # 关键修复：如果返回的 last_processed_id 为 0，说明应该重置查询
-                        if last_processed_id == 0 and self.last_processed_file_id > 0:
-                            logger.warning(
-                                f"[压缩循环] [步骤1-检索文件] ⚠️ 检测到需要重置查询："
-                                f"返回的 last_processed_id=0，当前值={self.last_processed_file_id}，"
-                                f"可能存在ID更小的未压缩文件，重置为0重新查询"
-                            )
-                            self.last_processed_file_id = 0
-                        elif last_processed_id > self.last_processed_file_id:
-                            self.last_processed_file_id = last_processed_id
+                        # 无限等待，直到队列中有数据
+                        result = await self.file_group_prefetcher.get_file_group(timeout=None)
+                        
+                        if result is None:
+                            # 如果返回 None，检查任务集的完成标记
+                            scan_status = await self.backup_db.get_scan_status(self.backup_task.id)
+                            if scan_status == 'completed':
+                                # 任务集已完成，标记整个任务集状态为完成并发钉钉
+                                logger.info(
+                                    "[压缩循环] [步骤1-获取文件组] 预取器返回None且任务集已完成，"
+                                    "标记任务集状态为完成并发钉钉..."
+                                )
+                                await self._finalize_backup_set_and_notify()
+                                break
+                            else:
+                                # 任务集未完成，等待后重试
+                                logger.warning(
+                                    f"[压缩循环] [步骤1-获取文件组] 预取器返回None但任务集未完成（扫描状态={scan_status}），"
+                                    "5秒后重试..."
+                                )
+                                await asyncio.sleep(5)
+                                continue
+                        
+                        if isinstance(result, tuple) and len(result) == 2:
+                            file_groups, last_processed_id = result
+                            
+                            # 检查结束标记
+                            if last_processed_id == -1:
+                                # 检查任务集的完成标记
+                                scan_status = await self.backup_db.get_scan_status(self.backup_task.id)
+                                if scan_status == 'completed':
+                                    # 任务集已完成，标记整个任务集状态为完成并发钉钉
+                                    logger.info(
+                                        "[压缩循环] [步骤1-获取文件组] 收到结束标记且任务集已完成，"
+                                        "标记任务集状态为完成并发钉钉..."
+                                    )
+                                    await self._finalize_backup_set_and_notify()
+                                    break
+                                else:
+                                    # 任务集未完成，继续等待
+                                    logger.info(
+                                        f"[压缩循环] [步骤1-获取文件组] 收到结束标记但任务集未完成（扫描状态={scan_status}），"
+                                        "5秒后继续检索..."
+                                    )
+                                    await asyncio.sleep(5.0)
+                                    continue
+                            
+                            # 如果文件组为空（但不是结束标记），检查任务集的完成标记
+                            if not file_groups:
+                                scan_status = await self.backup_db.get_scan_status(self.backup_task.id)
+                                if scan_status == 'completed':
+                                    # 任务集已完成，标记整个任务集状态为完成并发钉钉
+                                    logger.info(
+                                        "[压缩循环] [步骤1-获取文件组] 文件组为空且任务集已完成，"
+                                        "标记任务集状态为完成并发钉钉..."
+                                    )
+                                    await self._finalize_backup_set_and_notify()
+                                    break
+                                else:
+                                    # 任务集未完成，继续等待
+                                    logger.info(
+                                        f"[压缩循环] [步骤1-获取文件组] 文件组为空但任务集未完成（扫描状态={scan_status}），"
+                                        "5秒后继续等待预取器获取更多文件..."
+                                    )
+                                    await asyncio.sleep(5.0)
+                                    continue
+                            
                             logger.info(
-                                f"[压缩循环] [步骤1-检索文件] ✅ 更新最后处理的文件ID: "
-                                f"{old_last_processed_id} -> {self.last_processed_file_id}"
+                                f"[压缩循环] [步骤1-获取文件组] 从预取器队列获取成功，"
+                                f"文件组数量: {len(file_groups)}, "
+                                f"文件总数: {sum(len(group) for group in file_groups)}, "
+                                f"last_processed_id={last_processed_id}"
                             )
                         else:
                             logger.warning(
-                                f"[压缩循环] [步骤1-检索文件] ⚠️ 返回的 last_processed_id ({last_processed_id}) "
-                                f"不大于当前值 ({self.last_processed_file_id})，未更新"
+                                f"[压缩循环] [步骤1-获取文件组] 预取器返回格式异常: {type(result)}，"
+                                "继续等待..."
                             )
-                    else:
-                        # 兼容旧格式（如果没有返回元组，说明是旧版本）
-                        logger.warning(
-                            f"[压缩循环] [步骤1-检索文件] ⚠️ 返回格式不是元组，可能是旧版本代码，"
-                            f"result类型: {type(result)}"
+                            await asyncio.sleep(1)
+                            continue
+                    except asyncio.CancelledError:
+                        logger.info("[压缩循环] [步骤1-获取文件组] 获取文件组被取消")
+                        break
+                    except Exception as prefetch_error:
+                        logger.error(
+                            f"[压缩循环] [步骤1-获取文件组] 从预取器获取失败: {str(prefetch_error)}，"
+                            "5秒后重试...",
+                            exc_info=True
                         )
-                        file_groups = result
-                        last_processed_id = 0
-                    retrieval_elapsed = time.time() - retrieval_start_time
+                        await asyncio.sleep(5)
+                        continue
+                else:
+                    # 非openGauss模式：直接调用数据库函数
+                    # 新策略：调用数据库函数获取压缩组
+                    # 数据库函数内部已处理6次重试机制
+                    # fetch_pending_files_grouped_by_size 会自动：
+                    #   - 检索所有 is_copy_success = FALSE 的文件
+                    #   - 累积文件直到达到 max_file_size 阈值
+                    #   - 超过阈值的文件跳过（保持 FALSE 状态，下次仍可检索，不修改is_copy_success）
+                    settings = get_settings()
                     logger.info(
-                        f"[压缩循环] [步骤1-检索文件] 检索完成，耗时: {retrieval_elapsed:.2f}秒，"
-                        f"返回文件组数量: {len(file_groups) if file_groups else 0}, "
-                        f"last_processed_id={last_processed_id}, "
-                        f"当前 self.last_processed_file_id={self.last_processed_file_id}"
+                        f"[压缩循环] [步骤1-检索文件] 检索参数: backup_set_id={self.backup_set.id}, "
+                        f"max_file_size={settings.MAX_FILE_SIZE}, "
+                        f"should_wait={self.wait_retry_count < self.max_wait_retries}, "
+                        f"wait_retry_count={self.wait_retry_count}/{self.max_wait_retries}"
                     )
-                except Exception as retrieval_error:
-                    logger.error(
-                        f"[压缩循环] [步骤1-检索文件] 检索失败: {str(retrieval_error)}",
-                        exc_info=True
-                    )
-                    # 检索失败，等待后重试
-                    await asyncio.sleep(5)
-                    continue
+                    
+                    try:
+                        import time
+                        retrieval_start_time = time.time()
+                        logger.info(
+                            f"[压缩循环] [步骤1-检索文件] 开始检索下一批待压缩文件（文件组索引: {self.group_idx + 1}）... "
+                            f"start_from_id={self.last_processed_file_id}, "
+                            f"wait_retry_count={self.wait_retry_count}/{self.max_wait_retries}"
+                        )
+                        result = await self.backup_db.fetch_pending_files_grouped_by_size(
+                            self.backup_set.id,
+                            settings.MAX_FILE_SIZE,
+                            self.backup_task.id,
+                            should_wait_if_small=(self.wait_retry_count < self.max_wait_retries),
+                            start_from_id=self.last_processed_file_id
+                        )
+                        # 处理新的返回格式：(file_groups, last_processed_id)
+                        if isinstance(result, tuple) and len(result) == 2:
+                            file_groups, last_processed_id = result
+                            old_last_processed_id = self.last_processed_file_id
+                            
+                            if last_processed_id == 0 and self.last_processed_file_id > 0:
+                                logger.warning(
+                                    f"[压缩循环] [步骤1-检索文件] ⚠️ 检测到需要重置查询："
+                                    f"返回的 last_processed_id=0，当前值={self.last_processed_file_id}，"
+                                    f"可能存在ID更小的未压缩文件，重置为0重新查询"
+                                )
+                                self.last_processed_file_id = 0
+                            elif last_processed_id > self.last_processed_file_id:
+                                self.last_processed_file_id = last_processed_id
+                                logger.info(
+                                    f"[压缩循环] [步骤1-检索文件] ✅ 更新最后处理的文件ID: "
+                                    f"{old_last_processed_id} -> {self.last_processed_file_id}"
+                                )
+                            else:
+                                logger.warning(
+                                    f"[压缩循环] [步骤1-检索文件] ⚠️ 返回的 last_processed_id ({last_processed_id}) "
+                                    f"不大于当前值 ({self.last_processed_file_id})，未更新"
+                                )
+                        else:
+                            logger.warning(
+                                f"[压缩循环] [步骤1-检索文件] ⚠️ 返回格式不是元组，可能是旧版本代码，"
+                                f"result类型: {type(result)}"
+                            )
+                            file_groups = result
+                            last_processed_id = 0
+                        retrieval_elapsed = time.time() - retrieval_start_time
+                        logger.info(
+                            f"[压缩循环] [步骤1-检索文件] 检索完成，耗时: {retrieval_elapsed:.2f}秒，"
+                            f"返回文件组数量: {len(file_groups) if file_groups else 0}, "
+                            f"last_processed_id={last_processed_id}, "
+                            f"当前 self.last_processed_file_id={self.last_processed_file_id}"
+                        )
+                    except Exception as retrieval_error:
+                        logger.error(
+                            f"[压缩循环] [步骤1-检索文件] 检索失败: {str(retrieval_error)}",
+                            exc_info=True
+                        )
+                        await asyncio.sleep(5)
+                        continue
                 
                 if not file_groups:
                     # 新策略：返回空列表说明没有待压缩文件或需要等待
@@ -238,29 +346,23 @@ class CompressionWorker:
                         f"wait_retry_count={self.wait_retry_count}/{self.max_wait_retries}"
                     )
 
-                    if scan_status == 'completed' or self.processed_files >= total_files_from_db:
-                        # 扫描完成或已处理所有文件，退出循环
+                    # 只要备份集没有标记完成，就不能停
+                    if scan_status == 'completed':
+                        # 扫描完成，退出循环
                         logger.info(
-                            f"[压缩循环] 所有文件已压缩完毕，退出压缩循环。"
-                            f"扫描状态={scan_status}, 已处理={self.processed_files}, 总文件={total_files_from_db}"
+                            f"[压缩循环] 备份集已完成（扫描状态={scan_status}），"
+                            f"已处理={self.processed_files}, 总文件={total_files_from_db}，退出压缩循环"
                         )
                         break
-
-                    # 否则等待更多文件
-                    self.idle_checks += 1
-                    if self.idle_checks >= self.max_idle_checks:
-                        logger.warning(
-                            f"[压缩循环] 等待压缩文件超时，扫描状态={scan_status}，"
-                            f"已等待 {self.idle_checks * 5} 秒，继续等待..."
-                        )
                     else:
+                        # 备份集未完成，延时5秒后继续
                         logger.info(
-                            f"[压缩循环] 等待更多文件，idle_checks={self.idle_checks}/{self.max_idle_checks}，"
-                            f"将在5秒后重试..."
+                            f"[压缩循环] 备份集未完成（扫描状态={scan_status}），"
+                            f"已处理={self.processed_files}, 总文件={total_files_from_db}，"
+                            f"5秒后继续检索..."
                         )
-
-                    await asyncio.sleep(5)
-                    continue
+                        await asyncio.sleep(5.0)
+                        continue
                 
                 # 成功获取到文件组，重置等待计数
                 self.wait_retry_count = 0
@@ -834,3 +936,68 @@ class CompressionWorker:
             logger.error(f"[压缩循环线程] 压缩循环任务异常: {str(e)}", exc_info=True)
         finally:
             logger.info("[压缩循环线程] 压缩循环后台任务已退出")
+    
+    async def _finalize_backup_set_and_notify(self):
+        """标记任务集状态为完成并发钉钉（只有文件压缩任务可以调用）"""
+        try:
+            logger.info(
+                f"[压缩循环] ========== 标记任务集状态为完成 ==========\n"
+                f"backup_set_id={self.backup_set.id}, backup_task_id={self.backup_task.id}"
+            )
+            
+            # 1. 标记任务集状态为完成（更新统计信息）
+            await self.backup_db.finalize_backup_set(
+                self.backup_set,
+                self.processed_files,
+                self.total_original_size
+            )
+            logger.info(
+                f"[压缩循环] 任务集状态已标记为完成："
+                f"文件数={self.processed_files}, 总大小={format_bytes(self.total_original_size)}"
+            )
+            
+            # 2. 标记备份任务状态为 COMPLETED（只有文件压缩任务可以标记）
+            from models.backup import BackupTaskStatus
+            await self.backup_db.update_task_status(self.backup_task, BackupTaskStatus.COMPLETED)
+            logger.info(f"[压缩循环] 备份任务状态已标记为 COMPLETED: task_id={self.backup_task.id}")
+            
+            # 3. 发送钉钉通知（只有文件压缩任务可以发送）
+            if self.backup_notifier and self.backup_notifier.dingtalk_notifier:
+                try:
+                    # 获取通知事件配置
+                    notification_events = await self.backup_notifier.get_notification_events()
+                    if notification_events.get("notify_backup_success", True):
+                        logger.info("[压缩循环] 发送备份成功钉钉通知...")
+                        from datetime import datetime
+                        from utils.datetime_utils import now
+                        
+                        # 计算耗时
+                        task_start_time = getattr(self.backup_task, 'started_at', None)
+                        if task_start_time:
+                            duration_seconds = (now() - task_start_time).total_seconds()
+                        else:
+                            duration_seconds = 0.0
+                        
+                        await self.backup_notifier.dingtalk_notifier.send_backup_notification(
+                            self.backup_task.task_name,
+                            "success",
+                            {
+                                'size': format_bytes(self.total_original_size),
+                                'file_count': self.processed_files,
+                                'duration': f"{duration_seconds:.2f} 秒"
+                            }
+                        )
+                        logger.info("[压缩循环] 备份成功钉钉通知发送成功")
+                    else:
+                        logger.debug("[压缩循环] 通知事件配置中备份成功通知已禁用，跳过发送")
+                except Exception as notify_error:
+                    logger.warning(f"[压缩循环] 发送备份成功钉钉通知失败: {str(notify_error)}")
+            else:
+                logger.debug("[压缩循环] 钉钉通知器未配置，跳过发送")
+                
+        except Exception as e:
+            logger.error(
+                f"[压缩循环] 标记任务集状态为完成失败: {str(e)}",
+                exc_info=True
+            )
+            raise

@@ -165,6 +165,7 @@ class Settings(BaseSettings):
     # - USE_SCAN_MULTITHREAD=False: 使用顺序目录扫描（SequentialDirScanner，基于os.scandir）
     
     # 内存数据库配置
+    USE_MEMORY_DB: bool = True  # 是否使用内存数据库（默认启用，性能最优）
     MEMORY_DB_MAX_FILES: int = 5000000  # 内存数据库中最大文件数（500万）
     MEMORY_DB_SYNC_BATCH_SIZE: int = 5000  # 内存数据库同步批次大小
     MEMORY_DB_SYNC_INTERVAL: int = 30  # 内存数据库同步间隔（秒）

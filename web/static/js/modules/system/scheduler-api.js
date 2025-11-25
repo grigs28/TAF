@@ -107,7 +107,7 @@ export class SchedulerAPI {
     static async deleteTask(taskId) {
         try {
             await fetchJSON(`/api/scheduler/tasks/${taskId}`, { method: 'DELETE' });
-            alert('任务已删除');
+            // 不在这里弹出 alert，由调用者处理成功提示
             return true;
         } catch (error) {
             console.error('删除任务失败:', error);

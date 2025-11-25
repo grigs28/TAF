@@ -157,3 +157,108 @@ async def get_backup_sets(
         logger.error(f"获取备份集列表失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@router.delete("/backup-sets/{set_id}")
+async def delete_backup_set(set_id: str):
+    """删除备份集（包括关联的备份文件）"""
+    try:
+        logger.info(f"开始删除备份集: {set_id}")
+        
+        if is_redis():
+            # Redis 模式：使用 Redis 删除
+            from backup.redis_backup_db import delete_backup_set_redis
+            success = await delete_backup_set_redis(set_id)
+            if success:
+                logger.info(f"已删除备份集: {set_id}")
+                return {"success": True, "message": f"备份集 {set_id} 已删除"}
+            else:
+                raise HTTPException(status_code=404, detail=f"备份集 {set_id} 不存在")
+        elif is_opengauss():
+            # openGauss 模式：使用原生 SQL 删除
+            from utils.scheduler.db_utils import get_opengauss_connection
+            
+            async with get_opengauss_connection() as conn:
+                # 先查询备份集是否存在
+                set_row = await conn.fetchrow(
+                    "SELECT id FROM backup_sets WHERE set_id = $1",
+                    set_id
+                )
+                
+                if not set_row:
+                    raise HTTPException(status_code=404, detail=f"备份集 {set_id} 不存在")
+                
+                backup_set_id = set_row['id']
+                
+                # 删除关联的备份文件
+                files_result = await conn.execute(
+                    "DELETE FROM backup_files WHERE backup_set_id = $1",
+                    backup_set_id
+                )
+                files_deleted = files_result if hasattr(files_result, '__int__') else 0
+                logger.info(f"已删除备份集 {set_id} 的 {files_deleted} 个文件记录")
+                
+                # 删除备份集
+                set_result = await conn.execute(
+                    "DELETE FROM backup_sets WHERE id = $1",
+                    backup_set_id
+                )
+                sets_deleted = set_result if hasattr(set_result, '__int__') else 0
+                
+                if sets_deleted > 0:
+                    logger.info(f"已删除备份集: {set_id}（文件数: {files_deleted}）")
+                    return {
+                        "success": True,
+                        "message": f"备份集 {set_id} 已删除",
+                        "files_deleted": files_deleted
+                    }
+                else:
+                    raise HTTPException(status_code=500, detail="删除备份集失败")
+        elif is_sqlite():
+            # SQLite 模式：使用原生 SQL 删除
+            from utils.scheduler.sqlite_utils import get_sqlite_connection
+            
+            async with get_sqlite_connection() as conn:
+                # 先查询备份集是否存在
+                cursor = await conn.execute(
+                    "SELECT id FROM backup_sets WHERE set_id = ?",
+                    (set_id,)
+                )
+                set_row = await cursor.fetchone()
+                
+                if not set_row:
+                    raise HTTPException(status_code=404, detail=f"备份集 {set_id} 不存在")
+                
+                backup_set_id = set_row[0]
+                
+                # 删除关联的备份文件
+                files_cursor = await conn.execute(
+                    "DELETE FROM backup_files WHERE backup_set_id = ?",
+                    (backup_set_id,)
+                )
+                files_deleted = files_cursor.rowcount if hasattr(files_cursor, 'rowcount') else 0
+                logger.info(f"已删除备份集 {set_id} 的 {files_deleted} 个文件记录")
+                
+                # 删除备份集
+                set_cursor = await conn.execute(
+                    "DELETE FROM backup_sets WHERE id = ?",
+                    (backup_set_id,)
+                )
+                sets_deleted = set_cursor.rowcount if hasattr(set_cursor, 'rowcount') else 0
+                
+                if sets_deleted > 0:
+                    logger.info(f"已删除备份集: {set_id}（文件数: {files_deleted}）")
+                    return {
+                        "success": True,
+                        "message": f"备份集 {set_id} 已删除",
+                        "files_deleted": files_deleted
+                    }
+                else:
+                    raise HTTPException(status_code=500, detail="删除备份集失败")
+        else:
+            raise HTTPException(status_code=500, detail="未知的数据库类型")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除备份集失败: {set_id}, 错误: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"删除备份集失败: {str(e)}")
