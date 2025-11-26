@@ -64,6 +64,7 @@ class SystemEnvConfig(BaseModel):
     use_scan_multithread: Optional[bool] = Field(None, description="是否使用多线程扫描（默认启用），仅当scan_method=default时有效")
     scan_threads: Optional[int] = Field(None, description="目录扫描并发线程数（默认4，建议1-16）")
     use_checkpoint: Optional[bool] = Field(None, description="是否启用检查点文件，默认不启用")
+    enable_background_copy_update: Optional[bool] = Field(None, description="启用后台标记 is_copy_success（异步 mark_files_as_copied）")
     
     # 内存数据库配置
     use_memory_db: Optional[bool] = Field(None, description="是否使用内存数据库（默认启用，性能最优）")
@@ -163,6 +164,7 @@ async def get_env_config():
             "use_scan_multithread": parse_bool(env_vars.get("USE_SCAN_MULTITHREAD"), True),
             "scan_threads": parse_int(env_vars.get("SCAN_THREADS"), 4),
             "use_checkpoint": parse_bool(env_vars.get("USE_CHECKPOINT"), False),
+            "enable_background_copy_update": parse_bool(env_vars.get("ENABLE_BACKGROUND_COPY_UPDATE"), False),
             
             # 内存数据库配置
             "use_memory_db": parse_bool(env_vars.get("USE_MEMORY_DB"), True),
@@ -282,6 +284,8 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             updates["SCAN_THREADS"] = str(config.scan_threads)
         if config.use_checkpoint is not None:
             updates["USE_CHECKPOINT"] = str(config.use_checkpoint).lower()
+        if config.enable_background_copy_update is not None:
+            updates["ENABLE_BACKGROUND_COPY_UPDATE"] = str(config.enable_background_copy_update).lower()
         
         # 内存数据库配置
         if config.use_memory_db is not None:

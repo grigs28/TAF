@@ -10,7 +10,7 @@ from fastapi import APIRouter
 # 导入所有子模块
 from . import models, utils
 from . import tasks_create, tasks_query, tasks_update, tasks_delete
-from . import operations, statistics, sets
+from . import operations, statistics, sets, settings
 
 # 创建主路由器
 router = APIRouter()
@@ -23,6 +23,7 @@ router.include_router(tasks_delete.router, tags=["备份任务"])
 router.include_router(operations.router, tags=["备份操作"])
 router.include_router(statistics.router, tags=["备份统计"])
 router.include_router(sets.router, tags=["备份集"])
+router.include_router(settings.router, tags=["备份设置"])
 
 __all__ = ['router', 'models', 'utils']
 

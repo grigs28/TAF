@@ -147,6 +147,7 @@ class Settings(BaseSettings):
     # 优化：从500增加到2000，减少数据库写入频率，提升扫描速度
     # 如需更快速度，可增加到5000（需要更多内存，但写入速度更快）
     SCAN_LOG_INTERVAL_SECONDS: int = 60  # 后台扫描进度日志输出的时间间隔（秒）
+    ENABLE_BACKGROUND_COPY_UPDATE: bool = False  # 是否启用压缩线程后台标记 is_copy_success
     
     # 扫描方法配置
     SCAN_METHOD: str = "default"  # 扫描方法: "default" (默认) 或 "es" (Everything搜索工具)

@@ -949,6 +949,12 @@ async function loadAllSystemConfig() {
                 const useCheckpointInput = document.getElementById('useCheckpoint');
                 if (useCheckpointInput) useCheckpointInput.checked = config.use_checkpoint;
             }
+            if (config.enable_background_copy_update !== undefined) {
+                const enableBackgroundCopyUpdateInput = document.getElementById('enableBackgroundCopyUpdate');
+                if (enableBackgroundCopyUpdateInput) {
+                    enableBackgroundCopyUpdateInput.checked = config.enable_background_copy_update;
+                }
+            }
             
             // 内存数据库配置
             if (config.use_memory_db !== undefined) {
@@ -1049,6 +1055,11 @@ async function saveEnvConfigSection() {
                 return isNaN(parsed) ? null : parsed;
             })(),
             use_checkpoint: document.getElementById('useCheckpoint')?.checked || null,
+            enable_background_copy_update: (() => {
+                const checkbox = document.getElementById('enableBackgroundCopyUpdate');
+                if (!checkbox) return undefined;
+                return checkbox.checked === true;
+            })(),
             
             // 内存数据库配置
             use_memory_db: (() => {

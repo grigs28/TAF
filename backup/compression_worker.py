@@ -8,7 +8,7 @@
 import asyncio
 import logging
 import os
-from typing import Optional, Any, Dict, List
+from typing import Optional, Any, Dict, List, Set
 from pathlib import Path
 
 from models.backup import BackupSet, BackupTask
@@ -46,6 +46,7 @@ class CompressionWorker:
         self.backup_notifier = backup_notifier
         self.tape_file_mover = tape_file_mover
         self.file_group_prefetcher = file_group_prefetcher  # openGauss模式下的预取器
+        self.enable_background_copy_update = getattr(settings, 'ENABLE_BACKGROUND_COPY_UPDATE', False)
         
         # 检查是否使用预取模式（openGauss模式且有预取器）
         self.use_prefetcher = is_opengauss() and file_group_prefetcher is not None
@@ -67,6 +68,7 @@ class CompressionWorker:
         # 关键修复：维护最后处理的文件ID，避免重复查询相同的文件
         # 注意：在预取模式下，last_processed_file_id 由预取器管理
         self.last_processed_file_id = 0  # 上次处理的最后一个文件ID
+        self._background_copy_tasks: Set[asyncio.Task] = set()
 
     def start(self):
         """启动压缩循环后台任务"""
@@ -77,6 +79,10 @@ class CompressionWorker:
         self.compression_task = asyncio.create_task(self._compression_loop())
         self._running = True
         logger.info("[压缩循环线程] 压缩循环后台任务已启动")
+        logger.info(
+            "[压缩循环线程] 后台标记 is_copy_success 模式: %s",
+            "开启" if self.enable_background_copy_update else "关闭"
+        )
 
     async def stop(self):
         """停止压缩循环后台任务"""
@@ -95,6 +101,7 @@ class CompressionWorker:
             except KeyboardInterrupt:
                 logger.warning("[压缩循环线程] 压缩循环收到KeyboardInterrupt")
                 raise
+        await self._wait_for_background_copy_tasks()
         logger.info("[压缩循环线程] 压缩循环后台任务已停止")
 
     async def _compression_loop(self):
@@ -494,7 +501,7 @@ class CompressionWorker:
                 async def update_compression_progress_periodically():
                     """定期更新压缩进度到数据库"""
                     while True:
-                        await asyncio.sleep(2)  # 每2秒更新一次
+                        await asyncio.sleep(5)  # 每5秒更新一次
                         if hasattr(self.backup_task, 'current_compression_progress') and self.backup_task.current_compression_progress:
                             comp_prog = self.backup_task.current_compression_progress
                             # 检查必要的键是否存在
@@ -583,15 +590,33 @@ class CompressionWorker:
                         tape_file_path = compressed_file['path']
                     
                     try:
-                        logger.info(f"[压缩循环] [步骤3-数据库更新] 开始更新文件复制状态：文件组 {current_group_idx + 1}，包含 {len(file_group)} 个文件")
-                        await self.backup_db.mark_files_as_copied(
-                            backup_set=self.backup_set,
-                            file_group=file_group,
-                            compressed_file=compressed_file,
-                            tape_file_path=tape_file_path or compressed_file['path'],
-                            chunk_number=current_group_idx
+                        logger.info(
+                            f"[压缩循环] [步骤3-数据库更新] 开始更新文件复制状态：文件组 {current_group_idx + 1}，"
+                            f"包含 {len(file_group)} 个文件，模式={'后台异步' if self.enable_background_copy_update else '同步'}"
                         )
-                        logger.info(f"[压缩循环] [步骤3-数据库更新] ✅ 文件复制状态更新成功：文件组 {current_group_idx + 1}，{len(file_group)} 个文件的 is_copy_success 已设置为 TRUE")
+                        if self.enable_background_copy_update:
+                            self._schedule_background_copy_update(
+                                file_group=file_group,
+                                compressed_file=compressed_file,
+                                tape_file_path=tape_file_path or compressed_file['path'],
+                                chunk_number=current_group_idx
+                            )
+                            logger.info(
+                                f"[压缩循环] [步骤3-数据库更新] ⏳ 已调度后台任务更新文件组 {current_group_idx + 1} 的 is_copy_success"
+                            )
+                        else:
+                            await self.backup_db.mark_files_as_copied(
+                                backup_set=self.backup_set,
+                                file_group=file_group,
+                                compressed_file=compressed_file,
+                                tape_file_path=tape_file_path or compressed_file['path'],
+                                chunk_number=current_group_idx
+                            )
+                            logger.info(
+                                f"[压缩循环] [步骤3-数据库更新] ✅ 文件复制状态更新成功：文件组 {current_group_idx + 1}，"
+                                f"{len(file_group)} 个文件的 is_copy_success 已设置为 TRUE"
+                            )
+                            await self._verify_is_copy_success(file_group, current_group_idx)
                     except Exception as db_error:
                         logger.error(f"⚠️ [数据库更新] 更新文件复制状态失败: {str(db_error)}，继续执行", exc_info=True)
                         # 即使更新失败，也继续执行，避免阻塞整个流程
@@ -720,148 +745,6 @@ class CompressionWorker:
                     
                     logger.info(f"[压缩循环] 文件组 {current_group_idx + 1} 处理完成，数据库已更新，准备继续下一组压缩")
                     
-                    # 验证 is_copy_success 是否已正确更新（全量验证，使用批量查询优化性能）
-                    try:
-                        # 提取所有文件路径进行验证
-                        all_paths = [f.get("file_path") or f.get("path") for f in file_group if f.get("file_path") or f.get("path")]
-                        if all_paths:
-                            from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
-                            from utils.scheduler.sqlite_utils import get_sqlite_connection
-                            
-                            if is_redis():
-                                # Redis 模式：全量验证，使用批量查询优化性能
-                                from config.redis_db import get_redis_client
-                                from backup.redis_backup_db import KEY_PREFIX_BACKUP_FILE, KEY_INDEX_BACKUP_FILE_BY_PATH, _get_redis_key
-                                
-                                redis = await get_redis_client()
-                                path_index_key = KEY_INDEX_BACKUP_FILE_BY_PATH
-                                
-                                verified_count = 0
-                                total_checked = 0
-                                
-                                # 分批验证，每批1000个文件，避免单个pipeline过大导致超时
-                                batch_size = 1000
-                                for batch_start in range(0, len(all_paths), batch_size):
-                                    batch_paths = all_paths[batch_start:batch_start + batch_size]
-                                    
-                                    # 构建路径索引键: backup_set_id:file_path
-                                    path_keys = [f"{self.backup_set.id}:{path}" for path in batch_paths]
-                                    
-                                    # 批量获取文件ID
-                                    pipe = redis.pipeline()
-                                    for path_key in path_keys:
-                                        pipe.hget(path_index_key, path_key)
-                                    
-                                    file_id_results = await pipe.execute()
-                                    
-                                    # 根据文件ID批量获取文件状态
-                                    file_ids_to_check = []
-                                    for file_id_str in file_id_results:
-                                        if file_id_str:
-                                            try:
-                                                file_id = int(file_id_str)
-                                                file_ids_to_check.append(file_id)
-                                            except (ValueError, TypeError):
-                                                pass
-                                    
-                                    if file_ids_to_check:
-                                        # 批量获取文件状态
-                                        pipe2 = redis.pipeline()
-                                        for file_id in file_ids_to_check:
-                                            file_key = _get_redis_key(KEY_PREFIX_BACKUP_FILE, file_id)
-                                            pipe2.hget(file_key, 'is_copy_success')
-                                        
-                                        status_results = await pipe2.execute()
-                                        
-                                        # 统计验证结果
-                                        for is_copy_success in status_results:
-                                            if is_copy_success == '1':
-                                                verified_count += 1
-                                            total_checked += 1
-                                
-                                if total_checked > 0:
-                                    logger.info(f"[压缩循环] [验证] 文件组 {current_group_idx + 1} 验证完成: {verified_count}/{total_checked} 个文件的 is_copy_success=1 (总文件数: {len(all_paths)})")
-                                    if verified_count < total_checked:
-                                        logger.warning(f"[压缩循环] [验证] ⚠️ 验证失败: 期望 {total_checked} 个文件 is_copy_success=1，实际只有 {verified_count} 个 (失败率: {(total_checked - verified_count) / total_checked * 100:.1f}%)")
-                                else:
-                                    logger.warning(f"[压缩循环] [验证] ⚠️ 无法验证：未找到文件记录（路径可能不匹配）")
-                            elif is_opengauss():
-                                # openGauss 模式：全量验证（使用原生 openGauss SQL）
-                                async with get_opengauss_connection() as conn:
-                                    # 分批验证，每批1000个文件
-                                    batch_size = 1000
-                                    verified_count = 0
-                                    total_checked = 0
-                                    
-                                    for batch_start in range(0, len(all_paths), batch_size):
-                                        batch_paths = all_paths[batch_start:batch_start + batch_size]
-                                        # 使用原生 openGauss SQL：ANY($2) 方式查询
-                                        # 分别查询总记录数和 is_copy_success=TRUE 的数量，避免 FILTER 语法兼容性问题
-                                        try:
-                                            # 查询总记录数
-                                            total_result = await conn.fetchrow(
-                                                """
-                                                SELECT COUNT(*)::BIGINT as count
-                                                FROM backup_files 
-                                                WHERE backup_set_id = $1 AND file_path = ANY($2)
-                                                """,
-                                                self.backup_set.id, batch_paths
-                                            )
-                                            batch_total = total_result['count'] if total_result else 0
-                                            
-                                            # 查询 is_copy_success=TRUE 的数量
-                                            verified_result = await conn.fetchrow(
-                                                """
-                                                SELECT COUNT(*)::BIGINT as count
-                                                FROM backup_files 
-                                                WHERE backup_set_id = $1 
-                                                  AND file_path = ANY($2)
-                                                  AND is_copy_success = TRUE
-                                                """,
-                                                self.backup_set.id, batch_paths
-                                            )
-                                            batch_verified = verified_result['count'] if verified_result else 0
-                                            
-                                            verified_count += batch_verified
-                                            total_checked += batch_total
-                                        except Exception as verify_batch_error:
-                                            logger.error(
-                                                f"[压缩循环] [验证] 批次验证失败: {str(verify_batch_error)}，"
-                                                f"批次 {batch_start // batch_size + 1}，跳过该批次",
-                                                exc_info=True
-                                            )
-                                            # 跳过该批次，继续验证其他批次
-                                            continue
-                                    
-                                    logger.info(f"[压缩循环] [验证] 文件组 {current_group_idx + 1} 验证完成: {verified_count}/{total_checked} 个文件的 is_copy_success=TRUE (总文件数: {len(all_paths)})")
-                                    if verified_count < total_checked:
-                                        logger.warning(f"[压缩循环] [验证] ⚠️ 验证失败: 期望 {total_checked} 个文件 is_copy_success=TRUE，实际只有 {verified_count} 个")
-                            else:
-                                # SQLite 模式：全量验证
-                                async with get_sqlite_connection() as conn:
-                                    # 分批验证，每批1000个文件
-                                    batch_size = 1000
-                                    verified_count = 0
-                                    total_checked = 0
-                                    
-                                    for batch_start in range(0, len(all_paths), batch_size):
-                                        batch_paths = all_paths[batch_start:batch_start + batch_size]
-                                        placeholders = ','.join(['?' for _ in batch_paths])
-                                        verify_cursor = await conn.execute(f"""
-                                            SELECT file_path, is_copy_success FROM backup_files 
-                                            WHERE backup_set_id = ? AND file_path IN ({placeholders})
-                                        """, (self.backup_set.id,) + tuple(batch_paths))
-                                        verify_rows = await verify_cursor.fetchall()
-                                        verified_count += sum(1 for row in verify_rows if row[1] == 1)
-                                        total_checked += len(verify_rows)
-                                    
-                                    logger.info(f"[压缩循环] [验证] 文件组 {current_group_idx + 1} 验证完成: {verified_count}/{total_checked} 个文件的 is_copy_success=1 (总文件数: {len(all_paths)})")
-                                    if verified_count < total_checked:
-                                        logger.warning(f"[压缩循环] [验证] ⚠️ 验证失败: 期望 {total_checked} 个文件 is_copy_success=1，实际只有 {verified_count} 个")
-                        else:
-                            logger.warning(f"[压缩循环] [验证] ⚠️ 无法提取文件路径进行验证，file_group示例: {file_group[:3] if file_group else '空'}")
-                    except Exception as verify_error:
-                        logger.error(f"[压缩循环] [验证] ❌ 验证 is_copy_success 时出错: {str(verify_error)}", exc_info=True)
                 
                 except (KeyboardInterrupt, asyncio.CancelledError) as cancel_error:
                     # 收到中断信号，立即停止
@@ -935,7 +818,237 @@ class CompressionWorker:
         except Exception as e:
             logger.error(f"[压缩循环线程] 压缩循环任务异常: {str(e)}", exc_info=True)
         finally:
+            await self._wait_for_background_copy_tasks()
             logger.info("[压缩循环线程] 压缩循环后台任务已退出")
+
+    def _schedule_background_copy_update(
+        self,
+        file_group: List[Dict],
+        compressed_file: Dict,
+        tape_file_path: str,
+        chunk_number: int
+    ):
+        """创建后台任务标记 is_copy_success"""
+        task = asyncio.create_task(
+            self._background_mark_files(file_group, compressed_file, tape_file_path, chunk_number)
+        )
+        self._background_copy_tasks.add(task)
+
+        def _cleanup(t: asyncio.Task):
+            self._background_copy_tasks.discard(t)
+            if t.cancelled():
+                logger.debug("[后台更新] 标记任务被取消")
+
+        task.add_done_callback(_cleanup)
+
+    async def _background_mark_files(
+        self,
+        file_group: List[Dict],
+        compressed_file: Dict,
+        tape_file_path: str,
+        chunk_number: int
+    ):
+        """后台标记文件复制状态并验证"""
+        try:
+            await self.backup_db.mark_files_as_copied(
+                backup_set=self.backup_set,
+                file_group=file_group,
+                compressed_file=compressed_file,
+                tape_file_path=tape_file_path,
+                chunk_number=chunk_number
+            )
+            logger.info(
+                f"[后台更新] ✅ 文件组 {chunk_number + 1} 的 is_copy_success 已在后台设置为 TRUE"
+            )
+            await self._verify_is_copy_success(file_group, chunk_number)
+        except asyncio.CancelledError:
+            logger.warning(f"[后台更新] 标记任务被取消：文件组 {chunk_number + 1}")
+            raise
+        except Exception as db_error:
+            logger.error(
+                f"[后台更新] ⚠️ 文件组 {chunk_number + 1} 标记 is_copy_success 失败: {str(db_error)}",
+                exc_info=True
+            )
+
+    async def _wait_for_background_copy_tasks(self):
+        """等待所有后台标记任务完成"""
+        if not self._background_copy_tasks:
+            return
+        pending = list(self._background_copy_tasks)
+        self._background_copy_tasks.clear()
+        logger.info(f"[后台更新] 等待 {len(pending)} 个 is_copy_success 标记任务完成...")
+        try:
+            await asyncio.gather(*pending, return_exceptions=True)
+        except Exception as e:
+            logger.error(f"[后台更新] 等待后台标记任务时出错: {str(e)}", exc_info=True)
+
+    async def _verify_is_copy_success(self, file_group: List[Dict], current_group_idx: int):
+        """验证 is_copy_success 状态"""
+        try:
+            # 提取所有文件路径进行验证
+            all_paths = [
+                f.get("file_path") or f.get("path")
+                for f in file_group
+                if f.get("file_path") or f.get("path")
+            ]
+            if not all_paths:
+                logger.warning(
+                    f"[压缩循环] [验证] ⚠️ 无法提取文件路径进行验证，file_group示例: {file_group[:3] if file_group else '空'}"
+                )
+                return
+
+            from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
+            from utils.scheduler.sqlite_utils import get_sqlite_connection
+
+            if is_redis():
+                # Redis 模式：全量验证，使用批量查询优化性能
+                from config.redis_db import get_redis_client
+                from backup.redis_backup_db import KEY_PREFIX_BACKUP_FILE, KEY_INDEX_BACKUP_FILE_BY_PATH, _get_redis_key
+
+                redis = await get_redis_client()
+                path_index_key = KEY_INDEX_BACKUP_FILE_BY_PATH
+
+                verified_count = 0
+                total_checked = 0
+
+                # 分批验证，每批1000个文件，避免单个pipeline过大导致超时
+                batch_size = 1000
+                for batch_start in range(0, len(all_paths), batch_size):
+                    batch_paths = all_paths[batch_start:batch_start + batch_size]
+
+                    # 构建路径索引键: backup_set_id:file_path
+                    path_keys = [f"{self.backup_set.id}:{path}" for path in batch_paths]
+
+                    # 批量获取文件ID
+                    pipe = redis.pipeline()
+                    for path_key in path_keys:
+                        pipe.hget(path_index_key, path_key)
+
+                    file_id_results = await pipe.execute()
+
+                    # 根据文件ID批量获取文件状态
+                    file_ids_to_check = []
+                    for file_id_str in file_id_results:
+                        if file_id_str:
+                            try:
+                                file_id = int(file_id_str)
+                                file_ids_to_check.append(file_id)
+                            except (ValueError, TypeError):
+                                pass
+
+                    if file_ids_to_check:
+                        # 批量获取文件状态
+                        pipe2 = redis.pipeline()
+                        for file_id in file_ids_to_check:
+                            file_key = _get_redis_key(KEY_PREFIX_BACKUP_FILE, file_id)
+                            pipe2.hget(file_key, 'is_copy_success')
+
+                        status_results = await pipe2.execute()
+
+                        # 统计验证结果
+                        for is_copy_success in status_results:
+                            if is_copy_success == '1':
+                                verified_count += 1
+                            total_checked += 1
+
+                if total_checked > 0:
+                    logger.info(
+                        f"[压缩循环] [验证] 文件组 {current_group_idx + 1} 验证完成: "
+                        f"{verified_count}/{total_checked} 个文件的 is_copy_success=1 (总文件数: {len(all_paths)})"
+                    )
+                    if verified_count < total_checked:
+                        logger.warning(
+                            f"[压缩循环] [验证] ⚠️ 验证失败: 期望 {total_checked} 个文件 is_copy_success=1，"
+                            f"实际只有 {verified_count} 个 (失败率: {(total_checked - verified_count) / total_checked * 100:.1f}%)"
+                        )
+                else:
+                    logger.warning(f"[压缩循环] [验证] ⚠️ 无法验证：未找到文件记录（路径可能不匹配）")
+            elif is_opengauss():
+                # openGauss 模式：全量验证（使用原生 openGauss SQL）
+                async with get_opengauss_connection() as conn:
+                    # 分批验证，每批1000个文件
+                    batch_size = 1000
+                    verified_count = 0
+                    total_checked = 0
+
+                    for batch_start in range(0, len(all_paths), batch_size):
+                        batch_paths = all_paths[batch_start:batch_start + batch_size]
+                        # 使用原生 openGauss SQL：ANY($2) 方式查询
+                        # 分别查询总记录数和 is_copy_success=TRUE 的数量，避免 FILTER 语法兼容性问题
+                        try:
+                            # 查询总记录数
+                            total_result = await conn.fetchrow(
+                                """
+                                SELECT COUNT(*)::BIGINT as count
+                                FROM backup_files 
+                                WHERE backup_set_id = $1 AND file_path = ANY($2)
+                                """,
+                                self.backup_set.id, batch_paths
+                            )
+                            batch_total = total_result['count'] if total_result else 0
+
+                            # 查询 is_copy_success=TRUE 的数量
+                            verified_result = await conn.fetchrow(
+                                """
+                                SELECT COUNT(*)::BIGINT as count
+                                FROM backup_files 
+                                WHERE backup_set_id = $1 
+                                  AND file_path = ANY($2)
+                                  AND is_copy_success = TRUE
+                                """,
+                                self.backup_set.id, batch_paths
+                            )
+                            batch_verified = verified_result['count'] if verified_result else 0
+
+                            verified_count += batch_verified
+                            total_checked += batch_total
+                        except Exception as verify_batch_error:
+                            logger.error(
+                                f"[压缩循环] [验证] 批次验证失败: {str(verify_batch_error)}，"
+                                f"批次 {batch_start // batch_size + 1}，跳过该批次",
+                                exc_info=True
+                            )
+                            # 跳过该批次，继续验证其他批次
+                            continue
+
+                    logger.info(
+                        f"[压缩循环] [验证] 文件组 {current_group_idx + 1} 验证完成: "
+                        f"{verified_count}/{total_checked} 个文件的 is_copy_success=TRUE (总文件数: {len(all_paths)})"
+                    )
+                    if verified_count < total_checked:
+                        logger.warning(
+                            f"[压缩循环] [验证] ⚠️ 验证失败: 期望 {total_checked} 个文件 is_copy_success=TRUE，"
+                            f"实际只有 {verified_count} 个"
+                        )
+            else:
+                # SQLite 模式：全量验证
+                async with get_sqlite_connection() as conn:
+                    # 分批验证，每批1000个文件
+                    batch_size = 1000
+                    verified_count = 0
+                    total_checked = 0
+
+                    for batch_start in range(0, len(all_paths), batch_size):
+                        batch_paths = all_paths[batch_start:batch_start + batch_size]
+                        placeholders = ','.join(['?' for _ in batch_paths])
+                        verify_cursor = await conn.execute(f"""
+                            SELECT file_path, is_copy_success FROM backup_files 
+                            WHERE backup_set_id = ? AND file_path IN ({placeholders})
+                        """, (self.backup_set.id,) + tuple(batch_paths))
+                        verify_rows = await verify_cursor.fetchall()
+                        verified_count += sum(1 for row in verify_rows if row[1] == 1)
+                        total_checked += len(verify_rows)
+
+                    logger.info(
+                        f"[压缩循环] [验证] 文件组 {current_group_idx + 1} 验证完成: "
+                        f"{verified_count}/{total_checked} 个文件的 is_copy_success=1 (总文件数: {len(all_paths)})"
+                    )
+                    if verified_count < total_checked:
+                        logger.warning(
+                            f"[压缩循环] [验证] ⚠️ 验证失败: 期望 {total_checked} 个文件 is_copy_success=1，实际只有 {verified_count} 个"
+                        )
+        except Exception as verify_error:
+            logger.error(f"[压缩循环] [验证] ❌ 验证 is_copy_success 时出错: {str(verify_error)}", exc_info=True)
     
     async def _finalize_backup_set_and_notify(self):
         """标记任务集状态为完成并发钉钉（只有文件压缩任务可以调用）"""
