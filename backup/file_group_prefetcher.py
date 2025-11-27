@@ -23,21 +23,29 @@ class FileGroupPrefetcher:
     1. 在任务集开始时运行，预取文件组放入队列
     2. 压缩任务从队列获取文件组，不再直接查询数据库
     3. 压缩开始后，预取线程继续工作获取下一组文件
-    4. 内存中同时存在2组文件：正在压缩的，待压缩的
+    4. 内存中同时存在N+1组文件：N个正在压缩的，1个待压缩的（N=COMPRESSION_PARALLEL_BATCHES）
     """
     
     def __init__(
         self,
         backup_db: BackupDB,
         backup_set: BackupSet,
-        backup_task: BackupTask
+        backup_task: BackupTask,
+        parallel_batches: Optional[int] = None
     ):
         self.backup_db = backup_db
         self.backup_set = backup_set
         self.backup_task = backup_task
         
-        # 文件组队列：容量为2（正在压缩的+待压缩的）
-        self.file_group_queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+        # 获取并行批次数量（默认从配置读取）
+        if parallel_batches is None:
+            settings = get_settings()
+            parallel_batches = getattr(settings, 'COMPRESSION_PARALLEL_BATCHES', 2)
+        
+        self.parallel_batches = parallel_batches
+        # 文件组队列：容量为 parallel_batches + 1（N个正在压缩的 + 1个待压缩的）
+        self.queue_maxsize = parallel_batches + 1
+        self.file_group_queue: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
         
         # 预取任务
         self.prefetch_task: Optional[asyncio.Task] = None
@@ -109,29 +117,48 @@ class FileGroupPrefetcher:
             return None
     
     async def _prefetch_loop(self):
-        """预取循环：持续从数据库获取文件组并放入队列"""
+        """预取循环：持续从数据库获取文件组并放入队列
+        
+        逻辑：
+        1. 保证队列始终是 3/3（满状态）
+        2. 6秒轮询检测队列大小
+        3. 如果文件大小不足无法组成新文件组，队列保持当前状态，直到有新文件组能入队
+        4. 扫描任务完成后，如果不够一组，全库扫描避免遗漏，还不够1组，停止线程
+        5. 预取器不能阻塞其他线程（所有操作都是异步的）
+        """
         logger.info(
             f"[文件组预取器] ========== 预取循环已启动 ==========\n"
-            f"backup_set_id={self.backup_set.id}, backup_task_id={self.backup_task.id}"
+            f"backup_set_id={self.backup_set.id}, backup_task_id={self.backup_task.id}, "
+            f"队列容量={self.queue_maxsize}"
         )
         
         settings = get_settings()
         wait_retry_count = 0
         max_wait_retries = 6
         prefetch_loop_count = 0  # 预取循环计数
+        queue_check_interval = 6.0  # 6秒轮询检测队列大小
         
         try:
             while self._running:
                 prefetch_loop_count += 1
                 try:
-                    # 检查队列是否已满（容量为2）
-                    if self.file_group_queue.full():
-                        # 队列已满，等待压缩任务消费
+                    # 6秒轮询检测队列大小
+                    current_queue_size = self.file_group_queue.qsize()
+                    
+                    # 如果队列未满，尝试填充
+                    if current_queue_size < self.queue_maxsize:
+                        # 队列未满，继续预取
                         logger.debug(
-                            f"[文件组预取器] 队列已满（{self.file_group_queue.qsize()}/2），"
-                            f"等待压缩任务消费..."
+                            f"[文件组预取器] 队列未满（{current_queue_size}/{self.queue_maxsize}），"
+                            f"继续预取文件组..."
                         )
-                        await asyncio.sleep(1.0)  # 短暂等待后继续检查
+                    else:
+                        # 队列已满（3/3），6秒后再次检查
+                        logger.debug(
+                            f"[文件组预取器] 队列已满（{current_queue_size}/{self.queue_maxsize}），"
+                            f"{queue_check_interval}秒后再次检查..."
+                        )
+                        await asyncio.sleep(queue_check_interval)
                         continue
                     
                     # 从数据库获取文件组
@@ -140,7 +167,7 @@ class FileGroupPrefetcher:
                     
                     logger.info(
                         f"[文件组预取器] [循环 #{prefetch_loop_count}] 开始检索文件组："
-                        f"队列大小={self.file_group_queue.qsize()}/2, "
+                        f"队列大小={self.file_group_queue.qsize()}/{self.queue_maxsize}, "
                         f"last_processed_id={self.last_processed_file_id}, "
                         f"max_file_size={settings.MAX_FILE_SIZE}"
                     )
@@ -195,117 +222,185 @@ class FileGroupPrefetcher:
                     
                     # 将文件组放入队列
                     if file_groups:
-                        # 有文件组，放入队列（即使扫描已完成，也要继续预读取直到没有文件）
-                        await self.file_group_queue.put((file_groups, last_processed_id))
-                        self.prefetched_groups += len(file_groups)
-                        wait_retry_count = 0  # 重置等待计数
-                        logger.info(
-                            f"[文件组预取器] [循环 #{prefetch_loop_count}] 已预取 {len(file_groups)} 个文件组"
-                            f"（共 {total_files_in_groups} 个文件），"
-                            f"队列大小: {self.file_group_queue.qsize()}/2"
-                        )
-                        
-                        # 检查是否完成2个队列读取（队列容量为2）
-                        # 注意：使用队列大小而不是累计预取组数来判断是否需要等待
-                        # 因为 prefetched_groups 会一直累加，不能准确反映队列状态
-                        if self.file_group_queue.qsize() >= 2:
-                            # 队列已满，等待压缩任务消费
-                            logger.info(
-                                f"[文件组预取器] 队列已满（{self.file_group_queue.qsize()}/2），"
-                                f"等待压缩任务消费..."
-                            )
-                            # 检查压缩任务是否完成（通过检查队列是否被消费）
-                            while self.file_group_queue.full():
-                                await asyncio.sleep(1.0)
-                            logger.info(
-                                f"[文件组预取器] 压缩任务已消费队列，继续预取..."
-                            )
-                    else:
-                        # 没有收到文件，先进行全库扫描，防止遗漏
-                        logger.info(
-                            f"[文件组预取器] [循环 #{prefetch_loop_count}] 没有收到文件，"
-                            f"进行全库扫描检查是否有遗漏的未压缩文件..."
-                        )
-                        
-                        # 全库扫描：查询所有未压缩文件
-                        from utils.scheduler.db_utils import get_opengauss_connection
+                        # 在放入队列前，直接设置 is_copy_success = TRUE
                         try:
-                            async with get_opengauss_connection() as conn:
-                                full_search_timeout = 1000.0  # 1000秒超时
-                                await conn.execute(f"SET LOCAL statement_timeout = '{int(full_search_timeout)}s'")
-                                
-                                logger.info(
-                                    f"[文件组预取器] [循环 #{prefetch_loop_count}] 开始全库检索所有未压缩文件"
-                                    f"（超时时间：{full_search_timeout}秒）..."
-                                )
-                                all_pending_rows = await asyncio.wait_for(
-                                    conn.fetch(
-                                        """
-                                        SELECT id, file_path, file_name, directory_path, display_name, file_type,
-                                               file_size, file_permissions, modified_time, accessed_time
-                                        FROM backup_files
-                                        WHERE backup_set_id = $1
-                                          AND (is_copy_success = FALSE OR is_copy_success IS NULL)
-                                          AND file_type = 'file'::backupfiletype
-                                        ORDER BY id
-                                        """,
-                                        self.backup_set.id
-                                    ),
-                                    timeout=full_search_timeout
-                                )
-                                
-                                logger.info(
-                                    f"[文件组预取器] [循环 #{prefetch_loop_count}] 全库检索完成，"
-                                    f"找到 {len(all_pending_rows)} 个未压缩文件"
-                                )
-                                
-                                if all_pending_rows:
-                                    # 全库扫描找到文件，重置 last_processed_file_id 为 0，重新开始检索
-                                    logger.warning(
-                                        f"[文件组预取器] [循环 #{prefetch_loop_count}] ⚠️ 全库扫描发现遗漏的未压缩文件："
-                                        f"{len(all_pending_rows)} 个，重置 last_processed_file_id=0，重新检索..."
-                                    )
-                                    self.last_processed_file_id = 0
-                                    await asyncio.sleep(1.0)  # 短暂等待后继续检索
-                                    continue
-                                else:
-                                    # 全库扫描也没有文件，查看任务集的完成标记（由文件扫描程序设置）
-                                    scan_status = await self.backup_db.get_scan_status(self.backup_task.id)
-                                    
-                                    logger.info(
-                                        f"[文件组预取器] [循环 #{prefetch_loop_count}] 全库扫描未找到文件，"
-                                        f"查看任务集的完成标记（扫描状态={scan_status}，由文件扫描程序设置）"
-                                    )
-                                    
-                                    if scan_status == 'completed':
-                                        # 文件扫描已完成，且全库扫描确认没有未压缩文件，放入结束标记
-                                        logger.info(
-                                            "[文件组预取器] 文件扫描已完成且全库扫描确认没有未压缩文件，放入结束标记"
-                                        )
-                                        await self.file_group_queue.put(([], -1))  # -1 表示结束
-                                        break
-                                    else:
-                                        # 文件扫描未完成，可能还有文件在同步，等待后重复查找
-                                        logger.info(
-                                            f"[文件组预取器] [循环 #{prefetch_loop_count}] 文件扫描未完成"
-                                            f"（扫描状态={scan_status}），可能还有文件在同步，5秒后重复查找文件成组..."
-                                        )
-                                        await asyncio.sleep(5.0)
-                                        continue
-                        except asyncio.TimeoutError:
-                            logger.error(
-                                f"[文件组预取器] [循环 #{prefetch_loop_count}] 全库扫描超时，"
-                                f"5秒后重试..."
+                            logger.info(
+                                f"[文件组预取器] [循环 #{prefetch_loop_count}] 开始标记文件为已入队："
+                                f"{len(file_groups)} 个文件组，共 {total_files_in_groups} 个文件"
                             )
-                            await asyncio.sleep(5.0)
-                            continue
-                        except Exception as full_search_error:
+                            await self.backup_db.mark_files_as_queued(
+                                backup_set=self.backup_set,
+                                file_groups=file_groups
+                            )
+                            logger.info(
+                                f"[文件组预取器] [循环 #{prefetch_loop_count}] ✅ 文件标记完成，"
+                                f"is_copy_success 已设置为 TRUE"
+                            )
+                        except Exception as mark_error:
                             logger.error(
-                                f"[文件组预取器] [循环 #{prefetch_loop_count}] 全库扫描失败: {full_search_error}，"
-                                f"5秒后重试...",
+                                f"[文件组预取器] [循环 #{prefetch_loop_count}] ⚠️ 标记文件失败: {str(mark_error)}",
                                 exc_info=True
                             )
-                            await asyncio.sleep(5.0)
+                            # 即使标记失败，也继续放入队列，避免阻塞流程
+                        
+                        # 有文件组，放入队列（非阻塞，如果队列满则等待）
+                        try:
+                            # 使用 put_nowait 尝试非阻塞放入，如果队列满则等待
+                            if self.file_group_queue.full():
+                                logger.debug(
+                                    f"[文件组预取器] 队列已满，等待放入文件组..."
+                                )
+                            await self.file_group_queue.put((file_groups, last_processed_id))
+                            self.prefetched_groups += len(file_groups)
+                            wait_retry_count = 0  # 重置等待计数
+                            logger.info(
+                                f"[文件组预取器] [循环 #{prefetch_loop_count}] 已预取 {len(file_groups)} 个文件组"
+                                f"（共 {total_files_in_groups} 个文件），"
+                                f"✅队列大小: {self.file_group_queue.qsize()}/{self.queue_maxsize}"
+                            )
+                        except Exception as put_error:
+                            logger.error(
+                                f"[文件组预取器] [循环 #{prefetch_loop_count}] 放入队列失败: {put_error}",
+                                exc_info=True
+                            )
+                    else:
+                        # 没有收到文件，检查扫描状态
+                        scan_status = await self.backup_db.get_scan_status(self.backup_task.id)
+                        
+                        if scan_status == 'completed':
+                            # 扫描任务已完成，如果不够一组，先进行全库扫描避免遗漏
+                            logger.info(
+                                f"[文件组预取器] [循环 #{prefetch_loop_count}] 扫描任务已完成，"
+                                f"但未检索到文件组，进行全库扫描检查是否有遗漏..."
+                            )
+                            
+                            # 全库扫描：查询所有未压缩文件
+                            from utils.scheduler.db_utils import get_opengauss_connection
+                            try:
+                                async with get_opengauss_connection() as conn:
+                                    full_search_timeout = 7200.0  # 7200秒超时（两小时）
+                                    await conn.execute(f"SET LOCAL statement_timeout = '{int(full_search_timeout)}s'")
+                                    
+                                    logger.info(
+                                        f"[文件组预取器] [循环 #{prefetch_loop_count}] 开始全库检索所有未压缩文件"
+                                        f"（超时时间：{full_search_timeout}秒）..."
+                                    )
+                                    all_pending_rows = await asyncio.wait_for(
+                                        conn.fetch(
+                                            """
+                                            SELECT id, file_path, file_name, directory_path, display_name, file_type,
+                                                   file_size, file_permissions, modified_time, accessed_time
+                                            FROM backup_files
+                                            WHERE backup_set_id = $1
+                                              AND (is_copy_success = FALSE OR is_copy_success IS NULL)
+                                              AND file_type = 'file'::backupfiletype
+                                            ORDER BY id
+                                            """,
+                                            self.backup_set.id
+                                        ),
+                                        timeout=full_search_timeout
+                                    )
+                                    
+                                    logger.info(
+                                        f"[文件组预取器] [循环 #{prefetch_loop_count}] 全库检索完成，"
+                                        f"找到 {len(all_pending_rows)} 个未压缩文件"
+                                    )
+                                    
+                                    if all_pending_rows:
+                                        # 全库扫描找到文件，重置 last_processed_file_id 为 0，重新开始检索
+                                        logger.warning(
+                                            f"[文件组预取器] [循环 #{prefetch_loop_count}] ⚠️ 全库扫描发现遗漏的未压缩文件："
+                                            f"{len(all_pending_rows)} 个，重置 last_processed_file_id=0，重新检索..."
+                                        )
+                                        self.last_processed_file_id = 0
+                                        await asyncio.sleep(1.0)  # 短暂等待后继续检索
+                                        continue
+                                    else:
+                                        # 全库扫描也没有文件，再次调用 fetch_pending_files_grouped_by_size
+                                        # 这次应该会返回文件组（即使大小不足，因为扫描已完成）
+                                        logger.info(
+                                            f"[文件组预取器] [循环 #{prefetch_loop_count}] 全库扫描确认没有遗漏文件，"
+                                            f"再次调用 fetch_pending_files_grouped_by_size 获取文件组（即使大小不足）..."
+                                        )
+                                        # 再次查询，这次应该会返回文件组（因为扫描已完成）
+                                        result = await self.backup_db.fetch_pending_files_grouped_by_size(
+                                            self.backup_set.id,
+                                            settings.MAX_FILE_SIZE,
+                                            self.backup_task.id,
+                                            should_wait_if_small=False,  # 不再等待
+                                            start_from_id=self.last_processed_file_id
+                                        )
+                                        
+                                        if isinstance(result, tuple) and len(result) == 2:
+                                            file_groups, last_processed_id = result
+                                        else:
+                                            file_groups = result
+                                            last_processed_id = self.last_processed_file_id
+                                        
+                                        if file_groups:
+                                            # 有文件组，标记并放入队列
+                                            total_files_in_groups = sum(len(group) for group in file_groups)
+                                            try:
+                                                logger.info(
+                                                    f"[文件组预取器] [循环 #{prefetch_loop_count}] 开始标记文件为已入队："
+                                                    f"{len(file_groups)} 个文件组，共 {total_files_in_groups} 个文件"
+                                                )
+                                                await self.backup_db.mark_files_as_queued(
+                                                    backup_set=self.backup_set,
+                                                    file_groups=file_groups
+                                                )
+                                                logger.info(
+                                                    f"[文件组预取器] [循环 #{prefetch_loop_count}] ✅ 文件标记完成，"
+                                                    f"is_copy_success 已设置为 TRUE"
+                                                )
+                                            except Exception as mark_error:
+                                                logger.error(
+                                                    f"[文件组预取器] [循环 #{prefetch_loop_count}] ⚠️ 标记文件失败: {str(mark_error)}",
+                                                    exc_info=True
+                                                )
+                                            
+                                            await self.file_group_queue.put((file_groups, last_processed_id))
+                                            self.prefetched_groups += len(file_groups)
+                                            self.last_processed_file_id = last_processed_id
+                                            logger.info(
+                                                f"[文件组预取器] [循环 #{prefetch_loop_count}] 已预取 {len(file_groups)} 个文件组"
+                                                f"（共 {total_files_in_groups} 个文件），"
+                                                f"✅队列大小: {self.file_group_queue.qsize()}/{self.queue_maxsize}"
+                                            )
+                                            continue
+                                        else:
+                                            # 全库扫描后仍然没有文件组，停止线程
+                                            logger.info(
+                                                f"[文件组预取器] [循环 #{prefetch_loop_count}] 全库扫描后仍然没有文件组，"
+                                                f"不够1组，停止预取线程"
+                                            )
+                                            await self.file_group_queue.put(([], -1))  # -1 表示结束
+                                            break
+                            except asyncio.TimeoutError:
+                                logger.error(
+                                    f"[文件组预取器] [循环 #{prefetch_loop_count}] 全库扫描超时，"
+                                    f"停止预取线程"
+                                )
+                                await self.file_group_queue.put(([], -1))  # -1 表示结束
+                                break
+                            except Exception as full_search_error:
+                                logger.error(
+                                    f"[文件组预取器] [循环 #{prefetch_loop_count}] 全库扫描失败: {full_search_error}，"
+                                    f"停止预取线程",
+                                    exc_info=True
+                                )
+                                await self.file_group_queue.put(([], -1))  # -1 表示结束
+                                break
+                        else:
+                            # 扫描任务未完成，文件大小不足无法组成新文件组，队列保持当前状态
+                            # 6秒后再次检查队列大小和扫描状态
+                            logger.info(
+                                f"[文件组预取器] [循环 #{prefetch_loop_count}] 扫描任务未完成"
+                                f"（扫描状态={scan_status}），文件大小不足无法组成新文件组，"
+                                f"队列保持当前状态（{current_queue_size}/{self.queue_maxsize}），"
+                                f"{queue_check_interval}秒后再次检查..."
+                            )
+                            await asyncio.sleep(queue_check_interval)
                             continue
                 
                 except asyncio.CancelledError:
@@ -360,7 +455,7 @@ class FileGroupPrefetcher:
                 f"总检索时间: {self.total_retrieval_time:.2f}秒\n"
                 f"平均检索时间: {avg_retrieval_time:.2f}秒/次\n"
                 f"最后处理的文件ID: {self.last_processed_file_id}\n"
-                f"队列剩余大小: {self.file_group_queue.qsize()}/2"
+                f"队列剩余大小: {self.file_group_queue.qsize()}/{self.queue_maxsize}"
             )
     
     def get_stats(self) -> Dict[str, Any]:

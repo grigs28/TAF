@@ -195,6 +195,19 @@ class BackupTaskManager:
             if self._current_task and self._current_task.id == task_id:
                 if hasattr(self._current_task, 'current_compression_progress') and self._current_task.current_compression_progress:
                     current_compression_progress = self._current_task.current_compression_progress
+
+            # 如果从_current_task获取不到，尝试从系统实例获取
+            if not current_compression_progress:
+                try:
+                    from web.api.system import get_system_instance
+                    # 需要传入request对象，但这里没有，使用其他方法
+                    # 直接检查压缩工作线程的进度
+                    if hasattr(self, '_compression_worker') and self._compression_worker:
+                        if hasattr(self._compression_worker, 'backup_task') and self._compression_worker.backup_task.id == task_id:
+                            if hasattr(self._compression_worker.backup_task, 'current_compression_progress'):
+                                current_compression_progress = self._compression_worker.backup_task.current_compression_progress
+                except Exception as e:
+                    logger.debug(f"从压缩工作线程获取进度失败: {str(e)}")
             
             from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             

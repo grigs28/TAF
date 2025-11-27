@@ -1,5 +1,5 @@
 (function () {
-    const POLL_INTERVAL = 5000;
+    const POLL_INTERVAL = 2000;  // 减少到2秒，进一步提高状态更新频率
     const REFRESH_INTERVAL = 30000;
 
     const dom = {
@@ -574,10 +574,44 @@
                 `;
                 body.appendChild(stageSection);
             } else {
-                const currentStageLabel = task.operation_status
-                    || stageSteps.find(step => step.state === 'current')?.label
-                    || '-';
-                
+                const isCompressStage = (task.operation_stage || '').toLowerCase() === 'compress';
+
+                // 优先：如果是压缩阶段且后端提供了 current_compression_progress，直接用它构造文案
+                // 避免依赖后端 description 是否及时更新，保证"当前阶段"能实时显示压缩进度
+                let currentStageLabel = null;
+                if (isCompressStage && task.current_compression_progress) {
+                    console.log('[压缩进度] 前端获取到压缩进度数据:', task.current_compression_progress);
+                    const compProg = task.current_compression_progress;
+                    const current = compProg.current || 0;
+                    const total = compProg.total || 0;
+                    let percent = typeof compProg.percent === 'number'
+                        ? compProg.percent
+                        : (total > 0 ? (current / total * 100) : 0);
+                    // 保证百分比是有限数值
+                    if (!Number.isFinite(percent)) {
+                        percent = 0;
+                    }
+                    currentStageLabel = `压缩文件中 ${current}/${total} 个文件 (${percent.toFixed(1)}%)`;
+                    console.log('[压缩进度] 构造的标签:', currentStageLabel);
+                } else {
+                    console.log('[压缩进度] 压缩阶段但没有进度数据 - isCompressStage:', isCompressStage, 'current_compression_progress:', task.current_compression_progress);
+                }
+
+                // 退回：如果不是压缩阶段，或者没有进度信息，仍然使用后端提供的 operation_status / 阶段标签
+                // 但是过滤掉"初始化压缩引擎"这样的初始状态，显示更有意义的信息
+                if (!currentStageLabel) {
+                    let operationStatus = task.operation_status
+                        || stageSteps.find(step => step.state === 'current')?.label
+                        || '-';
+
+                    // 如果操作状态包含"初始化压缩引擎"且是压缩阶段，显示默认压缩状态
+                    if (isCompressStage && operationStatus.includes('初始化压缩引擎')) {
+                        operationStatus = '压缩文件中...';
+                    }
+
+                    currentStageLabel = operationStatus;
+                }
+
                 // 从 currentStageLabel 中解析进度百分比
                 // 格式示例: "压缩文件中 1201/3395 个文件 (35.4%)"
                 let progressPercent = null;
@@ -591,7 +625,6 @@
                 
                 // 构建显示文本，添加大小信息
                 let displayLabel = currentStageLabel;
-                const isCompressStage = (task.operation_stage || '').toLowerCase() === 'compress';
                 
                 // 如果是压缩阶段，必须使用当前文件组的总容量（压缩前）
                 // 501/20362 个文件 (2.5%) 中的 103.22G 应该是当前文件组的总文件大小，不是整个任务的总大小

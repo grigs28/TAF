@@ -216,14 +216,19 @@ async def get_backup_tasks(
                         current_compression_progress = None
                         if status_value == 'running':
                             try:
-                                from web.api.system import get_system_instance
+                                from web.api.backup.utils import get_system_instance
                                 system = get_system_instance(http_request)
+                                logger.debug(f"[任务查询] 获取系统实例成功: {system is not None}, backup_engine: {system.backup_engine is not None if system else False}")
                                 if system and system.backup_engine:
                                     task_status = await system.backup_engine.get_task_status(row["id"])
+                                    logger.debug(f"[任务查询] 任务 {row['id']} 状态: {task_status}")
                                     if task_status and 'current_compression_progress' in task_status:
                                         current_compression_progress = task_status['current_compression_progress']
+                                        logger.info(f"[任务查询] 任务 {row['id']} 获取压缩进度成功: {current_compression_progress}")
+                                    else:
+                                        logger.debug(f"[任务查询] 任务 {row['id']} 无压缩进度信息")
                             except Exception as e:
-                                logger.debug(f"获取任务压缩进度失败: {str(e)}")
+                                logger.error(f"[任务查询] 获取任务 {row['id']} 压缩进度失败: {str(e)}", exc_info=True)
                         
                         tasks.append({
                             "task_id": row["id"],
@@ -804,7 +809,7 @@ async def get_backup_task(task_id: int, http_request: Request):
                 current_compression_progress = None
                 if status_value and status_value.lower() == 'running':
                     try:
-                        from web.api.system import get_system_instance
+                        from web.api.backup.utils import get_system_instance
                         system = get_system_instance(http_request)
                         if system and system.backup_engine:
                             task_status = await system.backup_engine.get_task_status(row["id"])

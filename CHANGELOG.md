@@ -1,5 +1,113 @@
 # 更新日志
 
+## [0.1.32] - 2025-11-27
+
+### 新增
+
+#### 文件组预取器（openGauss模式）
+- ✅ 实现文件组预取功能，压缩和搜索并行执行
+  - 新增 `backup/file_group_prefetcher.py` 模块，实现 `FileGroupPrefetcher` 类
+  - 在压缩任务开始前预取文件组，放入队列供压缩任务使用
+  - 压缩任务从队列获取文件组，不再直接查询数据库
+  - 内存中同时存在 N+1 组文件：N 个正在压缩的，1 个待压缩的（N=COMPRESSION_PARALLEL_BATCHES）
+  - 大幅提升压缩效率，减少数据库查询等待时间
+  - 支持 openGauss 模式，自动检测并使用预取器
+
+#### 数据库连接辅助工具
+- ✅ 新增统一的数据库连接辅助函数
+  - 新增 `utils/db_connection_helper.py` 模块
+  - 统一处理 psycopg2 和 psycopg3 的连接创建
+  - 在 openGauss 模式下优先使用 psycopg3 binary protocol
+  - 自动降级到 psycopg2（如果 psycopg3 不可用）
+  - 简化数据库连接管理，提高代码复用性
+
+#### psycopg3 兼容层
+- ✅ 新增调度器 psycopg3 兼容支持
+  - 新增 `utils/scheduler/psycopg3_compat.py` 模块
+  - 为调度器提供 psycopg3 兼容接口
+  - 支持调度器在 openGauss 模式下使用 psycopg3
+  - 保持与现有代码的兼容性
+
+#### 备份集查询 API
+- ✅ 新增备份集查询接口
+  - 新增 `web/api/backup/sets.py` 模块
+  - 提供 `GET /api/backup/backup-sets` 接口，支持备份集列表查询
+  - 支持按备份组过滤、分页查询
+  - 支持 openGauss、SQLite、Redis 三种数据库模式
+  - 统一返回格式，便于前端使用
+
+#### 备份设置管理 API
+- ✅ 新增备份设置管理接口
+  - 新增 `web/api/backup/settings.py` 模块
+  - 提供备份相关配置的查询和更新接口
+  - 支持后台更新开关等配置项管理
+  - 与系统配置页面集成
+
+#### 磁带历史清理功能
+- ✅ 新增磁带操作历史清理接口
+  - 新增 `web/api/tape/tape_history_clean.py` 模块
+  - 提供 `DELETE /api/tape/history/clean` 接口，支持清理历史记录
+  - 支持按时间范围清理，避免历史数据无限增长
+  - 记录清理操作日志
+
+### 改进
+
+#### 数据库连接管理优化
+- ✅ 优化数据库连接创建和管理逻辑
+  - 统一使用 `get_psycopg_connection()` 辅助函数
+  - 改进连接池配置和错误处理
+  - 提升数据库操作的稳定性和性能
+
+#### 压缩工作流优化
+- ✅ 优化压缩工作流程
+  - 集成文件组预取器，减少数据库查询等待
+  - 改进压缩任务调度和资源管理
+  - 提升整体压缩性能
+
+#### API 接口优化
+- ✅ 优化备份和磁带管理 API
+  - 改进错误处理和日志记录
+  - 统一返回格式和状态码
+  - 提升 API 响应速度和稳定性
+
+### 技术细节
+
+#### 文件组预取器实现
+- 使用 `asyncio.Queue` 管理文件组队列
+- 队列容量为 `parallel_batches + 1`
+- 预取任务在后台持续运行，直到所有文件组处理完成
+- 支持超时和取消机制
+
+#### 数据库连接辅助
+- 优先尝试使用 psycopg3（如果可用）
+- 自动降级到 psycopg2
+- 统一连接参数和错误处理
+- 支持连接池和直接连接两种模式
+
+#### API 接口
+- 所有新 API 支持 openGauss、SQLite、Redis 三种模式
+- 使用原生 SQL 查询，提升性能
+- 统一的错误处理和日志记录
+
+## [0.1.31] - 2025-11-27
+
+### 修改
+
+#### 多进程压缩进度聚合显示
+- ✅ 实现多进程压缩进度聚合显示功能
+  - 新增 `BackupDB.get_compressed_files_count()` 方法，支持从数据库查询已压缩文件数（聚合所有进程的进度）
+  - 在 `CompressionWorker` 中添加 `_update_compression_progress_periodically()` 后台任务，每5秒从数据库查询并更新压缩进度
+  - 支持 openGauss、SQLite、Redis 三种数据库模式
+  - 前端显示所有压缩进程的聚合进度，而非单个进程的进度
+  - 解决多进程并发压缩时进度显示不准确的问题
+
+### 技术细节
+- `backup/backup_db.py`：新增 `get_compressed_files_count()` 方法，查询已压缩文件数
+- `backup/compression_worker.py`：新增 `_update_compression_progress_periodically()` 后台任务，定期更新压缩进度
+- `backup/sqlite_backup_db.py`：新增 `get_compressed_files_count_sqlite()` 方法
+- `backup/redis_backup_db.py`：新增 `get_compressed_files_count_redis()` 方法
+- 进度更新格式：`[压缩文件中...] {已压缩数}/{总文件数} 个文件 ({百分比}%)`
+
 ## [0.1.30] - 2025-11-25
 
 ### 修改
@@ -2223,5 +2331,5 @@
 
 **企业级磁带备份系统**
 项目地址: https://github.com/grigs28/TAF
-版本：v0.1.22
+版本：v0.1.32
 

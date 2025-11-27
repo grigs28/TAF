@@ -71,7 +71,7 @@ class BatchDBWriter:
                 # 临时性错误：队列满或超时，无限重试
                 retry_count += 1
                 if retry_count % 100 == 0:  # 每100次重试记录一次日志
-                    logger.warning(f"批量写入队列满，重试第 {retry_count} 次: {file_info.get('path', 'unknown')[:200]}")
+                    logger.info(f"批量写入队列满，重试第 {retry_count} 次: {file_info.get('path', 'unknown')[:200]}")
                 # 等待一小段时间后重试
                 await asyncio.sleep(0.1)
             except (ValueError, KeyError, TypeError) as e:
@@ -89,7 +89,7 @@ class BatchDBWriter:
                     raise  # 永久性错误，抛出异常
                 # 可能是临时性错误，重试
                 if retry_count % 100 == 0:
-                    logger.warning(f"批量写入队列未知错误，重试第 {retry_count} 次: {file_info.get('path', 'unknown')[:200]}, 错误: {str(e)}")
+                    logger.info(f"批量写入队列未知错误，重试第 {retry_count} 次: {file_info.get('path', 'unknown')[:200]}, 错误: {str(e)}")
                 await asyncio.sleep(0.1)
     
     async def write_batch_sync(self, file_batch: List[Dict]):
@@ -231,39 +231,11 @@ class BatchDBWriter:
                         insert_data.append(insert_params)
 
                 # 执行批量操作
-                # 注意：executemany 内部已经调用了 commit()，这里不需要再次提交
-                # 但是为了确保数据持久化，我们验证事务状态
                 if insert_data:
                     await self._batch_insert(conn, insert_data)
-                    # executemany 内部已经提交，验证状态
-                    actual_conn = conn._conn if hasattr(conn, '_conn') else conn
-                    transaction_status = actual_conn.info.transaction_status
-                    if transaction_status == 1:  # INTRANS: 仍在事务中，说明提交失败
-                        logger.warning(f"[批量写入] ⚠️ executemany 后事务状态仍为 INTRANS，尝试再次提交")
-                        try:
-                            await actual_conn.commit()
-                            logger.info(f"[批量写入] ✅ 已成功提交插入事务: {len(insert_data)} 个文件")
-                        except Exception as commit_err:
-                            logger.error(f"[批量写入] ❌ 提交插入事务失败: {commit_err}", exc_info=True)
-                            raise
-                    else:
-                        logger.debug(f"[批量写入] ✅ 插入事务已提交: {len(insert_data)} 个文件，状态={transaction_status}")
 
                 if update_data:
                     await self._batch_update(conn, update_data)
-                    # executemany 内部已经提交，验证状态
-                    actual_conn = conn._conn if hasattr(conn, '_conn') else conn
-                    transaction_status = actual_conn.info.transaction_status
-                    if transaction_status == 1:  # INTRANS: 仍在事务中，说明提交失败
-                        logger.warning(f"[批量写入] ⚠️ executemany 后事务状态仍为 INTRANS，尝试再次提交")
-                        try:
-                            await actual_conn.commit()
-                            logger.info(f"[批量写入] ✅ 已成功提交更新事务: {len(update_data)} 个文件")
-                        except Exception as commit_err:
-                            logger.error(f"[批量写入] ❌ 提交更新事务失败: {commit_err}", exc_info=True)
-                            raise
-                    else:
-                        logger.debug(f"[批量写入] ✅ 更新事务已提交: {len(update_data)} 个文件，状态={transaction_status}")
         elif is_sqlite():
             # SQLite 版本：使用原生 SQL
             from backup.sqlite_backup_db import insert_backup_files_sqlite
@@ -284,7 +256,7 @@ class BatchDBWriter:
             if file_dicts:
                 await insert_backup_files_sqlite(file_dicts)
         else:
-            logger.warning(f"不支持的数据库类型，跳过批量写入 {len(file_batch)} 个文件")
+            logger.info(f"不支持的数据库类型，跳过批量写入 {len(file_batch)} 个文件")
 
     async def _process_batch_redis(self, file_batch: List[Dict]):
         """处理一个文件批次（Redis版本，优化10000条记录写入速度）"""
@@ -805,62 +777,252 @@ class BatchDBWriter:
 
     async def _batch_insert(self, conn, insert_data: List[tuple]):
         """批量插入文件记录"""
-        await conn.executemany(
-            """
-            INSERT INTO backup_files (
-                backup_set_id, file_path, file_name, directory_path, display_name,
-                file_type, file_size, compressed_size, file_permissions, file_owner,
-                file_group, created_time, modified_time, accessed_time, tape_block_start,
-                tape_block_count, compressed, encrypted, checksum, is_copy_success,
-                copy_status_at, backup_time, chunk_number, version, file_metadata, tags,
-                created_at, updated_at
-            ) VALUES (
-                $1, $2, $3, $4, $5,
-                $6::backupfiletype, $7, $8, $9, $10,
-                $11, $12, $13, $14, $15,
-                $16, $17, $18, $19, $20,
-                $21, $22, $23, $24, CAST($25 AS jsonb), CAST($26 AS jsonb),
-                NOW(), NOW()
+        import asyncio
+        from utils.scheduler.db_utils import is_opengauss
+
+        # openGauss模式下需要手动管理事务
+        if is_opengauss():
+            # 在openGauss模式下，确保事务正确提交
+            max_retries = 3
+            retry_count = 0
+            insert_success = False
+
+            while retry_count < max_retries and not insert_success:
+                try:
+                    # 开始新事务
+                    await conn.execute("BEGIN")
+
+                    # 执行批量插入
+                    await conn.executemany(
+                        """
+                        INSERT INTO backup_files (
+                            backup_set_id, file_path, file_name, directory_path, display_name,
+                            file_type, file_size, compressed_size, file_permissions, file_owner,
+                            file_group, created_time, modified_time, accessed_time, tape_block_start,
+                            tape_block_count, compressed, encrypted, checksum, is_copy_success,
+                            copy_status_at, backup_time, chunk_number, version, file_metadata, tags,
+                            created_at, updated_at
+                        ) VALUES (
+                            $1, $2, $3, $4, $5,
+                            $6::backupfiletype, $7, $8, $9, $10,
+                            $11, $12, $13, $14, $15,
+                            $16, $17, $18, $19, $20,
+                            $21, $22, $23, $24, CAST($25 AS jsonb), CAST($26 AS jsonb),
+                            NOW(), NOW()
+                        )
+                        """,
+                        insert_data
+                    )
+
+                    # 显式提交事务
+                    await conn.commit()
+
+                    # 验证事务提交状态
+                    actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                    transaction_status = actual_conn.info.transaction_status
+
+                    if transaction_status == 0:  # IDLE: 事务成功提交
+                        insert_success = True
+                        logger.info(f"[批量插入] ✅ openGauss模式下批量插入事务提交成功：{len(insert_data)} 个文件")
+                    else:
+                        # 事务状态异常
+                        logger.warning(
+                            f"[批量插入] ⚠️ 批量插入事务状态异常: {transaction_status}，"
+                            f"尝试回滚后重试 (重试 {retry_count + 1}/{max_retries})"
+                        )
+                        try:
+                            await conn.rollback()
+                        except Exception as rollback_error:
+                            logger.error(f"[批量插入] 回滚失败: {rollback_error}")
+
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            # 等待一段时间后重试
+                            await asyncio.sleep(0.5 * retry_count)
+                        else:
+                            raise Exception(f"批量插入事务提交失败，达到最大重试次数 {max_retries}")
+
+                except Exception as insert_error:
+                    retry_count += 1
+                    if retry_count >= max_retries:
+                        logger.error(
+                            f"[批量插入] ❌ 批量插入失败，达到最大重试次数 {max_retries}: {str(insert_error)}",
+                            exc_info=True
+                        )
+                        raise
+
+                    logger.warning(
+                        f"[批量插入] ⚠️ 批量插入失败，重试 {retry_count}/{max_retries}: {str(insert_error)}"
+                    )
+
+                    # 尝试回滚可能的事务
+                    try:
+                        await conn.rollback()
+                    except Exception:
+                        pass
+
+                    # 等待一段时间后重试
+                    await asyncio.sleep(1.0 * retry_count)
+        else:
+            # 非openGauss模式（SQLite、Redis等）保持原有逻辑
+            await conn.executemany(
+                """
+                INSERT INTO backup_files (
+                    backup_set_id, file_path, file_name, directory_path, display_name,
+                    file_type, file_size, compressed_size, file_permissions, file_owner,
+                    file_group, created_time, modified_time, accessed_time, tape_block_start,
+                    tape_block_count, compressed, encrypted, checksum, is_copy_success,
+                    copy_status_at, backup_time, chunk_number, version, file_metadata, tags,
+                    created_at, updated_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5,
+                    $6::backupfiletype, $7, $8, $9, $10,
+                    $11, $12, $13, $14, $15,
+                    $16, $17, $18, $19, $20,
+                    $21, $22, $23, $24, CAST($25 AS jsonb), CAST($26 AS jsonb),
+                    NOW(), NOW()
+                )
+                """,
+                insert_data
             )
-            """,
-            insert_data
-        )
+
         logger.debug(f"批量插入 {len(insert_data)} 个文件记录")
 
     async def _batch_update(self, conn, update_data: List[tuple]):
         """批量更新文件记录"""
-        await conn.executemany(
-            """
-            UPDATE backup_files
-            SET file_name = $2,
-                directory_path = $3,
-                display_name = $4,
-                file_type = $5::backupfiletype,
-                file_size = $6,
-                compressed_size = $7,
-                file_permissions = $8,
-                file_owner = $9,
-                file_group = $10,
-                created_time = $11,
-                modified_time = $12,
-                accessed_time = $13,
-                tape_block_start = $14,
-                tape_block_count = $15,
-                compressed = $16,
-                encrypted = $17,
-                checksum = $18,
-                is_copy_success = $19,
-                copy_status_at = $20,
-                backup_time = $21,
-                chunk_number = $22,
-                version = $23,
-                file_metadata = $24::jsonb,
-                tags = $25::jsonb,
-                updated_at = NOW()
-            WHERE id = $1
-            """,
-            update_data
-        )
+        import asyncio
+        from utils.scheduler.db_utils import is_opengauss
+
+        # openGauss模式下需要手动管理事务
+        if is_opengauss():
+            # 在openGauss模式下，确保事务正确提交
+            max_retries = 3
+            retry_count = 0
+            update_success = False
+
+            while retry_count < max_retries and not update_success:
+                try:
+                    # 开始新事务
+                    await conn.execute("BEGIN")
+
+                    # 执行批量更新
+                    await conn.executemany(
+                        """
+                        UPDATE backup_files
+                        SET file_name = $2,
+                            directory_path = $3,
+                            display_name = $4,
+                            file_type = $5::backupfiletype,
+                            file_size = $6,
+                            compressed_size = $7,
+                            file_permissions = $8,
+                            file_owner = $9,
+                            file_group = $10,
+                            created_time = $11,
+                            modified_time = $12,
+                            accessed_time = $13,
+                            tape_block_start = $14,
+                            tape_block_count = $15,
+                            compressed = $16,
+                            encrypted = $17,
+                            checksum = $18,
+                            is_copy_success = $19,
+                            copy_status_at = $20,
+                            backup_time = $21,
+                            chunk_number = $22,
+                            version = $23,
+                            file_metadata = $24::jsonb,
+                            tags = $25::jsonb,
+                            updated_at = NOW()
+                        WHERE id = $1
+                        """,
+                        update_data
+                    )
+
+                    # 显式提交事务
+                    await conn.commit()
+
+                    # 验证事务提交状态
+                    actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                    transaction_status = actual_conn.info.transaction_status
+
+                    if transaction_status == 0:  # IDLE: 事务成功提交
+                        update_success = True
+                        logger.info(f"[批量更新] ✅ openGauss模式下批量更新事务提交成功：{len(update_data)} 个文件")
+                    else:
+                        # 事务状态异常
+                        logger.warning(
+                            f"[批量更新] ⚠️ 批量更新事务状态异常: {transaction_status}，"
+                            f"尝试回滚后重试 (重试 {retry_count + 1}/{max_retries})"
+                        )
+                        try:
+                            await conn.rollback()
+                        except Exception as rollback_error:
+                            logger.error(f"[批量更新] 回滚失败: {rollback_error}")
+
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            # 等待一段时间后重试
+                            await asyncio.sleep(0.5 * retry_count)
+                        else:
+                            raise Exception(f"批量更新事务提交失败，达到最大重试次数 {max_retries}")
+
+                except Exception as update_error:
+                    retry_count += 1
+                    if retry_count >= max_retries:
+                        logger.error(
+                            f"[批量更新] ❌ 批量更新失败，达到最大重试次数 {max_retries}: {str(update_error)}",
+                            exc_info=True
+                        )
+                        raise
+
+                    logger.warning(
+                        f"[批量更新] ⚠️ 批量更新失败，重试 {retry_count}/{max_retries}: {str(update_error)}"
+                    )
+
+                    # 尝试回滚可能的事务
+                    try:
+                        await conn.rollback()
+                    except Exception:
+                        pass
+
+                    # 等待一段时间后重试
+                    await asyncio.sleep(1.0 * retry_count)
+        else:
+            # 非openGauss模式（SQLite、Redis等）保持原有逻辑
+            await conn.executemany(
+                """
+                UPDATE backup_files
+                SET file_name = $2,
+                    directory_path = $3,
+                    display_name = $4,
+                    file_type = $5::backupfiletype,
+                    file_size = $6,
+                    compressed_size = $7,
+                    file_permissions = $8,
+                    file_owner = $9,
+                    file_group = $10,
+                    created_time = $11,
+                    modified_time = $12,
+                    accessed_time = $13,
+                    tape_block_start = $14,
+                    tape_block_count = $15,
+                    compressed = $16,
+                    encrypted = $17,
+                    checksum = $18,
+                    is_copy_success = $19,
+                    copy_status_at = $20,
+                    backup_time = $21,
+                    chunk_number = $22,
+                    version = $23,
+                    file_metadata = $24::jsonb,
+                    tags = $25::jsonb,
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                update_data
+            )
+
         logger.debug(f"批量更新 {len(update_data)} 个文件记录")
 
     async def stop(self):
@@ -882,7 +1044,7 @@ class BatchDBWriter:
         wait_start = time.time()
         while not self.file_queue.empty():
             if time.time() - wait_start > max_wait_time:
-                logger.warning(f"批量写入器flush超时（{max_wait_time}秒），队列中仍有 {self.file_queue.qsize()} 个文件")
+                logger.info(f"批量写入器flush超时（{max_wait_time}秒），队列中仍有 {self.file_queue.qsize()} 个文件")
                 break
             await asyncio.sleep(0.1)
         
@@ -949,7 +1111,7 @@ class BackupDB:
             self._last_operation_status[task_id] = stage_only
             task_name = getattr(backup_task, 'task_name', '') or ''
             stage_label = stage_only.strip('[]') or stage_only
-            logger.warning(f"[关键阶段] 任务 {task_name or task_id}: {stage_label}")
+            logger.info(f"[关键阶段] 任务 {task_name or task_id}: {stage_label}")
 
             if any(keyword in stage_label for keyword in ("完成", "成功", "失败", "终止", "结束")):
                 self._last_operation_status.pop(task_id, None)
@@ -1018,7 +1180,7 @@ class BackupDB:
                             await actual_conn.commit()
                             logger.debug(f"备份集创建事务已提交: backup_set_id={backup_set_id}, set_id={set_id}")
                         except Exception as commit_err:
-                            logger.warning(f"提交备份集创建事务失败（可能已自动提交）: {commit_err}")
+                            logger.info(f"提交备份集创建事务失败（可能已自动提交）: {commit_err}")
                     
                     # 查询插入的记录
                     row = await conn.fetchrow(
@@ -1139,7 +1301,7 @@ class BackupDB:
             from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
             if not is_opengauss():
-                logger.warning("非openGauss数据库，跳过保存备份文件信息")
+                logger.info("非openGauss数据库，跳过保存备份文件信息")
                 return
             
             # 使用连接池
@@ -1154,7 +1316,7 @@ class BackupDB:
                     )
                     
                     if not backup_set_row:
-                        logger.warning(f"找不到备份集: {backup_set.set_id}，跳过保存文件信息")
+                        logger.info(f"找不到备份集: {backup_set.set_id}，跳过保存文件信息")
                         return
                     
                     backup_set_db_id = backup_set_row['id']
@@ -1186,7 +1348,7 @@ class BackupDB:
                                 logger.debug(f"无法获取文件统计信息: {file_path} (错误: {str(stat_error)})")
                                 file_stat = None
                             except Exception as stat_error:
-                                logger.warning(f"获取文件统计信息失败: {file_path} (错误: {str(stat_error)})")
+                                logger.info(f"获取文件统计信息失败: {file_path} (错误: {str(stat_error)})")
                                 file_stat = None
                             
                             # 跳过单个文件的校验和计算（文件已压缩，压缩包本身有校验和，避免阻塞）
@@ -1210,7 +1372,7 @@ class BackupDB:
                                 'file_checksum': file_checksum
                             }
                         except Exception as process_error:
-                            logger.warning(f"处理文件信息失败: {file_info.get('path', 'unknown')} (错误: {str(process_error)})")
+                            logger.info(f"处理文件信息失败: {file_info.get('path', 'unknown')} (错误: {str(process_error)})")
                             return None
                     
                     # 批量处理文件信息（在线程池中执行）
@@ -1224,7 +1386,7 @@ class BackupDB:
                     
                     if len(valid_processed_files) < len(file_group):
                         failed_count = len(file_group) - len(valid_processed_files)
-                        logger.warning(f"⚠️ 处理文件信息时，{failed_count} 个文件失败，继续保存其他文件")
+                        logger.info(f"⚠️ 处理文件信息时，{failed_count} 个文件失败，继续保存其他文件")
                     
                     # 批量插入文件记录（使用事务）
                     success_count = 0
@@ -1240,14 +1402,170 @@ class BackupDB:
                     )
                         
                 except Exception as db_conn_error:
-                    logger.warning(f"⚠️ 数据库连接或查询失败，跳过保存文件信息: {str(db_conn_error)}")
+                    logger.info(f"⚠️ 数据库连接或查询失败，跳过保存文件信息: {str(db_conn_error)}")
                     # 数据库错误不影响备份流程，继续执行
                     
         except Exception as e:
-            logger.warning(f"⚠️ 保存备份文件信息到数据库失败: {str(e)}，但备份流程继续")
+            logger.info(f"⚠️ 保存备份文件信息到数据库失败: {str(e)}，但备份流程继续")
             import traceback
             logger.debug(f"错误堆栈:\n{traceback.format_exc()}")
             # 不抛出异常，因为文件已经写入磁带，数据库记录失败不应该影响备份流程
+
+    async def mark_files_as_queued(
+        self,
+        backup_set: BackupSet,
+        file_groups: List[List[Dict]]
+    ):
+        """标记文件组为已入队（仅设置 is_copy_success = TRUE，不更新压缩信息）"""
+        from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
+        
+        backup_set_db_id = getattr(backup_set, 'id', None)
+        if not backup_set_db_id:
+            logger.info(f"[mark_files_as_queued] ❌ 无法获取 backup_set.id，跳过文件状态更新")
+            return
+        
+        # 收集所有文件路径
+        all_file_paths = []
+        for file_group in file_groups:
+            for file_info in file_group:
+                file_path = file_info.get('file_path') or file_info.get('path')
+                if file_path:
+                    all_file_paths.append(file_path)
+        
+        if not all_file_paths:
+            logger.info(f"[mark_files_as_queued] ❌ 没有有效的文件路径，跳过文件状态更新")
+            return
+        
+        logger.info(f"[mark_files_as_queued] 开始标记 {len(all_file_paths)} 个文件为已入队（is_copy_success = TRUE）")
+        
+        if is_redis():
+            # Redis 模式
+            from backup.redis_backup_db import mark_files_as_queued_redis
+            try:
+                await mark_files_as_queued_redis(backup_set_db_id, all_file_paths)
+                logger.info(f"[mark_files_as_queued] ✅ Redis模式：{len(all_file_paths)} 个文件的 is_copy_success 已设置为 TRUE")
+            except Exception as e:
+                logger.error(f"[mark_files_as_queued] ❌ Redis模式更新失败: {str(e)}", exc_info=True)
+        elif is_opengauss():
+            # openGauss 模式
+            try:
+                async with get_opengauss_connection() as conn:
+                    await self._mark_files_as_queued_opengauss(conn, backup_set_db_id, all_file_paths)
+                logger.info(f"[mark_files_as_queued] ✅ openGauss模式：{len(all_file_paths)} 个文件的 is_copy_success 已设置为 TRUE")
+            except Exception as e:
+                logger.error(f"[mark_files_as_queued] ❌ openGauss模式更新失败: {str(e)}", exc_info=True)
+        else:
+            # SQLite 模式
+            from backup.sqlite_backup_db import mark_files_as_queued_sqlite
+            try:
+                await mark_files_as_queued_sqlite(backup_set_db_id, all_file_paths)
+                logger.info(f"[mark_files_as_queued] ✅ SQLite模式：{len(all_file_paths)} 个文件的 is_copy_success 已设置为 TRUE")
+            except Exception as e:
+                logger.error(f"[mark_files_as_queued] ❌ SQLite模式更新失败: {str(e)}", exc_info=True)
+    
+    async def _mark_files_as_queued_opengauss(self, conn, backup_set_db_id: int, file_paths: List[str]):
+        """openGauss模式：仅设置 is_copy_success = TRUE"""
+        import asyncio
+
+        # 分批更新，避免单次更新过多文件
+        batch_size = 1000
+        total_updated = 0
+
+        for i in range(0, len(file_paths), batch_size):
+            batch_paths = file_paths[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            total_batches = (len(file_paths) + batch_size - 1) // batch_size
+
+            # 重试机制：最多重试3次
+            max_retries = 3
+            retry_count = 0
+            batch_success = False
+
+            while retry_count < max_retries and not batch_success:
+                try:
+                    # 开始新事务
+                    await conn.execute("BEGIN")
+
+                    # 设置语句超时
+                    await conn.execute("SET LOCAL statement_timeout = '180s'")
+
+                    # psycopg3 的 execute 返回 rowcount（更新的行数）
+                    update_result = await conn.execute(
+                        """
+                        UPDATE backup_files
+                        SET is_copy_success = TRUE,
+                            copy_status_at = NOW(),
+                            updated_at = NOW()
+                        WHERE backup_set_id = $1
+                          AND file_path = ANY($2)
+                          AND (is_copy_success = FALSE OR is_copy_success IS NULL)
+                        """,
+                        backup_set_db_id, batch_paths
+                    )
+
+                    # 获取实际更新的行数
+                    updated_count = update_result if hasattr(update_result, 'rowcount') else update_result
+
+                    # openGauss 默认不开启 autocommit，需要显式提交事务
+                    await conn.commit()
+
+                    # 验证事务提交状态
+                    actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                    transaction_status = actual_conn.info.transaction_status
+
+                    if transaction_status == 0:  # IDLE: 事务成功提交
+                        batch_success = True
+                        total_updated += updated_count
+                        logger.info(
+                            f"[mark_files_as_queued] ✅ 批次 {batch_num}/{total_batches} 事务提交成功："
+                            f"更新了 {updated_count} 个文件，事务状态={transaction_status}"
+                        )
+                    else:
+                        # 事务状态异常，尝试回滚
+                        logger.warning(
+                            f"[mark_files_as_queued] ⚠️ 批次 {batch_num}/{total_batches} 事务状态异常: {transaction_status}，"
+                            f"尝试回滚后重试 (重试 {retry_count + 1}/{max_retries})"
+                        )
+                        try:
+                            await conn.rollback()
+                        except Exception as rollback_error:
+                            logger.error(f"[mark_files_as_queued] 回滚失败: {rollback_error}")
+
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            # 等待一段时间后重试
+                            await asyncio.sleep(0.5 * retry_count)  # 递增等待时间
+                        else:
+                            # 达到最大重试次数，抛出异常
+                            raise Exception(f"批次 {batch_num}/{total_batches} 事务提交失败，达到最大重试次数")
+
+                except Exception as batch_error:
+                    retry_count += 1
+                    if retry_count >= max_retries:
+                        # 达到最大重试次数，记录详细错误并抛出异常
+                        logger.error(
+                            f"[mark_files_as_queued] ❌ 批次 {batch_num}/{total_batches} 更新失败，"
+                            f"达到最大重试次数 {max_retries}: {str(batch_error)}",
+                            exc_info=True
+                        )
+                        raise
+
+                    # 记录重试信息
+                    logger.warning(
+                        f"[mark_files_as_queued] ⚠️ 批次 {batch_num}/{total_batches} 更新失败，"
+                        f"重试 {retry_count}/{max_retries}: {str(batch_error)}"
+                    )
+
+                    # 尝试回滚可能的事务
+                    try:
+                        await conn.rollback()
+                    except Exception:
+                        pass  # 忽略回滚错误
+
+                    # 等待一段时间后重试
+                    await asyncio.sleep(1.0 * retry_count)  # 递增等待时间
+
+        logger.info(f"[mark_files_as_queued] ✅ 所有批次处理完成，总共更新了 {total_updated} 个文件的 is_copy_success 状态")
 
     async def mark_files_as_copied(
         self,
@@ -1323,7 +1641,7 @@ class BackupDB:
                     backup_set.set_id
                 )
             if not row:
-                logger.warning(f"找不到备份集: {backup_set.set_id}，无法标记文件成功")
+                logger.info(f"找不到备份集: {backup_set.set_id}，无法标记文件成功")
                 return
             backup_set_db_id = row['id']
 
@@ -1404,7 +1722,7 @@ class BackupDB:
             error_msg = str(e)
             # 如果表不存在，记录警告但不报错（可能是数据库未初始化）
             if "does not exist" in error_msg.lower() or "relation" in error_msg.lower():
-                logger.warning(
+                logger.info(
                     f"清理备份集 {backup_set_db_id} 的文件记录时表不存在，跳过清理（可能是数据库未初始化）: {error_msg}"
                 )
             else:
@@ -1660,6 +1978,9 @@ class BackupDB:
         tolerance = max_file_size * 0.05  # 5% 容差
         min_group_size = max_file_size - tolerance  # 最小目标大小
         max_group_size = max_file_size + tolerance  # 超大文件阈值（含容差）
+        # 最小文件组大小限制：即使扫描已完成，如果文件组太小也不应该返回
+        # 设置为 max_file_size 的 1% 或 100MB，取较大值
+        min_acceptable_group_size = max(max_file_size * 0.01, 100 * 1024 * 1024)  # 1% 或 100MB
         
         async with get_opengauss_connection() as conn:
             # 关键修复：先查询当前备份集中第一个未压缩文件的ID
@@ -1694,12 +2015,12 @@ class BackupDB:
                 error_msg = str(e)
                 # 如果表不存在，返回空结果
                 if "does not exist" in error_msg.lower() or "relation" in error_msg.lower() or "UndefinedTable" in str(type(e).__name__):
-                    logger.warning(
+                    logger.info(
                         f"[openGauss优化] backup_files 表不存在，返回空结果（可能是数据库未初始化）: {error_msg}"
                     )
                     return ([], start_from_id)
                 # 其他错误也记录警告并返回空结果
-                logger.warning(f"[openGauss优化] 查询第一个待处理文件ID时出错: {error_msg}，返回空结果")
+                logger.info(f"[openGauss优化] 查询第一个待处理文件ID时出错: {error_msg}，返回空结果")
                 return ([], start_from_id)
             
             if first_pending_id is None:
@@ -1712,15 +2033,16 @@ class BackupDB:
             )
             
             # 确定查询起始ID：取 start_from_id 和 first_pending_id 的较大值
-            # 如果 start_from_id 小于第一个未压缩文件ID，说明可能跳过了某些文件，应该从第一个文件开始
-            if start_from_id > 0 and start_from_id < first_pending_id:
-                logger.warning(
-                    f"[openGauss优化] ⚠️ start_from_id ({start_from_id}) 小于第一个未压缩文件ID ({first_pending_id})，"
+            # 如果 start_from_id 小于第一个未压缩文件ID - 1，说明可能跳过了某些文件，应该从第一个文件开始
+            # 注意：start_from_id = first_pending_id - 1 是正常的（查询条件 id > start_from_id 能包含第一个文件）
+            if start_from_id > 0 and start_from_id < first_pending_id - 1:
+                logger.info(
+                    f"[openGauss优化] ⚠️ start_from_id ({start_from_id}) 小于第一个未压缩文件ID - 1 ({first_pending_id - 1})，"
                     f"可能存在ID更小的未压缩文件，从第一个文件ID开始查询"
                 )
                 last_processed_id = first_pending_id - 1  # 从第一个文件开始（id > first_pending_id - 1 即 id >= first_pending_id）
-            elif start_from_id >= first_pending_id:
-                # 正常情况：从 start_from_id 开始查询
+            elif start_from_id >= first_pending_id - 1:
+                # 正常情况：从 start_from_id 开始查询（包括 start_from_id = first_pending_id - 1 的情况）
                 last_processed_id = start_from_id
             else:
                 # start_from_id = 0，从第一个文件开始
@@ -1732,6 +2054,8 @@ class BackupDB:
             )
             # 循环检索文件，直到累积到足够的文件或没有更多文件
             should_stop = False  # 是否应该停止检索
+            first_skipped_file_id = None  # 记录第一个跳过的文件ID（用于情况2.3）
+            first_skipped_file_info = None  # 记录第一个跳过的文件信息（用于最后一批时添加）
             while not should_stop:
                 # 使用原生 openGauss SQL 分批检索（使用 LIMIT 和 WHERE id > last_processed_id）
                 logger.info(
@@ -1785,7 +2109,7 @@ class BackupDB:
                     error_msg = str(e)
                     # 如果表不存在，返回空结果
                     if "does not exist" in error_msg.lower() or "relation" in error_msg.lower() or "UndefinedTable" in str(type(e).__name__):
-                        logger.warning(
+                        logger.info(
                             f"[openGauss优化] backup_files 表不存在，返回空结果（可能是数据库未初始化）: {error_msg}"
                         )
                         return ([], start_from_id)
@@ -1802,7 +2126,7 @@ class BackupDB:
                     else:
                         reason = "未知错误"
                     
-                    logger.warning(
+                    logger.info(
                         f"[openGauss优化] 统计查询失败（不影响主流程）: {error_type}: {error_msg}，"
                         f"原因: {reason}，继续执行主查询"
                     )
@@ -1827,7 +2151,7 @@ class BackupDB:
                             # 尝试更小的批次：10条
                             if retry_count % 100 == 0:  # 每100次重试尝试一次更小的批次
                                 current_batch_size = 10
-                                logger.warning(
+                                logger.info(
                                     f"[openGauss优化] 批次大小50持续失败（第 {retry_count} 次重试），"
                                     f"尝试更小批次：{current_batch_size}，"
                                     f"可能是某些文件记录数据量过大（路径很长等）"
@@ -1836,7 +2160,7 @@ class BackupDB:
                             # 如果10条还是失败，尝试1条
                             if retry_count % 200 == 0:  # 每200次重试尝试一次单条查询
                                 current_batch_size = 1
-                                logger.warning(
+                                logger.info(
                                     f"[openGauss优化] 批次大小10持续失败（第 {retry_count} 次重试），"
                                     f"尝试单条查询：{current_batch_size}，"
                                     f"将逐条处理以避免缓冲区错误"
@@ -1848,21 +2172,21 @@ class BackupDB:
                             # 2. 如果批次已经是 min_batch_size，不再减小（避免无限减小）
                             if current_batch_size > min_batch_size:
                                 current_batch_size = max(min_batch_size, current_batch_size // 2)
-                                logger.warning(
+                                logger.info(
                                     f"[openGauss优化] 重试查询（第 {retry_count} 次），"
                                     f"减小批次大小至 {current_batch_size}"
                                 )
                             
                             # 每10次重试记录一次详细信息
                             if retry_count % 10 == 0:
-                                logger.warning(
+                                logger.info(
                                     f"[openGauss优化] 持续重试中（第 {retry_count} 次），"
                                     f"批次大小={current_batch_size}"
                                 )
                             
                             # 每50次重试记录一次警告（批次很小但持续失败）
                             if retry_count % 50 == 0 and current_batch_size <= 50:
-                                logger.warning(
+                                logger.info(
                                     f"[openGauss优化] ⚠️ 批次大小已降至 {current_batch_size} 但持续失败（第 {retry_count} 次重试），"
                                     f"可能原因：\n"
                                     f"  1. 某些文件记录的数据量过大（路径很长、文件名很长等）\n"
@@ -1940,7 +2264,7 @@ class BackupDB:
                         if "insufficient data in buffer" in error_msg:
                             retry_count += 1
                             
-                            logger.warning(
+                            logger.info(
                                 f"[openGauss优化] 缓冲区错误（第 {retry_count} 次重试）: {e}, "
                                 f"当前批次大小={current_batch_size}，将无限重试直到成功"
                             )
@@ -1968,7 +2292,7 @@ class BackupDB:
                         else:
                             # 其他 AssertionError，也继续重试（可能是临时错误）
                             retry_count += 1
-                            logger.warning(
+                            logger.info(
                                 f"[openGauss优化] 查询错误（第 {retry_count} 次重试）: {e}, "
                                 f"将无限重试直到成功"
                             )
@@ -1980,7 +2304,7 @@ class BackupDB:
                         error_type = type(e).__name__
                         # 如果表不存在，直接返回空结果，不重试
                         if "does not exist" in error_msg.lower() or "relation" in error_msg.lower() or "UndefinedTable" in error_type:
-                            logger.warning(
+                            logger.info(
                                 f"[openGauss优化] backup_files 表不存在，返回空结果（可能是数据库未初始化）: {error_msg}"
                             )
                             return ([], start_from_id)
@@ -1989,7 +2313,7 @@ class BackupDB:
                         if isinstance(e, asyncio.TimeoutError):
                             # 超时错误，继续重试
                             retry_count += 1
-                            logger.warning(
+                            logger.info(
                                 f"[openGauss优化] 查询超时（第 {retry_count} 次重试）: {e}, "
                             f"将无限重试直到成功"
                         )
@@ -2003,7 +2327,7 @@ class BackupDB:
                         
                         # 如果表不存在，直接返回空结果，不重试
                         if "does not exist" in error_msg.lower() or "relation" in error_msg.lower() or "UndefinedTable" in error_type:
-                            logger.warning(
+                            logger.info(
                                 f"[openGauss优化] backup_files 表不存在，返回空结果（可能是数据库未初始化）: {error_msg}"
                             )
                             return ([], start_from_id)
@@ -2043,7 +2367,7 @@ class BackupDB:
                         )
                         
                         if is_buffer_error:
-                            logger.warning(
+                            logger.info(
                                 f"[openGauss优化] 查询异常（第 {retry_count} 次重试）: {error_type}: {e}\n"
                                 f"说明: 这是数据库缓冲区错误，通常由以下原因导致：\n"
                                 f"  1. 查询结果数据量过大，超出缓冲区容量\n"
@@ -2052,7 +2376,7 @@ class BackupDB:
                                 f"处理: 已自动减小批次大小至 {current_batch_size}，将无限重试直到成功"
                             )
                         else:
-                            logger.warning(
+                            logger.info(
                                 f"[openGauss优化] 查询异常（第 {retry_count} 次重试）: {error_type}: {e}, "
                                 f"将无限重试直到成功"
                             )
@@ -2113,7 +2437,7 @@ class BackupDB:
                         scan_status = await self.get_scan_status(backup_task_id) if backup_task_id else None
                         
                         if scan_status == 'completed':
-                            logger.warning(
+                            logger.info(
                                 f"[openGauss优化] ⚠️ 检测到异常：总共有 {total_pending} 个未压缩文件，"
                                 f"但 id > {last_processed_id} 的没有，扫描已完成，进行全库检索（不限制ID范围）"
                             )
@@ -2123,7 +2447,7 @@ class BackupDB:
                             need_full_search = True
                             break
                         else:
-                            logger.warning(
+                            logger.info(
                                 f"[openGauss优化] ⚠️ 检测到异常：总共有 {total_pending} 个未压缩文件，"
                                 f"但 id > {last_processed_id} 的没有，可能存在ID更小的未压缩文件，"
                                 f"或者新文件还在内存数据库中未同步。扫描状态={scan_status}，重置查询起点，从第一个未压缩文件开始查询"
@@ -2155,7 +2479,7 @@ class BackupDB:
                                     continue
                                 else:
                                     # 如果查询不到第一个文件ID，但扫描未完成，返回空列表等待
-                                    logger.warning(
+                                    logger.info(
                                         f"[openGauss优化] 无法查询到第一个未压缩文件ID，但扫描未完成（状态={scan_status}），"
                                         f"返回空列表等待更多文件同步"
                                     )
@@ -2194,29 +2518,37 @@ class BackupDB:
                     
                     file_size = file_info['size']
                     
-                    # 情况1：单一大文件（最高优先）- 如果单个文件 > max_file_size - 5%，马上返回
+                    # 第一原则：超大文件处理（最高优先级）
+                    # 如果单个文件 > max_file_size - 5%，立即独立成组，放弃当前已累积的所有文件
                     if file_size > min_group_size:
                         # 如果当前组已有文件，丢弃当前组（前面加的文件保持 is_copy_success = FALSE，下次还可以成组压缩）
                         if all_files:
-                            logger.warning(
-                                f"[openGauss优化] 遇到超大文件（单个文件 {format_bytes(file_size)} > {format_bytes(min_group_size)}），"
-                                f"丢弃当前组：{len(all_files)} 个文件，总大小 {format_bytes(current_group_size)}，"
-                                f"这些文件保持 is_copy_success = FALSE，下次还可以成组压缩"
+                            discarded_count = len(all_files)
+                            discarded_size = current_group_size
+                            first_discarded_id = all_files[0].get('id')
+                            # 下一次查询需要从第一个被丢弃的文件重新开始（id > resume_id）
+                            resume_id = (first_discarded_id - 1) if first_discarded_id else (row['id'] - 1)
+                            
+                            logger.info(
+                                f"[第一原则] 超大文件独立成组：文件 {format_bytes(file_size)} > {format_bytes(min_group_size)}，"
+                                f"丢弃已累积的 {discarded_count} 个文件（总大小 {format_bytes(discarded_size)}），"
+                                f"超大文件优先单独处理，被丢弃的文件保持 is_copy_success = FALSE，下次重新累积"
                             )
-                            # 丢弃当前组，只返回超大文件单独成组
-                            return ([[file_info]], row['id'])
+                            # 丢弃当前组，只返回超大文件单独成组，last_processed_id 从丢弃文件前一个ID算起
+                            return ([[file_info]], resume_id)
                         
                         # 超大文件单独成组
-                        logger.warning(
-                            f"[openGauss优化] 发现超大文件单独成组：{format_bytes(file_size)} "
-                            f"(超过 {format_bytes(min_group_size)} = max_file_size - 5%)"
+                        logger.info(
+                            f"[第一原则] 超大文件单独成组：{format_bytes(file_size)} "
+                            f"(超过阈值 {format_bytes(min_group_size)} = MAX_FILE_SIZE - 5%)"
                         )
                         return ([[file_info]], row['id'])
                     
-                    # 情况2：检查加入当前组后的大小
+                    # 第二原则：文件组累积处理
+                    # 只有文件 <= max_file_size - 5% 的文件才会进入累积逻辑
                     new_group_size = current_group_size + file_size
-                    
-                    # 情况2.1：new_group_size <= max_file_size - 5%，继续加文件
+
+                    # 情况2.1：new_group_size <= max_file_size - 5%，继续累积文件
                     if new_group_size <= min_group_size:
                         # 加入当前组
                         all_files.append(file_info)
@@ -2240,17 +2572,32 @@ class BackupDB:
                     
                     # 情况2.3：new_group_size > max_file_size + 5%，跳过这个文件，继续下一个
                     if new_group_size > max_group_size:
+                        # 记录第一个跳过的文件ID和文件信息（用于下一批检索的起始点，或最后一批时添加）
+                        if first_skipped_file_id is None:
+                            first_skipped_file_id = row['id']
+                            first_skipped_file_info = file_info  # 保存文件信息，用于最后一批时添加
+                            logger.info(
+                                f"[第二原则] 跳过第一个大文件：加入后组大小 {format_bytes(new_group_size)} > {format_bytes(max_group_size)}，"
+                                f"文件 {file_info['name']} ({format_bytes(file_size)})，"
+                                f"记录第一个跳过文件ID={first_skipped_file_id}，下一批将从该文件开始检索"
+                            )
+                        else:
+                            logger.debug(
+                                f"[第二原则] 跳过大文件：加入后组大小 {format_bytes(new_group_size)} > {format_bytes(max_group_size)}，"
+                                f"文件 {file_info['name']} ({format_bytes(file_size)})，跳过此文件继续累积"
+                            )
                         # 跳过这个文件，继续处理下一个（保持FALSE状态，下次仍可检索）
-                        logger.debug(
-                            f"[openGauss优化] 跳过文件（超过容差上限）：{format_bytes(new_group_size)} > {format_bytes(max_group_size)}，"
-                            f"文件 {file_info['name']} ({format_bytes(file_size)})，继续处理下一个文件"
-                        )
-                        # 更新 last_processed_id，但不加入文件
-                        last_processed_id = row['id']
                         continue  # 跳过这个文件，继续下一个
                 
                 # 如果检索到的文件数少于当前批次大小，说明没有更多文件了
+                # 确保 last_processed_id 更新为最后一批的最后一个文件ID
                 if len(rows) < current_batch_size:
+                    if rows:
+                        # 更新 last_processed_id 为最后一批的最后一个文件ID
+                        last_processed_id = rows[-1]['id']
+                        logger.debug(
+                            f"[openGauss优化] 最后一批文件处理完成，更新 last_processed_id={last_processed_id}"
+                        )
                     break
                 
                 # 如果已经达到容差范围，跳出外层循环
@@ -2280,20 +2627,57 @@ class BackupDB:
             size_ratio = current_group_size / max_file_size if max_file_size > 0 else 0
             scan_status = await self.get_scan_status(backup_task_id) if backup_task_id else None
             
+            # 如果文件组大小不够，且这一批文件检索完（没有更多文件了），尝试添加跳过的文件
+            if current_group_size < min_group_size and first_skipped_file_info is not None:
+                # 检查添加跳过的文件后是否超过容差上限
+                skipped_file_size = first_skipped_file_info.get('size', 0)
+                new_size_with_skipped = current_group_size + skipped_file_size
+                
+                if new_size_with_skipped <= max_group_size:
+                    # 添加跳过的文件后不超过容差上限，添加并返回
+                    current_group.append(first_skipped_file_info)
+                    current_group_size = new_size_with_skipped
+                    logger.info(
+                        f"[openGauss优化] 这一批文件检索完，文件组大小 {format_bytes(current_group_size - skipped_file_size)} "
+                        f"< {format_bytes(min_group_size)}，添加之前跳过的文件 "
+                        f"({format_bytes(skipped_file_size)})，"
+                        f"新文件组大小: {format_bytes(new_size_with_skipped)}"
+                    )
+                    # 更新 last_processed_id 为跳过文件的ID
+                    last_processed_id = first_skipped_file_id
+                    first_skipped_file_id = None  # 已添加，清除跳过标记
+                    first_skipped_file_info = None
+                else:
+                    # 添加跳过的文件后超过容差上限，不添加
+                    logger.info(
+                        f"[openGauss优化] 这一批文件检索完，文件组大小 {format_bytes(current_group_size)} "
+                        f"< {format_bytes(min_group_size)}，但添加跳过的文件后会超过容差上限 "
+                        f"({format_bytes(new_size_with_skipped)} > {format_bytes(max_group_size)})，"
+                        f"不添加跳过的文件，下一批将从跳过文件ID={first_skipped_file_id}开始检索"
+                    )
+            
             # 如果达到容差范围，直接返回
             if current_group_size >= min_group_size:
-                logger.info(
-                    f"[openGauss优化] 达到容差范围内：{format_bytes(current_group_size)} "
-                    f"({size_ratio*100:.1f}% of 目标，≥ {format_bytes(min_group_size)})"
-                )
-                # 标记检索完成（如果返回了文件组，说明检索完成）
-                if backup_task_id and current_group:
-                    current_scan_status = await self.get_scan_status(backup_task_id)
-                    if current_scan_status == 'retrieving':
-                        logger.info(f"[openGauss优化] 标记检索状态为完成（backup_task_id={backup_task_id}）")
-                        await self.update_scan_status(backup_task_id, 'completed')
+                # 确定返回的 last_processed_id：如果有跳过的文件，使用第一个跳过的文件ID作为下一批的起始点
+                return_last_processed_id = last_processed_id
+                if first_skipped_file_id is not None:
+                    # 使用第一个跳过的文件ID作为下一批的起始点（id > first_skipped_file_id - 1 即 id >= first_skipped_file_id）
+                    return_last_processed_id = first_skipped_file_id - 1
+                    logger.info(
+                        f"[openGauss优化] 达到容差范围内：{format_bytes(current_group_size)} "
+                        f"({size_ratio*100:.1f}% of 目标，≥ {format_bytes(min_group_size)})，"
+                        f"有跳过的文件，下一批将从第一个跳过文件ID={first_skipped_file_id}开始检索"
+                    )
+                else:
+                    logger.info(
+                        f"[openGauss优化] 达到容差范围内：{format_bytes(current_group_size)} "
+                        f"({size_ratio*100:.1f}% of 目标，≥ {format_bytes(min_group_size)})"
+                    )
+                # 注意：不要在这里标记扫描完成
+                # 扫描完成应该由扫描任务自己标记，而不是在检索文件时标记
+                # 检索到文件组不等于扫描完成，文件可能还在扫描中
                 # 返回文件组和最后处理的文件ID
-                return ([current_group], last_processed_id)
+                return ([current_group], return_last_processed_id)
         
         # 检查是否需要进行全库检索（只有扫描完成时才进行）
         # 注意：异常检测逻辑已在循环内的 if not rows 块中处理
@@ -2306,7 +2690,7 @@ class BackupDB:
             try:
                 async with get_opengauss_connection() as conn:
                     # 全库搜索：检索本备份集所有未压缩文件（不限制ID范围）
-                    full_search_timeout = 1000.0  # 1000秒超时
+                    full_search_timeout = 7200.0  # 7200秒超时（两小时）
                     await conn.execute(f"SET LOCAL statement_timeout = '{int(full_search_timeout)}s'")
                     
                     logger.info(f"[openGauss优化] 开始全库检索所有未压缩文件（超时时间：{full_search_timeout}秒）...")
@@ -2359,7 +2743,7 @@ class BackupDB:
                                 f"last_processed_id={last_processed_id}"
                             )
                     else:
-                        logger.warning(
+                        logger.info(
                             f"[openGauss优化] 全库检索未找到任何文件，返回空列表"
                         )
                         return ([], start_from_id)
@@ -2373,7 +2757,9 @@ class BackupDB:
                 f"[openGauss优化] 没有检索到任何文件，返回空列表，"
                 f"start_from_id={start_from_id}, last_processed_id={last_processed_id}"
             )
-            return ([], start_from_id)  # 如果没有检索到文件，返回传入的 start_from_id
+            # 关键修复：即使没有检索到文件，也要返回 last_processed_id（如果有效），避免丢失进度
+            return_id = last_processed_id if last_processed_id > start_from_id else start_from_id
+            return ([], return_id)
 
         # 文件已在检索时处理并分组，all_files 就是当前组
         current_group = all_files
@@ -2398,22 +2784,90 @@ class BackupDB:
 
         if current_group_size < min_group_size and scan_status != 'completed' and retry_count < max_retries:
             # 组大小低于容差下限且扫描未完成，继续等待
-            logger.warning(
+            logger.info(
                 f"[openGauss优化] 文件组大小低于容差下限：{format_bytes(current_group_size)} "
                 f"(需要 ≥ {format_bytes(min_group_size)} = {size_ratio*100:.1f}% of 目标)，"
                 f"扫描状态：{scan_status}，等待更多文件...（重试 {retry_count}/{max_retries}）"
             )
             # 关键修复：即使返回空列表，也要返回最后处理的文件ID，避免下次查询重复
             # 返回格式：(file_groups, last_processed_id)
-            # 如果 all_files 不为空，说明已经检索到文件但大小不够，需要记录最后处理的文件ID
-            if all_files and last_processed_id > 0:
+            # 如果 current_group 不为空，说明已经检索到文件但大小不够，需要记录最后处理的文件ID
+            if current_group and last_processed_id > 0:
                 logger.info(
-                    f"[openGauss优化] 已检索到 {len(all_files)} 个文件但大小不够，"
+                    f"[openGauss优化] 已检索到 {len(current_group)} 个文件但大小不够，"
                     f"最后处理的文件ID: {last_processed_id}，下次查询将从 id > {last_processed_id} 开始"
                 )
-                # 返回空列表和最后处理的文件ID
+                # 返回空列表和最后处理的文件ID，继续等待直到满足大小要求
                 return ([], last_processed_id)
-            return ([], start_from_id)  # 如果没有检索到文件，返回传入的 start_from_id
+            # 如果没有检索到文件，返回传入的 start_from_id 或 last_processed_id（取较大值）
+            return_id = last_processed_id if last_processed_id > start_from_id else start_from_id
+            logger.info(
+                f"[openGauss优化] 文件组为空或 last_processed_id 无效，"
+                f"返回 start_from_id={start_from_id}, last_processed_id={last_processed_id}, "
+                f"最终返回ID={return_id}"
+            )
+            return ([], return_id)
+        
+        # 如果达到重试上限或扫描已完成，即使大小不足也返回当前文件组
+        if current_group_size < min_group_size:
+            # 如果文件组大小不够，且这一批文件检索完（没有更多文件了），尝试添加跳过的文件
+            if first_skipped_file_info is not None:
+                # 检查添加跳过的文件后是否超过容差上限
+                skipped_file_size = first_skipped_file_info.get('size', 0)
+                new_size_with_skipped = current_group_size + skipped_file_size
+                
+                if new_size_with_skipped <= max_group_size:
+                    # 添加跳过的文件后不超过容差上限，添加并返回
+                    current_group.append(first_skipped_file_info)
+                    current_group_size = new_size_with_skipped
+                    logger.info(
+                        f"[openGauss优化] 这一批文件检索完，文件组大小 {format_bytes(current_group_size - skipped_file_size)} "
+                        f"< {format_bytes(min_group_size)}，添加之前跳过的文件 "
+                        f"({format_bytes(skipped_file_size)})，"
+                        f"新文件组大小: {format_bytes(new_size_with_skipped)}"
+                    )
+                    # 更新 last_processed_id 为跳过文件的ID
+                    last_processed_id = first_skipped_file_id
+                    first_skipped_file_id = None  # 已添加，清除跳过标记
+                    first_skipped_file_info = None
+                    # 重新计算大小比例
+                    size_ratio = current_group_size / max_file_size if max_file_size > 0 else 0
+            
+            # 检查文件组大小是否太小，即使扫描已完成也不应该返回
+            if current_group_size < min_acceptable_group_size:
+                reason = '扫描已完成' if scan_status == 'completed' else '达到重试上限'
+                logger.warning(
+                    f"[openGauss优化] ❌ 文件组大小过小，拒绝返回：文件组大小 {format_bytes(current_group_size)} "
+                    f"< 最小可接受大小 {format_bytes(min_acceptable_group_size)} "
+                    f"(< {format_bytes(min_group_size)} = 95% of 目标)，"
+                    f"原因：{reason}，返回空列表，等待更多文件累积"
+                )
+                # 返回空列表，等待更多文件累积
+                return_last_processed_id = last_processed_id
+                if first_skipped_file_id is not None:
+                    return_last_processed_id = first_skipped_file_id - 1
+                return ([], return_last_processed_id)
+            
+            reason = '扫描已完成' if scan_status == 'completed' else '达到重试上限'
+            logger.info(
+                f"[openGauss优化] ⚠️ 强制返回文件组：文件组大小 {format_bytes(current_group_size)} "
+                f"({size_ratio*100:.1f}% of 目标，< {format_bytes(min_group_size)} 但 ≥ {format_bytes(min_acceptable_group_size)})，"
+                f"原因：{reason}，返回文件组（{len(current_group)} 个文件）"
+            )
+            # 标记检索完成（如果返回了文件组，说明检索完成）
+            if backup_task_id and current_group:
+                current_scan_status = await self.get_scan_status(backup_task_id)
+                if current_scan_status == 'retrieving':
+                    logger.info(f"[openGauss优化] 标记检索状态为完成（backup_task_id={backup_task_id}）")
+                    await self.update_scan_status(backup_task_id, 'completed')
+            # 确定返回的 last_processed_id：如果有跳过的文件，使用第一个跳过的文件ID作为下一批的起始点
+            return_last_processed_id = last_processed_id
+            if first_skipped_file_id is not None:
+                return_last_processed_id = first_skipped_file_id - 1
+                logger.info(
+                    f"[openGauss优化] 强制返回文件组，有跳过的文件，下一批将从第一个跳过文件ID={first_skipped_file_id}开始检索"
+                )
+            return ([current_group], return_last_processed_id)
 
         # 压缩条件：
         # 1. 达到或超过最小目标大小（在容差范围内）
@@ -2430,12 +2884,19 @@ class BackupDB:
                 if current_scan_status == 'retrieving':
                     logger.info(f"[openGauss优化] 标记检索状态为完成（backup_task_id={backup_task_id}）")
                     await self.update_scan_status(backup_task_id, 'completed')
+            # 确定返回的 last_processed_id：如果有跳过的文件，使用第一个跳过的文件ID作为下一批的起始点
+            return_last_processed_id = last_processed_id
+            if first_skipped_file_id is not None:
+                return_last_processed_id = first_skipped_file_id - 1
+                logger.info(
+                    f"[openGauss优化] 达到容差范围内，有跳过的文件，下一批将从第一个跳过文件ID={first_skipped_file_id}开始检索"
+                )
             # 返回文件组和最后处理的文件ID
-            return ([current_group], last_processed_id)
+            return ([current_group], return_last_processed_id)
         else:
             # 强制压缩情况：组大小不够，需要进行全库搜索防止遗漏
             reason = '扫描已完成' if scan_status == 'completed' else '达到重试上限'
-            logger.warning(
+            logger.info(
                 f"[openGauss优化] 强制压缩：文件组大小 {format_bytes(current_group_size)} "
                 f"({size_ratio*100:.1f}% of 目标，< {format_bytes(min_group_size)})，"
                 f"原因：{reason}，将进行全库搜索防止遗漏"
@@ -2443,7 +2904,7 @@ class BackupDB:
             
             # 当不能凑够容量时，进行本备份集全库搜索，防止遗漏
             # 超时时间按1000万记录设置（估算：1000万记录 * 0.1秒/万记录 = 1000秒，约16.7分钟）
-            full_search_timeout = 1000.0  # 1000秒超时（按1000万记录计算）
+            full_search_timeout = 7200.0  # 7200秒超时（按1000万记录计算）
             logger.info(f"[openGauss优化] 开始全库搜索本备份集所有未压缩文件（超时时间：{full_search_timeout}秒，按1000万记录设置）...")
             
             try:
@@ -2514,7 +2975,7 @@ class BackupDB:
                                     )
                                     return [all_files]
                                 
-                                logger.warning(
+                                logger.info(
                                     f"[openGauss优化] 全库搜索发现超大文件单独成组：{format_bytes(file_size)} "
                                     f"(超过最大大小 {format_bytes(max_file_size)} 含容差)"
                                 )
@@ -2548,7 +3009,7 @@ class BackupDB:
                             f"无遗漏"
                         )
                     else:
-                        logger.warning(
+                        logger.info(
                             f"[openGauss优化] 全库搜索发现文件数量异常："
                             f"分批检索找到 {len(all_files)} 个，全库搜索找到 {len(all_pending_rows)} 个"
                         )
@@ -2633,6 +3094,14 @@ class BackupDB:
                         current_time,
                         backup_task_id
                     )
+                # 关键节点：立即提交事务，确保状态更新对其他线程可见
+                try:
+                    await conn.commit()
+                except Exception as commit_error:
+                    logger.error(
+                        f"[update_scan_status] ⚠️ 提交扫描状态更新事务失败: {commit_error}"
+                    )
+                    raise
         else:
             # SQLite 版本
             from backup.sqlite_backup_db import update_scan_status_sqlite
@@ -2663,11 +3132,11 @@ class BackupDB:
         # 批量查询已存在的文件
         file_paths = [f.get('file_path') for f in processed_files if f.get('file_path')]
         if not file_paths:
-            logger.warning(f"[mark_files_as_copied] 没有有效的文件路径，processed_files 数量: {len(processed_files)}")
+            logger.info(f"[mark_files_as_copied] 没有有效的文件路径，processed_files 数量: {len(processed_files)}")
             if processed_files:
                 # 调试：打印第一个文件的结构
                 first_file = processed_files[0]
-                logger.warning(f"[mark_files_as_copied] 第一个文件的结构: {list(first_file.keys())}")
+                logger.info(f"[mark_files_as_copied] 第一个文件的结构: {list(first_file.keys())}")
             return
         
         logger.info(f"[mark_files_as_copied] 准备更新 {len(file_paths)} 个文件的 is_copy_success 状态")
@@ -2697,7 +3166,7 @@ class BackupDB:
                         if retry_count == 0:
                             logger.info(f"[mark_files_as_copied] 开始查询批次 {batch_num}/{total_batches}，包含 {len(batch_paths)} 个文件...")
                         else:
-                            logger.warning(f"[mark_files_as_copied] 批次 {batch_num}/{total_batches} 重试查询（第 {retry_count + 1}/{max_retries} 次）...")
+                            logger.info(f"[mark_files_as_copied] 批次 {batch_num}/{total_batches} 重试查询（第 {retry_count + 1}/{max_retries} 次）...")
                         
                         await conn.execute("SET LOCAL statement_timeout = '180s'")
                         logger.debug(f"[mark_files_as_copied] 已设置 statement_timeout，开始执行查询...")
@@ -2729,7 +3198,7 @@ class BackupDB:
                             logger.error(f"[mark_files_as_copied] 批次 {batch_num}/{total_batches} 查询超时（180秒），已重试 {max_retries} 次，跳过该批次")
                             break
                         else:
-                            logger.warning(f"[mark_files_as_copied] 批次 {batch_num}/{total_batches} 查询超时，将在 {1.0 * retry_count} 秒后重试...")
+                            logger.info(f"[mark_files_as_copied] 批次 {batch_num}/{total_batches} 查询超时，将在 {1.0 * retry_count} 秒后重试...")
                             await asyncio.sleep(1.0 * retry_count)  # 递增延迟重试
                     except (AssertionError, ConnectionError, OSError) as buffer_error:
                         # openGauss 缓冲区错误或连接错误，进行重试
@@ -2744,7 +3213,7 @@ class BackupDB:
                             )
                             break
                         else:
-                            logger.warning(
+                            logger.info(
                                 f"[mark_files_as_copied] 批次 {batch_num}/{total_batches} 查询失败（{error_type}），"
                                 f"将在 {1.0 * retry_count} 秒后重试（第 {retry_count + 1}/{max_retries} 次）..."
                             )
@@ -2771,7 +3240,7 @@ class BackupDB:
                     if retry_count == 0:
                         logger.info(f"[mark_files_as_copied] 开始查询已存在文件，文件数={len(file_paths)}")
                     else:
-                        logger.warning(f"[mark_files_as_copied] 重试查询已存在文件（第 {retry_count + 1}/{max_retries} 次）...")
+                        logger.info(f"[mark_files_as_copied] 重试查询已存在文件（第 {retry_count + 1}/{max_retries} 次）...")
                     
                     await conn.execute("SET LOCAL statement_timeout = '300s'")
                     
@@ -2801,7 +3270,7 @@ class BackupDB:
                         existing_map = {}
                         break
                     else:
-                        logger.warning(f"[mark_files_as_copied] 查询超时，将在 {1.0 * retry_count} 秒后重试...")
+                        logger.info(f"[mark_files_as_copied] 查询超时，将在 {1.0 * retry_count} 秒后重试...")
                         await asyncio.sleep(1.0 * retry_count)  # 递增延迟重试
                 except (AssertionError, ConnectionError, OSError) as buffer_error:
                     # openGauss 缓冲区错误或连接错误，进行重试
@@ -2818,7 +3287,7 @@ class BackupDB:
                         existing_map = {}
                         break
                     else:
-                        logger.warning(
+                        logger.info(
                             f"[mark_files_as_copied] 查询失败（{error_type}），"
                             f"将在 {1.0 * retry_count} 秒后重试（第 {retry_count + 1}/{max_retries} 次）..."
                         )
@@ -2860,7 +3329,7 @@ class BackupDB:
                     # 验证 JSON 格式
                     json.loads(metadata_json)
                 except (TypeError, ValueError) as json_error:
-                    logger.warning(f"[mark_files_as_copied] metadata JSON 序列化失败: {json_error}, 使用空对象")
+                    logger.info(f"[mark_files_as_copied] metadata JSON 序列化失败: {json_error}, 使用空对象")
                     metadata_json = '{}'
                 
                 if file_path in existing_map:
@@ -2913,7 +3382,7 @@ class BackupDB:
                     ))
             except Exception as e:
                 failed_count += 1
-                logger.warning(
+                logger.info(
                     f"[mark_files_as_copied] Failed to prepare {processed_file.get('file_path', 'unknown')}: {e}"
                 )
                 continue
@@ -3124,11 +3593,11 @@ class BackupDB:
                 f"[mark_files_as_copied] 成功更新 {success_count} 个文件的 is_copy_success=TRUE（批量操作：更新 {len(update_data)} 个，插入 {len(insert_data)} 个）"
             )
         if failed_count > 0:
-            logger.warning(
+            logger.info(
                 f"[mark_files_as_copied] {failed_count} 个文件更新失败，继续备份流程"
             )
         if success_count == 0 and failed_count == 0:
-            logger.warning(f"[mark_files_as_copied] 没有文件被更新（update_data={len(update_data)}, insert_data={len(insert_data)}）")
+            logger.info(f"[mark_files_as_copied] 没有文件被更新（update_data={len(update_data)}, insert_data={len(insert_data)}）")
     
     async def update_scan_progress(
         self, 
@@ -3251,17 +3720,17 @@ class BackupDB:
                         logger.debug(f"[update_scan_progress] 数据库更新完成：任务 {backup_task.id} 的 processed_files 和 processed_bytes 已更新")
 
                         # psycopg3 binary protocol 需要显式提交事务
-                        actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                        # 使用连接池的 commit() 方法，而不是直接操作底层连接
                         try:
-                            await actual_conn.commit()
-                            logger.debug(f"任务 {backup_task.id} 扫描进度更新已提交到数据库")
+                            await conn.commit()
+                            logger.info(f"[压缩进度] 任务 {backup_task.id} 扫描进度更新已提交: {new_desc}")
                         except Exception as commit_err:
-                            logger.warning(f"提交扫描进度更新事务失败（可能已自动提交）: {commit_err}")
-                            # 如果不在事务中，commit() 可能会失败，尝试回滚
+                            logger.error(f"提交扫描进度更新事务失败: {commit_err}")
+                            # 尝试回滚
                             try:
-                                await actual_conn.rollback()
-                            except:
-                                pass
+                                await conn.rollback()
+                            except Exception as rollback_err:
+                                logger.error(f"回滚扫描进度更新事务失败: {rollback_err}")
 
                         # 注意：total_bytes 字段不更新，由后台扫描任务负责更新
                     else:
@@ -3327,15 +3796,26 @@ class BackupDB:
                             datetime.now(),
                             backup_task.id
                         )
+
+                        # psycopg3 binary protocol 需要显式提交事务
+                        try:
+                            await conn.commit()
+                            logger.debug(f"[压缩进度] 任务 {backup_task.id} 进度更新已提交（无操作状态）")
+                        except Exception as commit_err:
+                            logger.error(f"提交进度更新事务失败: {commit_err}")
+                            try:
+                                await conn.rollback()
+                            except:
+                                pass
                         # 注意：total_bytes 字段不更新，由后台扫描任务负责更新
             elif is_sqlite():
                 # SQLite 版本
                 from backup.sqlite_backup_db import update_scan_progress_sqlite
                 await update_scan_progress_sqlite(backup_task, scanned_count, valid_count, operation_status)
             else:
-                logger.warning(f"不支持的数据库类型，跳过更新扫描进度")
+                logger.info(f"不支持的数据库类型，跳过更新扫描进度")
         except Exception as e:
-            logger.warning(f"更新扫描进度失败（忽略继续）: {str(e)}")
+            logger.info(f"更新扫描进度失败（忽略继续）: {str(e)}")
     
     async def update_task_status(self, backup_task: BackupTask, status: BackupTaskStatus):
         """更新任务状态
@@ -3426,7 +3906,7 @@ class BackupDB:
                         await actual_conn.commit()
                         logger.debug(f"任务 {backup_task.id} 状态更新已提交到数据库")
                     except Exception as commit_err:
-                        logger.warning(f"提交任务状态更新事务失败（可能已自动提交）: {commit_err}")
+                        logger.info(f"提交任务状态更新事务失败（可能已自动提交）: {commit_err}")
                         # 如果不在事务中，commit() 可能会失败，尝试回滚
                         try:
                             await actual_conn.rollback()
@@ -3441,7 +3921,7 @@ class BackupDB:
                     if verify_row:
                         logger.info(f"[更新任务状态] 验证: 任务ID={verify_row['id']}, 状态={verify_row['status']}, is_template={verify_row['is_template']}")
                     else:
-                        logger.warning(f"[更新任务状态] 验证失败: 找不到任务ID={backup_task.id}")
+                        logger.info(f"[更新任务状态] 验证失败: 找不到任务ID={backup_task.id}")
             else:
                 # SQLite 版本
                 from backup.sqlite_backup_db import update_task_status_sqlite
@@ -3459,7 +3939,7 @@ class BackupDB:
         """
         try:
             if not backup_task or not getattr(backup_task, 'id', None):
-                logger.warning("无效的任务对象，无法更新阶段")
+                logger.info("无效的任务对象，无法更新阶段")
                 return
 
             task_id = backup_task.id
@@ -3475,38 +3955,64 @@ class BackupDB:
                 from backup.redis_backup_db import update_task_stage_async_redis
                 await update_task_stage_async_redis(backup_task, stage_code, description)
             elif is_opengauss():
-                async with get_opengauss_connection() as conn:
-                    if description:
-                        # 同时更新operation_stage和description
-                        await conn.execute("""
-                            UPDATE backup_tasks
-                            SET operation_stage = $1,
-                                description = $2,
-                                updated_at = $3
-                            WHERE id = $4
-                        """, stage_code, description, current_time, task_id)
-                    else:
-                        # 只更新operation_stage
-                        await conn.execute("""
-                            UPDATE backup_tasks
-                            SET operation_stage = $1,
-                                updated_at = $2
-                            WHERE id = $3
-                        """, stage_code, current_time, task_id)
+                import asyncio
+                max_retries = 3
+                retry_count = 0
+                update_success = False
 
-                    # psycopg3 binary protocol 需要显式提交事务
-                    # 获取实际的连接对象
-                    actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                while retry_count < max_retries and not update_success:
                     try:
-                        await actual_conn.commit()
-                        logger.debug(f"任务 {task_id} 阶段更新已提交到数据库")
-                    except Exception as commit_err:
-                        logger.warning(f"提交任务阶段更新事务失败（可能已自动提交）: {commit_err}")
-                        # 如果不在事务中，commit() 可能会失败，尝试回滚
-                        try:
-                            await actual_conn.rollback()
-                        except:
-                            pass
+                        async with get_opengauss_connection() as conn:
+                            # 开始新事务
+                            await conn.execute("BEGIN")
+
+                            if description:
+                                # 同时更新operation_stage和description
+                                await conn.execute("""
+                                    UPDATE backup_tasks
+                                    SET operation_stage = $1,
+                                        description = $2,
+                                        updated_at = $3
+                                    WHERE id = $4
+                                """, stage_code, description, current_time, task_id)
+                            else:
+                                # 只更新operation_stage
+                                await conn.execute("""
+                                    UPDATE backup_tasks
+                                    SET operation_stage = $1,
+                                        updated_at = $2
+                                    WHERE id = $3
+                                """, stage_code, current_time, task_id)
+
+                            # psycopg3 binary protocol 需要显式提交事务
+                            await conn.commit()
+
+                            # 验证事务提交状态
+                            actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                            transaction_status = actual_conn.info.transaction_status
+
+                            if transaction_status == 0:  # IDLE: 事务成功提交
+                                update_success = True
+                                logger.info(f"任务 {task_id} 阶段更新事务提交成功: {stage_code}")
+                            else:
+                                # 事务状态异常
+                                logger.warning(f"任务 {task_id} 阶段更新事务状态异常: {transaction_status}，重试 {retry_count + 1}/{max_retries}")
+                                retry_count += 1
+                                if retry_count < max_retries:
+                                    await asyncio.sleep(0.2 * retry_count)  # 短暂等待后重试
+
+                    except Exception as update_error:
+                        retry_count += 1
+                        if retry_count >= max_retries:
+                            logger.error(f"任务 {task_id} 阶段更新失败，达到最大重试次数 {max_retries}: {str(update_error)}")
+                            raise
+                        else:
+                            logger.warning(f"任务 {task_id} 阶段更新失败，重试 {retry_count}/{max_retries}: {str(update_error)}")
+                            await asyncio.sleep(0.3 * retry_count)
+
+                if not update_success:
+                    logger.error(f"任务 {task_id} 阶段更新最终失败: {stage_code}")
+                    raise Exception(f"阶段更新失败: {stage_code}")
             elif is_sqlite():
                 # SQLite 版本
                 from backup.sqlite_backup_db import update_task_stage_async_sqlite
@@ -3527,6 +4033,47 @@ class BackupDB:
         """
         await self.update_task_stage_async(backup_task, stage_code, description)
 
+    async def get_compressed_files_count(self, backup_set_db_id: int) -> int:
+        """查询已压缩文件数（聚合所有进程的进度）
+        
+        Args:
+            backup_set_db_id: 备份集数据库ID
+            
+        Returns:
+            已压缩文件数（is_copy_success = TRUE 的文件数）
+        """
+        try:
+            from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
+            from utils.scheduler.sqlite_utils import is_sqlite
+            
+            if is_redis():
+                # Redis 版本
+                from backup.redis_backup_db import get_compressed_files_count_redis
+                return await get_compressed_files_count_redis(backup_set_db_id)
+            elif is_opengauss():
+                # openGauss 版本
+                async with get_opengauss_connection() as conn:
+                    row = await conn.fetchrow(
+                        """
+                        SELECT COUNT(*)::BIGINT as count
+                        FROM backup_files
+                        WHERE backup_set_id = $1::INTEGER
+                          AND (is_copy_success = TRUE)
+                          AND file_type = 'file'::backupfiletype
+                        """,
+                        backup_set_db_id
+                    )
+                    return row['count'] if row else 0
+            elif is_sqlite():
+                # SQLite 版本
+                from backup.sqlite_backup_db import get_compressed_files_count_sqlite
+                return await get_compressed_files_count_sqlite(backup_set_db_id)
+            else:
+                return 0
+        except Exception as e:
+            logger.error(f"查询已压缩文件数失败: {str(e)}", exc_info=True)
+            return 0
+
     def update_task_stage(self, backup_task: BackupTask, stage_code: str, main_loop=None, description: str = None):
         """更新任务的操作阶段（同步方法，在线程中调用时需要使用主事件循环）
 
@@ -3538,7 +4085,7 @@ class BackupDB:
         """
         try:
             if not backup_task or not getattr(backup_task, 'id', None):
-                logger.warning("无效的任务对象，无法更新阶段")
+                logger.info("无效的任务对象，无法更新阶段")
                 return
 
             import asyncio
@@ -3553,7 +4100,7 @@ class BackupDB:
                     # 等待完成（设置超时避免阻塞）
                     future.result(timeout=5.0)
                 except Exception as e:
-                    logger.warning(f"通过主事件循环更新任务阶段失败: {str(e)}")
+                    logger.info(f"通过主事件循环更新任务阶段失败: {str(e)}")
                 return
 
             # 否则，尝试在当前事件循环中执行
@@ -3867,7 +4414,7 @@ class BackupDB:
                         await actual_conn.commit()
                         logger.debug(f"任务 {backup_task.id} 扫描进度更新已提交到数据库: total_files={total_files}, total_bytes={total_bytes}")
                     except Exception as commit_err:
-                        logger.warning(f"提交扫描进度更新事务失败（可能已自动提交）: {commit_err}")
+                        logger.info(f"提交扫描进度更新事务失败（可能已自动提交）: {commit_err}")
                         try:
                             await actual_conn.rollback()
                         except:
@@ -3877,5 +4424,5 @@ class BackupDB:
                 from backup.sqlite_backup_db import update_scan_progress_only_sqlite
                 await update_scan_progress_only_sqlite(backup_task, total_files, total_bytes)
         except Exception as e:
-            logger.warning(f"更新扫描进度失败（忽略继续）: {str(e)}")
+            logger.info(f"更新扫描进度失败（忽略继续）: {str(e)}")
 

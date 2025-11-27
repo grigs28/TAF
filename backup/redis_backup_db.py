@@ -1498,6 +1498,93 @@ async def fetch_pending_files_grouped_by_size_redis(
         return []
 
 
+async def get_compressed_files_count_redis(backup_set_db_id: int) -> int:
+    """Redis 版本：查询已压缩文件数（聚合所有进程的进度）
+    
+    Args:
+        backup_set_db_id: 备份集数据库ID
+        
+    Returns:
+        已压缩文件数（is_copy_success = '1' 的文件数）
+    """
+    try:
+        redis = await get_redis_client()
+        
+        # 使用备份集索引来查找所有文件
+        backup_set_key = f"{KEY_PREFIX_BACKUP_SET}:{backup_set_db_id}"
+        file_list_key = f"{backup_set_key}:files"
+        
+        # 获取所有文件ID
+        file_ids = await redis.smembers(file_list_key)
+        if not file_ids:
+            return 0
+        
+        # 统计 is_copy_success = '1' 的文件数
+        compressed_count = 0
+        for file_id_bytes in file_ids:
+            try:
+                file_id = int(file_id_bytes) if isinstance(file_id_bytes, bytes) else int(file_id_bytes)
+                file_key = _get_redis_key(KEY_PREFIX_BACKUP_FILE, file_id)
+                
+                # 检查文件类型和 is_copy_success 状态
+                file_type = await redis.hget(file_key, 'file_type')
+                is_copy_success = await redis.hget(file_key, 'is_copy_success')
+                
+                if file_type == 'file' and is_copy_success in ('1', 'True', 'true'):
+                    compressed_count += 1
+            except (ValueError, TypeError):
+                continue
+        
+        return compressed_count
+    except Exception as e:
+        logger.error(f"[Redis模式] 查询已压缩文件数失败: {str(e)}", exc_info=True)
+        return 0
+
+async def mark_files_as_queued_redis(
+    backup_set_db_id: int,
+    file_paths: List[str]
+):
+    """Redis 版本：标记文件为已入队（仅设置 is_copy_success = TRUE）"""
+    logger.info(f"[Redis模式] 开始标记 {len(file_paths)} 个文件为已入队（is_copy_success = TRUE）")
+    
+    if not file_paths:
+        logger.warning("[Redis模式] ❌ 没有可更新的文件，跳过 mark_files_as_queued")
+        return
+    
+    try:
+        redis = await get_redis_client()
+        path_index_key = f"{KEY_INDEX_BACKUP_FILE_BY_PATH}:{backup_set_db_id}"
+        
+        # 批量获取文件ID
+        file_ids = []
+        for file_path in file_paths:
+            file_id = await redis.hget(path_index_key, file_path)
+            if file_id:
+                try:
+                    file_ids.append(int(file_id))
+                except (ValueError, TypeError):
+                    continue
+        
+        if not file_ids:
+            logger.warning(f"[Redis模式] ⚠️ 未找到任何文件ID，跳过更新")
+            return
+        
+        # 批量更新 is_copy_success
+        updated_count = 0
+        for file_id in file_ids:
+            file_key = _get_redis_key("backup_file", file_id)
+            current_value = await redis.hget(file_key, 'is_copy_success')
+            if current_value in ('0', 'False', 'false', None):
+                await redis.hset(file_key, 'is_copy_success', '1')
+                await redis.hset(file_key, 'copy_status_at', datetime.now().isoformat())
+                await redis.hset(file_key, 'updated_at', datetime.now().isoformat())
+                updated_count += 1
+        
+        logger.info(f"[Redis模式] ✅ 已更新 {updated_count} 个文件的 is_copy_success 状态")
+    except Exception as e:
+        logger.error(f"[Redis模式] ❌ 标记文件为已入队失败: {str(e)}", exc_info=True)
+        raise
+
 async def mark_files_as_copied_redis(
     backup_set_db_id: int,
     processed_files: List[Dict],

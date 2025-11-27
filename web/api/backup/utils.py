@@ -5,9 +5,13 @@
 Backup Management API - Utility Functions
 """
 
+import logging
+
 import re
 from typing import Dict, Any, Optional
 from fastapi import Request
+
+logger = logging.getLogger(__name__)
 
 # 阶段流程定义
 STAGE_FLOW_DEFINITION = [
@@ -87,6 +91,16 @@ def _build_stage_info(description: Optional[str], scan_status: Optional[str], st
             if remaining_text:
                 # 如果方括号后有文本，将其追加到 operation_status
                 operation_status = operation_status + " " + remaining_text
+
+    # 特殊处理：如果操作状态包含进度信息（如"123/500 个文件 (24.6%)"），优先使用这个状态
+    # 这可以覆盖"初始化压缩引擎"等初始状态
+    import re
+    progress_match = re.search(r'\[压缩文件中[^\]]*\]\s*(\d+/\d+\s*个文件\s*\([\d.]+%\))', desc)
+    if progress_match and stage_code == 'compress':
+        operation_status = f"压缩文件中 {progress_match[1]}"
+        logger.info(f"[状态解析] 从description解析到压缩进度: {progress_match[1]}, 操作状态: {operation_status}")
+    elif stage_code == 'compress':
+        logger.debug(f"[状态解析] 压缩阶段但未找到进度信息，原始description: {desc}")
 
     # 如果没有从数据库获取到 stage_code，则从 operation_status 中解析
     if not stage_code and operation_status:

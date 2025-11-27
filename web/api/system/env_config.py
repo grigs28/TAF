@@ -65,6 +65,7 @@ class SystemEnvConfig(BaseModel):
     scan_threads: Optional[int] = Field(None, description="目录扫描并发线程数（默认4，建议1-16）")
     use_checkpoint: Optional[bool] = Field(None, description="是否启用检查点文件，默认不启用")
     enable_background_copy_update: Optional[bool] = Field(None, description="启用后台标记 is_copy_success（异步 mark_files_as_copied）")
+    compression_parallel_batches: Optional[int] = Field(None, description="压缩并行批次数量（默认2），预读取程序队列数为该值+1")
     
     # 内存数据库配置
     use_memory_db: Optional[bool] = Field(None, description="是否使用内存数据库（默认启用，性能最优）")
@@ -165,6 +166,7 @@ async def get_env_config():
             "scan_threads": parse_int(env_vars.get("SCAN_THREADS"), 4),
             "use_checkpoint": parse_bool(env_vars.get("USE_CHECKPOINT"), False),
             "enable_background_copy_update": parse_bool(env_vars.get("ENABLE_BACKGROUND_COPY_UPDATE"), False),
+            "compression_parallel_batches": parse_int(env_vars.get("COMPRESSION_PARALLEL_BATCHES"), 2),
             
             # 内存数据库配置
             "use_memory_db": parse_bool(env_vars.get("USE_MEMORY_DB"), True),
@@ -286,6 +288,11 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             updates["USE_CHECKPOINT"] = str(config.use_checkpoint).lower()
         if config.enable_background_copy_update is not None:
             updates["ENABLE_BACKGROUND_COPY_UPDATE"] = str(config.enable_background_copy_update).lower()
+        if config.compression_parallel_batches is not None:
+            # 验证并行批次数范围（至少为1）
+            if config.compression_parallel_batches < 1:
+                raise ValueError("COMPRESSION_PARALLEL_BATCHES 必须大于等于 1")
+            updates["COMPRESSION_PARALLEL_BATCHES"] = str(config.compression_parallel_batches)
         
         # 内存数据库配置
         if config.use_memory_db is not None:

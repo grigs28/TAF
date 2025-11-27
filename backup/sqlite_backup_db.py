@@ -1068,6 +1068,78 @@ async def fetch_pending_files_grouped_by_size_sqlite(
         return []
 
 
+async def get_compressed_files_count_sqlite(backup_set_db_id: int) -> int:
+    """SQLite 版本：查询已压缩文件数（聚合所有进程的进度）
+    
+    Args:
+        backup_set_db_id: 备份集数据库ID
+        
+    Returns:
+        已压缩文件数（is_copy_success = 1 的文件数）
+    """
+    try:
+        from utils.scheduler.sqlite_utils import get_sqlite_connection
+        from models.backup import BackupFileType
+        
+        async with get_sqlite_connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM backup_files
+                WHERE backup_set_id = ?
+                  AND is_copy_success = 1
+                  AND file_type = ?
+                """,
+                (backup_set_db_id, BackupFileType.FILE.value)
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+    except Exception as e:
+        logger.error(f"[SQLite模式] 查询已压缩文件数失败: {str(e)}", exc_info=True)
+        return 0
+
+async def mark_files_as_queued_sqlite(
+    backup_set_db_id: int,
+    file_paths: List[str]
+):
+    """SQLite 版本：标记文件为已入队（仅设置 is_copy_success = TRUE）"""
+    logger.info(f"[SQLite模式] 开始标记 {len(file_paths)} 个文件为已入队（is_copy_success = TRUE）")
+    
+    if not file_paths:
+        logger.warning("[SQLite模式] ❌ 没有可更新的文件，跳过 mark_files_as_queued")
+        return
+    
+    try:
+        from utils.scheduler.sqlite_utils import get_sqlite_connection
+        async with get_sqlite_connection() as conn:
+            # 分批更新，避免单次更新过多文件
+            batch_size = 1000
+            total_updated = 0
+            
+            for i in range(0, len(file_paths), batch_size):
+                batch_paths = file_paths[i:i + batch_size]
+                placeholders = ','.join(['?' for _ in batch_paths])
+                
+                cursor = await conn.execute(
+                    f"""
+                    UPDATE backup_files
+                    SET is_copy_success = 1,
+                        copy_status_at = ?,
+                        updated_at = ?
+                    WHERE backup_set_id = ? 
+                      AND file_path IN ({placeholders})
+                      AND (is_copy_success = 0 OR is_copy_success IS NULL)
+                    """,
+                    (datetime.now(), datetime.now(), backup_set_db_id) + tuple(batch_paths)
+                )
+                updated_count = cursor.rowcount
+                total_updated += updated_count
+            
+            logger.info(f"[SQLite模式] ✅ 已更新 {total_updated} 个文件的 is_copy_success 状态")
+    except Exception as e:
+        logger.error(f"[SQLite模式] ❌ 标记文件为已入队失败: {str(e)}", exc_info=True)
+        raise
+
 async def mark_files_as_copied_sqlite(
     backup_set_db_id: int,
     processed_files: List[Dict],

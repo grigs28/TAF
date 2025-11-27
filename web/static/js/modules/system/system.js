@@ -955,6 +955,10 @@ async function loadAllSystemConfig() {
                     enableBackgroundCopyUpdateInput.checked = config.enable_background_copy_update;
                 }
             }
+            if (config.compression_parallel_batches) {
+                const compressionParallelBatchesInput = document.getElementById('compressionParallelBatches');
+                if (compressionParallelBatchesInput) compressionParallelBatchesInput.value = config.compression_parallel_batches;
+            }
             
             // 内存数据库配置
             if (config.use_memory_db !== undefined) {
@@ -1059,6 +1063,14 @@ async function saveEnvConfigSection() {
                 const checkbox = document.getElementById('enableBackgroundCopyUpdate');
                 if (!checkbox) return undefined;
                 return checkbox.checked === true;
+            })(),
+            compression_parallel_batches: (() => {
+                const input = document.getElementById('compressionParallelBatches');
+                if (!input) return null;
+                const value = input.value;
+                if (value === '' || value === null || value === undefined) return null;
+                const parsed = parseInt(value);
+                return isNaN(parsed) ? null : parsed;
             })(),
             
             // 内存数据库配置

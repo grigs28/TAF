@@ -149,6 +149,9 @@ class Settings(BaseSettings):
     SCAN_LOG_INTERVAL_SECONDS: int = 60  # 后台扫描进度日志输出的时间间隔（秒）
     ENABLE_BACKGROUND_COPY_UPDATE: bool = False  # 是否启用压缩线程后台标记 is_copy_success
     
+    # 压缩并行批次配置
+    COMPRESSION_PARALLEL_BATCHES: int = 2  # 压缩并行批次数量（默认2），预读取程序队列数为该值+1
+    
     # 扫描方法配置
     SCAN_METHOD: str = "default"  # 扫描方法: "default" (默认) 或 "es" (Everything搜索工具)
     ES_EXE_PATH: str = r"E:\app\TAF\ITDT\ES\es.exe"  # Everything搜索工具可执行文件路径

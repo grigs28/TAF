@@ -47,10 +47,10 @@ export class SchedulerUI {
                         <div class="btn-group btn-group-sm">
                             ${task.enabled
                                 ? `<button class="btn btn-outline-warning btn-action-disable" data-task-id="${task.id}" title="禁用">
-                                    <i class="bi bi-pause"></i>
+                                    <i class="bi bi-pause"></i> 禁用
                                 </button>`
                                 : `<button class="btn btn-outline-success btn-action-enable" data-task-id="${task.id}" title="启用">
-                                    <i class="bi bi-play"></i>
+                                    <i class="bi bi-play"></i> 启用
                                 </button>`
                             }
                             <button class="btn btn-outline-primary btn-action-edit" data-task-id="${task.id}" title="编辑">
