@@ -642,6 +642,7 @@ class BatchDBWriter:
         version = file_info.get('version', 1)
 
         metadata_input = file_info.get('file_metadata')
+        # 确保 file_metadata 始终是有效的 JSON 字符串
         if isinstance(metadata_input, str) and metadata_input.strip():
             # 验证是否为有效的 JSON 字符串
             try:
@@ -650,16 +651,18 @@ class BatchDBWriter:
             except (json.JSONDecodeError, TypeError):
                 # 如果不是有效的 JSON，重新构建
                 file_metadata = json.dumps({'scanned_at': datetime.now(timezone.utc).isoformat(), 'scanner_source': 'batch_db_writer'})
-        else:
-            metadata = {}
-            if isinstance(metadata_input, dict):
-                metadata.update(metadata_input)
+        elif isinstance(metadata_input, dict):
+            # 如果是字典，转换为 JSON 字符串
+            metadata = metadata_input.copy()
             metadata.setdefault('scanned_at', datetime.now(timezone.utc).isoformat())
             metadata.setdefault('scanner_source', 'batch_db_writer')
             file_metadata = json.dumps(metadata)
+        else:
+            # 其他情况（None、数字、布尔值等），创建默认的 JSON 字符串
+            file_metadata = json.dumps({'scanned_at': datetime.now(timezone.utc).isoformat(), 'scanner_source': 'batch_db_writer'})
         
-        # 确保 file_metadata 是字符串类型（不是 None）
-        if not file_metadata or not isinstance(file_metadata, str):
+        # 最终检查：确保 file_metadata 是字符串类型（不是 None 或其他类型）
+        if not isinstance(file_metadata, str):
             file_metadata = json.dumps({'scanned_at': datetime.now(timezone.utc).isoformat(), 'scanner_source': 'batch_db_writer'})
 
         tags_input = file_info.get('tags')
@@ -931,8 +934,8 @@ class BatchDBWriter:
                             backup_time = $21,
                             chunk_number = $22,
                             version = $23,
-                            file_metadata = $24::jsonb,
-                            tags = $25::jsonb,
+                            file_metadata = CAST($24 AS jsonb),
+                            tags = CAST($25 AS jsonb),
                             updated_at = NOW()
                         WHERE id = $1
                         """,
@@ -1015,8 +1018,8 @@ class BatchDBWriter:
                     backup_time = $21,
                     chunk_number = $22,
                     version = $23,
-                    file_metadata = $24::jsonb,
-                    tags = $25::jsonb,
+                    file_metadata = CAST($24 AS jsonb),
+                    tags = CAST($25 AS jsonb),
                     updated_at = NOW()
                 WHERE id = $1
                 """,
@@ -1709,19 +1712,19 @@ class BackupDB:
             return
 
         # openGauss 版本
-        if not backup_set_db_id:
-            async with get_opengauss_connection() as conn:
-                row = await conn.fetchrow(
-                    "SELECT id FROM backup_sets WHERE set_id = $1",
-                    backup_set.set_id
-                )
-            if not row:
-                logger.info(f"找不到备份集: {backup_set.set_id}，无法标记文件成功")
-                return
-            backup_set_db_id = row['id']
-
         async with get_opengauss_connection() as conn:
             try:
+                # 如果 backup_set_db_id 不存在，先查询（复用同一个连接，避免连接泄漏）
+                if not backup_set_db_id:
+                    row = await conn.fetchrow(
+                        "SELECT id FROM backup_sets WHERE set_id = $1",
+                        backup_set.set_id
+                    )
+                    if not row:
+                        logger.info(f"找不到备份集: {backup_set.set_id}，无法标记文件成功")
+                        return
+                    backup_set_db_id = row['id']
+                
                 await self._mark_files_as_copied(
                     conn=conn,
                     backup_set_db_id=backup_set_db_id,
@@ -3286,7 +3289,9 @@ class BackupDB:
         backup_time: datetime
     ):
         """Mark files as copied in the database (使用批量更新优化性能)"""
-        if not processed_files:
+        # 空列表检查：避免执行不必要的 SQL 查询
+        if not processed_files or len(processed_files) == 0:
+            logger.debug("[_mark_files_as_copied] processed_files 为空，跳过数据库操作")
             return
         
         success_count = 0
@@ -4161,7 +4166,7 @@ class BackupDB:
 
                             if transaction_status == 0:  # IDLE: 事务成功提交
                                 update_success = True
-                                logger.info(f"任务 {task_id} 阶段更新事务提交成功: {stage_code}")
+                                logger.debug(f"任务 {task_id} 阶段更新事务提交成功: {stage_code}")
                             else:
                                 # 事务状态异常
                                 logger.warning(f"任务 {task_id} 阶段更新事务状态异常: {transaction_status}，重试 {retry_count + 1}/{max_retries}")

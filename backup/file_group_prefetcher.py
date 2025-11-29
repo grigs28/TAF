@@ -199,7 +199,7 @@ class FileGroupPrefetcher:
                     
                     logger.info(
                         f"[文件组预取器] [循环 #{prefetch_loop_count}] 开始检索文件组："
-                        f"队列大小={self.file_group_queue.qsize()}/{self.queue_maxsize}, "
+                        f"队列大小✅={self.file_group_queue.qsize()}/{self.queue_maxsize}, "
                         f"last_processed_id={self.last_processed_file_id}, "
                         f"max_file_size={settings.MAX_FILE_SIZE}"
                     )
