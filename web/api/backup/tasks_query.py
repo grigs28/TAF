@@ -120,6 +120,7 @@ async def get_backup_tasks(
                        bt.processed_files, bt.total_bytes, bt.processed_bytes, bt.compressed_bytes,
                        bt.created_at, bt.started_at, bt.completed_at, bt.error_message, bt.is_template,
                        bt.tape_device, bt.source_paths, bt.description, bt.result_summary, bt.scan_status, bt.operation_stage,
+                       bt.backup_set_id,
                        CASE WHEN st.id IS NOT NULL THEN true ELSE false END as from_scheduler,
                        st.enabled as scheduler_enabled
                 FROM backup_tasks bt
@@ -205,25 +206,43 @@ async def get_backup_tasks(
                                 f"状态异常={status_mismatch}"
                             )
                         
+                        # 对于运行中的任务，尝试从内存中的压缩程序获取实时进度（不再从数据库description解析）
+                        current_compression_progress = None
+                        if status_value == 'running':
+                            try:
+                                from web.api.backup.utils import get_system_instance
+                                system = get_system_instance(http_request)
+                                logger.debug(f"[任务查询] 获取系统实例成功: {system is not None}, backup_engine: {system.backup_engine is not None if system else False}")
+                                if system and system.backup_engine:
+                                    # 从BackupEngine的compression_worker获取聚合的压缩进度
+                                    backup_engine = system.backup_engine
+                                    if hasattr(backup_engine, '_current_compression_worker') and backup_engine._current_compression_worker:
+                                        compression_worker = backup_engine._current_compression_worker
+                                        if compression_worker.backup_task.id == row["id"]:
+                                            # 从compression_worker获取聚合的压缩进度（包含所有并行任务的进度）
+                                            aggregated_progress = compression_worker.get_aggregated_compression_progress()
+                                            if aggregated_progress:
+                                                current_compression_progress = aggregated_progress
+                                                logger.debug(f"[任务查询] 任务 {row['id']} 从内存压缩程序获取聚合进度: {aggregated_progress}")
+                                    # 如果从compression_worker获取不到，尝试从get_task_status获取
+                                    if not current_compression_progress:
+                                        task_status = await system.backup_engine.get_task_status(row["id"])
+                                        logger.debug(f"[任务查询] 任务 {row['id']} 状态: {task_status}")
+                                        if task_status and 'current_compression_progress' in task_status:
+                                            current_compression_progress = task_status['current_compression_progress']
+                                            logger.debug(f"[任务查询] 任务 {row['id']} 从get_task_status获取压缩进度: {current_compression_progress}")
+                            except Exception as e:
+                                logger.error(f"[任务查询] 获取任务 {row['id']} 压缩进度失败: {str(e)}", exc_info=True)
+                        
+                        # 构建阶段信息，传入current_compression_progress用于构建operation_status
+                        # 预分组完成状态由预分组任务在完成时更新description字段来标记，不需要查询数据库
                         stage_info = _build_stage_info(
                             row.get("description"),
                             row.get("scan_status"),
                             status_value,
-                            row.get("operation_stage")  # 优先使用数据库中的 operation_stage 字段
+                            row.get("operation_stage"),  # 优先使用数据库中的 operation_stage 字段
+                            current_compression_progress  # 传入从内存获取的压缩进度
                         )
-                        
-                        # 对于运行中的任务，尝试获取 current_compression_progress
-                        current_compression_progress = None
-                        if status_value == 'running':
-                            try:
-                                from web.api.system import get_system_instance
-                                system = get_system_instance(http_request)
-                                if system and system.backup_engine:
-                                    task_status = await system.backup_engine.get_task_status(row["id"])
-                                    if task_status and 'current_compression_progress' in task_status:
-                                        current_compression_progress = task_status['current_compression_progress']
-                            except Exception as e:
-                                logger.debug(f"获取任务压缩进度失败: {str(e)}")
                         
                         tasks.append({
                             "task_id": row["id"],
@@ -453,6 +472,7 @@ async def get_backup_tasks(
                            bt.processed_files, bt.total_bytes, bt.processed_bytes, bt.compressed_bytes,
                            bt.created_at, bt.started_at, bt.completed_at, bt.error_message, bt.is_template,
                            bt.tape_device, bt.source_paths, bt.description, bt.result_summary, bt.scan_status, bt.operation_stage,
+                           bt.backup_set_id,
                            CASE WHEN st.id IS NOT NULL THEN 1 ELSE 0 END as from_scheduler,
                            st.enabled as scheduler_enabled
                     FROM backup_tasks bt
@@ -530,11 +550,15 @@ async def get_backup_tasks(
                             # 如果不是字符串，使用 _normalize_status_value
                             status_value = _normalize_status_value(status_raw)
                     
+                    # 构建阶段信息
+                    # 预分组完成状态由预分组任务在完成时更新description字段来标记，不需要查询数据库
+                    scan_status = row[19]  # scan_status
                     stage_info = _build_stage_info(
                         row[17] or "",  # description
-                        row[19],  # scan_status
+                        scan_status,  # scan_status
                         status_value,
-                        row[20] if len(row) > 20 else None  # operation_stage
+                        row[20] if len(row) > 20 else None,  # operation_stage
+                        None  # current_compression_progress
                     )
                     
                     # 处理task_type
@@ -794,17 +818,22 @@ async def get_backup_task(task_id: int, http_request: Request):
                     compression_ratio = 0.0
                 
                 status_value = _normalize_status_value(row["status"])
+                
+                # 构建阶段信息
+                # 预分组完成状态由预分组任务在完成时更新description字段来标记，不需要查询数据库
+                scan_status = row.get("scan_status")
                 stage_info = _build_stage_info(
                     row.get("description"),
-                    row.get("scan_status"),
+                    scan_status,
                     status_value,
-                    row.get("operation_stage")  # 优先使用数据库中的 operation_stage 字段
+                    row.get("operation_stage"),  # 优先使用数据库中的 operation_stage 字段
+                    None  # current_compression_progress
                 )
                 # 对于运行中的任务，尝试获取 current_compression_progress
                 current_compression_progress = None
                 if status_value and status_value.lower() == 'running':
                     try:
-                        from web.api.system import get_system_instance
+                        from web.api.backup.utils import get_system_instance
                         system = get_system_instance(http_request)
                         if system and system.backup_engine:
                             task_status = await system.backup_engine.get_task_status(row["id"])
@@ -864,7 +893,7 @@ async def get_backup_task(task_id: int, http_request: Request):
                     SELECT id, task_name, task_type, status, progress_percent, total_files,
                            processed_files, total_bytes, processed_bytes, compressed_bytes,
                            created_at, started_at, completed_at, error_message, is_template,
-                           tape_device, source_paths, description, result_summary, scan_status, operation_stage
+                           tape_device, source_paths, description, result_summary, scan_status, operation_stage, backup_set_id
                     FROM backup_tasks
                     WHERE id = ?
                 """, (task_id,))
@@ -934,10 +963,15 @@ async def get_backup_task(task_id: int, http_request: Request):
                     except (ValueError, AttributeError):
                         pass
                 
+                # 构建阶段信息
+                # 预分组完成状态由预分组任务在完成时更新description字段来标记，不需要查询数据库
+                scan_status = row[19]  # scan_status
                 stage_info = _build_stage_info(
                     row[17] or "",  # description
-                    row[19],  # scan_status
-                    status_value
+                    scan_status,  # scan_status
+                    status_value,
+                    row[20] if len(row) > 20 else None,  # operation_stage
+                    None  # current_compression_progress
                 )
                 
                 return {

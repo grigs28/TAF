@@ -1,5 +1,64 @@
 # 更新日志
 
+## [0.1.32] - 2025-01-XX
+
+### 修改
+
+#### 预分组完成状态显示优化
+- ✅ 优化预分组完成状态的判断逻辑
+  - 预分组任务完成时，更新任务 `description` 为 `"[分组完成] 所有文件已分组完成"`
+  - 前端通过检查 `description` 是否包含"分组完成"来判断分组状态，不再查询数据库
+  - 移除所有查询 `is_copy_success` 的数据库操作，提升性能
+  - 简化判断逻辑：仅当扫描完成且预分组任务完成时显示"分组完成"，其他情况显示"预分组中"
+
+#### 文件组预取器日志增强
+- ✅ 文件组预取器日志输出增强
+  - 在检索完成日志中添加扫描状态信息
+  - 添加当前组大小和累计总大小的显示
+  - 显示格式：`当前组大小={format_bytes(total_size_in_groups)}，累计总大小={format_bytes(self.total_queued_size)}`
+  - 便于监控预分组的总体进度和当前批次大小
+
+#### 修复未成组文件不丢弃问题
+- ✅ 修复预分组逻辑中可能丢弃未成组文件的问题
+  - 当文件组大小不足返回空列表时，返回第一个累积文件的ID - 1，确保下次查询包含所有已累积的文件
+  - 当文件组大小过小拒绝返回时，同样返回第一个累积文件的ID - 1
+  - 全库搜索遇到超大文件时，如果已累积文件，返回已累积的文件组（不丢弃）
+  - 确保所有已累积但未成组的文件保持 `is_copy_success = FALSE`，下次可以重新累积
+
+### 技术细节
+- `backup/file_group_prefetcher.py`：
+  - 预分组任务完成时更新 `description` 为 `"[分组完成] 所有文件已分组完成"`
+  - 添加 `total_queued_size` 变量跟踪累计总大小
+  - 日志输出中添加扫描状态、当前组大小和累计总大小
+- `web/api/backup/utils.py`：
+  - `_build_stage_info` 函数通过检查 `description` 是否包含"分组完成"来判断分组状态
+  - 移除 `has_un_copied_files` 参数，不再查询数据库
+- `web/api/backup/tasks_query.py`：
+  - 移除所有查询 `is_copy_success` 的数据库操作
+  - 简化任务查询逻辑，提升性能
+- `backup/backup_db.py`：
+  - 修复 `fetch_pending_files_grouped_by_size` 中可能丢弃未成组文件的问题
+  - 确保已累积但未成组的文件不会被跳过
+
+## [0.1.31] - 2025-11-27
+
+### 修改
+
+#### 多进程压缩进度聚合显示
+- ✅ 实现多进程压缩进度聚合显示功能
+  - 新增 `BackupDB.get_compressed_files_count()` 方法，支持从数据库查询已压缩文件数（聚合所有进程的进度）
+  - 在 `CompressionWorker` 中添加 `_update_compression_progress_periodically()` 后台任务，每5秒从数据库查询并更新压缩进度
+  - 支持 openGauss、SQLite、Redis 三种数据库模式
+  - 前端显示所有压缩进程的聚合进度，而非单个进程的进度
+  - 解决多进程并发压缩时进度显示不准确的问题
+
+### 技术细节
+- `backup/backup_db.py`：新增 `get_compressed_files_count()` 方法，查询已压缩文件数
+- `backup/compression_worker.py`：新增 `_update_compression_progress_periodically()` 后台任务，定期更新压缩进度
+- `backup/sqlite_backup_db.py`：新增 `get_compressed_files_count_sqlite()` 方法
+- `backup/redis_backup_db.py`：新增 `get_compressed_files_count_redis()` 方法
+- 进度更新格式：`[压缩文件中...] {已压缩数}/{总文件数} 个文件 ({百分比}%)`
+
 ## [0.1.30] - 2025-11-25
 
 ### 修改

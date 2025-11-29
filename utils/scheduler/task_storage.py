@@ -187,18 +187,50 @@ async def record_run_end(execution_id: str, completed_at: datetime, status: str,
         if is_opengauss():
             # 使用连接池
             async with get_opengauss_connection() as conn:
-                await conn.execute(
-                    """
-                    UPDATE task_runs
-                    SET completed_at = $1,
-                        status = $2,
-                        result = $3,
-                        error_message = $4
-                    WHERE execution_id = $5
-                    """,
-                    completed_at, status, json.dumps(result) if result is not None else None,
-                    error_message, execution_id
-                )
+                try:
+                    await conn.execute(
+                        """
+                        UPDATE task_runs
+                        SET completed_at = $1,
+                            status = $2,
+                            result = $3,
+                            error_message = $4
+                        WHERE execution_id = $5
+                        """,
+                        completed_at, status, json.dumps(result) if result is not None else None,
+                        error_message, execution_id
+                    )
+                    
+                    # 显式提交事务
+                    await conn.commit()
+                    
+                    # 验证事务提交状态
+                    actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                    if hasattr(actual_conn, 'info'):
+                        transaction_status = actual_conn.info.transaction_status
+                        if transaction_status == 0:  # IDLE: 事务成功提交
+                            logger.debug(f"record_run_end: 事务已提交（execution_id={execution_id}）")
+                        elif transaction_status == 1:  # INTRANS: 事务未提交
+                            logger.warning(f"record_run_end: ⚠️ 事务未提交，状态={transaction_status}，尝试回滚")
+                            await actual_conn.rollback()
+                            raise Exception("事务提交失败")
+                        elif transaction_status == 3:  # INERROR: 错误状态
+                            logger.error(f"record_run_end: ❌ 连接处于错误状态，回滚事务")
+                            await actual_conn.rollback()
+                            raise Exception("连接处于错误状态")
+                except Exception as db_error:
+                    # 异常时显式回滚，避免长事务锁表
+                    logger.error(f"record_run_end: 数据库操作失败: {str(db_error)}", exc_info=True)
+                    try:
+                        actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                        if hasattr(actual_conn, 'info'):
+                            transaction_status = actual_conn.info.transaction_status
+                            if transaction_status in (1, 3):  # INTRANS or INERROR
+                                await actual_conn.rollback()
+                                logger.debug(f"record_run_end: 异常时事务已回滚（execution_id={execution_id}）")
+                    except Exception as rollback_err:
+                        logger.warning(f"record_run_end: 回滚事务失败: {str(rollback_err)}")
+                    raise  # 重新抛出异常
         else:
             pass
     except Exception as e:

@@ -47,9 +47,8 @@ from backup.tape_handler import TapeHandler
 from backup.backup_notifier import BackupNotifier
 from backup.backup_scanner import BackupScanner
 from backup.backup_task_manager import BackupTaskManager
-from backup.tape_file_mover import TapeFileMover
+from backup.final_dir_monitor import FinalDirMonitor
 from backup.compression_worker import CompressionWorker
-from backup.file_move_worker import FileMoveWorker
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +66,7 @@ class BackupEngine:
         self.dingtalk_notifier: Optional[DingTalkNotifier] = None
         self._initialized = False
         self._current_task: Optional[BackupTask] = None
+        self._current_compression_worker: Optional['CompressionWorker'] = None  # 存储当前运行的压缩工作线程
         
         # 初始化子模块
         self.file_scanner = FileScanner(settings=self.settings)
@@ -77,8 +77,8 @@ class BackupEngine:
         self.backup_scanner = BackupScanner(file_scanner=self.file_scanner, backup_db=self.backup_db)
         self.task_manager = BackupTaskManager(settings=self.settings)
         
-        # 初始化文件移动队列管理器（延迟初始化，需要tape_handler）
-        self.tape_file_mover: Optional[TapeFileMover] = None
+        # 初始化Final目录监控器（延迟初始化，需要tape_handler）
+        self.final_dir_monitor: Optional[FinalDirMonitor] = None
 
     async def _get_notification_events(self) -> Dict[str, bool]:
         """获取通知事件配置（带缓存）- 委托给 BackupNotifier"""
@@ -133,20 +133,13 @@ class BackupEngine:
             for temp_dir in temp_dirs:
                 Path(temp_dir).mkdir(parents=True, exist_ok=True)
             
-            # 初始化文件移动队列管理器
-            # 获取主事件循环，以便在线程中使用
-            try:
-                main_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                main_loop = None
-            
-            self.tape_file_mover = TapeFileMover(
+            # 初始化Final目录监控器（独立线程，10秒轮询扫描）
+            self.final_dir_monitor = FinalDirMonitor(
                 tape_handler=self.tape_handler,
-                settings=self.settings,
-                main_loop=main_loop
+                settings=self.settings
             )
-            self.tape_file_mover.start()
-            logger.info("文件移动队列管理器已启动")
+            self.final_dir_monitor.start()
+            logger.info("Final目录监控器已启动（独立线程，10秒轮询扫描）")
 
             self._initialized = True
             logger.info("备份引擎初始化完成")
@@ -156,12 +149,12 @@ class BackupEngine:
             raise
     
     async def shutdown(self):
-        """关闭备份引擎，停止文件移动队列管理器"""
+        """关闭备份引擎，停止Final目录监控器"""
         try:
-            if self.tape_file_mover:
-                logger.info("正在停止文件移动队列管理器...")
-                self.tape_file_mover.stop()
-                self.tape_file_mover = None
+            if self.final_dir_monitor:
+                logger.info("正在停止Final目录监控器...")
+                self.final_dir_monitor.stop()
+                self.final_dir_monitor = None
                 logger.info("文件移动队列管理器已停止")
         except Exception as e:
             logger.error(f"关闭备份引擎时发生错误: {str(e)}")
@@ -263,7 +256,7 @@ class BackupEngine:
             if not manual_run and scheduled_task:
                 logger.info("========== 执行前检查：任务执行状态 ==========")
                 template_id = getattr(backup_task, 'template_id', None)
-                if not template_id and hasattr(scheduled_task, 'task_metadata'):
+                if not template_id and hasattr(scheduled_task, 'task_metadata') and scheduled_task.task_metadata:
                     template_id = scheduled_task.task_metadata.get('backup_task_id')
                 
                 if template_id:
@@ -803,17 +796,17 @@ class BackupEngine:
                             datetime.now(),
                             backup_task.id
                         )
-            elif is_redis():
-                # Redis模式：不需要提交事务，直接跳过
-                pass
-            elif is_sqlite():
-                # SQLite模式：使用 SQLAlchemy
-                from utils.scheduler.sqlite_utils import is_sqlite
-                from config.database import get_db
-                if is_sqlite() and db_manager.AsyncSessionLocal and callable(db_manager.AsyncSessionLocal):
-                    async for db in get_db():
-                        await db.commit()
-                # 其他情况跳过
+                elif is_redis():
+                    # Redis模式：不需要提交事务，直接跳过
+                    pass
+                elif is_sqlite():
+                    # SQLite模式：使用 SQLAlchemy
+                    from utils.scheduler.sqlite_utils import is_sqlite
+                    from config.database import get_db
+                    if is_sqlite() and db_manager.AsyncSessionLocal and callable(db_manager.AsyncSessionLocal):
+                        async for db in get_db():
+                            await db.commit()
+                    # 其他情况跳过
 
             logger.info(f"========== 备份任务执行完成 ==========")
             logger.info(f"任务名称: {task_name}")
@@ -1078,13 +1071,13 @@ class BackupEngine:
             # 记录关键阶段：开始压缩
             self.backup_db._log_operation_stage_event(
                 backup_task,
-                "[准备压缩...]"
+                "[压缩文件中...]"
             )
-            # 更新operation_stage和description
+            # 更新operation_stage和description - 使用更准确的状态描述
             await self.backup_db.update_task_stage_with_description(
                 backup_task,
                 "compress",
-                "[准备压缩] 正在构建文件组..."
+                "[压缩文件中...] 初始化压缩引擎..."
             )
 
             # ========== 设置压缩和移动线程的专属日志处理器 ==========
@@ -1110,26 +1103,33 @@ class BackupEngine:
             except Exception as log_setup_error:
                 logger.warning(f"设置专属日志处理器失败: {str(log_setup_error)}，将使用默认日志")
             
-            # ========== 创建文件移动后台任务（独立扫描 final 目录） ==========
-            file_move_worker = FileMoveWorker(tape_file_mover=self.tape_file_mover)
-            file_move_worker.start()
+            # 注意：文件移动到磁带由FinalDirMonitor独立线程监控final目录处理
+            # 不再需要FileMoveWorker
             
             # ========== openGauss模式：创建文件组预取器 ==========
             file_group_prefetcher = None
             from utils.scheduler.db_utils import is_opengauss
+            logger.info(f"[备份引擎] 检查数据库类型: is_opengauss={is_opengauss()}")
             if is_opengauss():
                 from backup.file_group_prefetcher import FileGroupPrefetcher
-                logger.info("[备份引擎] openGauss模式：创建文件组预取器，实现压缩和搜索并行执行")
+                # 获取并行批次数量
+                parallel_batches = getattr(self.settings, 'COMPRESSION_PARALLEL_BATCHES', 2)
+                logger.info(
+                    f"[备份引擎] openGauss模式：创建文件组预取器，实现压缩和搜索并行执行"
+                    f"（并行批次数: {parallel_batches}，队列大小: {parallel_batches + 1}）"
+                )
                 file_group_prefetcher = FileGroupPrefetcher(
                     backup_db=self.backup_db,
                     backup_set=backup_set,
-                    backup_task=backup_task
+                    backup_task=backup_task,
+                    parallel_batches=parallel_batches
                 )
                 # 在压缩任务开始前启动预取器
                 file_group_prefetcher.start()
                 logger.info("[备份引擎] 文件组预取器已启动，开始预取文件组...")
             
             # ========== 创建压缩循环后台任务（独立线程，顺序执行） ==========
+            logger.info(f"[备份引擎] 创建压缩工作线程，预取器: {file_group_prefetcher is not None}")
             compression_worker = CompressionWorker(
                 backup_db=self.backup_db,
                 compressor=self.compressor,
@@ -1138,10 +1138,13 @@ class BackupEngine:
                 settings=self.settings,
                 file_move_worker=None,  # 不再向 file_move_worker 发送消息，它独立扫描 final 目录
                 backup_notifier=self.backup_notifier,
-                tape_file_mover=self.tape_file_mover,
+                tape_file_mover=None,  # 不再使用队列模式，FinalDirMonitor独立监控final目录
                 file_group_prefetcher=file_group_prefetcher  # openGauss模式下的预取器
             )
             compression_worker.start()
+            logger.info(f"[备份引擎] 压缩工作线程已启动，使用预取模式: {compression_worker.use_prefetcher}")
+            # 存储压缩工作线程引用，以便get_task_status可以访问实时进度
+            self._current_compression_worker = compression_worker
 
             # ========== 等待压缩循环完成 ==========
             processed_files = 0
@@ -1164,11 +1167,36 @@ class BackupEngine:
             finally:
                 # 停止压缩循环、文件移动任务和预取器
                 await compression_worker.stop()
-                await file_move_worker.stop()
+                # 清除压缩工作线程引用
+                self._current_compression_worker = None
+                # 注意：不再需要file_move_worker，FinalDirMonitor独立运行
                 if file_group_prefetcher:
                     await file_group_prefetcher.stop()
             
             logger.info(f"========== 数据库压缩完成，共处理 {compression_worker.group_idx} 个文件组 ==========")
+
+            # 等待所有文件移动到磁带（检查final目录是否为空）
+            if self.final_dir_monitor:
+                logger.info("[备份引擎] 压缩完成，等待所有文件移动到磁带...")
+                max_wait_time = 3600  # 最多等待1小时
+                check_interval = 10  # 每10秒检查一次
+                wait_count = 0
+                max_checks = max_wait_time // check_interval
+                
+                while wait_count < max_checks:
+                    if self.final_dir_monitor.is_final_dir_empty():
+                        logger.info("[备份引擎] ✅ final目录已为空，所有文件已移动到磁带")
+                        break
+                    
+                    remaining_files = self.final_dir_monitor.get_processed_count()
+                    logger.info(f"[备份引擎] final目录仍有文件，等待移动完成... (已处理: {remaining_files} 个文件)")
+                    await asyncio.sleep(check_interval)
+                    wait_count += 1
+                
+                if wait_count >= max_checks:
+                    logger.warning(f"[备份引擎] ⚠️ 等待文件移动到磁带超时（{max_wait_time}秒），但继续完成备份任务")
+                else:
+                    logger.info(f"[备份引擎] ✅ 所有文件已移动到磁带，等待时间: {wait_count * check_interval}秒")
 
             # 注意：不再在这里调用 finalize_backup_set
             # 只有文件压缩任务（compression_worker）可以标记任务集状态为完成并发钉钉

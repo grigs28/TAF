@@ -5,13 +5,18 @@
 Backup Management API - Utility Functions
 """
 
+import logging
+
 import re
 from typing import Dict, Any, Optional
 from fastapi import Request
 
+logger = logging.getLogger(__name__)
+
 # 阶段流程定义
 STAGE_FLOW_DEFINITION = [
     ("scan", "扫描文件"),
+    ("prefetch", "预分组"),
     ("compress", "压缩/打包"),
     ("copy", "写入磁带"),
     ("finalize", "完成"),
@@ -19,6 +24,7 @@ STAGE_FLOW_DEFINITION = [
 STAGE_INDEX = {code: idx for idx, (code, _) in enumerate(STAGE_FLOW_DEFINITION)}
 STAGE_LABELS = {
     "scan": "扫描文件",
+    "prefetch": "预分组",
     "compress": "压缩/打包",
     "copy": "写入磁带",
     "finalize": "完成备份",
@@ -60,14 +66,15 @@ def _normalize_status_value(value: Any) -> str:
     return str(value).lower()
 
 
-def _build_stage_info(description: Optional[str], scan_status: Optional[str], status_value: str, operation_stage: Optional[str] = None) -> Dict[str, Any]:
+def _build_stage_info(description: Optional[str], scan_status: Optional[str], status_value: str, operation_stage: Optional[str] = None, current_compression_progress: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """构建阶段信息
     
     Args:
-        description: 任务描述（包含操作状态信息）
+        description: 任务描述（包含操作状态信息，不再从中解析压缩进度）
         scan_status: 扫描状态
         status_value: 任务状态值
-        operation_stage: 操作阶段代码（优先使用，如果提供则直接使用，不再从description解析）
+        operation_stage: 操作阶段代码（优先使用，如果提供则直接使用）
+        current_compression_progress: 当前压缩进度信息（从内存中的压缩程序获取，包含所有并行任务的聚合进度）
     """
     # 优先使用数据库中的 operation_stage 字段
     stage_code = operation_stage
@@ -87,6 +94,25 @@ def _build_stage_info(description: Optional[str], scan_status: Optional[str], st
             if remaining_text:
                 # 如果方括号后有文本，将其追加到 operation_status
                 operation_status = operation_status + " " + remaining_text
+
+    # 如果提供了current_compression_progress（从内存中的压缩程序获取），使用它构建压缩阶段的operation_status
+    if current_compression_progress and stage_code == 'compress':
+        current_file_index = current_compression_progress.get('current_file_index', 0)
+        total_files_in_group = current_compression_progress.get('total_files_in_group', 0)
+        percent = current_compression_progress.get('percent', 0.0)
+        running_count = current_compression_progress.get('running_count', 1)
+        
+        # 构建operation_status：压缩文件中 X/Y 个文件 (Z%)
+        if total_files_in_group > 0:
+            operation_status = f"压缩文件中 {current_file_index}/{total_files_in_group} 个文件 ({percent:.1f}%)"
+            if running_count > 1:
+                operation_status += f" [并行{running_count}个任务]"
+            logger.debug(f"[状态构建] 从内存压缩程序构建operation_status: {operation_status}")
+        else:
+            operation_status = "压缩文件中..."
+    elif stage_code == 'compress' and not current_compression_progress:
+        # 压缩阶段但没有进度信息，使用默认状态
+        operation_status = "压缩文件中..."
 
     # 如果没有从数据库获取到 stage_code，则从 operation_status 中解析
     if not stage_code and operation_status:
@@ -121,11 +147,83 @@ def _build_stage_info(description: Optional[str], scan_status: Optional[str], st
 
     if stage_code and stage_code in STAGE_INDEX:
         current_index = STAGE_INDEX[stage_code]
+        normalized_scan = (scan_status or "").lower()
+        normalized_status = (status_value or "").lower()
+        
         for idx, (code, label) in enumerate(STAGE_FLOW_DEFINITION):
+            # 判断阶段状态
+            if idx < current_index:
+                step_status = "completed"
+            elif idx == current_index:
+                step_status = "active"
+            else:
+                step_status = "pending"
+            
+            # 特殊处理：根据实际状态调整标签和状态
+            if code == "scan":
+                # 扫描阶段：如果扫描完成，显示"扫描完成"
+                if normalized_scan == "completed":
+                    label = "扫描完成"
+                    # 如果扫描完成但当前阶段不是scan，说明已进入下一阶段
+                    if stage_code != "scan":
+                        step_status = "completed"
+            elif code == "prefetch":
+                # 预分组阶段：根据description中是否包含"分组完成"来判断
+                # 预分组任务完成时会更新description为"[分组完成] 所有文件已分组完成"
+                if description and "分组完成" in description:
+                    # 预分组任务已完成，显示"分组完成"
+                    label = "分组完成"
+                    step_status = "completed"
+                elif normalized_scan == "completed":
+                    # 扫描完成但预分组任务未完成，显示"预分组中"
+                    label = "预分组中"
+                    if stage_code in ("prefetch", None):
+                        step_status = "active"
+                else:
+                    # 扫描未完成，显示"预分组中"
+                    label = "预分组中"
+                    if stage_code in ("prefetch", None):
+                        step_status = "active"
+            
             step = {
                 "code": code,
                 "label": label,
-                "status": "completed" if idx < current_index else ("active" if idx == current_index else "pending")
+                "status": step_status
+            }
+            stage_steps.append(step)
+    else:
+        # 如果stage_code不在定义中，仍然构建所有阶段
+        for idx, (code, label) in enumerate(STAGE_FLOW_DEFINITION):
+            # 根据scan_status和operation_stage判断阶段状态
+            normalized_scan = (scan_status or "").lower()
+            normalized_status = (status_value or "").lower()
+            
+            if code == "scan":
+                if normalized_scan == "completed":
+                    label = "扫描完成"
+                step_status = "completed" if normalized_scan == "completed" else ("active" if normalized_status == "running" else "pending")
+            elif code == "prefetch":
+                # 预分组：根据description中是否包含"分组完成"来判断
+                # 预分组任务完成时会更新description为"[分组完成] 所有文件已分组完成"
+                if description and "分组完成" in description:
+                    # 预分组任务已完成，显示"分组完成"
+                    label = "分组完成"
+                    step_status = "completed"
+                elif normalized_scan == "completed":
+                    # 扫描完成但预分组任务未完成，显示"预分组中"
+                    label = "预分组中"
+                    step_status = "active"
+                else:
+                    # 扫描未完成，显示"预分组中"
+                    label = "预分组中"
+                    step_status = "pending"
+            else:
+                step_status = "pending"
+            
+            step = {
+                "code": code,
+                "label": label,
+                "status": step_status
             }
             stage_steps.append(step)
 
@@ -140,4 +238,3 @@ def _build_stage_info(description: Optional[str], scan_status: Optional[str], st
 def get_system_instance(request: Request):
     """获取系统实例"""
     return request.app.state.system
-

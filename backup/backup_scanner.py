@@ -574,7 +574,7 @@ class BackupScanner:
                                 logger.info(
                                     f"{scan_type_info}后台扫描任务：已扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)}，"
                                     f"平均速度 {files_total_rate:.1f} 个文件/秒，"
-                                    f"最近 {files_window} 个文件用时 {elapsed_window:.1f} 秒，速度 {files_window_rate:.1f} 个文件/秒"
+                                    f"最近 {files_window} 个文件用时 {elapsed_window:.1f} 秒，✅速度 {files_window_rate:.1f} 个文件/秒"
                                 )
                                 last_log_time = now
                                 last_log_files = total_files

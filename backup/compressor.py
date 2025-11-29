@@ -19,7 +19,7 @@ try:
 except ImportError:
     zstd = None
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable, Awaitable
 
 from models.backup import BackupSet, BackupTask
 from utils.datetime_utils import now, format_datetime
@@ -356,7 +356,7 @@ def _compress_with_7zip_command(
                 if process.returncode not in (0, 1) and not archive_exists:
                     for file_path, _ in files_to_compress:
                         failed_files.append({'path': str(file_path), 'reason': f'7z命令失败: 返回码{process.returncode}'})
-                    _finalize_progress(archive_path_abs)
+                    _finalize_compression_progress(compress_progress, archive_path_abs)
                     return {'successful_files': [], 'failed_files': failed_files, 'successful_original_size': 0}
                 
                 if process.returncode == 1:
@@ -389,7 +389,7 @@ def _compress_with_7zip_command(
                 for file_path, _ in files_to_compress:
                     if str(file_path) not in [f['path'] for f in failed_files]:
                         failed_files.append({'path': str(file_path), 'reason': '压缩包文件不存在'})
-                _finalize_progress(archive_path_abs)
+                _finalize_compression_progress(compress_progress, archive_path_abs)
                 return {'successful_files': [], 'failed_files': failed_files, 'successful_original_size': 0}
             
         except Exception as work_dir_error:
@@ -408,7 +408,8 @@ def _compress_with_7zip_command(
             except Exception as cleanup_error:
                 logger.warning(f"清理临时工作目录失败: {cleanup_error}")
         
-        _finalize_progress(archive_path_abs)
+        # 标记压缩完成
+        _finalize_compression_progress(compress_progress, archive_path_abs)
         
         failed_paths = {f['path'] for f in failed_files}
         successful_files = [
@@ -794,14 +795,28 @@ def _compress_with_zstd(
                             # 将压缩进度信息存储到 compress_progress 和 backup_task 中
                             compress_progress['current_file_index'] = current_progress
                             compress_progress['total_files_in_group'] = total_files_in_group
+                            
+                            # 计算当前文件组的原始总大小（压缩前）
+                            total_group_size = sum(f.get('size', 0) or 0 for f in file_group)
+                            # 获取已处理文件的实际大小（如果已累计）
+                            processed_bytes = compress_progress.get('processed_bytes', 0)
+                            
+                            # 按文件大小计算进度百分比（更准确）
+                            if total_group_size > 0 and processed_bytes >= 0:
+                                size_based_percent = (processed_bytes / total_group_size * 100) if total_group_size > 0 else 0.0
+                                # 使用文件大小计算的百分比（更准确）
+                                actual_progress_percent = size_based_percent
+                            else:
+                                # 如果没有大小信息，回退到文件数百分比
+                                actual_progress_percent = progress_percent
+                            
                             if hasattr(backup_task, 'current_compression_progress'):
-                                # 计算当前文件组的原始总大小（压缩前）
-                                total_group_size = sum(f.get('size', 0) or 0 for f in file_group)
                                 backup_task.current_compression_progress = {
                                     'current': current_progress,
                                     'total': total_files_in_group,
-                                    'percent': progress_percent,
-                                    'group_size_bytes': total_group_size  # 文件组的原始总大小（压缩前）
+                                    'percent': actual_progress_percent,
+                                    'group_size_bytes': total_group_size,  # 文件组的原始总大小（压缩前）
+                                    'processed_bytes': processed_bytes  # 已处理文件的实际大小
                                 }
                             last_log_time = current_time
 
@@ -835,6 +850,10 @@ def _compress_with_zstd(
                         try:
                             tar.add(file_path, arcname=arcname)
                             successful_files.append(str(file_path))
+                            # 累计已处理文件的实际大小（用于按文件大小计算百分比）
+                            if 'processed_bytes' not in compress_progress:
+                                compress_progress['processed_bytes'] = 0
+                            compress_progress['processed_bytes'] += file_size
 
                             # 如果单个文件处理时间超过30秒，记录警告（包含文件大小）
                             file_process_time = time.time() - file_start_time
@@ -874,23 +893,31 @@ def _compress_with_zstd(
                             failed_files.append({'path': str(file_path), 'reason': f'写入失败: {add_error}'})
                             continue
 
-        logger.info(f"[zstd] 压缩完成：{len(successful_files)} 个文件成功，{len(failed_files)} 个失败")
+        # 计算原始文件总大小
+        successful_original_size = sum(f.get('size', 0) or 0 for f in file_group if str(f.get('path')) in successful_files)
         
         # 确保文件完全关闭：with语句退出后，获取最终文件大小
         # 注意：with语句应该已经关闭了文件，文件句柄释放的等待将在 compress_file_group 中处理
+        compressed_size = 0
         try:
             # 获取最终文件大小
             if archive_path_abs.exists():
-                final_size = archive_path_abs.stat().st_size
-                logger.debug(f"[zstd] 压缩文件最终大小: {format_bytes(final_size)}")
+                compressed_size = archive_path_abs.stat().st_size
+                logger.debug(f"[zstd] 压缩文件最终大小: {format_bytes(compressed_size)}")
         except Exception as size_check_error:
             logger.warning(f"[zstd] 检查文件大小时出错（不影响主流程）: {size_check_error}")
         
         compress_progress['completed'] = True
         compress_progress['running'] = False
-        compress_progress['bytes_written'] = archive_path_abs.stat().st_size if archive_path_abs.exists() else 0
-
-        successful_original_size = sum(f.get('size', 0) or 0 for f in file_group if str(f.get('path')) in successful_files)
+        compress_progress['bytes_written'] = compressed_size if compressed_size > 0 else (archive_path_abs.stat().st_size if archive_path_abs.exists() else 0)
+        
+        # 计算压缩比
+        compression_ratio = (compressed_size / successful_original_size) if successful_original_size > 0 else 0.0
+        
+        logger.info(f"[zstd] 压缩完成：{len(successful_files)} 个文件成功，{len(failed_files)} 个失败，"
+                   f"原始大小: {format_bytes(successful_original_size)}, "
+                   f"压缩后大小: {format_bytes(compressed_size)}, "
+                   f"压缩比: {compression_ratio:.2%}")
 
         return {
             'successful_files': successful_files,
@@ -1038,9 +1065,10 @@ class Compressor:
         backup_set: BackupSet, 
         backup_task: BackupTask,
         base_processed_files: int = 0, 
-        total_files: int = 0
+        total_files: int = 0,
+        shared_compress_progress: Optional[Dict] = None
     ) -> Optional[Dict]:
-        """压缩文件组（使用7z压缩，支持多线程，带进度跟踪）
+        """压缩文件组（异步启动，立即返回，不等待压缩完成）
         
         Args:
             file_group: 文件组列表
@@ -1050,7 +1078,7 @@ class Compressor:
             total_files: 总文件数
             
         Returns:
-            压缩文件信息字典，如果失败则返回None
+            压缩文件信息字典（包含预设路径和压缩任务future），立即返回，不等待压缩完成
         """
         try:
             # 从备份任务获取压缩设置
@@ -1180,30 +1208,53 @@ class Compressor:
                 final_dir.mkdir(parents=True, exist_ok=True)
                 logger.info(f"压缩到临时目录: {backup_dir}，完成后将移动到: {final_dir}")
             
-            # 进度跟踪变量
-            compress_progress = {'bytes_written': 0, 'running': True, 'completed': False}
+            # 预设压缩文件路径（立即确定，不等待压缩完成）
+            if compression_enabled:
+                if compression_method == 'pgzip':
+                    archive_suffix = ".tar.gz"
+                elif compression_method == 'tar':
+                    archive_suffix = ".tar"
+                elif compression_method == 'zstd':
+                    archive_suffix = ".tar.zst"
+                else:
+                    archive_suffix = ".7z"
+            else:
+                archive_suffix = ".tar"
+            archive_path = backup_dir / f"backup_{backup_set.set_id}_{timestamp}{archive_suffix}"
+            temp_archive_path = archive_path.absolute()
+            
+            # 进度跟踪变量：如果有共享的进度字典，使用它；否则创建新的
+            if shared_compress_progress is not None:
+                compress_progress = shared_compress_progress
+                # 确保必要的字段存在（但不重置current_file_index和total_files_in_group，它们应该已经被初始化）
+                compress_progress['bytes_written'] = compress_progress.get('bytes_written', 0)
+                compress_progress['running'] = True
+                compress_progress['completed'] = False
+                # 如果共享字典还没有total_files_in_group，初始化它
+                if 'total_files_in_group' not in compress_progress:
+                    compress_progress['total_files_in_group'] = len(file_group)
+                if 'current_file_index' not in compress_progress:
+                    compress_progress['current_file_index'] = 0
+            else:
+                compress_progress = {
+                    'bytes_written': 0,
+                    'running': True,
+                    'completed': False,
+                    'current_file_index': 0,
+                    'total_files_in_group': len(file_group)
+                }
             total_original_size = sum(f['size'] for f in file_group)
             # 用于存储成功和失败的文件信息（在线程间共享）
-            compress_result = {'successful_files': [], 'failed_files': [], 'successful_original_size': 0}
+            compress_result = {'successful_files': [], 'failed_files': [], 'successful_original_size': 0, 'archive_path': str(temp_archive_path)}
             
             # 将压缩操作放到线程池中执行，避免阻塞事件循环
             def _do_7z_compress():
-                """在线程中执行7z压缩操作，带进度跟踪"""
+                """在线程中执行7z压缩操作，带进度跟踪（同步顺序执行）"""
                 try:
                     # 在线程中创建目录（避免阻塞事件循环）
                     backup_dir.mkdir(parents=True, exist_ok=True)
                     
                     if compression_enabled:
-                        # 根据压缩方法选择使用不同的后缀
-                        if compression_method == 'pgzip':
-                            archive_suffix = ".tar.gz"
-                        elif compression_method == 'tar':
-                            archive_suffix = ".tar"
-                        elif compression_method == 'zstd':
-                            archive_suffix = ".tar.zst"
-                        else:
-                            archive_suffix = ".7z"
-                        archive_path = backup_dir / f"backup_{backup_set.set_id}_{timestamp}{archive_suffix}"
                         
                         if compression_method == '7zip_command':
                             # 使用7-Zip命令行工具进行压缩
@@ -1219,8 +1270,8 @@ class Compressor:
                             compress_result['successful_files'] = compress_result_inner['successful_files']
                             compress_result['failed_files'] = compress_result_inner['failed_files']
                             compress_result['successful_original_size'] = compress_result_inner['successful_original_size']
-                            # 优先使用压缩函数返回的实际路径（绝对路径）
-                            compress_result['archive_path'] = compress_result_inner.get('archive_path') or str(archive_path.absolute())
+                            # 使用预设路径
+                            compress_result['archive_path'] = str(temp_archive_path)
                         elif compression_method == 'pgzip':
                             logger.info(f"使用PGZip压缩 (线程数: {pgzip_threads}, 块大小: {pgzip_block_size}, 等级: {compression_level})")
                             compress_result_inner = _compress_with_pgzip(
@@ -1231,8 +1282,8 @@ class Compressor:
                             compress_result['successful_files'] = compress_result_inner['successful_files']
                             compress_result['failed_files'] = compress_result_inner['failed_files']
                             compress_result['successful_original_size'] = compress_result_inner['successful_original_size']
-                            # 优先使用压缩函数返回的实际路径（绝对路径）
-                            compress_result['archive_path'] = compress_result_inner.get('archive_path') or str(archive_path.absolute())
+                            # 使用预设路径
+                            compress_result['archive_path'] = str(temp_archive_path)
                         elif compression_method == 'tar':
                             logger.info(f"使用tar打包 (不压缩)")
                             compress_result_inner = _compress_with_tar(
@@ -1243,7 +1294,8 @@ class Compressor:
                             compress_result['successful_files'] = compress_result_inner['successful_files']
                             compress_result['failed_files'] = compress_result_inner['failed_files']
                             compress_result['successful_original_size'] = compress_result_inner['successful_original_size']
-                            compress_result['archive_path'] = compress_result_inner.get('archive_path') or str(archive_path.absolute())
+                            # 使用预设路径
+                            compress_result['archive_path'] = str(temp_archive_path)
                         elif compression_method == 'zstd':
                             logger.info(f"使用Zstandard压缩 (线程数: {zstd_threads}, 等级: {compression_level})")
                             compress_result_inner = _compress_with_zstd(
@@ -1254,7 +1306,8 @@ class Compressor:
                             compress_result['successful_files'] = compress_result_inner['successful_files']
                             compress_result['failed_files'] = compress_result_inner['failed_files']
                             compress_result['successful_original_size'] = compress_result_inner['successful_original_size']
-                            compress_result['archive_path'] = compress_result_inner.get('archive_path') or str(archive_path.absolute())
+                            # 使用预设路径
+                            compress_result['archive_path'] = str(temp_archive_path)
                         else:
                             # 使用py7zr进行7z压缩，启用多进程（mp=True启用多进程压缩）
                             # 注意：py7zr 使用 mp 参数启用多进程，而不是 threads
@@ -1357,21 +1410,21 @@ class Compressor:
                                     f['size'] for f in file_group 
                                     if str(f['path']) in successful_files
                                 )
-                                # py7zr直接使用预设路径，确保使用绝对路径
-                                compress_result['archive_path'] = str(archive_path.absolute())
+                                # 使用预设路径
+                                compress_result['archive_path'] = str(temp_archive_path)
                                 
                                 logger.info(f"py7zr压缩完成: {len(successful_files)} 个文件成功, {len(failed_files)} 个文件失败")
                             
                     else:
                         # 未启用压缩时，仍旧使用tar存储（TODO：实现真正的无压缩 tar 打包）
-                        archive_path = backup_dir / f"backup_{backup_set.set_id}_{timestamp}.tar"
                         logger.warning("当前未启用压缩，暂未实现tar打包，跳过压缩操作")
                         compress_progress['completed'] = True
+                        compress_progress['running'] = False
                         compress_progress['bytes_written'] = 0
                         compress_result['successful_files'] = []
                         compress_result['failed_files'] = []
                         compress_result['successful_original_size'] = 0
-                        compress_result['archive_path'] = str(archive_path)
+                        compress_result['archive_path'] = str(temp_archive_path)
                         
                 except Exception as e:
                     logger.error(f"压缩操作失败: {str(e)}")
@@ -1380,351 +1433,155 @@ class Compressor:
                     compress_progress['completed'] = True
                     compress_progress['running'] = False
             
-            # 在线程池中执行压缩操作
+            # 在线程池中异步启动压缩操作，立即返回，不等待完成
             loop = asyncio.get_event_loop()
-            logger.info(f"[压缩] 准备在线程池中执行压缩操作")
+            logger.info(f"[压缩] 异步启动压缩任务，立即返回，不等待完成")
             compression_future = loop.run_in_executor(None, _do_7z_compress)
-            logger.info(f"[压缩] 压缩任务已提交到线程池，等待完成...")
-
-            # 等待压缩完成，设置超时以避免无限等待
-            timeout_seconds = 3600  # 60分钟超时
-            try:
-                # 等待压缩线程完成（支持取消）
-                logger.info(f"[压缩] 开始等待压缩线程完成（超时: {timeout_seconds}秒）")
-                try:
-                    await asyncio.wait_for(compression_future, timeout=timeout_seconds)
-                except asyncio.CancelledError:
-                    logger.warning(f"[压缩] 压缩任务被取消（Ctrl+C）")
-                    # 尝试取消压缩线程（虽然无法直接取消，但至少记录日志）
-                    compress_progress['running'] = False
-                    compress_progress['completed'] = False
-                    raise
-                logger.info(f"[压缩] 压缩线程已完成，检查进度标记...")
-
-                # 等待压缩进度标记完成（最多等待30秒）
-                max_progress_wait = 30
-                progress_wait_count = 0
-                while not compress_progress['completed'] and progress_wait_count < max_progress_wait:
-                    logger.debug(f"[压缩] 等待进度标记完成... ({progress_wait_count}/{max_progress_wait})")
-                    await asyncio.sleep(1)
-                    progress_wait_count += 1
-
-                if not compress_progress['completed']:
-                    logger.warning("压缩操作完成但进度标记未更新，强制继续")
-                    compress_progress['completed'] = True
-                    compress_progress['running'] = False
-                else:
-                    logger.info(f"[压缩] 压缩进度标记已更新为完成")
-
-            except asyncio.TimeoutError:
-                logger.error(f"压缩操作超时（{timeout_seconds}秒），强制继续")
-                compress_progress['completed'] = True
-                compress_progress['running'] = False
-            except Exception as compress_error:
-                logger.error(f"压缩操作发生异常: {str(compress_error)}")
-                compress_progress['completed'] = True
-                compress_progress['running'] = False
-                raise
             
-            # 压缩完成后，等待文件完全关闭（Windows上文件句柄释放可能需要时间）
-            logger.debug("[压缩] 压缩函数已完成，等待文件句柄完全释放...")
-            await asyncio.sleep(1.0)  # 等待1秒，确保文件句柄完全释放
+            # 顺序执行：等待压缩完成、标注完成、移动到final
+            # 等待压缩完成（不设置超时，让压缩自然完成）
+            await compression_future
+            logger.info(f"[压缩] 压缩任务已完成")
             
-            # 确定压缩文件的实际路径（使用压缩函数返回的完整路径）
-            archive_path_str = compress_result.get('archive_path')
-            if archive_path_str:
-                temp_archive_path = Path(archive_path_str)
-                logger.info(f"压缩函数返回的文件路径: {temp_archive_path}")
-            else:
-                # 如果压缩函数没有返回路径，回退到预设路径
-                if compression_enabled:
-                    if compression_method == 'pgzip':
-                        suffix = ".tar.gz"
-                    elif compression_method == 'tar':
-                        suffix = ".tar"
-                    elif compression_method == 'zstd':
-                        suffix = ".tar.zst"
-                    else:
-                        suffix = ".7z"
-                    temp_archive_path = backup_dir / f"backup_{backup_set.set_id}_{timestamp}{suffix}"
-                else:
-                    temp_archive_path = backup_dir / f"backup_{backup_set.set_id}_{timestamp}.tar"
-                logger.warning(f"压缩函数未返回路径，使用预设路径: {temp_archive_path}")
+            # 等待文件完全关闭（Windows上文件句柄释放可能需要时间）
+            logger.debug("[压缩] 等待文件句柄完全释放...")
+            await asyncio.sleep(1.0)
             
+            # 验证压缩文件是否存在
             if not temp_archive_path.exists():
-                logger.error(f"压缩文件不存在: {temp_archive_path} (绝对路径: {temp_archive_path.absolute()})")
+                logger.error(f"[压缩] 压缩文件不存在: {temp_archive_path}")
                 return None
             
-            logger.info(f"压缩文件存在，大小: {format_bytes(temp_archive_path.stat().st_size)}, 路径: {temp_archive_path}")
+            # 验证压缩文件大小是否合理
+            compressed_size = temp_archive_path.stat().st_size
+            total_original_size = sum(f['size'] for f in file_group)
+            
+            # 计算压缩比
+            if total_original_size > 0:
+                compression_ratio = compressed_size / total_original_size
+                logger.info(f"[压缩] 压缩文件存在，原始大小: {format_bytes(total_original_size)}, "
+                          f"压缩后大小: {format_bytes(compressed_size)}, "
+                          f"压缩比: {compression_ratio:.2%}, 路径: {temp_archive_path}")
+                
+                # 检查压缩比是否异常（压缩后文件过小可能是压缩失败）
+                # 如果原始文件 > 100MB，但压缩后 < 原始大小的 0.1%，可能是异常
+                if total_original_size > 100 * 1024 * 1024 and compression_ratio < 0.001:
+                    logger.warning(f"[压缩] ⚠️ 压缩比异常：原始大小 {format_bytes(total_original_size)} "
+                                 f"压缩后只有 {format_bytes(compressed_size)} (压缩比 {compression_ratio:.2%})，"
+                                 f"可能压缩失败或文件为空")
+                    # 检查成功文件数
+                    successful_count = len(compress_result.get('successful_files', []))
+                    failed_count = len(compress_result.get('failed_files', []))
+                    logger.warning(f"[压缩] 成功文件数: {successful_count}, 失败文件数: {failed_count}")
+                    
+                    # 如果所有文件都失败，返回None
+                    if successful_count == 0:
+                        logger.error(f"[压缩] ❌ 所有文件压缩失败，返回None")
+                        return None
+            else:
+                logger.info(f"[压缩] 压缩文件存在，大小: {format_bytes(compressed_size)}, 路径: {temp_archive_path}")
+            
+            # 压缩完成后，标注完成
+            from backup.backup_db import BackupDB
+            backup_db = BackupDB()
+            await backup_db.update_task_stage_with_description(
+                backup_task,
+                "compress",
+                f"[压缩完成] {total_files}/{total_files} 个文件 (100.0%)"
+            )
+            logger.info(f"[压缩] ✅ 已标注压缩完成: {total_files} 个文件")
             
             # 根据配置决定是否需要移动文件
-            # 统一流程：都压缩到temp目录，根据配置决定是否移动到final目录
+            final_archive_path_for_db = temp_archive_path  # 默认使用temp路径
             if compress_directly_to_tape:
-                # 直接压缩到磁带模式：不移动文件，直接使用temp目录中的文件
-                final_archive_path = temp_archive_path
-                logger.info(f"直接压缩到磁带模式：文件保留在临时目录，不移动: {final_archive_path}")
+                # 直接压缩到磁带模式：不移动文件
+                logger.info(f"[压缩] 直接压缩到磁带模式：文件保留在临时目录: {temp_archive_path}")
+                # 直接压缩到磁带模式，使用temp路径
+                final_archive_path_for_db = temp_archive_path
             else:
-                # 非直接压缩模式：压缩完成，将文件从temp目录移动到final目录（顺序执行，验证成功）
+                # 非直接压缩模式：将文件从temp目录移动到final目录
                 if final_dir is None:
-                    # 如果final_dir未定义，说明配置有问题，使用temp目录
-                    logger.warning("final_dir未定义，使用temp目录中的文件")
-                    final_archive_path = temp_archive_path
-                else:
-                    # 确保目标目录存在
-                    final_dir.mkdir(parents=True, exist_ok=True)
-                    final_archive_path = final_dir / temp_archive_path.name
-                    
-                    # 顺序执行：将文件从temp移动到final目录，并验证是否成功
-                    try:
-                        # 判断文件名（验证源文件是否存在且名称正确）
-                        if not temp_archive_path.exists():
-                            logger.error(f"[文件移动] 源文件不存在: {temp_archive_path}")
-                            raise FileNotFoundError(f"源文件不存在: {temp_archive_path}")
-                        
-                        source_filename = temp_archive_path.name
-                        target_filename = final_archive_path.name
-                        
-                        logger.info(f"[文件移动] 开始移动文件到final目录")
-                        logger.info(f"[文件移动] 源文件名: {source_filename}, 目标文件名: {target_filename}")
-                        logger.info(f"[文件移动] 源路径: {temp_archive_path}, 目标路径: {final_archive_path}")
-                        
-                        # 验证文件名是否匹配（确保文件名正确）
-                        if source_filename != target_filename:
-                            logger.warning(f"[文件移动] 文件名不匹配: 源={source_filename}, 目标={target_filename}，使用目标文件名")
-                        
-                        # 移动前检查：确保文件已经完全关闭且大小稳定
-                        logger.info(f"[文件移动] 移动前检查：确保文件已完全关闭且大小稳定...")
-                        max_wait_seconds = 30  # 最多等待30秒
-                        check_interval = 0.5  # 每0.5秒检查一次
-                        wait_count = 0
-                        max_checks = int(max_wait_seconds / check_interval)
-                        last_size = None
-                        stable_count = 0
-                        stable_required = 3  # 需要连续3次大小不变才认为稳定
-                        
-                        while wait_count < max_checks:
-                            try:
-                                current_size = temp_archive_path.stat().st_size
-                                if last_size is None:
-                                    last_size = current_size
-                                    stable_count = 1
-                                elif current_size == last_size:
-                                    stable_count += 1
-                                    if stable_count >= stable_required:
-                                        logger.info(f"[文件移动] 文件大小已稳定: {format_bytes(current_size)} (连续{stable_count}次检查大小不变)")
-                                        break
-                                else:
-                                    # 大小还在变化，重置计数
-                                    logger.debug(f"[文件移动] 文件大小仍在变化: {format_bytes(last_size)} -> {format_bytes(current_size)}，继续等待...")
-                                    last_size = current_size
-                                    stable_count = 1
-                                
-                                await asyncio.sleep(check_interval)
-                                wait_count += 1
-                            except (OSError, PermissionError) as check_error:
-                                # 文件可能还在被占用，继续等待
-                                logger.debug(f"[文件移动] 文件检查时遇到错误（可能仍在写入）: {check_error}，继续等待...")
-                                await asyncio.sleep(check_interval)
-                                wait_count += 1
-                        
-                        if wait_count >= max_checks:
-                            logger.warning(f"[文件移动] 等待文件稳定超时（{max_wait_seconds}秒），但继续尝试移动")
+                    logger.warning("[压缩] final_dir未定义，使用temp目录中的文件")
+                    return None
+                
+                # 确保目标目录存在
+                final_dir.mkdir(parents=True, exist_ok=True)
+                final_archive_path = final_dir / temp_archive_path.name
+                
+                # 移动文件
+                if not temp_archive_path.exists():
+                    logger.error(f"[压缩] 源文件不存在: {temp_archive_path}")
+                    return None
+                
+                logger.info(f"[压缩] 开始移动文件到final目录: {final_archive_path}")
+                
+                # 等待文件稳定
+                max_wait_seconds = 30
+                check_interval = 0.5
+                wait_count = 0
+                max_checks = int(max_wait_seconds / check_interval)
+                last_size = None
+                stable_count = 0
+                stable_required = 3
+                
+                while wait_count < max_checks and stable_count < stable_required:
+                    await asyncio.sleep(check_interval)
+                    wait_count += 1
+                    if temp_archive_path.exists():
+                        current_size = temp_archive_path.stat().st_size
+                        if last_size is not None and current_size == last_size:
+                            stable_count += 1
                         else:
-                            logger.info(f"[文件移动] 文件大小已稳定，准备移动（等待了 {wait_count * check_interval:.1f} 秒）")
-                        
-                        # 额外等待一小段时间，确保文件句柄完全释放
-                        await asyncio.sleep(0.5)
-                        
-                        # 记录源文件大小，用于验证移动是否成功
-                        source_file_size = temp_archive_path.stat().st_size
-                        logger.debug(f"[文件移动] 源文件大小: {format_bytes(source_file_size)}")
-                        
-                        # 顺序执行文件移动（在同一文件系统上是瞬间完成的，但需要同步执行以验证结果）
-                        loop = asyncio.get_event_loop()
-                        try:
-                            await loop.run_in_executor(None, shutil.move, str(temp_archive_path), str(final_archive_path))
-                        except Exception as move_exception:
-                            logger.error(f"[文件移动] shutil.move() 抛出异常: {move_exception}", exc_info=True)
-                            raise
-                        
-                        # 验证移动是否成功：检查目标文件是否存在，源文件是否已删除
-                        if not final_archive_path.exists():
-                            raise FileNotFoundError(f"移动后目标文件不存在: {final_archive_path}")
-                        
-                        # 验证目标文件大小是否与源文件一致
-                        final_file_size = final_archive_path.stat().st_size
-                        if final_file_size != source_file_size:
-                            logger.error(
-                                f"[文件移动] 文件大小不匹配！源文件: {format_bytes(source_file_size)}, "
-                                f"目标文件: {format_bytes(final_file_size)}"
-                            )
-                            raise ValueError(f"文件移动后大小不匹配: 源={source_file_size}, 目标={final_file_size}")
-                        
-                        # 检查源文件是否仍然存在（shutil.move可能在某些情况下失败但不抛出异常）
-                        if temp_archive_path.exists():
-                            logger.warning(f"[文件移动] ⚠️ 移动后源文件仍存在: {temp_archive_path}")
-                            
-                            # 验证源文件大小是否与目标文件一致（可能是复制而不是移动）
-                            remaining_source_size = temp_archive_path.stat().st_size
-                            if remaining_source_size == final_file_size:
-                                logger.warning(
-                                    f"[文件移动] 源文件和目标文件大小相同，可能是复制操作而非移动。"
-                                    f"源文件大小: {format_bytes(remaining_source_size)}, "
-                                    f"目标文件大小: {format_bytes(final_file_size)}"
-                                )
-                            
-                            # 尝试删除源文件（最多重试3次）
-                            # 注意：如果移动已成功（目标文件存在且大小匹配），删除失败可以跳过
-                            max_delete_retries = 3
-                            delete_retry_count = 0
-                            delete_success = False
-                            
-                            while delete_retry_count < max_delete_retries and not delete_success:
-                                delete_retry_count += 1
-                                try:
-                                    # 等待一小段时间，可能文件句柄还在释放中
-                                    if delete_retry_count > 1:
-                                        await asyncio.sleep(1.0 * delete_retry_count)  # 递增等待时间
-                                    
-                                    temp_archive_path.unlink()
-                                    delete_success = True
-                                    logger.info(f"[文件移动] ✅ 源文件已成功删除（第{delete_retry_count}次尝试）")
-                                except PermissionError as perm_error:
-                                    logger.warning(
-                                        f"[文件移动] 删除源文件失败（第{delete_retry_count}次尝试）: "
-                                        f"权限错误 - {perm_error}。文件可能被其他进程占用。"
-                                    )
-                                    if delete_retry_count >= max_delete_retries:
-                                        # 移动已成功，删除失败可以跳过，只记录警告
-                                        logger.warning(
-                                            f"[文件移动] ⚠️ 无法删除源文件（已重试{max_delete_retries}次），"
-                                            f"但移动已成功（目标文件存在且大小匹配），跳过删除操作。"
-                                            f"源文件: {temp_archive_path}，目标文件: {final_archive_path}。"
-                                            f"可稍后手动删除源文件。"
-                                        )
-                                except OSError as os_error:
-                                    logger.warning(
-                                        f"[文件移动] 删除源文件失败（第{delete_retry_count}次尝试）: "
-                                        f"系统错误 - {os_error}"
-                                    )
-                                    if delete_retry_count >= max_delete_retries:
-                                        # 移动已成功，删除失败可以跳过，只记录警告
-                                        logger.warning(
-                                            f"[文件移动] ⚠️ 无法删除源文件（已重试{max_delete_retries}次），"
-                                            f"但移动已成功（目标文件存在且大小匹配），跳过删除操作。"
-                                            f"源文件: {temp_archive_path}，目标文件: {final_archive_path}。"
-                                            f"可稍后手动删除源文件。"
-                                        )
-                                except Exception as del_error:
-                                    logger.warning(
-                                        f"[文件移动] 删除源文件失败（第{delete_retry_count}次尝试）: {del_error}"
-                                    )
-                                    if delete_retry_count >= max_delete_retries:
-                                        # 移动已成功，删除失败可以跳过，只记录警告
-                                        logger.warning(
-                                            f"[文件移动] ⚠️ 无法删除源文件（已重试{max_delete_retries}次），"
-                                            f"但移动已成功（目标文件存在且大小匹配），跳过删除操作。"
-                                            f"源文件: {temp_archive_path}，目标文件: {final_archive_path}。"
-                                            f"错误: {del_error}，可稍后手动删除源文件。"
-                                        )
-                        else:
-                            logger.debug(f"[文件移动] 源文件已成功删除（shutil.move自动删除）")
-                        
-                        logger.info(f"[文件移动] ✅ 文件已成功移动到final目录: {target_filename}, 大小: {format_bytes(final_file_size)}")
-                        
-                        # 记录关键阶段：文件移动到final目录
-                        if backup_task:
-                            from backup.backup_db import BackupDB
-                            backup_db = BackupDB()
-                            backup_db._log_operation_stage_event(
-                                backup_task,
-                                f"[文件已移动到final目录] {target_filename}，大小: {format_bytes(final_file_size)}"
-                            )
-                            # 同时更新operation_stage和description
-                            await backup_db.update_task_stage_with_description(
-                                backup_task,
-                                "compress",
-                                f"[移动完成] 压缩文件已移动到final目录：{target_filename}"
-                            )
-                    except Exception as move_error:
-                        logger.error(f"[文件移动] 移动文件到final目录失败: {str(move_error)}", exc_info=True)
-                        # 移动失败，使用temp路径
-                        final_archive_path = temp_archive_path
-                        logger.warning(f"[文件移动] 移动失败，使用temp路径: {temp_archive_path}")
-                        
-                        # 如果移动失败，记录错误但不抛出异常（允许继续处理）
-                        # 可以选择抛出异常让调用者处理，或记录错误并继续
-                    
-                    # 获取文件大小（移动完成后应该使用final路径）
-                    try:
-                        compressed_size = final_archive_path.stat().st_size
-                    except FileNotFoundError:
-                        # 如果final路径不存在，尝试temp路径（移动可能失败）
-                        if temp_archive_path.exists():
-                            compressed_size = temp_archive_path.stat().st_size
-                        else:
-                            logger.error(f"无法获取压缩文件大小：temp路径不存在，final路径也不存在")
-                            return None
+                            stable_count = 0
+                        last_size = current_size
+                    else:
+                        break
+                
+                if wait_count >= max_checks:
+                    logger.warning(f"[压缩] 等待文件稳定超时，但继续尝试移动")
+                
+                # 移动文件
+                loop_move = asyncio.get_event_loop()
+                await loop_move.run_in_executor(None, shutil.move, str(temp_archive_path), str(final_archive_path))
+                
+                # 验证移动成功
+                if not final_archive_path.exists():
+                    logger.error(f"[压缩] 移动后目标文件不存在: {final_archive_path}")
+                    return None
+                
+                logger.info(f"[压缩] ✅ 文件已成功移动到final目录: {final_archive_path}")
+                
+                # 更新compress_result中的路径
+                compress_result['archive_path'] = str(final_archive_path)
+                # 更新最终路径（用于数据库更新）
+                final_archive_path_for_db = final_archive_path
             
-            # 计算校验和（可选，性能考虑可以跳过）
-            checksum = None
-            # checksum = calculate_file_checksum(archive_path)  # 注释掉以提高性能
+            # 注意：is_copy_success 已在预读程序入队时设置为 TRUE，此处不再更新
             
-            successful_file_count = len(compress_result['successful_files'])
+            # 计算原始大小
+            total_original_size = sum(f['size'] for f in file_group)
             
+            # 使用最终路径（已移动到final或保留在temp）
+            final_path = final_archive_path_for_db
+            
+            # 返回压缩信息（压缩已完成，文件已移动到final）
             compressed_info = {
-                'path': str(final_archive_path.absolute()),  # 使用final目录中的绝对路径（兼容旧代码）
+                'path': str(final_path),  # 最终路径（已移动到final或保留在temp）
                 'temp_path': temp_archive_path,  # temp目录中的路径（Path对象）
-                'final_path': final_archive_path,  # final目录中的路径（Path对象）
-                'compressed_size': compressed_size,
-                'original_size': compress_result['successful_original_size'] or total_original_size,
-                'successful_files': successful_file_count,  # 成功压缩的文件数
-                'failed_files': 0,  # 失败的文件数（无法精确统计，设为0）
-                'checksum': checksum,
+                'final_path': final_dir / temp_archive_path.name if final_dir else temp_archive_path,  # final目录中的路径（Path对象）
+                'compressed_size': final_path.stat().st_size if final_path.exists() else 0,  # 压缩文件大小
+                'original_size': total_original_size,
+                'successful_files': len(compress_result.get('successful_files', [])),  # 实际成功文件数
+                'failed_files': len(compress_result.get('failed_files', [])),  # 实际失败文件数
+                'checksum': None,
                 'compression_enabled': compression_enabled,
-                'compression_method': compression_method,  # 压缩方法：'pgzip', 'py7zr', '7zip_command', 'tar', 'zstd'
+                'compression_method': compression_method,
                 'compression_level': compression_level if compression_enabled else None,
-                'compression_threads': compression_threads if compression_enabled else None
+                'compression_threads': compression_threads if compression_enabled else None,
+                'compress_progress': compress_progress,  # 进度跟踪字典
+                'compress_result': compress_result  # 压缩结果字典
             }
             
-            logger.info(f"压缩文件组完成，返回路径: {compressed_info['path']} (文件存在: {final_archive_path.exists()})")
-
-            if compression_enabled:
-                compression_ratio = compressed_size / compressed_info['original_size'] if compressed_info['original_size'] > 0 else 0
-                
-                # 根据压缩方法显示正确的名称和线程数
-                method_names = {
-                    'pgzip': 'PGZip',
-                    '7zip_command': '7-Zip命令行',
-                    'py7zr': 'py7zr',
-                    'zstd': 'Zstandard',
-                    'tar': 'Tar'
-                }
-                method_display = method_names.get(compression_method, compression_method)
-                
-                # 根据压缩方法获取对应的线程数
-                if compression_method == '7zip_command':
-                    actual_threads = compression_command_threads
-                elif compression_method == 'pgzip':
-                    actual_threads = pgzip_threads
-                elif compression_method == 'zstd':
-                    actual_threads = zstd_threads
-                else:
-                    # py7zr, tar 等其他方法使用通用的 compression_threads
-                    actual_threads = compression_threads
-                
-                # 确保线程数不为空
-                threads_display = str(actual_threads) if actual_threads is not None else "未知"
-                
-                logger.info(f"{method_display}压缩完成: {successful_file_count} 个文件, "
-                            f"原始大小: {format_bytes(compressed_info['original_size'])}, "
-                            f"压缩后: {format_bytes(compressed_size)}, "
-                            f"压缩比: {compression_ratio:.2%}, "
-                            f"线程数: {threads_display}")
-            else:
-                logger.info(f"打包完成: {successful_file_count} 个文件, "
-                            f"大小: {format_bytes(compressed_size)}")
-
             return compressed_info
 
         except Exception as e:

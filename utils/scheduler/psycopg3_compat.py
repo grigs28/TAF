@@ -206,7 +206,7 @@ class AsyncPGCompatConnection:
             
             transaction_status = self._conn.info.transaction_status
             if transaction_status == 0:  # IDLE: 不在事务中，已提交
-                logger.info(f"[psycopg3_compat] ✅ executemany 事务已提交: {rowcount} 行，commit耗时={commit_time:.3f}秒，事务状态=IDLE")
+                logger.info(f"[psycopg3_compat] ✅ {rowcount} 行，耗时={commit_time:.3f}秒，事务状态=IDLE")
             elif transaction_status == 1:  # INTRANS: 仍在事务中，提交失败
                 logger.error(f"[psycopg3_compat] ❌ executemany commit() 调用后事务状态仍为 INTRANS！这可能导致数据被回滚！")
                 # 尝试再次提交

@@ -84,26 +84,46 @@ def create_task_executor(
             elif is_opengauss():
                 # 使用连接池
                 async with get_opengauss_connection() as conn:
-                    await conn.execute(
-                        """
-                        UPDATE scheduled_tasks
-                        SET status = $1::scheduledtaskstatus, last_run_time = $2
-                        WHERE id = $3
-                        """,
-                        'running', start_time, scheduled_task.id
-                    )
-                    # psycopg3 binary protocol 需要显式提交事务
-                    actual_conn = conn._conn if hasattr(conn, '_conn') else conn
                     try:
-                        await actual_conn.commit()
-                        logger.debug(f"任务 {scheduled_task.id} 状态更新已提交到数据库")
-                    except Exception as commit_err:
-                        logger.warning(f"提交任务状态更新事务失败（可能已自动提交）: {commit_err}")
-                        # 如果不在事务中，commit() 可能会失败，尝试回滚
+                        await conn.execute(
+                            """
+                            UPDATE scheduled_tasks
+                            SET status = $1::scheduledtaskstatus, last_run_time = $2
+                            WHERE id = $3
+                            """,
+                            'running', start_time, scheduled_task.id
+                        )
+                        
+                        # psycopg3 binary protocol 需要显式提交事务
+                        await conn.commit()
+                        
+                        # 验证事务提交状态
+                        actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                        if hasattr(actual_conn, 'info'):
+                            transaction_status = actual_conn.info.transaction_status
+                            if transaction_status == 0:  # IDLE: 事务成功提交
+                                logger.debug(f"任务 {scheduled_task.id} 状态更新已提交到数据库")
+                            elif transaction_status == 1:  # INTRANS: 事务未提交
+                                logger.warning(f"任务 {scheduled_task.id} 状态更新事务未提交，状态={transaction_status}，尝试回滚")
+                                await actual_conn.rollback()
+                                raise Exception("事务提交失败")
+                            elif transaction_status == 3:  # INERROR: 错误状态
+                                logger.error(f"任务 {scheduled_task.id} 状态更新连接处于错误状态，回滚事务")
+                                await actual_conn.rollback()
+                                raise Exception("连接处于错误状态")
+                    except Exception as db_error:
+                        # 异常时显式回滚，避免长事务锁表
+                        logger.error(f"任务 {scheduled_task.id} 状态更新失败: {str(db_error)}", exc_info=True)
                         try:
-                            await actual_conn.rollback()
-                        except:
-                            pass
+                            actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                            if hasattr(actual_conn, 'info'):
+                                transaction_status = actual_conn.info.transaction_status
+                                if transaction_status in (1, 3):  # INTRANS or INERROR
+                                    await actual_conn.rollback()
+                                    logger.debug(f"任务 {scheduled_task.id} 状态更新异常时事务已回滚")
+                        except Exception as rollback_err:
+                            logger.warning(f"任务 {scheduled_task.id} 状态更新回滚事务失败: {str(rollback_err)}")
+                        raise  # 重新抛出异常
             elif is_sqlite() and db_manager.AsyncSessionLocal and callable(db_manager.AsyncSessionLocal):
                 async with db_manager.AsyncSessionLocal() as session:
                     scheduled_task.status = ScheduledTaskStatus.RUNNING

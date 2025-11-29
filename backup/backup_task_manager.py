@@ -190,7 +190,7 @@ class BackupTaskManager:
             Dict: 任务状态字典，如果任务不存在返回None
         """
         try:
-            # 尝试从运行中的任务对象获取 current_compression_progress
+            # 尝试从运行中的任务对象获取 current_compression_progress（从内存中的压缩程序获取）
             current_compression_progress = None
             if self._current_task and self._current_task.id == task_id:
                 if hasattr(self._current_task, 'current_compression_progress') and self._current_task.current_compression_progress:

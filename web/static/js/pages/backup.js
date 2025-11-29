@@ -1,5 +1,5 @@
 (function () {
-    const POLL_INTERVAL = 5000;
+    const POLL_INTERVAL = 2000;  // 减少到2秒，进一步提高状态更新频率
     const REFRESH_INTERVAL = 30000;
 
     const dom = {
@@ -338,11 +338,12 @@
                     case 'compress':
                         return 'bg-warning text-dark'; // 压缩完成 - 黄色
                     case 'copy':
-                        // 写入磁带完成：如果整个任务完成，显示绿色；否则显示红色（不闪烁）
+                        // 写入磁带完成：熄灭（不显示高亮），只有进行中才亮起
+                        // 如果整个任务完成，显示绿色；否则不显示（已完成但任务未完成）
                         if (task && task.status && task.status.toLowerCase() === 'completed') {
-                            return 'bg-success'; // 任务完成时亮起绿色
+                            return 'bg-success'; // 任务完成时亮起绿色（任务整体完成）
                         }
-                        return 'bg-danger text-white'; // 写入磁带完成但任务未完成 - 红色（不闪烁）
+                        return 'bg-secondary'; // 写入磁带完成但任务未完成 - 熄灭（灰色）
                     case 'finalize':
                         return 'bg-success pulse-badge'; // 最终完成 - 绿色脉冲
                     default:
@@ -481,9 +482,10 @@
         const isCompleted = (task.status || '').toLowerCase() === 'completed';
         
         // 定义阶段顺序和映射
-        const stageOrder = ['scan', 'compress', 'copy', 'finalize'];
+        const stageOrder = ['scan', 'prefetch', 'compress', 'copy', 'finalize'];
         const stageLabels = {
             'scan': '扫描文件',
+            'prefetch': '预分组',
             'compress': '压缩/打包',
             'copy': '写入磁带',
             'finalize': '完成'
@@ -514,9 +516,16 @@
             if (isCompleted) {
                 // 完成状态：所有阶段都是 done，finalize 是 current
                 stageOrder.forEach(code => {
+                    let label = stageLabels[code] || code;
+                    // 完成状态下的特殊标签
+                    if (code === 'scan' && isScanCompleted) {
+                        label = '扫描完成';
+                    } else if (code === 'prefetch') {
+                        label = '分组完成';
+                    }
                     stageSteps.push({
                         code: code,
-                        label: stageLabels[code] || code,
+                        label: label,
                         state: code === 'finalize' ? 'current' : 'done'
                     });
                 });
@@ -533,9 +542,23 @@
                         } else {
                             state = 'pending';  // 未开始的阶段
                         }
+                        
+                        let label = stageLabels[code] || code;
+                        // 根据状态调整标签
+                        if (code === 'scan' && isScanCompleted) {
+                            label = '扫描完成';
+                        } else if (code === 'prefetch') {
+                            // 预分组：如果已开始压缩或已完成，显示"分组完成"
+                            if (index < currentIndex || (isScanCompleted && currentIndex > index)) {
+                                label = '分组完成';
+                            } else {
+                                label = '预分组';
+                            }
+                        }
+                        
                         stageSteps.push({
                             code: code,
-                            label: stageLabels[code] || code,
+                            label: label,
                             state: state
                         });
                     });
@@ -574,10 +597,50 @@
                 `;
                 body.appendChild(stageSection);
             } else {
-                const currentStageLabel = task.operation_status
-                    || stageSteps.find(step => step.state === 'current')?.label
-                    || '-';
-                
+                const isCompressStage = (task.operation_stage || '').toLowerCase() === 'compress';
+
+                // 优先：如果是压缩阶段且后端提供了 current_compression_progress，直接用它构造文案
+                // 避免依赖后端 description 是否及时更新，保证"当前阶段"能实时显示压缩进度
+                let currentStageLabel = null;
+                if (isCompressStage && task.current_compression_progress) {
+                    console.log('[压缩进度] 前端获取到压缩进度数据:', task.current_compression_progress);
+                    const compProg = task.current_compression_progress;
+                    // 优先使用 current 和 total（兼容字段），如果没有则使用 current_file_index 和 total_files_in_group
+                    const current = compProg.current !== undefined ? compProg.current : (compProg.current_file_index || 0);
+                    const total = compProg.total !== undefined ? compProg.total : (compProg.total_files_in_group || 0);
+                    let percent = typeof compProg.percent === 'number'
+                        ? compProg.percent
+                        : (total > 0 ? (current / total * 100) : 0);
+                    // 保证百分比是有限数值
+                    if (!Number.isFinite(percent)) {
+                        percent = 0;
+                    }
+                    // 如果 current 和 total 都是 0，显示百分比即可
+                    if (current === 0 && total === 0) {
+                        currentStageLabel = `压缩文件中 (${percent.toFixed(1)}%)`;
+                    } else {
+                        currentStageLabel = `压缩文件中 ${current}/${total} 个文件 (${percent.toFixed(1)}%)`;
+                    }
+                    console.log('[压缩进度] 构造的标签:', currentStageLabel);
+                } else {
+                    console.log('[压缩进度] 压缩阶段但没有进度数据 - isCompressStage:', isCompressStage, 'current_compression_progress:', task.current_compression_progress);
+                }
+
+                // 退回：如果不是压缩阶段，或者没有进度信息，仍然使用后端提供的 operation_status / 阶段标签
+                // 但是过滤掉"初始化压缩引擎"这样的初始状态，显示更有意义的信息
+                if (!currentStageLabel) {
+                    let operationStatus = task.operation_status
+                        || stageSteps.find(step => step.state === 'current')?.label
+                        || '-';
+
+                    // 如果操作状态包含"初始化压缩引擎"且是压缩阶段，显示默认压缩状态
+                    if (isCompressStage && operationStatus.includes('初始化压缩引擎')) {
+                        operationStatus = '压缩文件中...';
+                    }
+
+                    currentStageLabel = operationStatus;
+                }
+
                 // 从 currentStageLabel 中解析进度百分比
                 // 格式示例: "压缩文件中 1201/3395 个文件 (35.4%)"
                 let progressPercent = null;
@@ -591,7 +654,6 @@
                 
                 // 构建显示文本，添加大小信息
                 let displayLabel = currentStageLabel;
-                const isCompressStage = (task.operation_stage || '').toLowerCase() === 'compress';
                 
                 // 如果是压缩阶段，必须使用当前文件组的总容量（压缩前）
                 // 501/20362 个文件 (2.5%) 中的 103.22G 应该是当前文件组的总文件大小，不是整个任务的总大小
@@ -636,36 +698,42 @@
             const progressSection = document.createElement('div');
             progressSection.className = 'mb-2';
             
-            // 检查是否有批次压缩进度信息
+            // 检查是否有各压缩任务进度信息
             let batchProgressHtml = '';
             if (task.operation_stage === 'compress' && task.current_compression_progress) {
                 const compProg = task.current_compression_progress;
-                // 优先使用文件组的总容量（压缩前）
-                let batchSizeGB = '';
-                if (compProg.group_size_bytes && compProg.group_size_bytes > 0) {
-                    // 使用当前文件组的总容量（压缩前）
-                    const batchSizeGBValue = (compProg.group_size_bytes / (1024 * 1024 * 1024)).toFixed(2);
-                    batchSizeGB = ` ${batchSizeGBValue}G`;
-                } else if (progressInfo && progressInfo.compressedBytes > 0 && progressInfo.processedFiles > 0) {
-                    // 如果没有文件组大小信息，估算：平均每个文件的压缩大小
-                    const avgCompressedSizePerFile = progressInfo.compressedBytes / progressInfo.processedFiles;
-                    // 当前批次的大小
-                    const batchSizeBytes = avgCompressedSizePerFile * compProg.current;
-                    const batchSizeGBValue = (batchSizeBytes / (1024 * 1024 * 1024)).toFixed(2);
-                    batchSizeGB = ` ${batchSizeGBValue}G`;
-                } else if (progressInfo && progressInfo.compressedBytes > 0 && compProg.total > 0) {
-                    // 如果无法用总文件数计算，使用当前批次文件数占比估算
-                    const batchRatio = compProg.current / compProg.total;
-                    const batchSizeBytes = progressInfo.compressedBytes * batchRatio;
-                    const batchSizeGBValue = (batchSizeBytes / (1024 * 1024 * 1024)).toFixed(2);
-                    batchSizeGB = ` ${batchSizeGBValue}G`;
+                console.log('[各压缩任务进度] compProg:', compProg);
+                
+                // 优先显示各压缩任务的进度百分比
+                if (compProg.task_progress_list && Array.isArray(compProg.task_progress_list) && compProg.task_progress_list.length > 0) {
+                    // 按文件大小显示各任务的进度：文件总数（百分比%）
+                    const taskProgress = compProg.task_progress_list.map(taskProg => {
+                        const total = taskProg.total || 0;
+                        const percent = taskProg.percent || 0;
+                        return `${total}（${percent.toFixed(0)}%）`;
+                    }).join('   ');
+                    console.log('[各压缩任务进度] 显示任务进度:', taskProgress);
+                    
+                    batchProgressHtml = `
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                            <small class="text-muted">各压缩任务进度:</small>
+                            <small class="text-muted fw-semibold">${taskProgress}</small>
+                        </div>
+                    `;
+                } else if (compProg.running_count && compProg.running_count > 0) {
+                    // 如果有running_count但没有task_progress_list，至少显示任务数量
+                    console.log('[各压缩任务进度] 没有task_progress_list，显示任务数量:', compProg.running_count);
+                    batchProgressHtml = `
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                            <small class="text-muted">各压缩任务进度:</small>
+                            <small class="text-muted fw-semibold">${compProg.running_count} 个任务运行中</small>
+                        </div>
+                    `;
+                } else {
+                    console.log('[各压缩任务进度] 没有进度信息，不显示');
                 }
-                batchProgressHtml = `
-                    <div class="d-flex justify-content-between align-items-center mb-1">
-                        <small class="text-muted">本批次压缩进度:</small>
-                        <small class="text-muted fw-semibold">${compProg.current}/${compProg.total} 个文件 (${compProg.percent.toFixed(1)}%)${batchSizeGB}</small>
-                    </div>
-                `;
+                // 不再显示聚合的文件数进度（如 2793/11972 个文件），只显示各任务的百分比
+                // 文件数进度只在"当前阶段"中显示（作为总体进度参考）
             }
             
             progressSection.innerHTML = `
