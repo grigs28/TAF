@@ -1275,25 +1275,57 @@ class BackupDB:
             elif is_opengauss():
                 # 使用连接池
                 async with get_opengauss_connection() as conn:
-                    await conn.execute(
-                        """
-                        UPDATE backup_sets
-                        SET total_files = $1,
-                            total_bytes = $2,
-                            compressed_bytes = $3,
-                            compression_ratio = $4,
-                            chunk_count = $5,
-                            updated_at = $6
-                        WHERE set_id = $7
-                        """,
-                        file_count,
-                        total_size,
-                        total_size,
-                        backup_set.compression_ratio,
-                        backup_set.chunk_count,
-                        datetime.now(),
-                        backup_set.set_id
-                    )
+                    try:
+                        await conn.execute(
+                            """
+                            UPDATE backup_sets
+                            SET total_files = $1,
+                                total_bytes = $2,
+                                compressed_bytes = $3,
+                                compression_ratio = $4,
+                                chunk_count = $5,
+                                updated_at = $6
+                            WHERE set_id = $7
+                            """,
+                            file_count,
+                            total_size,
+                            total_size,
+                            backup_set.compression_ratio,
+                            backup_set.chunk_count,
+                            datetime.now(),
+                            backup_set.set_id
+                        )
+                        
+                        # 显式提交事务（psycopg3 binary protocol 需要显式提交）
+                        await conn.commit()
+                        
+                        # 验证事务提交状态
+                        actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                        if hasattr(actual_conn, 'info'):
+                            transaction_status = actual_conn.info.transaction_status
+                            if transaction_status == 0:  # IDLE: 事务成功提交
+                                logger.debug(f"finalize_backup_set: 事务已提交（set_id={backup_set.set_id}）")
+                            elif transaction_status == 1:  # INTRANS: 事务未提交
+                                logger.warning(f"finalize_backup_set: ⚠️ 事务未提交，状态={transaction_status}，尝试回滚")
+                                await actual_conn.rollback()
+                                raise Exception("事务提交失败")
+                            elif transaction_status == 3:  # INERROR: 错误状态
+                                logger.error(f"finalize_backup_set: ❌ 连接处于错误状态，回滚事务")
+                                await actual_conn.rollback()
+                                raise Exception("连接处于错误状态")
+                    except Exception as db_error:
+                        # 异常时显式回滚，避免长事务锁表
+                        logger.error(f"finalize_backup_set: 数据库操作失败: {str(db_error)}", exc_info=True)
+                        try:
+                            actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                            if hasattr(actual_conn, 'info'):
+                                transaction_status = actual_conn.info.transaction_status
+                                if transaction_status in (1, 3):  # INTRANS or INERROR
+                                    await actual_conn.rollback()
+                                    logger.debug(f"finalize_backup_set: 异常时事务已回滚（set_id={backup_set.set_id}）")
+                        except Exception as rollback_err:
+                            logger.warning(f"finalize_backup_set: 回滚事务失败: {str(rollback_err)}")
+                        raise  # 重新抛出异常
             else:
                 # SQLite 版本：使用原生 SQL
                 from backup.sqlite_backup_db import finalize_backup_set_sqlite

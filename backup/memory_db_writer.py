@@ -930,9 +930,9 @@ class MemoryDBWriter:
                     total_synced_accumulated = self._stats['synced_files']
                     
                     logger.info(
-                        f"[openGauss同步状态] 同步进行中 - "
+                        f"【openGauss同步状态】同步进行中 - "
                         f"已处理批次: {batch_number}，"
-                        f"剩余待同步: {pending_count} 个文件，"
+                        f"剩余待同步:⏩ {pending_count} 个文件，"
                         f"本次已同步: {total_synced_count} 个，"
                         f"累计总扫描: {total_scanned} 个，"
                         f"累计总同步: {total_synced_accumulated} 个，"
@@ -976,6 +976,24 @@ class MemoryDBWriter:
                     synced_file_ids = await self._insert_files_to_opengauss(file_data_map)
                     batch_sync_time = time.time() - batch_sync_start
                     logger.info(f"[openGauss批次 {batch_number}] _insert_files_to_opengauss 完成，耗时: {batch_sync_time:.2f}秒")
+                    
+                    # 批次同步完成后，检查是否需要报告状态（如果批次耗时很长，可能已经超过30秒）
+                    current_time_after_sync = time.time()
+                    if current_time_after_sync - last_status_report_time >= status_report_interval:
+                        pending_count = await self._get_pending_sync_count()
+                        sync_duration = current_time_after_sync - sync_start_time
+                        total_scanned = self._stats['total_files']
+                        total_synced_accumulated = self._stats['synced_files']
+                        
+                        logger.info(
+                            f"【openGauss同步状态】批次 {batch_number} 完成后状态 - "
+                            f"剩余待同步:⏩ {pending_count} 个文件，"
+                            f"本次已同步: {total_synced_count} 个，"
+                            f"累计总扫描: {total_scanned} 个，"
+                            f"累计总同步: {total_synced_accumulated} 个，"
+                            f"已持续: {sync_duration:.1f}秒"
+                        )
+                        last_status_report_time = current_time_after_sync
                 except Exception as batch_error:
                     batch_sync_time = time.time() - batch_sync_start
                     logger.error(
@@ -1223,7 +1241,18 @@ class MemoryDBWriter:
                         self.__class__._backup_files_table_exists = True
                         logger.info("[openGauss同步] ✅ backup_files 表存在，可以执行插入操作")
                     except Exception as table_check_err:
+                        # 异常时显式回滚，避免长事务锁表
                         error_msg = str(table_check_err)
+                        try:
+                            actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                            if hasattr(actual_conn, 'info'):
+                                transaction_status = actual_conn.info.transaction_status
+                                if transaction_status in (1, 3):  # INTRANS or INERROR
+                                    await actual_conn.rollback()
+                                    logger.debug("[openGauss同步] 检查表时异常，事务已回滚")
+                        except Exception as rollback_err:
+                            logger.warning(f"[openGauss同步] 回滚事务失败: {str(rollback_err)}")
+                        
                         if "does not exist" in error_msg.lower() or "relation" in error_msg.lower() or "UndefinedTable" in str(type(table_check_err).__name__):
                             self.__class__._backup_files_table_exists = False
                             logger.warning(
@@ -1268,6 +1297,16 @@ class MemoryDBWriter:
                 except Exception as executemany_err:
                     insert_time = time.time() - insert_start_time
                     logger.error(f"[openGauss同步] ❌ executemany 执行失败: {str(executemany_err)}, 耗时={insert_time:.2f}秒", exc_info=True)
+                    # 注意：executemany 在 psycopg3_compat 中已经处理了回滚，但为了确保，这里也检查一下
+                    try:
+                        actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                        if hasattr(actual_conn, 'info'):
+                            transaction_status = actual_conn.info.transaction_status
+                            if transaction_status in (1, 3):  # INTRANS or INERROR
+                                await actual_conn.rollback()
+                                logger.debug("[openGauss同步] executemany 异常后，事务已回滚")
+                    except Exception as rollback_err:
+                        logger.warning(f"[openGauss同步] 回滚事务失败: {str(rollback_err)}")
                     raise  # 重新抛出异常，让外层处理
                 
                 # 注意：executemany 在 psycopg3_compat 中已经显式提交了事务
@@ -1322,10 +1361,34 @@ class MemoryDBWriter:
                         )
                 except Exception as verify_err:
                     logger.warning(f"[openGauss同步] ⚠️ 验证数据时出错: {str(verify_err)}")
+                    # 验证失败时，如果连接还在事务中，需要回滚
+                    try:
+                        actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                        if hasattr(actual_conn, 'info'):
+                            transaction_status = actual_conn.info.transaction_status
+                            if transaction_status in (1, 3):  # INTRANS or INERROR
+                                await actual_conn.rollback()
+                                logger.debug("[openGauss同步] 验证数据异常后，事务已回滚")
+                    except Exception as rollback_err:
+                        logger.warning(f"[openGauss同步] 回滚事务失败: {str(rollback_err)}")
                     
         except Exception as e:
             error_msg = str(e)
             logger.error(f"[openGauss同步] ❌ _insert_files_to_opengauss 异常: {error_msg}", exc_info=True)
+            # 异常时显式回滚，避免长事务锁表（如果连接还在上下文中）
+            # 注意：如果异常发生在 async with 块外，连接可能已经释放
+            try:
+                # 尝试获取连接并回滚（如果还在上下文中）
+                if 'conn' in locals():
+                    actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                    if hasattr(actual_conn, 'info'):
+                        transaction_status = actual_conn.info.transaction_status
+                        if transaction_status in (1, 3):  # INTRANS or INERROR
+                            await actual_conn.rollback()
+                            logger.debug("[openGauss同步] 外层异常处理，事务已回滚")
+            except Exception as rollback_err:
+                # 连接可能已经释放，忽略回滚错误
+                logger.debug(f"[openGauss同步] 外层异常处理时回滚失败（可能连接已释放）: {str(rollback_err)}")
             # 如果是表不存在的错误，记录警告并缓存结果
             if "does not exist" in error_msg.lower() or "relation" in error_msg.lower() or "UndefinedTable" in str(type(e).__name__):
                 self.__class__._backup_files_table_exists = False
