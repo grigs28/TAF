@@ -308,6 +308,12 @@ async def acquire_task_lock(task_id: int, execution_id: str) -> bool:
                             """,
                             execution_id, datetime.now(), task_id
                         )
+                        # psycopg3 binary protocol 需要显式提交事务
+                        actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                        try:
+                            await actual_conn.commit()
+                        except Exception as commit_err:
+                            logger.warning(f"提交任务锁更新事务失败（可能已自动提交）: {commit_err}")
                         logger.info(f"任务 {task_id} 的锁已重新激活（更新现有记录）")
                         return True
                 else:
@@ -320,6 +326,12 @@ async def acquire_task_lock(task_id: int, execution_id: str) -> bool:
                             """,
                             task_id, execution_id, datetime.now()
                         )
+                        # psycopg3 binary protocol 需要显式提交事务
+                        actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                        try:
+                            await actual_conn.commit()
+                        except Exception as commit_err:
+                            logger.warning(f"提交任务锁插入事务失败（可能已自动提交）: {commit_err}")
                         logger.info(f"任务 {task_id} 的新锁已创建")
                         return True
                     except Exception as insert_error:
@@ -345,6 +357,12 @@ async def acquire_task_lock(task_id: int, execution_id: str) -> bool:
                                     """,
                                     execution_id, datetime.now(), task_id
                                 )
+                                # psycopg3 binary protocol 需要显式提交事务
+                                actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                                try:
+                                    await actual_conn.commit()
+                                except Exception as commit_err:
+                                    logger.warning(f"提交任务锁更新事务失败（可能已自动提交）: {commit_err}")
                                 logger.info(f"任务 {task_id} 的锁已重新激活（并发插入后更新）")
                                 return True
                         else:
@@ -355,8 +373,10 @@ async def acquire_task_lock(task_id: int, execution_id: str) -> bool:
             from utils.scheduler.sqlite_task_storage import acquire_task_lock_sqlite
             return await acquire_task_lock_sqlite(task_id, execution_id)
     except Exception as e:
-        logger.warning(f"获取任务锁失败（忽略并继续）: {str(e)}")
-        return True
+        logger.error(f"获取任务锁失败: {str(e)}", exc_info=True)
+        # 关键修复：获取锁失败时应该返回 False，而不是 True
+        # 返回 True 会导致即使获取锁失败，任务也会继续执行，造成并发问题
+        return False
 
 
 async def release_task_lock(task_id: int, execution_id: str) -> None:
@@ -381,6 +401,12 @@ async def release_task_lock(task_id: int, execution_id: str) -> None:
                     """,
                     task_id, execution_id
                 )
+                # psycopg3 binary protocol 需要显式提交事务
+                actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                try:
+                    await actual_conn.commit()
+                except Exception as commit_err:
+                    logger.warning(f"提交任务锁释放事务失败（可能已自动提交）: {commit_err}")
         else:
             # SQLite 版本
             from utils.scheduler.sqlite_task_storage import release_task_lock_sqlite
@@ -424,10 +450,20 @@ async def release_task_locks_by_task(task_id: int) -> None:
                     task_id
                 )
                 
-                if lock_count > 0:
-                    logger.info(f"已释放任务 {task_id} 的 {lock_count} 个活跃锁")
-                else:
-                    logger.info(f"任务 {task_id} 没有活跃锁需要释放")
+                # 显式提交事务（openGauss 模式需要显式提交）
+                actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                try:
+                    await actual_conn.commit()
+                    if lock_count > 0:
+                        logger.info(f"已释放任务 {task_id} 的 {lock_count} 个活跃锁（事务已提交）")
+                    else:
+                        logger.info(f"任务 {task_id} 没有活跃锁需要释放")
+                except Exception as commit_err:
+                    logger.warning(f"提交解锁事务失败（可能已自动提交）: {commit_err}")
+                    if lock_count > 0:
+                        logger.info(f"已释放任务 {task_id} 的 {lock_count} 个活跃锁")
+                    else:
+                        logger.info(f"任务 {task_id} 没有活跃锁需要释放")
         else:
             # SQLite 版本
             from utils.scheduler.sqlite_task_storage import release_task_locks_by_task_sqlite
@@ -858,6 +894,15 @@ async def update_task(task_id: int, updates: Dict[str, Any], next_run_time: Opti
                     """
                     
                     await conn.execute(update_sql, *update_values)
+                
+                # 显式提交事务（openGauss 模式需要显式提交）
+                actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                try:
+                    await actual_conn.commit()
+                    logger.debug(f"计划任务更新事务已提交: task_id={task_id}")
+                except Exception as commit_err:
+                    logger.warning(f"提交计划任务更新事务失败（可能已自动提交）: {commit_err}")
+                
                 logger.info(f"使用原生SQL更新计划任务成功: {task.task_name} (ID: {task_id})")
                 
                 # 记录操作日志
@@ -883,7 +928,7 @@ async def update_task(task_id: int, updates: Dict[str, Any], next_run_time: Opti
                     changed_fields=list(updates.keys())
                 )
                 
-                # 重新获取更新后的任务
+                # 重新获取更新后的任务（在事务提交后）
                 return await get_task_by_id(task_id)
         else:
             # SQLite 版本

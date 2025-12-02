@@ -122,7 +122,8 @@ async def get_backup_tasks(
                        bt.tape_device, bt.source_paths, bt.description, bt.result_summary, bt.scan_status, bt.operation_stage,
                        bt.backup_set_id,
                        CASE WHEN st.id IS NOT NULL THEN true ELSE false END as from_scheduler,
-                       st.enabled as scheduler_enabled
+                       st.enabled as scheduler_enabled,
+                       st.id as scheduler_task_id
                 FROM backup_tasks bt
                 LEFT JOIN scheduled_tasks st ON st.backup_task_id = bt.id AND st.action_type = 'backup'
                 WHERE {where_sql}
@@ -268,6 +269,7 @@ async def get_backup_tasks(
                             "description": row["description"] or "",
                             "from_scheduler": row.get("from_scheduler", False),  # 从JOIN查询中获取正确的值
                             "enabled": row.get("scheduler_enabled", True),  # 计划任务的启用状态
+                            "scheduler_task_id": row.get("scheduler_task_id"),  # scheduled_tasks.id，用于启用/禁用操作
                             "operation_status": stage_info["operation_status"],
                             "operation_stage": stage_info["operation_stage"],
                             "operation_stage_label": stage_info["operation_stage_label"],
@@ -374,6 +376,7 @@ async def get_backup_tasks(
                                 "source_paths": spaths or [],
                                 "from_scheduler": True,
                                 "enabled": srow.get("enabled", True),
+                                "scheduler_task_id": srow.get("id"),  # scheduled_tasks.id，用于启用/禁用操作
                                 "description": "",
                                 "estimated_archive_count": None,
                                 "operation_status": stage_info["operation_status"],
@@ -474,7 +477,8 @@ async def get_backup_tasks(
                            bt.tape_device, bt.source_paths, bt.description, bt.result_summary, bt.scan_status, bt.operation_stage,
                            bt.backup_set_id,
                            CASE WHEN st.id IS NOT NULL THEN 1 ELSE 0 END as from_scheduler,
-                           st.enabled as scheduler_enabled
+                           st.enabled as scheduler_enabled,
+                           st.id as scheduler_task_id
                     FROM backup_tasks bt
                     LEFT JOIN scheduled_tasks st ON st.backup_task_id = bt.id AND st.action_type = 'backup'
                     WHERE {where_sql}
@@ -594,6 +598,7 @@ async def get_backup_tasks(
                         "description": row[17] or "",  # description
                         "from_scheduler": bool(row[20]) if len(row) > 20 and row[20] is not None else False,  # from_scheduler
                         "enabled": row[21] if len(row) > 21 and row[21] is not None else True,  # scheduler_enabled
+                        "scheduler_task_id": row[22] if len(row) > 22 and row[22] is not None else None,  # scheduler_task_id
                         "operation_status": stage_info["operation_status"],
                         "operation_stage": stage_info["operation_stage"],
                         "operation_stage_label": stage_info["operation_stage_label"],

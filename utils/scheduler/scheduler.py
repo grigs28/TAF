@@ -150,13 +150,13 @@ class BackupScheduler:
                         task_info['next_run'] = self._get_next_run_time(task_info['cron'])
 
                 # 每分钟检查一次
-                await asyncio.sleep(60)
+                await asyncio.sleep(360)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"调度器循环出错: {str(e)}")
-                await asyncio.sleep(60)
+                await asyncio.sleep(360)
 
     async def _execute_task(self, task_id: str, task_info: Dict):
         """执行任务"""
@@ -303,77 +303,143 @@ class TaskScheduler:
         """从数据库加载计划任务"""
         try:
             scheduled_tasks = await load_tasks_from_db(enabled_only=True)
+            logger.info(f"[任务加载] 从数据库加载启用的计划任务，共 {len(scheduled_tasks)} 个")
+            
+            loaded_count = 0
+            failed_count = 0
+            skipped_count = 0
             
             for task in scheduled_tasks:
-                await self._load_task(task)
+                result = await self._load_task(task)
+                if result == 'loaded':
+                    loaded_count += 1
+                elif result == 'failed':
+                    failed_count += 1
+                elif result == 'skipped':
+                    skipped_count += 1
+            
+            logger.info(
+                f"[任务加载] 任务加载完成 - "
+                f"成功: {loaded_count}, "
+                f"失败: {failed_count}, "
+                f"跳过: {skipped_count}, "
+                f"总计: {len(scheduled_tasks)}"
+            )
                     
         except Exception as e:
             import traceback
             error_detail = traceback.format_exc()
-            logger.error(f"从数据库加载任务失败: {str(e)}")
-            logger.error(f"错误详情:\n{error_detail}")
+            logger.error(f"[任务加载] ❌ 从数据库加载任务失败: {str(e)}")
+            logger.error(f"[任务加载] 错误详情:\n{error_detail}")
 
     async def _load_task(self, scheduled_task: ScheduledTask):
         """加载单个任务到内存"""
         try:
+            task_id = scheduled_task.id
+            task_name = scheduled_task.task_name
+            schedule_type = scheduled_task.schedule_type.value if hasattr(scheduled_task.schedule_type, 'value') else str(scheduled_task.schedule_type)
+            enabled = scheduled_task.enabled
+            status = scheduled_task.status.value if hasattr(scheduled_task.status, 'value') else str(scheduled_task.status)
+            
+            logger.debug(
+                f"[任务加载] 开始加载任务 - "
+                f"ID: {task_id}, "
+                f"名称: {task_name}, "
+                f"调度类型: {schedule_type}, "
+                f"启用状态: {enabled}, "
+                f"任务状态: {status}"
+            )
+            
+            # 检查任务是否启用
+            if not enabled:
+                logger.warning(
+                    f"[任务加载] ⚠️ 任务未启用，跳过加载 - "
+                    f"ID: {task_id}, "
+                    f"名称: {task_name}"
+                )
+                return 'skipped'
+            
             # 计算下次执行时间
             next_run = calculate_next_run_time(scheduled_task)
-            if next_run:
-                # 创建任务执行函数
-                execute_func = create_task_executor(scheduled_task, self.system_instance)
-                
-                self.tasks[scheduled_task.id] = {
-                    'task': scheduled_task,
-                    'execute_func': execute_func,
-                    'next_run': next_run,
-                    'last_run': scheduled_task.last_run_time
-                }
-                
-                # 更新数据库中的下次执行时间
-                from utils.scheduler.db_utils import is_redis
-                from utils.scheduler.sqlite_utils import is_sqlite
-                from utils.scheduler.redis_task_storage import update_task_redis
-                
-                if is_redis():
-                    # Redis模式：使用Redis更新函数
-                    await update_task_redis(scheduled_task.id, {'next_run_time': next_run}, next_run_time=next_run)
-                elif is_opengauss():
-                    # 使用openGauss原生连接，避免SQLAlchemy版本解析错误
-                    # 使用连接池
-                    async with get_opengauss_connection() as conn:
-                        await conn.execute(
-                            """
-                            UPDATE scheduled_tasks
-                            SET next_run_time = $1
-                            WHERE id = $2
-                            """,
-                            next_run,
-                            scheduled_task.id
-                        )
-                        # psycopg3 binary protocol 需要显式提交事务
-                        actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+            if not next_run:
+                logger.warning(
+                    f"[任务加载] ⚠️ 无法计算下次执行时间，跳过加载 - "
+                    f"ID: {task_id}, "
+                    f"名称: {task_name}, "
+                    f"调度类型: {schedule_type}, "
+                    f"调度配置: {scheduled_task.schedule_config}"
+                )
+                return 'skipped'
+            
+            # 创建任务执行函数
+            execute_func = create_task_executor(scheduled_task, self.system_instance)
+            
+            self.tasks[scheduled_task.id] = {
+                'task': scheduled_task,
+                'execute_func': execute_func,
+                'next_run': next_run,
+                'last_run': scheduled_task.last_run_time
+            }
+            
+            # 更新数据库中的下次执行时间
+            from utils.scheduler.db_utils import is_redis
+            from utils.scheduler.sqlite_utils import is_sqlite
+            from utils.scheduler.redis_task_storage import update_task_redis
+            
+            if is_redis():
+                # Redis模式：使用Redis更新函数
+                await update_task_redis(scheduled_task.id, {'next_run_time': next_run}, next_run_time=next_run)
+            elif is_opengauss():
+                # 使用openGauss原生连接，避免SQLAlchemy版本解析错误
+                # 使用连接池
+                async with get_opengauss_connection() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE scheduled_tasks
+                        SET next_run_time = $1
+                        WHERE id = $2
+                        """,
+                        next_run,
+                        scheduled_task.id
+                    )
+                    # psycopg3 binary protocol 需要显式提交事务
+                    actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                    try:
+                        await actual_conn.commit()
+                        logger.debug(f"[任务加载] 任务 {scheduled_task.id} next_run_time 更新已提交到数据库")
+                    except Exception as commit_err:
+                        logger.warning(f"[任务加载] 提交任务 next_run_time 更新事务失败（可能已自动提交）: {commit_err}")
+                        # 如果不在事务中，commit() 可能会失败，尝试回滚
                         try:
-                            await actual_conn.commit()
-                            logger.debug(f"任务 {scheduled_task.id} next_run_time 更新已提交到数据库")
-                        except Exception as commit_err:
-                            logger.warning(f"提交任务 next_run_time 更新事务失败（可能已自动提交）: {commit_err}")
-                            # 如果不在事务中，commit() 可能会失败，尝试回滚
-                            try:
-                                await actual_conn.rollback()
-                            except:
-                                pass
-                elif is_sqlite() and db_manager.AsyncSessionLocal and callable(db_manager.AsyncSessionLocal):
-                    # 使用SQLAlchemy会话（SQLite数据库）
-                    async with db_manager.AsyncSessionLocal() as session:
-                        scheduled_task.next_run_time = next_run
-                        session.add(scheduled_task)
-                        await session.commit()
-                    
-                logger.info(f"加载任务: {scheduled_task.task_name} (ID: {scheduled_task.id})")
+                            await actual_conn.rollback()
+                        except:
+                            pass
+            elif is_sqlite() and db_manager.AsyncSessionLocal and callable(db_manager.AsyncSessionLocal):
+                # 使用SQLAlchemy会话（SQLite数据库）
+                async with db_manager.AsyncSessionLocal() as session:
+                    scheduled_task.next_run_time = next_run
+                    session.add(scheduled_task)
+                    await session.commit()
+            
+            logger.info(
+                f"[任务加载] ✅ 任务加载成功 - "
+                f"ID: {task_id}, "
+                f"名称: {task_name}, "
+                f"调度类型: {schedule_type}, "
+                f"下次执行时间: {next_run.strftime('%Y-%m-%d %H:%M:%S') if next_run else 'N/A'}"
+            )
+            return 'loaded'
+            
         except Exception as e:
-            logger.error(f"加载任务失败 {scheduled_task.task_name}: {str(e)}")
+            logger.error(
+                f"[任务加载] ❌ 加载任务失败 - "
+                f"ID: {scheduled_task.id if scheduled_task else 'N/A'}, "
+                f"名称: {scheduled_task.task_name if scheduled_task else 'N/A'}, "
+                f"错误: {str(e)}"
+            )
             import traceback
-            logger.debug(f"错误详情:\n{traceback.format_exc()}")
+            logger.debug(f"[任务加载] 错误详情:\n{traceback.format_exc()}")
+            return 'failed'
 
     async def add_task(self, scheduled_task: ScheduledTask) -> bool:
         """添加计划任务"""
@@ -457,11 +523,23 @@ class TaskScheduler:
             # 重新加载任务
             if updated_task.enabled:
                 await self._load_task(updated_task)
-            elif task_id in self.tasks:
+                logger.info(f"更新计划任务成功: {updated_task.task_name} (已启用)")
+            else:
                 # 如果任务被禁用，从内存中移除
-                del self.tasks[task_id]
+                if task_id in self.tasks:
+                    del self.tasks[task_id]
+                    logger.info(f"更新计划任务成功: {updated_task.task_name} (已禁用，已从内存中移除)")
+                # 如果任务正在运行，停止它
+                if task_id in self._running_executions:
+                    logger.warning(
+                        f"任务被禁用时仍在运行，正在停止 - "
+                        f"任务ID: {task_id}, "
+                        f"任务名称: {updated_task.task_name}"
+                    )
+                    await self.stop_task(task_id)
+                else:
+                    logger.info(f"更新计划任务成功: {updated_task.task_name} (已禁用)")
             
-            logger.info(f"更新计划任务成功: {updated_task.task_name}")
             return True
             
         except Exception as e:
@@ -472,7 +550,7 @@ class TaskScheduler:
             return False
 
     async def run_task(self, task_id: int, run_options: Optional[Dict[str, Any]] = None) -> bool:
-        """立即运行计划任务"""
+        """立即运行计划任务（手动运行，跳过启用状态检查）"""
         try:
             task = await get_task_by_id(task_id)
             
@@ -480,27 +558,74 @@ class TaskScheduler:
                 logger.warning(f"未找到任务 ID: {task_id}")
                 return False
             
-            # 如果任务不在内存中，先加载
+            # 手动运行时，即使任务未启用也可以运行
+            # 如果任务不在内存中，强制加载（忽略 enabled 状态）
             if task_id not in self.tasks:
-                await self._load_task(task)
+                # 手动运行时，即使任务未启用也允许运行
+                # 先尝试正常加载，如果因为未启用而跳过，则强制加载
+                load_result = await self._load_task(task)
+                if load_result == 'skipped' and not task.enabled:
+                    # 任务未启用，但手动运行允许执行，强制加载到内存
+                    logger.info(f"[手动运行] 任务未启用，但允许手动运行，强制加载到内存 - ID: {task_id}, 名称: {task.task_name}")
+                    # 计算下次执行时间
+                    next_run = calculate_next_run_time(task)
+                    if not next_run:
+                        # 如果无法计算下次执行时间，使用当前时间作为下次执行时间（仅用于手动运行）
+                        from datetime import datetime
+                        next_run = datetime.now()
+                        logger.debug(f"[手动运行] 无法计算下次执行时间，使用当前时间: {next_run}")
+                    
+                    # 创建任务执行函数（手动运行标记为True）
+                    execute_func = create_task_executor(
+                        task,
+                        self.system_instance,
+                        manual_run=True,
+                        run_options=run_options
+                    )
+                    # 临时加载到内存（不检查 enabled 状态）
+                    self.tasks[task_id] = {
+                        'task': task,
+                        'next_run': next_run,
+                        'execute_func': execute_func,
+                        'last_run': task.last_run_time
+                    }
+                elif load_result != 'loaded':
+                    # 加载失败（非跳过原因）
+                    logger.error(f"[手动运行] 任务加载失败: {load_result} - ID: {task_id}")
+                    return False
             
-            # 创建执行函数并执行（手动运行标记为True，因为是从Web界面点击运行的）
-            execute_func = create_task_executor(
-                task,
-                self.system_instance,
-                manual_run=True,
-                run_options=run_options
-            )
+            # 确保任务在内存中
+            if task_id not in self.tasks:
+                logger.error(f"[手动运行] 任务不在内存中，无法运行 - ID: {task_id}")
+                return False
+            
+            # 获取执行函数（如果内存中没有，创建新的）
+            task_info = self.tasks.get(task_id)
+            if task_info and 'execute_func' in task_info:
+                # 如果执行函数已存在，但 run_options 可能不同，需要重新创建
+                execute_func = task_info['execute_func']
+            else:
+                # 创建执行函数并执行（手动运行标记为True，因为是从Web界面点击运行的）
+                execute_func = create_task_executor(
+                    task,
+                    self.system_instance,
+                    manual_run=True,
+                    run_options=run_options
+                )
             
             # 在后台执行（不阻塞）
+            logger.info(f"[手动运行] 创建后台执行任务 - 任务ID: {task_id}, 任务名称: {task.task_name}")
             execution_task = asyncio.create_task(execute_func())
             self._running_executions[task_id] = execution_task
+            logger.info(f"[手动运行] 后台执行任务已创建并启动 - 任务ID: {task_id}, 任务名称: {task.task_name}")
             
-            logger.info(f"立即运行计划任务: {task.task_name}")
+            logger.info(f"立即运行计划任务: {task.task_name} (ID: {task_id}, 手动运行)")
             return True
                 
         except Exception as e:
+            import traceback
             logger.error(f"立即运行计划任务失败: {str(e)}")
+            logger.error(f"错误详情:\n{traceback.format_exc()}")
             return False
 
     async def stop_task(self, task_id: int) -> bool:
@@ -541,11 +666,61 @@ class TaskScheduler:
     async def start(self):
         """启动调度器"""
         if self.running:
+            logger.warning("[调度器启动] 调度器已在运行中")
             return
         
         self.running = True
+        total_tasks = len(self.tasks)
+        logger.info(
+            f"[调度器启动] 启动计划任务调度器 - "
+            f"内存中任务数: {total_tasks}"
+        )
+        
+        # 输出所有已加载任务的详细信息
+        if total_tasks > 0:
+            logger.info("[调度器启动] 已加载的任务列表:")
+            for task_id, task_info in self.tasks.items():
+                task = task_info.get('task')
+                task_name = task.task_name if task else f"任务ID:{task_id}"
+                next_run = task_info.get('next_run')
+                schedule_type = task.schedule_type.value if task and hasattr(task.schedule_type, 'value') else 'N/A'
+                last_success = task.last_success_time if task else None
+                last_run = task.last_run_time if task else None
+                last_error = task.last_error if task else None
+                
+                # 构建执行状态信息
+                execution_status = []
+                if last_success:
+                    execution_status.append(f"上次成功: {last_success.strftime('%Y-%m-%d %H:%M:%S')}")
+                elif last_run:
+                    # 有运行记录但没有成功记录，说明执行过但失败了
+                    execution_status.append(f"上次运行: {last_run.strftime('%Y-%m-%d %H:%M:%S')} (失败)")
+                else:
+                    execution_status.append("从未执行")
+                
+                execution_info = ", ".join(execution_status) if execution_status else "无执行记录"
+                
+                # 如果有错误信息，显示错误摘要（最多100个字符）
+                error_info = ""
+                if last_error:
+                    error_preview = last_error[:100] + "..." if len(last_error) > 100 else last_error
+                    error_info = f"\n      ❌ 失败原因: {error_preview}"
+                
+                logger.info(
+                    f"  - 任务ID: {task_id}, "
+                    f"名称: {task_name}, "
+                    f"调度类型: {schedule_type}, "
+                    f"下次执行: {next_run.strftime('%Y-%m-%d %H:%M:%S') if next_run else 'N/A'}, "
+                    f"{execution_info}{error_info}"
+                )
+        else:
+            logger.warning("[调度器启动] ⚠️ 内存中没有任何任务，请检查:")
+            logger.warning("  1. 数据库中是否有启用的计划任务（enabled=True）")
+            logger.warning("  2. 任务的下次执行时间是否计算成功")
+            logger.warning("  3. 任务加载过程中是否有错误")
+        
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
-        logger.info("计划任务调度器已启动")
+        logger.info("[调度器启动] ✅ 计划任务调度器主循环已启动")
 
     async def stop(self):
         """停止调度器"""
@@ -565,16 +740,106 @@ class TaskScheduler:
 
     async def _scheduler_loop(self):
         """调度器主循环"""
+        loop_count = 0
         while self.running:
             try:
                 current_time = datetime.now()
+                loop_count += 1
+                
+                # 每10次循环输出一次统计信息（约10分钟）
+                if loop_count % 10 == 0:
+                    total_tasks = len(self.tasks)
+                    running_tasks = len(self._running_executions)
+                    logger.info(
+                        f"[调度器主循环] 检查任务状态 - "
+                        f"总任务数: {total_tasks}, "
+                        f"运行中: {running_tasks}, "
+                        f"当前时间: {current_time.strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
                 
                 # 检查每个任务
+                triggered_tasks = []
                 for task_id, task_info in list(self.tasks.items()):
-                    if current_time >= task_info['next_run']:
+                    task = task_info.get('task')
+                    task_name = task.task_name if task else f"任务ID:{task_id}"
+                    next_run = task_info.get('next_run')
+                    
+                    # 检查任务是否启用（双重检查，确保安全）
+                    if not task or not task.enabled:
+                        # 如果任务被禁用，从内存中移除（防止内存泄漏）
+                        if task_id in self.tasks:
+                            logger.debug(
+                                f"[调度器主循环] 任务已禁用，从内存中移除 - "
+                                f"任务ID: {task_id}, "
+                                f"任务名称: {task_name}"
+                            )
+                            del self.tasks[task_id]
+                        # 如果任务正在运行，停止它
+                        if task_id in self._running_executions:
+                            logger.warning(
+                                f"[调度器主循环] 检测到已禁用的任务仍在运行，停止执行 - "
+                                f"任务ID: {task_id}, "
+                                f"任务名称: {task_name}"
+                            )
+                            await self.stop_task(task_id)
+                        continue
+                    
+                    # 检查 next_run 是否为 None
+                    if next_run is None:
+                        logger.warning(
+                            f"[调度器主循环] ⚠️ 任务的下次执行时间为空 - "
+                            f"任务ID: {task_id}, "
+                            f"任务名称: {task_name}, "
+                            f"建议重新加载任务"
+                        )
+                        continue
+                    
+                    # 获取任务的执行状态信息（用于日志输出）
+                    last_success = task.last_success_time if task else None
+                    schedule_type = task.schedule_type.value if task and hasattr(task.schedule_type, 'value') else 'N/A'
+                    
+                    # 判断月度任务是否本月已执行
+                    is_monthly_executed = False
+                    if task and schedule_type.lower() == 'monthly' and last_success:
+                        is_monthly_executed = (
+                            last_success.year == current_time.year and 
+                            last_success.month == current_time.month
+                        )
+                    
+                    # 调试日志：输出任务检查详情（每100次循环输出一次，避免日志过多）
+                    if loop_count % 100 == 0:
+                        monthly_status = ""
+                        if schedule_type.lower() == 'monthly':
+                            if is_monthly_executed:
+                                monthly_status = f", 本月已执行: 是 ({last_success.strftime('%Y-%m-%d %H:%M:%S') if last_success else 'N/A'})"
+                            else:
+                                monthly_status = f", 本月已执行: 否" + (f" (上次成功: {last_success.strftime('%Y-%m-%d %H:%M:%S')})" if last_success else " (从未执行)")
+                        
+                        logger.debug(
+                            f"[调度器主循环] 检查任务 - "
+                            f"任务ID: {task_id}, "
+                            f"任务名称: {task_name}, "
+                            f"下次执行时间: {next_run.strftime('%Y-%m-%d %H:%M:%S')}, "
+                            f"当前时间: {current_time.strftime('%Y-%m-%d %H:%M:%S')}, "
+                            f"时间差: {(next_run - current_time).total_seconds():.0f}秒, "
+                            f"是否到达: {current_time >= next_run}"
+                            f"{monthly_status}"
+                        )
+                    
+                    if current_time >= next_run:
+                        # 记录触发执行的任务信息
+                        logger.info(
+                            f"[调度器主循环] ✅ 检测到任务需要执行 - "
+                            f"任务ID: {task_id}, "
+                            f"任务名称: {task_name}, "
+                            f"下次执行时间: {next_run.strftime('%Y-%m-%d %H:%M:%S') if next_run else 'N/A'}, "
+                            f"当前时间: {current_time.strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                        
                         # 执行任务（在后台执行，不阻塞）
                         execution_task = asyncio.create_task(task_info['execute_func']())
                         self._running_executions[task_id] = execution_task
+                        triggered_tasks.append(task_name)
                         
                         # 清理已完成的任务
                         def cleanup_task(exec_task, tid):
@@ -590,14 +855,22 @@ class TaskScheduler:
                         
                         asyncio.create_task(cleanup_task(execution_task, task_id)())
                 
+                # 如果有任务被触发，输出汇总信息
+                if triggered_tasks:
+                    logger.info(
+                        f"[调度器主循环] 本次检查触发了 {len(triggered_tasks)} 个任务: "
+                        f"{', '.join(triggered_tasks)}"
+                    )
+                
                 # 每分钟检查一次
-                await asyncio.sleep(60)
+                await asyncio.sleep(360)
                 
             except asyncio.CancelledError:
+                logger.info("[调度器主循环] 收到取消信号，退出主循环")
                 break
             except Exception as e:
-                logger.error(f"调度器循环出错: {str(e)}")
-                await asyncio.sleep(60)
+                logger.error(f"[调度器主循环] ❌ 调度器循环出错: {str(e)}", exc_info=True)
+                await asyncio.sleep(360)
 
     async def get_tasks(self, enabled_only: bool = False) -> List[ScheduledTask]:
         """获取所有计划任务"""

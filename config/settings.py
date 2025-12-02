@@ -141,6 +141,7 @@ class Settings(BaseSettings):
     PGZIP_BLOCK_SIZE: str = "1M"  # PGZip块大小（默认1M，可通过.env中的PGZIP_BLOCK_SIZE覆盖）
     PGZIP_THREADS: int = 4  # PGZip线程数
     ZSTD_THREADS: int = 4  # Zstandard压缩线程数
+    ZSTD_WRITE_SIZE: int = 1048576  # Zstandard压缩写入缓冲区大小（字节），默认1MB（1048576字节）
 
     # 扫描进度更新配置
     SCAN_UPDATE_INTERVAL: int = 2000  # 后台扫描每处理多少个文件更新一次数据库（total_files/total_bytes）
@@ -171,7 +172,7 @@ class Settings(BaseSettings):
     # 内存数据库配置
     USE_MEMORY_DB: bool = True  # 是否使用内存数据库（默认启用，性能最优）
     MEMORY_DB_MAX_FILES: int = 5000000  # 内存数据库中最大文件数（500万）
-    MEMORY_DB_SYNC_BATCH_SIZE: int = 5000  # 内存数据库同步批次大小
+    MEMORY_DB_SYNC_BATCH_SIZE: int = 3000  # 内存数据库同步批次大小
     MEMORY_DB_SYNC_INTERVAL: int = 30  # 内存数据库同步间隔（秒）
     MEMORY_DB_CHECKPOINT_INTERVAL: int = 300  # 内存数据库检查点间隔（秒）
     MEMORY_DB_CHECKPOINT_RETENTION_HOURS: int = 24  # 内存数据库检查点保留时间（小时）

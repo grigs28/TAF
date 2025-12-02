@@ -135,7 +135,7 @@ class CompressionWorker:
         if tasks:
             logger.info(f"等待 {len(tasks)} 个压缩任务完成...")
             await asyncio.gather(*tasks, return_exceptions=True)
-            logger.info("所有压缩任务已完成")
+            logger.warning("所有压缩任务已完成")
 
     async def _process_database_file_groups(self):
         """处理数据库中的文件组（非openGauss模式）"""

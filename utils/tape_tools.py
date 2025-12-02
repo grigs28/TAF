@@ -67,150 +67,87 @@ class TapeToolsManager:
         logger.info(f"[{tool_type}] 执行命令: {cmd_str}")
         logger.info(f"[{tool_type}] 工作目录: {working_dir}")
         
-        proc = None
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                stdin=asyncio.subprocess.DEVNULL,  # 防止子进程等待输入导致阻塞
-                cwd=working_dir  # 使用正确的工作目录
-            )
-            
-            # 使用 wait() 和 read() 分别处理，避免 communicate() 的问题
-            stdout = b""
-            stderr = b""
-            returncode = -1
-            
-            # 创建读取任务 - 在进程结束后读取所有输出
-            async def read_stdout():
-                if proc.stdout:
-                    try:
-                        # 进程结束后，读取所有剩余数据
-                        data = b""
-                        import time
-                        read_start_time = time.time()
-                        while True:
-                            # 添加单次读取超时（1秒），防止无限等待
-                            try:
-                                chunk = await asyncio.wait_for(
-                                    proc.stdout.read(4096),  # 每次读取4KB
-                                    timeout=1.0
-                                )
-                                if not chunk:
-                                    break
-                                data += chunk
-                                # 如果已经读取了很长时间（超过30秒），强制退出
-                                if time.time() - read_start_time > 30:
-                                    logger.warning(f"[{tool_type}] 读取stdout超时（30秒），强制退出")
-                                    break
-                            except asyncio.TimeoutError:
-                                # 单次读取超时，可能管道已关闭，尝试检查
-                                logger.debug(f"[{tool_type}] 读取stdout单次读取超时，可能管道已关闭")
-                                break
-                        return data
-                    except Exception as e:
-                        logger.warning(f"[{tool_type}] 读取stdout失败: {e}")
-                        return b""
-                return b""
-            
-            async def read_stderr():
-                if proc.stderr:
-                    try:
-                        # 进程结束后，读取所有剩余数据
-                        data = b""
-                        import time
-                        read_start_time = time.time()
-                        while True:
-                            # 添加单次读取超时（1秒），防止无限等待
-                            try:
-                                chunk = await asyncio.wait_for(
-                                    proc.stderr.read(4096),  # 每次读取4KB
-                                    timeout=1.0
-                                )
-                                if not chunk:
-                                    break
-                                data += chunk
-                                # 如果已经读取了很长时间（超过30秒），强制退出
-                                if time.time() - read_start_time > 30:
-                                    logger.warning(f"[{tool_type}] 读取stderr超时（30秒），强制退出")
-                                    break
-                            except asyncio.TimeoutError:
-                                # 单次读取超时，可能管道已关闭，尝试检查
-                                logger.debug(f"[{tool_type}] 读取stderr单次读取超时，可能管道已关闭")
-                                break
-                        return data
-                    except Exception as e:
-                        logger.warning(f"[{tool_type}] 读取stderr失败: {e}")
-                        return b""
-                return b""
-            
+        # 在 Windows 上，由于使用 WindowsSelectorEventLoopPolicy（兼容 psycopg3），
+        # asyncio.create_subprocess_exec 不支持（会抛出 NotImplementedError）。
+        # 因此改用同步的 subprocess.run，通过 asyncio.to_thread 在线程中执行。
+        import subprocess
+        import platform
+        import time
+        
+        # 记录开始时间
+        start_time = time.time()
+        
+        # 判断是否为格式化命令
+        is_format_command = tool_type == "LTFS" and ("format" in cmd_str.lower() or "LtfsCmdFormat" in cmd_str)
+        
+        def run_subprocess():
+            """在线程中运行同步 subprocess"""
             try:
-                # 等待进程结束
-                returncode = await asyncio.wait_for(proc.wait(), timeout=timeout)
-                logger.info(f"[{tool_type}] 进程已结束，返回码: {returncode}")
+                result = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    stdin=subprocess.DEVNULL,  # 防止子进程等待输入导致阻塞
+                    cwd=working_dir,  # 使用正确的工作目录
+                    timeout=timeout,  # 设置超时
+                    text=False  # 返回 bytes，稍后手动解码
+                )
+                stdout = result.stdout if result.stdout else b""
+                stderr = result.stderr if result.stderr else b""
+                returncode = result.returncode
+                return stdout, stderr, returncode
+            except subprocess.TimeoutExpired:
+                logger.error(f"[{tool_type}] 命令执行超时（{timeout}秒）")
+                return b"", "命令执行超时".encode('utf-8', errors='ignore'), -1
+            except Exception as e:
+                logger.error(f"[{tool_type}] 命令执行异常: {str(e)}", exc_info=True)
+                return b"", str(e).encode('utf-8', errors='ignore'), -1
+        
+        try:
+            # 对于格式化命令，启动一个后台任务显示等待时间
+            waiting_task = None
+            if is_format_command:
+                async def show_waiting_time():
+                    """显示格式化等待时间"""
+                    wait_interval = 30  # 每30秒显示一次
+                    while True:
+                        await asyncio.sleep(wait_interval)
+                        elapsed = time.time() - start_time
+                        elapsed_minutes = int(elapsed // 60)
+                        elapsed_seconds = int(elapsed % 60)
+                        # 使用 print 直接输出到终端，确保用户能看到
+                        print(f"\r[{tool_type}] 格式化进行中... 已等待: {elapsed_minutes}分{elapsed_seconds}秒", end="", flush=True)
                 
-                # 读取输出（进程已结束，应该很快）
-                # 使用较短的超时时间，因为进程已经结束
+                # 启动等待时间显示任务
+                waiting_task = asyncio.create_task(show_waiting_time())
+            
+            # 在线程中执行同步 subprocess
+            stdout, stderr, returncode = await asyncio.to_thread(run_subprocess)
+            
+            # 停止等待时间显示任务
+            if waiting_task:
+                waiting_task.cancel()
                 try:
-                    stdout_task = asyncio.create_task(read_stdout())
-                    stderr_task = asyncio.create_task(read_stderr())
-                    stdout, stderr = await asyncio.wait_for(
-                        asyncio.gather(stdout_task, stderr_task),
-                        timeout=30  # 增加到30秒，确保能读取完所有输出
-                    )
-                    logger.debug(f"[{tool_type}] 成功读取输出，stdout长度: {len(stdout)}, stderr长度: {len(stderr)}")
-                except asyncio.TimeoutError:
-                    logger.warning(f"[{tool_type}] 读取输出超时（进程已结束但读取超时）")
-                    # 尝试强制关闭管道
-                    try:
-                        if proc.stdout:
-                            proc.stdout.close()
-                        if proc.stderr:
-                            proc.stderr.close()
-                    except Exception:
-                        pass
-                    stdout = b""
-                    stderr = b""
-                except Exception as e:
-                    logger.warning(f"[{tool_type}] 读取输出时出错: {e}")
-                    stdout = b""
-                    stderr = b""
-                    
-            except asyncio.TimeoutError:
-                # 超时了，尝试终止进程
-                logger.warning(f"[{tool_type}] 命令执行超时，尝试终止进程...")
-                try:
-                    if proc and proc.returncode is None:
-                        proc.kill()
-                        # 等待进程终止
-                        try:
-                            await asyncio.wait_for(proc.wait(), timeout=5)
-                            returncode = proc.returncode if proc.returncode is not None else -1
-                        except asyncio.TimeoutError:
-                            returncode = -1
-                    else:
-                        returncode = proc.returncode if proc else -1
-                except Exception as e:
-                    logger.error(f"[{tool_type}] 终止进程时出错: {e}")
-                    returncode = -1
-                
-                logger.error(f"[{tool_type}] 命令执行超时")
-                return {
-                    "success": False,
-                    "returncode": returncode,
-                    "stdout": "",
-                    "stderr": "命令执行超时",
-                    "error": "Timeout",
-                    "command": cmd_str  # 添加完整命令行
-                }
+                    await waiting_task
+                except asyncio.CancelledError:
+                    pass
+                # 清除当前行的等待时间显示
+                print("\r" + " " * 80 + "\r", end="", flush=True)
+            
+            # 计算总耗时
+            elapsed_time = time.time() - start_time
+            elapsed_minutes = int(elapsed_time // 60)
+            elapsed_seconds = int(elapsed_time % 60)
             
             # 解码输出
-            stdout_str = stdout.decode('utf-8', errors='ignore') if stdout else ""
-            stderr_str = stderr.decode('utf-8', errors='ignore') if stderr else ""
+            stdout_str = stdout.decode('utf-8', errors='ignore') if isinstance(stdout, bytes) else (stdout if stdout else "")
+            stderr_str = stderr.decode('utf-8', errors='ignore') if isinstance(stderr, bytes) else (stderr if stderr else "")
             
-            # 记录详细的执行结果
-            logger.info(f"[{tool_type}] 命令执行完成 - 返回码: {returncode}, stdout长度: {len(stdout_str)}, stderr长度: {len(stderr_str)}")
+            # 记录详细的执行结果（包含耗时）
+            logger.info(f"[{tool_type}] 命令执行完成 - 返回码: {returncode}, 耗时: {elapsed_minutes}分{elapsed_seconds}秒, stdout长度: {len(stdout_str)}, stderr长度: {len(stderr_str)}")
+            # 同时在终端显示耗时
+            if tool_type == "LTFS" and "format" in cmd_str.lower():
+                print(f"[{tool_type}] 格式化完成 - 总耗时: {elapsed_minutes}分{elapsed_seconds}秒")
             if stdout_str:
                 logger.debug(f"[{tool_type}] stdout内容: {stdout_str[:500]}")  # 只记录前500字符
             if stderr_str:
@@ -238,14 +175,6 @@ class TapeToolsManager:
             
         except Exception as e:
             logger.error(f"[{tool_type}] 命令执行异常: {str(e)}", exc_info=True)
-            # 确保进程被清理
-            if proc and proc.returncode is None:
-                try:
-                    proc.kill()
-                    # 不等待，直接返回错误
-                except Exception:
-                    pass
-            
             return {
                 "success": False,
                 "returncode": -1,
@@ -788,6 +717,9 @@ class TapeToolsManager:
         
         Returns:
             操作结果字典
+        
+        Note:
+            LtfsCmdFormat.exe 可以使用盘符（如 "O"）作为参数。
         """
         # 使用配置的盘符或提供的盘符
         if not drive_letter:
@@ -800,7 +732,7 @@ class TapeToolsManager:
         logger.info(f"LTFS格式化磁带 (盘符: {drive_letter}, 卷标: {volume_label})...")
         tool_path = os.path.join(self.ltfs_tools_dir, self.ltfs_tools['format'])
         
-        # LtfsCmdFormat.exe的参数是盘符（如 "O"），不是驱动器地址
+        # LtfsCmdFormat.exe的参数是盘符（如 "O"）
         cmd = [tool_path, drive_letter]
         
         # 添加序列号参数
@@ -927,11 +859,24 @@ class TapeToolsManager:
         cmd = [tool_path, drive_id, drive_letter_with_colon]
         return await self.run_command(cmd, timeout=60, tool_type="LTFS", working_dir=self.ltfs_tools_dir)
     
-    async def unassign_tape_ltfs(self, drive_id: str) -> Dict[str, Any]:
-        """从驱动器卸载磁带"""
-        logger.info(f"从驱动器 {drive_id} 卸载磁带...")
+    async def unassign_tape_ltfs(self, drive_letter: Optional[str] = None) -> Dict[str, Any]:
+        """从驱动器卸载磁带
+        
+        Args:
+            drive_letter: 盘符（大写，不带冒号，如 "O"），如果为None则使用配置的盘符
+        """
+        # 使用配置的盘符或提供的盘符
+        if not drive_letter:
+            drive_letter = self.drive_letter
+        
+        # 确保盘符不带冒号
+        if drive_letter.endswith(':'):
+            drive_letter = drive_letter[:-1]
+        
+        logger.info(f"从盘符 {drive_letter} 卸载磁带...")
         tool_path = os.path.join(self.ltfs_tools_dir, self.ltfs_tools['unassign'])
-        cmd = [tool_path, drive_id]
+        # LtfsCmdUnassign.exe 的参数是盘符（如 "O"），不是驱动器地址
+        cmd = [tool_path, drive_letter]
         return await self.run_command(cmd, timeout=60, tool_type="LTFS", working_dir=self.ltfs_tools_dir)
     
     async def check_tape_ltfs(self, drive_id: str) -> Dict[str, Any]:
@@ -959,7 +904,24 @@ class TapeToolsManager:
     def get_volume_info_sync(self, drive_letter: Optional[str] = None) -> Dict[str, Any]:
         """
         同步版本：使用fsutil获取卷信息（包括卷标）
+        
         适用于在线程中调用，避免 asyncio.create_subprocess_shell 在非主线程的Windows问题。
+        
+        阻塞原因分析：
+        1. **磁带驱动器未就绪**：虽然 os.path.exists() 检查通过，但设备可能还未完全就绪，
+           导致 fsutil 命令挂起等待设备响应。
+        2. **Windows文件系统访问延迟**：访问LTFS磁带驱动器时，Windows可能需要较长时间
+           来获取卷信息，特别是在格式化刚完成后。
+        3. **设备I/O阻塞**：如果磁带驱动器正在执行其他操作（如格式化、写入等），
+           fsutil 可能会等待设备响应，导致阻塞。
+        4. **Windows文件系统缓存**：Windows可能会缓存文件系统信息，但在某些情况下
+           需要重新查询设备，这个过程可能较慢。
+        
+        解决方案：
+        - 使用 subprocess.run() 的 timeout 参数（10秒），超时后自动终止进程
+        - 设置 stdin=subprocess.DEVNULL 防止等待输入
+        - 使用同步版本在线程中执行（通过 asyncio.to_thread），避免阻塞事件循环
+        - 添加详细的错误日志，帮助诊断问题
         """
         # 使用配置的盘符或提供的盘符
         if not drive_letter:
@@ -1022,10 +984,14 @@ class TapeToolsManager:
                     "error": f"无法获取卷信息 (returncode={result.returncode})"
                 }
         except subprocess.TimeoutExpired:
-            logger.error("[同步] 读取卷信息超时（10秒）")
+            # 超时异常：fsutil命令执行超过10秒
+            # 这通常发生在磁带驱动器未就绪或设备I/O阻塞时
+            logger.error(f"[同步] 读取卷信息超时（10秒）- 驱动器 {drive_with_colon} 可能未就绪或设备I/O阻塞")
+            logger.error(f"[同步] 可能原因：1) 磁带未正确挂载 2) 驱动器正在执行其他操作 3) 设备未响应")
+            logger.error(f"[同步] 建议：等待设备就绪后重试，或检查驱动器状态")
             return {
                 "success": False,
-                "error": "读取卷信息超时（fsutil命令执行超过10秒）"
+                "error": f"读取卷信息超时（fsutil命令执行超过10秒）- 驱动器 {drive_with_colon} 可能未就绪"
             }
         except Exception as e:
             logger.error(f"[同步] 读取卷信息异常: {str(e)}", exc_info=True)
@@ -1035,75 +1001,15 @@ class TapeToolsManager:
             }
     
     async def get_volume_info(self) -> Dict[str, Any]:
-        """使用fsutil获取卷信息（包括卷标）"""
-        # fsutil需要带冒号的盘符
-        drive_with_colon = f"{self.drive_letter}:" if not self.drive_letter.endswith(':') else self.drive_letter
-        logger.info(f"使用fsutil获取 {drive_with_colon} 卷信息...")
+        """
+        使用fsutil获取卷信息（包括卷标）
         
-        # 检查驱动器是否存在
-        if not os.path.exists(drive_with_colon):
-            return {
-                "success": False,
-                "error": f"驱动器 {drive_with_colon} 不存在或未分配"
-            }
-        
-        cmd = f"fsutil fsinfo volumeinfo {drive_with_colon}"
-        proc = await asyncio.create_subprocess_shell(
-            cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            stdin=asyncio.subprocess.DEVNULL  # 防止子进程等待输入导致阻塞
-        )
-        
-        try:
-            # 添加超时设置（10秒），防止fsutil命令卡住
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=10
-            )
-        except asyncio.TimeoutError:
-            logger.warning(f"读取卷信息超时（10秒），尝试终止进程...")
-            try:
-                if proc.returncode is None:
-                    proc.kill()
-                    await asyncio.wait_for(proc.wait(), timeout=2)
-            except Exception as kill_error:
-                logger.warning(f"终止fsutil进程时出错: {kill_error}")
-            return {
-                "success": False,
-                "error": "读取卷信息超时（fsutil命令执行超过10秒）"
-            }
-        
-        stdout_str = stdout.decode('gbk', errors='ignore') if stdout else ""
-        
-        if proc.returncode == 0:
-            # 解析输出
-            lines = stdout_str.split('\n')
-            volume_info = {}
-            
-            for line in lines:
-                line = line.strip()
-                if ':' in line:
-                    key, value = line.split(':', 1)
-                    volume_info[key.strip()] = value.strip()
-            
-            # 提取关键信息
-            result = {
-                "success": True,
-                "volume_info": volume_info,
-                "volume_name": volume_info.get('卷名', volume_info.get('Volume Name', '')),
-                "serial_number": volume_info.get('卷序列号', volume_info.get('Volume Serial Number', '')),
-                "file_system": volume_info.get('文件系统名', volume_info.get('File System Name', '')),
-                "raw_output": stdout_str
-            }
-            
-            logger.info(f"成功读取卷标: {result['volume_name']}, 序列号: {result['serial_number']}")
-            return result
-        else:
-            return {
-                "success": False,
-                "error": "无法获取卷信息"
-            }
+        注意：在Windows上访问磁带驱动器时，fsutil可能会因为设备未就绪而阻塞。
+        因此使用同步版本（通过asyncio.to_thread）并设置超时，避免阻塞整个事件循环。
+        """
+        # 使用同步版本，通过 asyncio.to_thread 在线程中执行，避免阻塞事件循环
+        # 这样可以更好地控制超时和进程终止
+        return await asyncio.to_thread(self.get_volume_info_sync, self.drive_letter)
     
     def read_tape_label_windows_sync(self, drive_letter: Optional[str] = None) -> Dict[str, Any]:
         """

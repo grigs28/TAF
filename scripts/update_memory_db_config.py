@@ -49,8 +49,8 @@ def update_env_file():
 # 是否使用内存数据库，默认启用（性能最优）
 USE_MEMORY_DB=True
 
-# 同步到openGauss的批次大小，默认5000个文件
-MEMORY_DB_SYNC_BATCH_SIZE=5000
+# 同步到openGauss的批次大小，默认3000个文件
+MEMORY_DB_SYNC_BATCH_SIZE=3000
 
 # 同步间隔（秒），默认30秒同步一次
 MEMORY_DB_SYNC_INTERVAL=30

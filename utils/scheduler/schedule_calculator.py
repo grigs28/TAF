@@ -108,6 +108,16 @@ def calculate_next_run_time(scheduled_task: ScheduledTask) -> Optional[datetime]
             
         elif schedule_type == ScheduleType.MONTHLY:
             # 每月任务：每月固定日期的固定时间
+            # 如果从未成功执行过（last_success_time 为空），应该立即执行（下一分钟）
+            if not scheduled_task.last_success_time:
+                logger.info(
+                    f"[调度时间计算] 月度任务从未成功执行过，设置为立即执行（下一分钟） - "
+                    f"任务ID: {scheduled_task.id if scheduled_task else 'N/A'}, "
+                    f"任务名称: {scheduled_task.task_name if scheduled_task else 'N/A'}"
+                )
+                # 返回当前时间+1分钟，确保尽快执行
+                return current_time + timedelta(minutes=1)
+            
             day_of_month = config.get('day_of_month', 1)
             # 确保 day_of_month 是整数类型
             try:

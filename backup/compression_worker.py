@@ -72,6 +72,16 @@ class CompressionWorker:
         
         # 压缩进度更新任务（定期从数据库查询聚合进度）
         self.progress_update_task: Optional[asyncio.Task] = None
+        
+        # openGauss 数据库统一调度器（异步批量更新压缩信息和内存数据库同步）
+        if is_opengauss():
+            from backup.compression_db_updater import OpenGaussDBScheduler
+            self.db_updater = OpenGaussDBScheduler(
+                backup_set_db_id=backup_set.id,
+                batch_size=3000  # 每3000个文件批量更新一次
+            )
+        else:
+            self.db_updater = None
 
     def start(self):
         """启动压缩处理任务"""
@@ -86,6 +96,10 @@ class CompressionWorker:
                 logger.error("❌ 没有运行中的事件循环，无法创建任务")
                 raise
 
+            # 启动数据库更新器（如果使用）
+            if self.db_updater:
+                self.db_updater.start()
+            
             self.compression_task = asyncio.create_task(self._compression_loop())
             self._running = True
             logger.info("压缩处理任务已启动")
@@ -112,6 +126,11 @@ class CompressionWorker:
                 raise
             except Exception as e:
                 logger.error(f"压缩处理任务异常: {str(e)}", exc_info=True)
+
+        # 停止数据库更新器（处理剩余文件）
+        if self.db_updater:
+            logger.info("[压缩循环] 停止数据库更新器，处理剩余文件...")
+            await self.db_updater.stop()
 
         logger.info("压缩处理任务已停止")
 
@@ -332,7 +351,7 @@ class CompressionWorker:
                 except Exception as e:
                     logger.error(f"压缩任务异常: {str(e)}", exc_info=True)
             self.running_compression_futures.clear()
-        logger.info("所有压缩任务已完成")
+        logger.warning("所有压缩任务已完成")
     
     def get_aggregated_compression_progress(self) -> Optional[Dict[str, Any]]:
         """获取所有并行压缩任务的聚合进度和各个任务的进度列表
@@ -719,86 +738,21 @@ class CompressionWorker:
                         file_paths = [f.get('file_path') or f.get('path') for f in processed_file_group if f.get('file_path') or f.get('path')]
                         
                         if file_paths:
-                            # 直接更新 chunk_number，不更新 is_copy_success
-                            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
-                            if is_opengauss():
-                                async with get_opengauss_connection() as conn:
-                                    try:
-                                        # 计算每个文件的压缩大小（平均分配）
-                                        per_file_compressed_size = compressed_size // len(file_paths) if file_paths else 0
-                                        update_params = [(chunk_number, per_file_compressed_size, self.backup_set.id, path) for path in file_paths]
-                                        
-                                        # 执行批量更新
-                                        await conn.executemany(
-                                            """
-                                            UPDATE backup_files
-                                            SET chunk_number = $1,
-                                                compressed_size = $2,
-                                                updated_at = NOW()
-                                            WHERE backup_set_id = $3
-                                              AND file_path = $4
-                                              AND (is_copy_success = TRUE)
-                                            """,
-                                            update_params
-                                        )
-                                        
-                                        # 显式提交事务
-                                        await conn.commit()
-                                        
-                                        # 验证事务提交状态
-                                        actual_conn = conn._conn if hasattr(conn, '_conn') else conn
-                                        if hasattr(actual_conn, 'info'):
-                                            transaction_status = actual_conn.info.transaction_status
-                                            if transaction_status == 0:  # IDLE: 事务成功提交
-                                                logger.debug(f"[#{group_idx + 1}] chunk_number更新事务已提交")
-                                            elif transaction_status == 1:  # INTRANS: 事务未提交
-                                                logger.warning(f"[#{group_idx + 1}] ⚠️ 事务未提交，状态={transaction_status}，尝试回滚")
-                                                await actual_conn.rollback()
-                                                raise Exception("事务提交失败")
-                                            elif transaction_status == 3:  # INERROR: 错误状态
-                                                logger.error(f"[#{group_idx + 1}] ❌ 连接处于错误状态，回滚事务")
-                                                await actual_conn.rollback()
-                                                raise Exception("连接处于错误状态")
-                                        
-                                        # 验证更新：查询实际更新的文件数
-                                        verify_row = await conn.fetchrow(
-                                            """
-                                            SELECT COUNT(*)::BIGINT as count
-                                            FROM backup_files
-                                            WHERE backup_set_id = $1
-                                              AND file_path = ANY($2)
-                                              AND chunk_number = $3
-                                            """,
-                                            self.backup_set.id,
-                                            file_paths,
-                                            chunk_number
-                                        )
-                                        verified_count = verify_row['count'] if verify_row else 0
-                                        
-                                        logger.info(
-                                            f"[#{group_idx + 1}] ✅ 已更新 chunk_number={chunk_number}，"
-                                            f"文件数={len(file_paths)}，验证更新={verified_count}，"
-                                            f"压缩大小={format_bytes(compressed_size)}"
-                                        )
-                                        
-                                        if verified_count < len(file_paths):
-                                            logger.warning(
-                                                f"[#{group_idx + 1}] ⚠️ 部分文件未更新 chunk_number: "
-                                                f"期望={len(file_paths)}, 实际={verified_count}"
-                                            )
-                                    except Exception as e:
-                                        # 异常时显式回滚，避免长事务锁表
-                                        logger.error(f"[#{group_idx + 1}] 更新chunk_number失败: {str(e)}", exc_info=True)
-                                        try:
-                                            actual_conn = conn._conn if hasattr(conn, '_conn') else conn
-                                            if hasattr(actual_conn, 'info'):
-                                                transaction_status = actual_conn.info.transaction_status
-                                                if transaction_status in (1, 3):  # INTRANS or INERROR
-                                                    await actual_conn.rollback()
-                                                    logger.debug(f"[#{group_idx + 1}] 异常时事务已回滚")
-                                        except Exception as rollback_err:
-                                            logger.warning(f"[#{group_idx + 1}] 回滚事务失败: {str(rollback_err)}")
-                                        raise  # 重新抛出异常
+                            # 使用数据库更新器异步批量更新（openGauss模式）
+                            if self.db_updater:
+                                # 提交给更新器，由更新器批量处理
+                                await self.db_updater.submit_compressed_files(
+                                    group_idx=group_idx,
+                                    file_paths=file_paths,
+                                    chunk_number=chunk_number,
+                                    compressed_size=compressed_size,
+                                    original_size=original_size
+                                )
+                                logger.info(
+                                    f"[压缩工作器] ✅ 已提交压缩文件组 #{group_idx + 1} 给调度器: "
+                                    f"{len(file_paths)} 个文件, chunk_number={chunk_number}, "
+                                    f"压缩大小={format_bytes(compressed_size)}"
+                                )
                             else:
                                 # SQLite/Redis 模式：使用 mark_files_as_copied（它会处理这些模式）
                                 # 但只更新 chunk_number 相关字段
@@ -817,7 +771,7 @@ class CompressionWorker:
                                 )
                                 logger.info(f"[#{group_idx + 1}] ✅ 已更新 chunk_number={chunk_number}，文件数={len(processed_file_group)}")
                     except Exception as update_error:
-                        logger.error(f"[#{group_idx + 1}] ⚠️ 更新 chunk_number 失败: {str(update_error)}", exc_info=True)
+                        logger.error(f"[#{group_idx + 1}] ⚠️ 提交压缩文件信息失败: {str(update_error)}", exc_info=True)
                     
                     # 从数据库读取当前值，然后累加（避免并发问题）
                     from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection

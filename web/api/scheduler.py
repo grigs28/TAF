@@ -1142,6 +1142,15 @@ async def unlock_scheduled_task(task_id: int, request: Request = None):
             details={"task_name": task.task_name, "task_id": task_id}
         )
         
+        # 先停止正在运行的任务执行器（如果存在）
+        if task_id in scheduler._running_executions:
+            logger.info(f"检测到任务 {task_id} 正在运行，先停止执行器...")
+            try:
+                await scheduler.stop_task(task_id)
+                logger.info(f"已停止任务 {task_id} 的执行器")
+            except Exception as stop_error:
+                logger.warning(f"停止任务 {task_id} 的执行器失败: {str(stop_error)}")
+        
         # 解锁任务并重置状态
         from utils.scheduler.task_unlocker import unlock_task_and_reset_status
         success = await unlock_task_and_reset_status(task_id)

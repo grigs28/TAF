@@ -43,7 +43,13 @@ async def unlock_task_and_reset_status(task_id: int) -> bool:
                             """,
                             'active', task_id
                         )
-                        logger.info(f"任务 {task_id} 状态已从 RUNNING 重置为 ACTIVE")
+                        # 显式提交事务（openGauss 模式需要显式提交）
+                        actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                        try:
+                            await actual_conn.commit()
+                            logger.info(f"任务 {task_id} 状态已从 RUNNING 重置为 ACTIVE（事务已提交）")
+                        except Exception as commit_err:
+                            logger.warning(f"提交解锁事务失败（可能已自动提交）: {commit_err}")
                     else:
                         logger.info(f"任务 {task_id} 当前状态为 {current_status}，无需重置")
         else:

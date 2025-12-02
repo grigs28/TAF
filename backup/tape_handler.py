@@ -168,7 +168,7 @@ class TapeHandler:
             
             # 步骤1: 复制文件到磁带机（LTFS挂载的盘符）
             # 使用异步方式执行文件复制，避免阻塞事件循环
-            logger.info(f"正在复制文件到磁带机: {source_file} -> {target_file}")
+            logger.warning(f"正在复制文件到磁带机: {source_file} -> {target_file}")
             import asyncio
             try:
                 await asyncio.to_thread(shutil.copy2, str(source_file), str(target_file))

@@ -266,7 +266,7 @@ def _compress_with_7zip_command(
                         continue
                 return data.decode("utf-8", errors="ignore")
 
-            # 执行命令
+            # 执行命令（不设置超时，让压缩自然完成）
             process = subprocess.run(
                 cmd_work_abs,
                 cwd=str(temp_work_dir_abs),
@@ -770,12 +770,19 @@ def _compress_with_zstd(
     log_interval = 10.0  # 改为10秒
     last_file_process_time = time.time()
 
-    logger.info(f"[zstd] 开始创建压缩文件: {archive_path_abs} (level={level}, threads={threads})")
+    logger.warning(f"[zstd] 开始创建压缩文件: {archive_path_abs} (level={level}, threads={threads})")
     logger.info(f"[zstd] 待压缩文件数: {total_files_in_group} 个，预计耗时较长")
+    
+    # 获取 zstd 写入缓冲区大小配置（默认1MB = 1048576字节）
+    from config.settings import get_settings
+    settings = get_settings()
+    zstd_write_size = getattr(settings, 'ZSTD_WRITE_SIZE', 1048576)
+    
     try:
         with archive_path_abs.open('wb') as raw_out:
             compressor = zstd.ZstdCompressor(level=level, threads=threads)
-            with compressor.stream_writer(raw_out, closefd=False) as zstd_stream:
+            logger.info(f"[zstd] 使用写入缓冲区大小: {format_bytes(zstd_write_size)}")
+            with compressor.stream_writer(raw_out, closefd=False, write_size=zstd_write_size) as zstd_stream:
                 with tarfile.open(fileobj=zstd_stream, mode='w|') as tar:
                     for file_idx, file_info in enumerate(file_group):
                         file_path = Path(file_info['path'])
@@ -820,15 +827,25 @@ def _compress_with_zstd(
                                 }
                             last_log_time = current_time
 
-                        # 优化：只检查一次文件是否存在，使用 stat() 同时获取大小（避免重复检查）
-                        try:
-                            file_stat = file_path.stat()
-                            file_size = file_stat.st_size
-                            file_size_display = format_bytes(file_size) if file_size > 0 else "未知"
-                        except (OSError, FileNotFoundError) as path_error:
-                            logger.warning(f"[zstd] 文件不存在或无法访问，跳过: {file_path} (错误: {str(path_error)})")
-                            failed_files.append({'path': str(file_path), 'reason': f'文件不存在或无法访问: {str(path_error)}'})
-                            continue
+                        # 优化：优先使用扫描时已获取的文件大小，避免重复调用 stat()
+                        # 从 file_info 中获取大小（扫描阶段已通过 get_file_info() 获取）
+                        file_size = file_info.get('size', 0) or file_info.get('file_size', 0) or 0
+                        
+                        # 如果 file_info 中没有大小信息，才调用 stat() 获取（后备方案，但通常不会执行）
+                        if file_size == 0:
+                            try:
+                                file_stat = file_path.stat()
+                                file_size = file_stat.st_size
+                            except (OSError, FileNotFoundError) as path_error:
+                                logger.warning(f"[zstd] 文件不存在或无法访问，跳过: {file_path} (错误: {str(path_error)})")
+                                failed_files.append({'path': str(file_path), 'reason': f'文件不存在或无法访问: {str(path_error)}'})
+                                continue
+                        
+                        file_size_display = format_bytes(file_size) if file_size > 0 else "未知"
+                        
+                        # 注意：不检查文件是否存在，因为：
+                        # 1. file_info 中有 size 说明扫描时文件存在
+                        # 2. 如果文件不存在，tar.add() 会抛出异常，在异常处理中处理
 
                         arcname = file_path.name
                         for src_path in source_paths:
@@ -858,21 +875,9 @@ def _compress_with_zstd(
                             # 如果单个文件处理时间超过30秒，记录警告（包含文件大小）
                             file_process_time = time.time() - file_start_time
                             if file_process_time > 30.0:
-                                logger.warning(
+                                logger.info(
                                     f"[zstd] 文件处理时间较长 ({file_process_time:.1f}秒, 大小: {file_size_display}): {file_path}"
                                 )
-                            
-                            # 每100个文件记录一次进度，避免长时间无日志（改进：从1000改为100）
-                            if (file_idx + 1) % 100 == 0:
-                                elapsed = time.time() - last_file_process_time
-                                avg_time = elapsed / 100.0
-                                current_progress = file_idx + 1
-                                progress_percent = (current_progress / max(total_files_in_group, 1) * 100) if total_files_in_group > 0 else 0
-                                logger.debug(
-                                    f"[zstd] 压缩进度: {current_progress}/{total_files_in_group} 个文件 ({progress_percent:.1f}%) - "
-                                    f"最近100个文件平均: {avg_time:.3f}秒/文件 (总耗时: {elapsed:.1f}秒)"
-                                )
-                                last_file_process_time = time.time()
                             
                             # 每1000个文件记录一次详细的处理时间统计（重置统计时间点）
                             if (file_idx + 1) % 1000 == 0:
@@ -882,11 +887,12 @@ def _compress_with_zstd(
                                 files_per_sec = 1000.0 / elapsed if elapsed > 0 else 0
                                 logger.info(f"[zstd] 最近1000个文件耗时: {elapsed:.1f}秒，{files_per_sec:.1f}文件/秒")
                                 last_log_time = time.time()
-
+                            
+                            # 更新任务进度百分比（不更新 bytes_written，避免频繁调用 stat()）
+                            # bytes_written 会在压缩完成后由 _finalize_compression_progress 一次性获取
                             if total_files > 0:
                                 current_processed = base_processed_files + file_idx + 1
                                 compress_progress_value = 10.0 + (current_processed / total_files) * 90.0
-                                compress_progress['bytes_written'] = archive_path_abs.stat().st_size if archive_path_abs.exists() else 0
                                 backup_task.progress_percent = min(100.0, compress_progress_value)
                         except Exception as add_error:
                             logger.warning(f"[zstd] 添加文件失败: {file_path}, 错误: {add_error}")
@@ -896,28 +902,29 @@ def _compress_with_zstd(
         # 计算原始文件总大小
         successful_original_size = sum(f.get('size', 0) or 0 for f in file_group if str(f.get('path')) in successful_files)
         
-        # 确保文件完全关闭：with语句退出后，获取最终文件大小
-        # 注意：with语句应该已经关闭了文件，文件句柄释放的等待将在 compress_file_group 中处理
+        # 压缩完成后，获取一次最终文件大小（避免压缩过程中频繁调用 stat()）
         compressed_size = 0
         try:
-            # 获取最终文件大小
             if archive_path_abs.exists():
                 compressed_size = archive_path_abs.stat().st_size
-                logger.debug(f"[zstd] 压缩文件最终大小: {format_bytes(compressed_size)}")
-        except Exception as size_check_error:
-            logger.warning(f"[zstd] 检查文件大小时出错（不影响主流程）: {size_check_error}")
+                compress_progress['bytes_written'] = compressed_size
+        except Exception:
+            compressed_size = 0
+            compress_progress['bytes_written'] = 0
         
         compress_progress['completed'] = True
         compress_progress['running'] = False
-        compress_progress['bytes_written'] = compressed_size if compressed_size > 0 else (archive_path_abs.stat().st_size if archive_path_abs.exists() else 0)
         
-        # 计算压缩比
-        compression_ratio = (compressed_size / successful_original_size) if successful_original_size > 0 else 0.0
+        # 计算压缩比（如果 compressed_size 为 0，压缩比也为 0）
+        compression_ratio = (compressed_size / successful_original_size) if (successful_original_size > 0 and compressed_size > 0) else 0.0
         
-        logger.info(f"[zstd] 压缩完成：{len(successful_files)} 个文件成功，{len(failed_files)} 个失败，"
+        # 格式化压缩比和压缩后大小
+        compression_ratio_str = f"{compression_ratio:.2%}" if compression_ratio > 0 else "未知"
+        compressed_size_str = format_bytes(compressed_size) if compressed_size > 0 else "未知"
+        logger.warning(f"[zstd] 压缩完成：{len(successful_files)} 个文件成功，{len(failed_files)} 个失败，"
                    f"原始大小: {format_bytes(successful_original_size)}, "
-                   f"压缩后大小: {format_bytes(compressed_size)}, "
-                   f"压缩比: {compression_ratio:.2%}")
+                   f"压缩后大小: {compressed_size_str}, "
+                   f"压缩比: {compression_ratio_str}")
 
         return {
             'successful_files': successful_files,
@@ -929,16 +936,41 @@ def _compress_with_zstd(
         logger.error(f"zstd压缩失败: {zstd_error}")
         import traceback
         logger.error(traceback.format_exc())
-        for file_path in successful_files:
-            failed_files.append({'path': file_path, 'reason': 'zstd压缩失败'})
+        
+        # 只保留已经成功添加的文件在 successful_files 中，不把它们移到 failed_files
+        # 只把真正没写成功的文件（已经在 failed_files 中的，或者在循环中还没处理的）放进 failed_files
+        # 找出所有文件路径，把未成功的添加到 failed_files
+        all_file_paths = set()
+        file_info_map = {}  # {file_path_str: file_info}
+        for f in file_group:
+            file_path_str = str(Path(f.get('path', '')).absolute())
+            all_file_paths.add(file_path_str)
+            file_info_map[file_path_str] = f
+        
+        successful_file_paths = {str(Path(p).absolute()) for p in successful_files}
+        failed_file_paths = {str(Path(f.get('path', '')).absolute()) for f in failed_files}
+        
+        # 找出那些既不在 successful_files 也不在 failed_files 的文件（循环中还没处理的）
+        unprocessed_files = all_file_paths - successful_file_paths - failed_file_paths
+        for unprocessed_path in unprocessed_files:
+            # 使用原始路径（从 file_info 中获取）
+            original_path = file_info_map.get(unprocessed_path, {}).get('path', unprocessed_path)
+            failed_files.append({'path': original_path, 'reason': 'zstd压缩过程异常，文件未处理'})
+        
+        # 计算成功文件的原始大小（只计算已经成功添加的文件）
+        successful_original_size = sum(
+            f.get('size', 0) or 0 
+            for f in file_group 
+            if str(Path(f.get('path', '')).absolute()) in successful_file_paths
+        )
 
         # 标记压缩完成（即使失败也要标记，避免无限等待）
         _finalize_compression_progress(compress_progress, archive_path_abs)
 
         return {
-            'successful_files': [],
-            'failed_files': failed_files,
-            'successful_original_size': 0,
+            'successful_files': successful_files,  # 保留已经成功添加的文件
+            'failed_files': failed_files,  # 只包含真正失败的文件
+            'successful_original_size': successful_original_size,
             'archive_path': str(archive_path_abs)
         }
 
@@ -1435,13 +1467,13 @@ class Compressor:
             
             # 在线程池中异步启动压缩操作，立即返回，不等待完成
             loop = asyncio.get_event_loop()
-            logger.info(f"[压缩] 异步启动压缩任务，立即返回，不等待完成")
+            logger.warning(f"[压缩] 异步启动压缩任务，立即返回，不等待完成")
             compression_future = loop.run_in_executor(None, _do_7z_compress)
             
             # 顺序执行：等待压缩完成、标注完成、移动到final
             # 等待压缩完成（不设置超时，让压缩自然完成）
             await compression_future
-            logger.info(f"[压缩] 压缩任务已完成")
+            logger.warning(f"[压缩] 压缩任务已完成")
             
             # 等待文件完全关闭（Windows上文件句柄释放可能需要时间）
             logger.debug("[压缩] 等待文件句柄完全释放...")

@@ -171,7 +171,7 @@ async def get_env_config():
             # 内存数据库配置
             "use_memory_db": parse_bool(env_vars.get("USE_MEMORY_DB"), True),
             "memory_db_max_files": parse_int(env_vars.get("MEMORY_DB_MAX_FILES"), 5000000),
-            "memory_db_sync_batch_size": parse_int(env_vars.get("MEMORY_DB_SYNC_BATCH_SIZE"), 5000),
+            "memory_db_sync_batch_size": parse_int(env_vars.get("MEMORY_DB_SYNC_BATCH_SIZE"), 3000),
             "memory_db_sync_interval": parse_int(env_vars.get("MEMORY_DB_SYNC_INTERVAL"), 30),
             "memory_db_checkpoint_interval": parse_int(env_vars.get("MEMORY_DB_CHECKPOINT_INTERVAL"), 300),
             "memory_db_checkpoint_retention_hours": parse_int(env_vars.get("MEMORY_DB_CHECKPOINT_RETENTION_HOURS"), 24),

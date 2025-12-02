@@ -28,7 +28,7 @@ class MemoryDBWriter:
     _backup_files_table_exists = None
 
     def __init__(self, backup_set_db_id: int,
-                 sync_batch_size: int = 5000,           # 同步批次大小
+                 sync_batch_size: int = 3000,           # 同步批次大小
                  sync_interval: int = 30,                # 同步间隔(秒)
                  max_memory_files: int = 5000000,        # 内存中最大文件数（500万）
                  checkpoint_interval: int = 300,         # 检查点间隔(秒)
@@ -55,6 +55,9 @@ class MemoryDBWriter:
         self.memory_db = None
         self.db_connection = None
 
+        # openGauss 统一调度器（仅 openGauss 模式使用）
+        self.db_scheduler = None
+        
         # 同步相关
         self._is_syncing = False
         self._sync_task = None
@@ -65,6 +68,9 @@ class MemoryDBWriter:
         self._last_trigger_time = 0  # 防止频繁触发同步
         self._last_file_added_time = time.time()  # 记录最后添加文件的时间
         self._checkpoint_files = []  # 记录创建的检查点文件列表 [(文件路径, 创建时间, 最大未同步文件ID), ...]
+        # 用于检测同步是否卡住：记录上一次的待同步文件数量和检查时间
+        self._last_pending_count = -1  # 上一次的待同步文件数量（-1表示未初始化）
+        self._last_pending_check_time = 0  # 上一次检查待同步文件数量的时间
 
         # 统计信息
         self._stats = {
@@ -82,6 +88,18 @@ class MemoryDBWriter:
         if self.enable_checkpoint:
             await self._cleanup_old_checkpoints_on_startup()
         await self._setup_memory_database()
+        
+        # openGauss 模式：使用统一调度器
+        from utils.scheduler.db_utils import is_opengauss
+        if is_opengauss():
+            from backup.compression_db_updater import OpenGaussDBScheduler
+            self.db_scheduler = OpenGaussDBScheduler(
+                backup_set_db_id=self.backup_set_db_id,
+                batch_size=self.sync_batch_size
+            )
+            self.db_scheduler.start()
+            logger.info(f"[内存数据库] openGauss 统一调度器已启动")
+        
         await self._start_sync_tasks()
         logger.info(f"内存数据库写入器已初始化 (backup_set_id={self.backup_set_db_id}, checkpoint={self.enable_checkpoint})")
 
@@ -671,7 +689,7 @@ class MemoryDBWriter:
                     return
 
             # 条件2：文件数量达到批次大小的10%（更早触发，避免积压）
-            # 默认 sync_batch_size=5000，所以 500 个文件就触发同步
+            # 默认 sync_batch_size=3000，所以 300 个文件就触发同步
             if pending_files >= self.sync_batch_size // 10:
                 await self._trigger_sync("batch_size_reached")
                 return
@@ -831,6 +849,28 @@ class MemoryDBWriter:
                     # 计算同步速度
                     sync_speed = total_synced / sync_duration if sync_duration > 0 else 0
                     
+                    # 检测待同步文件数量是否有变化，如果有变化则重置计时器
+                    if self._last_pending_count != pending_count:
+                        # 待同步文件数量有变化，说明没有卡住，重置计时器
+                        if self._last_pending_count >= 0:  # 不是第一次检查
+                            logger.debug(
+                                f"待同步文件数量有变化 ({self._last_pending_count} -> {pending_count})，"
+                                f"判定未卡住，重置计时器"
+                            )
+                        self._last_pending_count = pending_count
+                        self._last_pending_check_time = current_time
+                    else:
+                        # 待同步文件数量没有变化，检查是否卡住
+                        if self._last_pending_check_time > 0:
+                            stuck_duration = current_time - self._last_pending_check_time
+                            # 如果待同步文件数量持续不变超过5分钟，记录警告（可能是卡住了）
+                            if stuck_duration > 300:
+                                logger.warning(
+                                    f"⚠️⚠️ 警告：待同步文件数量已持续 {stuck_duration:.1f} 秒（超过5分钟）未变化，"
+                                    f"可能已卡住！待同步: {pending_count} 个文件。"
+                                    f"建议检查数据库连接是否正常。"
+                                )
+                    
                     # 每30秒报告一次状态
                     if current_time - last_status_report_time >= status_report_interval:
                         logger.info(
@@ -848,14 +888,6 @@ class MemoryDBWriter:
                             f"待同步: {pending_count} 个，"
                             f"累计总扫描: {total_scanned} 个，累计总同步: {total_synced} 个，"
                             f"当前同步已持续: {sync_duration:.1f}秒"
-                        )
-                    
-                    # 如果同步状态持续超过5分钟，记录警告（可能是卡住了）
-                    if sync_duration > 300:
-                        logger.warning(
-                            f"⚠️⚠️ 警告：同步状态已持续 {sync_duration:.1f} 秒（超过5分钟），"
-                            f"可能已卡住！待同步: {pending_count} 个文件。"
-                            f"建议检查数据库连接是否正常。"
                         )
 
             except asyncio.CancelledError:
@@ -932,7 +964,7 @@ class MemoryDBWriter:
                     logger.info(
                         f"【openGauss同步状态】同步进行中 - "
                         f"已处理批次: {batch_number}，"
-                        f"剩余待同步:⏩ {pending_count} 个文件，"
+                        f"剩余待同步:▶️{pending_count} 个文件，"
                         f"本次已同步: {total_synced_count} 个，"
                         f"累计总扫描: {total_scanned} 个，"
                         f"累计总同步: {total_synced_accumulated} 个，"
@@ -944,7 +976,7 @@ class MemoryDBWriter:
                 files_to_sync = await self._get_files_to_sync()
                 get_files_time = time.time() - get_files_start
                 if get_files_time > 1.0:
-                    logger.warning(f"[openGauss同步] 获取待同步文件耗时较长: {get_files_time:.2f}秒")
+                    logger.info(f"[openGauss同步] 获取待同步文件耗时较长: {get_files_time:.2f}秒")
 
                 if not files_to_sync:
                     # 没有更多文件需要同步
@@ -967,15 +999,26 @@ class MemoryDBWriter:
                 if prepare_time > 1.0:
                     logger.warning(f"[openGauss批次 {batch_number}] 准备数据耗时较长: {prepare_time:.2f}秒")
 
-                # 同步到openGauss（使用_insert_files_to_opengauss）
-                # 注意：不使用 asyncio.wait_for，允许同步任务自然完成，不中断
+                # 同步到openGauss（使用统一调度器）
                 batch_sync_start = time.time()
                 try:
-                    logger.debug(f"[openGauss批次 {batch_number}] 调用 _insert_files_to_opengauss，文件数: {len(file_data_map)}")
-                    # 直接调用，不使用超时限制，确保不中断正在同步的任务
-                    synced_file_ids = await self._insert_files_to_opengauss(file_data_map)
+                    logger.debug(f"[openGauss批次 {batch_number}] 提交到统一调度器，文件数: {len(file_data_map)}")
+                    
+                    # 使用统一调度器（如果已初始化）
+                    if self.db_scheduler:
+                        await self.db_scheduler.submit_sync_files(file_data_map)
+                        # 注意：统一调度器是异步的，这里只是提交，不等待完成
+                        # 实际插入会在调度器的后台循环中完成
+                        # file_data_map 格式: [(file_record, None), ...]
+                        # file_record 格式: (id, backup_set_id, file_path, ...)
+                        # 需要提取 file_record[0] 作为 file_id，并确保是整数类型
+                        synced_file_ids = [int(file_record[0]) for file_record, _ in file_data_map if file_record]
+                    else:
+                        # 回退到直接插入（兼容旧逻辑）
+                        synced_file_ids = await self._insert_files_to_opengauss(file_data_map)
+                    
                     batch_sync_time = time.time() - batch_sync_start
-                    logger.info(f"[openGauss批次 {batch_number}] _insert_files_to_opengauss 完成，耗时: {batch_sync_time:.2f}秒")
+                    logger.info(f"[openGauss批次 {batch_number}] 已提交到统一调度器，耗时: {batch_sync_time:.2f}秒")
                     
                     # 批次同步完成后，检查是否需要报告状态（如果批次耗时很长，可能已经超过30秒）
                     current_time_after_sync = time.time()
@@ -987,7 +1030,7 @@ class MemoryDBWriter:
                         
                         logger.info(
                             f"【openGauss同步状态】批次 {batch_number} 完成后状态 - "
-                            f"剩余待同步:⏩ {pending_count} 个文件，"
+                            f"剩余待同步:▶️{pending_count} 个文件，"
                             f"本次已同步: {total_synced_count} 个，"
                             f"累计总扫描: {total_scanned} 个，"
                             f"累计总同步: {total_synced_accumulated} 个，"
@@ -1803,7 +1846,7 @@ class MemoryDBWriter:
                 files_to_sync = await self._get_files_to_sync()
                 get_files_time = time.time() - get_files_start
                 if get_files_time > 1.0:
-                    logger.warning(f"[SQLite同步] 获取待同步文件耗时较长: {get_files_time:.2f}秒")
+                    logger.info(f"[SQLite同步] 获取待同步文件耗时较长: {get_files_time:.2f}秒")
 
                 if not files_to_sync:
                     # 没有更多文件需要同步
@@ -2120,6 +2163,12 @@ class MemoryDBWriter:
     async def stop(self):
         """停止内存数据库写入器"""
         logger.info("停止内存数据库写入器")
+
+        # 停止 openGauss 统一调度器
+        if self.db_scheduler:
+            logger.info("[内存数据库] 停止 openGauss 统一调度器...")
+            await self.db_scheduler.stop()
+            self.db_scheduler = None
 
         # 停止同步任务
         if self._sync_task:

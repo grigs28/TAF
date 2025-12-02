@@ -135,21 +135,78 @@ class BackupActionHandler(ActionHandler):
                 cycle_ok = True
                 last_success = scheduled_task.last_success_time
                 schedule_type = getattr(scheduled_task, 'schedule_type', None)
-                if last_success:
+                schedule_type_str = schedule_type.value if hasattr(schedule_type, 'value') else str(schedule_type) if schedule_type else 'unknown'
+                
+                # 特殊处理：月度任务
+                # 如果 last_success_time 不为空，直接跳过（不管是否在同一周期内，因为月度任务一个月只执行一次）
+                # 如果 last_success_time 为空，任务锁已经在 task_executor 中处理了
+                if schedule_type and getattr(schedule_type, 'value', '').lower() in ('monthly', 'month'):
+                    if last_success:
+                        # 月度任务：如果 last_success_time 不为空，直接跳过
+                        logger.info(
+                            f"[月度任务检查] 已成功执行过，跳过本次备份 - "
+                            f"任务ID: {getattr(scheduled_task, 'id', 'N/A')}, "
+                            f"任务名称: {getattr(scheduled_task, 'task_name', 'N/A')}, "
+                            f"上次成功时间: {last_success.strftime('%Y-%m-%d %H:%M:%S')}, "
+                            f"当前时间: {current_time.strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                        try:
+                            await log_operation(
+                                operation_type=OperationType.SCHEDULER_RUN,
+                                resource_type="scheduler",
+                                resource_id=str(getattr(scheduled_task, 'id', '')),
+                                resource_name=getattr(scheduled_task, 'task_name', ''),
+                                operation_name="执行计划任务",
+                                operation_description="跳过：月度任务已成功执行过",
+                                category="scheduler",
+                                success=True,
+                                result_message="跳过执行（月度任务已成功执行过）"
+                            )
+                            await log_system(
+                                level=LogLevel.INFO,
+                                category=LogCategory.SYSTEM,
+                                message="月度任务跳过：已成功执行过",
+                                module="utils.scheduler.action_handlers",
+                                function="BackupActionHandler.execute",
+                                task_id=getattr(scheduled_task, 'id', None)
+                            )
+                        except Exception:
+                            pass
+                        return {"status": "skipped", "message": "月度任务已成功执行过"}
+                    else:
+                        # 月度任务：如果 last_success_time 为空，任务锁已经在 task_executor 中处理了
+                        # 如果执行到这里，说明已经成功获取了任务锁，可以继续执行
+                        logger.info(
+                            f"[月度任务检查] 从未成功执行过，检查任务锁 - "
+                            f"任务ID: {getattr(scheduled_task, 'id', 'N/A')}, "
+                            f"任务名称: {getattr(scheduled_task, 'task_name', 'N/A')}"
+                        )
+                        # 任务锁已经在 task_executor 中获取，如果获取失败，不会执行到这里
+                        # 所以这里不需要再次检查任务锁
+                
+                # 其他类型的任务：按原有逻辑检查周期
+                if last_success and not (schedule_type and getattr(schedule_type, 'value', '').lower() in ('monthly', 'month')):
                     if schedule_type and getattr(schedule_type, 'value', '').lower() in ('daily', 'day'):
                         cycle_ok = (last_success.date() != current_time.date())
                     elif schedule_type and getattr(schedule_type, 'value', '').lower() in ('weekly', 'week'):
                         cycle_ok = (last_success.isocalendar().week != current_time.isocalendar().week or last_success.year != current_time.year)
-                    elif schedule_type and getattr(schedule_type, 'value', '').lower() in ('monthly', 'month'):
-                        cycle_ok = (last_success.year != current_time.year or last_success.month != current_time.month)
                     elif schedule_type and getattr(schedule_type, 'value', '').lower() in ('yearly', 'year'):
                         cycle_ok = (last_success.year != current_time.year)
                     else:
                         # 未明确类型，默认按日
                         cycle_ok = (last_success.date() != current_time.date())
+                
                 # 如果周期内已执行过，则跳过
                 if not cycle_ok:
-                    logger.info("当前周期内已成功执行，跳过本次备份")
+                    schedule_type_str = schedule_type.value if hasattr(schedule_type, 'value') else str(schedule_type)
+                    logger.info(
+                        f"[周期检查] 当前周期内已成功执行，跳过本次备份 - "
+                        f"任务ID: {getattr(scheduled_task, 'id', 'N/A')}, "
+                        f"任务名称: {getattr(scheduled_task, 'task_name', 'N/A')}, "
+                        f"调度类型: {schedule_type_str}, "
+                        f"上次成功时间: {last_success.strftime('%Y-%m-%d %H:%M:%S') if last_success else 'N/A'}, "
+                        f"当前时间: {current_time.strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
                     try:
                         await log_operation(
                             operation_type=OperationType.SCHEDULER_RUN,
@@ -183,8 +240,8 @@ class BackupActionHandler(ActionHandler):
 
             # 3) 磁带标签是否当月（从 LTFS 标签或磁带头读取）
             # 仅当备份目标为磁带时要求当月
-            # 注意：手动运行和自动运行都检查磁带标签
-            if scheduled_task:
+            # 注意：手动运行时跳过磁带标签检查
+            if scheduled_task and not manual_run:
                 target_is_tape = False
                 try:
                     # 从 scheduled_task.action_config 读取备份目标
@@ -351,18 +408,20 @@ class BackupActionHandler(ActionHandler):
                     template_id = scheduled_task.task_metadata.get('backup_task_id') or template_id
                 
                 if template_id:
-                    # 检查是否有相同模板的任务正在执行
+                    # 检查是否有相同模板的任务正在执行或等待执行（PENDING 或 RUNNING）
+                    # 关键：必须同时检查 PENDING 和 RUNNING，防止并发创建任务
                     if is_opengauss():
                         # openGauss 原生SQL查询
                         # 使用连接池
                         async with get_opengauss_connection() as conn:
                             running_task_row = await conn.fetchrow(
                                 """
-                                SELECT id, started_at FROM backup_tasks
-                                WHERE template_id = $1 AND status = $2
+                                SELECT id, started_at, status FROM backup_tasks
+                                WHERE template_id = $1 AND status IN ($2::backuptaskstatus, $3::backuptaskstatus)
+                                ORDER BY created_at DESC
                                 LIMIT 1
                                 """,
-                                template_id, 'running'
+                                template_id, 'pending', 'running'
                             )
                             running_task = dict(running_task_row) if running_task_row else None
                     elif is_redis():
@@ -388,18 +447,19 @@ class BackupActionHandler(ActionHandler):
                                        for k, v in task_data.items()}
                             task_template_id = task_dict.get('template_id', '')
                             task_status = task_dict.get('status', '').lower()
-                            if task_template_id == str(template_id) and task_status == 'running':
-                                running_task = {'id': task_id, 'started_at': task_dict.get('started_at')}
+                            # 检查 PENDING 或 RUNNING 状态的任务
+                            if task_template_id == str(template_id) and task_status in ('pending', 'running'):
+                                running_task = {'id': task_id, 'started_at': task_dict.get('started_at'), 'status': task_status}
                                 break
                     elif is_sqlite() and db_manager.AsyncSessionLocal and callable(db_manager.AsyncSessionLocal):
-                        # 使用SQLAlchemy查询
+                        # 使用SQLAlchemy查询（检查 PENDING 或 RUNNING 状态）
                         async with db_manager.AsyncSessionLocal() as session:
                             stmt = select(BackupTask).where(
                                 and_(
                                     BackupTask.template_id == template_id,
-                                    BackupTask.status == BackupTaskStatus.RUNNING
+                                    BackupTask.status.in_([BackupTaskStatus.PENDING, BackupTaskStatus.RUNNING])
                                 )
-                            )
+                            ).order_by(BackupTask.created_at.desc()).limit(1)
                             result = await session.execute(stmt)
                             running_task = result.scalar_one_or_none()
                     else:

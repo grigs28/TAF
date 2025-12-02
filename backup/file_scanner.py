@@ -34,8 +34,51 @@ class FileScanner:
         self.settings = settings
         self.update_progress_callback = update_progress_callback
     
+    def get_file_info_from_entry(self, entry) -> Optional[Dict]:
+        """从 os.scandir 的 DirEntry 对象直接获取文件信息（一次性获取路径和大小，避免额外调用）
+        
+        如果遇到权限错误、访问错误等，返回None，调用者应该跳过该文件。
+        
+        Args:
+            entry: os.scandir 返回的 DirEntry 对象
+            
+        Returns:
+            文件信息字典，如果无法访问则返回None
+        """
+        try:
+            # 一次性获取路径和 stat 信息（使用 entry.stat() 更高效，可能利用 scandir 缓存）
+            entry_path_str = entry.path
+            stat = entry.stat()
+            
+            # 从路径中提取文件名
+            try:
+                from pathlib import Path
+                file_name = Path(entry_path_str).name
+            except Exception:
+                # 如果 Path 解析失败，尝试直接提取
+                file_name = entry_path_str.split('\\')[-1].split('/')[-1]
+            
+            return {
+                'path': entry_path_str,
+                'name': file_name,
+                'size': stat.st_size,
+                'modified_time': datetime.fromtimestamp(stat.st_mtime),
+                'permissions': oct(stat.st_mode)[-3:],
+                'is_file': entry.is_file(follow_symlinks=False),
+                'is_dir': entry.is_dir(follow_symlinks=False),
+                'is_symlink': entry.is_symlink()
+            }
+        except (PermissionError, OSError, FileNotFoundError, IOError) as e:
+            # 权限错误、访问错误等，返回None，让调用者跳过该文件
+            logger.debug(f"无法获取文件信息（权限/访问错误）: {entry.path if hasattr(entry, 'path') else 'unknown'} (错误: {str(e)})")
+            return None
+        except Exception as e:
+            # 其他错误，也返回None
+            logger.warning(f"获取文件信息失败 {entry.path if hasattr(entry, 'path') else 'unknown'}: {str(e)}")
+            return None
+    
     async def get_file_info(self, file_path: Path) -> Optional[Dict]:
-        """获取文件信息
+        """获取文件信息（兼容旧接口，用于非 scandir 场景）
         
         如果遇到权限错误、访问错误等，返回None，调用者应该跳过该文件。
         
@@ -403,17 +446,16 @@ class FileScanner:
                                             pass
                             
                             # 使用并发扫描生成器
-                            async for file_path_batch in async_rglob_generator(source_path):
-                                # file_path_batch 已经是批次（List[Path]），直接处理
-                                if not file_path_batch:
+                            async for file_info_batch in async_rglob_generator(source_path):
+                                # file_info_batch 已经是文件信息字典批次（List[Dict]），已经在扫描时获取了文件信息
+                                if not file_info_batch:
                                     continue
                                 
-                                # 将Path对象转换为文件信息
+                                # 过滤排除的文件
                                 file_batch = []
-                                for file_path_item in file_path_batch:
+                                for file_info in file_info_batch:
                                     try:
-                                        file_info = await self.get_file_info(file_path_item)
-                                        if file_info and not self.should_exclude_file(file_info['path'], exclude_patterns):
+                                        if file_info and not self.should_exclude_file(file_info.get('path', ''), exclude_patterns):
                                             file_batch.append(file_info)
                                             scanned_count += 1
                                     except Exception as file_error:
@@ -462,14 +504,77 @@ class FileScanner:
                                     
                                     # 批次达到阈值，放入队列
                                     if len(current_batch) >= batch_size and main_loop:
-                                        try:
-                                            asyncio.run_coroutine_threadsafe(
-                                                path_queue.put(current_batch.copy()),
-                                                main_loop
-                                            ).result(timeout=30.0)
-                                            current_batch.clear()
-                                        except Exception as e:
-                                            logger.warning(f"{context_prefix or ''} 顺序扫描：放入队列失败: {str(e)}")
+                                        # 重试机制：最多重试 6 次，每次间隔 3 分钟
+                                        max_retries = 6
+                                        retry_interval = 180.0  # 3 分钟
+                                        retry_count = 0
+                                        success = False
+                                        
+                                        while retry_count < max_retries and not success:
+                                            try:
+                                                # 记录放入队列前的状态
+                                                queue_size_before = path_queue.qsize() if hasattr(path_queue, 'qsize') else 'N/A'
+                                                
+                                                future = asyncio.run_coroutine_threadsafe(
+                                                    path_queue.put(current_batch.copy()),
+                                                    main_loop
+                                                )
+                                                # 超时时间改为 5 分钟（300秒）
+                                                future.result(timeout=300.0)
+                                                current_batch.clear()
+                                                success = True
+                                                
+                                                if retry_count > 0:
+                                                    logger.info(
+                                                        f"{context_prefix or ''} 顺序扫描：放入队列成功（重试 {retry_count} 次后），"
+                                                        f"批次大小: {len(current_batch)}"
+                                                    )
+                                            except asyncio.TimeoutError:
+                                                retry_count += 1
+                                                queue_size_after = path_queue.qsize() if hasattr(path_queue, 'qsize') else 'N/A'
+                                                
+                                                if retry_count < max_retries:
+                                                    logger.warning(
+                                                        f"{context_prefix or ''} 顺序扫描：放入队列超时（5分钟），"
+                                                        f"批次大小: {len(current_batch)}，"
+                                                        f"队列大小: {queue_size_before} -> {queue_size_after}，"
+                                                        f"重试 {retry_count}/{max_retries}，"
+                                                        f"等待 {retry_interval} 秒后重试..."
+                                                    )
+                                                    # 等待 3 分钟后重试
+                                                    import time
+                                                    time.sleep(retry_interval)
+                                                else:
+                                                    logger.error(
+                                                        f"{context_prefix or ''} 顺序扫描：放入队列超时（5分钟），"
+                                                        f"已重试 {max_retries} 次，批次大小: {len(current_batch)}，"
+                                                        f"队列大小: {queue_size_before} -> {queue_size_after}。"
+                                                        f"批次将保留，等待扫描结束时处理。"
+                                                    )
+                                                    # 最后一次重试失败，不清空批次，等待扫描结束时处理
+                                            except Exception as e:
+                                                retry_count += 1
+                                                queue_size_after = path_queue.qsize() if hasattr(path_queue, 'qsize') else 'N/A'
+                                                
+                                                if retry_count < max_retries:
+                                                    logger.warning(
+                                                        f"{context_prefix or ''} 顺序扫描：放入队列失败: {str(e)}，"
+                                                        f"批次大小: {len(current_batch)}，"
+                                                        f"队列大小: {queue_size_after}，"
+                                                        f"重试 {retry_count}/{max_retries}，"
+                                                        f"等待 {retry_interval} 秒后重试..."
+                                                    )
+                                                    # 等待 3 分钟后重试
+                                                    import time
+                                                    time.sleep(retry_interval)
+                                                else:
+                                                    logger.error(
+                                                        f"{context_prefix or ''} 顺序扫描：放入队列失败: {str(e)}，"
+                                                        f"已重试 {max_retries} 次，批次大小: {len(current_batch)}，"
+                                                        f"队列大小: {queue_size_after}。"
+                                                        f"批次将保留，等待扫描结束时处理。"
+                                                    )
+                                                    # 最后一次重试失败，不清空批次，等待扫描结束时处理
                                 
                                 # 在线程池中执行顺序扫描
                                 def sequential_scan_worker():
@@ -484,15 +589,62 @@ class FileScanner:
                                             file_callback=file_callback
                                         )
                                         
-                                        # 处理剩余批次
+                                        # 处理剩余批次（包括之前放入队列失败的批次）
                                         if current_batch and main_loop:
-                                            try:
-                                                asyncio.run_coroutine_threadsafe(
-                                                    path_queue.put(current_batch.copy()),
-                                                    main_loop
-                                                ).result(timeout=30.0)
-                                            except Exception:
-                                                pass
+                                            retry_count = 0
+                                            max_retries = 6  # 重试次数改为 6 次
+                                            retry_interval = 180.0  # 间隔 3 分钟
+                                            success = False
+                                            
+                                            while retry_count < max_retries and current_batch and not success:
+                                                try:
+                                                    asyncio.run_coroutine_threadsafe(
+                                                        path_queue.put(current_batch.copy()),
+                                                        main_loop
+                                                    ).result(timeout=300.0)  # 超时时间改为 5 分钟
+                                                    logger.info(
+                                                        f"{context_prefix or ''} 顺序扫描：剩余批次已成功放入队列，"
+                                                        f"批次大小: {len(current_batch)}"
+                                                        + (f"（重试 {retry_count} 次后）" if retry_count > 0 else "")
+                                                    )
+                                                    current_batch.clear()
+                                                    success = True
+                                                    break  # 成功，退出重试循环
+                                                except asyncio.TimeoutError:
+                                                    retry_count += 1
+                                                    if retry_count < max_retries:
+                                                        logger.warning(
+                                                            f"{context_prefix or ''} 顺序扫描：剩余批次放入队列超时（5分钟），"
+                                                            f"重试 {retry_count}/{max_retries}，批次大小: {len(current_batch)}，"
+                                                            f"等待 {retry_interval} 秒后重试..."
+                                                        )
+                                                        # 等待 3 分钟后重试
+                                                        import time
+                                                        time.sleep(retry_interval)
+                                                    else:
+                                                        logger.error(
+                                                            f"{context_prefix or ''} 顺序扫描：剩余批次放入队列失败（已重试 {max_retries} 次），"
+                                                            f"批次大小: {len(current_batch)}，这些文件将丢失！"
+                                                        )
+                                                        # 最后一次重试失败，清空批次避免内存泄漏
+                                                        # 但会丢失这些文件
+                                                        current_batch.clear()
+                                                except Exception as e:
+                                                    retry_count += 1
+                                                    if retry_count < max_retries:
+                                                        logger.warning(
+                                                            f"{context_prefix or ''} 顺序扫描：剩余批次放入队列失败: {str(e)}，"
+                                                            f"重试 {retry_count}/{max_retries}，批次大小: {len(current_batch)}，"
+                                                            f"等待 {retry_interval} 秒后重试..."
+                                                        )
+                                                        import time
+                                                        time.sleep(retry_interval)
+                                                    else:
+                                                        logger.error(
+                                                            f"{context_prefix or ''} 顺序扫描：剩余批次放入队列失败（已重试 {max_retries} 次）: {str(e)}，"
+                                                            f"批次大小: {len(current_batch)}，这些文件将丢失！"
+                                                        )
+                                                        current_batch.clear()
                                         
                                         # 发送停止信号
                                         if main_loop:
@@ -785,36 +937,50 @@ class FileScanner:
                                                                 if scan_cancelled:
                                                                     break
                                                                 
-                                                                # 获取路径
-                                                                try:
-                                                                    entry_path = Path(entry.path)
-                                                                    current_path_str = str(entry_path)
-                                                                except Exception as path_str_err:
-                                                                    # 路径字符串化失败（可能是编码问题）
-                                                                    logger.debug(f"{context_prefix}流式扫描：路径字符串化失败: {str(path_str_err)}")
-                                                                    continue
+                                                                # 优化：直接使用 entry.path 和 entry.stat()，不转换为 Path
+                                                                entry_path_str = entry.path
                                                                 
                                                                 # 处理目录和文件
                                                                 try:
                                                                     if entry.is_dir(follow_symlinks=False):
-                                                                        # 目录：添加到待扫描队列
-                                                                        dirs_to_scan.append(entry_path)
+                                                                        # 目录：添加到待扫描队列（需要 Path 对象用于队列）
+                                                                        dirs_to_scan.append(Path(entry_path_str))
                                                                     elif entry.is_file(follow_symlinks=False):
-                                                                        # 文件：添加到批次
-                                                                        batch.append(entry_path)
-                                                                        total_paths_scanned += 1
+                                                                        # 文件：直接使用 entry.stat() 一次性获取文件信息，避免额外调用
+                                                                        try:
+                                                                            file_info = self.get_file_info_from_entry(entry)
+                                                                            if file_info:
+                                                                                # 将文件信息添加到批次（而不是只添加路径）
+                                                                                batch.append(file_info)
+                                                                                total_paths_scanned += 1
+                                                                            else:
+                                                                                # 文件信息获取失败，跳过
+                                                                                permission_error_count += 1
+                                                                                if permission_error_count <= 20:
+                                                                                    logger.debug(f"{context_prefix}流式扫描：无法获取文件信息: {format_path_for_log(entry_path_str)}")
+                                                                        except Exception as file_info_err:
+                                                                            permission_error_count += 1
+                                                                            if permission_error_count <= 20:
+                                                                                logger.debug(f"{context_prefix}流式扫描：获取文件信息失败: {format_path_for_log(entry_path_str)}，错误: {str(file_info_err)}")
+                                                                            continue
                                                                 except (OSError, PermissionError) as entry_err:
                                                                     # 无法判断类型，尝试作为文件处理
                                                                     try:
-                                                                        if entry_path.is_file():
-                                                                            batch.append(entry_path)
-                                                                            total_paths_scanned += 1
-                                                                        elif entry_path.is_dir():
-                                                                            dirs_to_scan.append(entry_path)
+                                                                        if entry.is_file(follow_symlinks=False):
+                                                                            # 优化：直接使用 entry.stat() 一次性获取文件信息
+                                                                            try:
+                                                                                file_info = self.get_file_info_from_entry(entry)
+                                                                                if file_info:
+                                                                                    batch.append(file_info)
+                                                                                    total_paths_scanned += 1
+                                                                            except Exception:
+                                                                                pass
+                                                                        elif entry.is_dir(follow_symlinks=False):
+                                                                            dirs_to_scan.append(Path(entry_path_str))
                                                                     except Exception:
                                                                         permission_error_count += 1
                                                                         if permission_error_count <= 20:
-                                                                            logger.debug(f"{context_prefix}流式扫描：无法访问路径: {format_path_for_log(current_path_str)}，错误: {str(entry_err)}")
+                                                                            logger.debug(f"{context_prefix}流式扫描：无法访问路径: {format_path_for_log(entry_path_str)}，错误: {str(entry_err)}")
                                                                         continue
                                                                 
                                                                 # 检查是否需要强制提交批次（即使没有达到阈值，也要定期提交）
@@ -1069,9 +1235,9 @@ class FileScanner:
                                                                 break
                                                         elif item is stop_signal:
                                                             break
-                                                        # item 是一个路径列表（批次）
-                                                        for file_path in item:
-                                                            yield file_path
+                                                        # item 是一个文件信息字典列表（批次），已经在扫描时获取了文件信息
+                                                        for file_info in item:
+                                                            yield file_info
                                                             total_paths_count += 1
                                                     except asyncio.QueueEmpty:
                                                         break
@@ -1102,9 +1268,9 @@ class FileScanner:
                                         elif item is stop_signal:
                                             break
                                         
-                                        # item 是一个路径列表（批次）
-                                        for file_path in item:
-                                            yield file_path
+                                        # item 是一个文件信息字典列表（批次），已经在扫描时获取了文件信息
+                                        for file_info in item:
+                                            yield file_info
                                             total_paths_count += 1
                                             
                                     except asyncio.CancelledError:
@@ -1169,32 +1335,31 @@ class FileScanner:
                                 return str(path_str)[:MAX_PATH_DISPLAY]
                         
                         # 使用异步生成器逐步遍历目录
-                        async for file_path in async_rglob_generator(source_path):
+                        # 优化：async_rglob_generator 现在直接返回文件信息字典（已在扫描时获取）
+                        async for file_info in async_rglob_generator(source_path):
                             try:
-                                # 路径长度检查和字符串化
-                                file_path_str = None
-                                try:
-                                    file_path_str = str(file_path)
-                                    path_len = len(file_path_str)
-                                    
-                                    # 检查路径长度（Windows限制260字符）
+                                # 文件信息已经在扫描时获取，直接使用
+                                if not file_info:
+                                    continue
+                                
+                                path_str = file_info.get('path', '')
+                                
+                                # 路径长度检查
+                                if path_str:
+                                    path_len = len(path_str)
                                     if path_len > MAX_PATH_LENGTH:
                                         path_too_long_count += 1
                                         if path_too_long_count <= 10:  # 只记录前10个路径过长的情况
-                                            logger.warning(f"压缩扫描：路径过长（{path_len} 字符 > {MAX_PATH_LENGTH} 字符）: {format_path_for_log(file_path_str)}")
+                                            logger.warning(f"压缩扫描：路径过长（{path_len} 字符 > {MAX_PATH_LENGTH} 字符）: {format_path_for_log(path_str)}")
                                         continue
-                                except Exception as path_str_err:
-                                    # 路径字符串化失败（可能是编码问题）
-                                    logger.debug(f"压缩扫描：路径字符串化失败: {str(path_str_err)}")
-                                    continue
                                 
-                                # 检查文件路径的父目录是否匹配排除规则
-                                # 如果父目录匹配，跳过该文件
-                                if file_path_str and self.should_exclude_file(file_path_str, exclude_patterns):
+                                # 检查文件路径是否匹配排除规则
+                                if path_str and self.should_exclude_file(path_str, exclude_patterns):
                                     skipped_dirs += 1
                                     continue
                                 
-                                if file_path.is_file():
+                                # 确保是文件（虽然扫描时已经过滤，但再次确认）
+                                if file_info.get('is_file', True):
                                     scanned_count += 1
                                     total_scanned += 1
                                     
@@ -1214,8 +1379,8 @@ class FileScanner:
                                             backup_task.progress_percent = 0.0
                                         await self.update_progress_callback(backup_task, total_scanned, len(current_batch), "[扫描文件中...]")
                                     
+                                    # 文件信息已经在扫描时获取，直接使用（不再调用 get_file_info）
                                     try:
-                                        file_info = await self.get_file_info(file_path)
                                         if file_info:
                                             path_str = file_info.get('path', '')
                                             if len(path_str) > MAX_PATH_LENGTH:
@@ -1226,7 +1391,7 @@ class FileScanner:
                                             if not self.should_exclude_file(path_str, exclude_patterns):
                                                 current_batch.append(file_info)
                                                 total_valid_files += 1  # 累计有效文件数
-                                                total_scanned_size += file_info['size']
+                                                total_scanned_size += file_info.get('size', 0) or 0
                                                 if len(current_batch) >= batch_size:
                                                     yield current_batch
                                                     current_batch = []
@@ -1236,21 +1401,21 @@ class FileScanner:
                                         # 文件权限错误、不存在或IO错误：记录详细路径信息并跳过（不中止）
                                         permission_error_count += 1
                                         error_count += 1
-                                        path_display = format_path_for_log(file_path_str) if file_path_str else "未知路径"
+                                        path_display = format_path_for_log(path_str) if path_str else "未知路径"
                                         if permission_error_count <= 20:  # 只记录前20个权限错误
                                             logger.warning(f"压缩扫描：文件错误（文件 #{permission_error_count}）: {path_display}，错误: {str(file_error)}")
                                         if len(error_paths) < 50:  # 只记录前50个错误路径
-                                            error_paths.append(file_path_str if file_path_str else str(file_path))
+                                            error_paths.append(path_str if path_str else 'unknown')
                                         continue
                                     except Exception as file_error:
                                         # 其他错误：记录并跳过该文件（不中止）
                                         permission_error_count += 1
                                         error_count += 1
-                                        path_display = format_path_for_log(file_path_str) if file_path_str else "未知路径"
+                                        path_display = format_path_for_log(path_str) if path_str else "未知路径"
                                         if permission_error_count <= 20:
                                             logger.warning(f"压缩扫描：跳过出错的文件（文件 #{permission_error_count}）: {path_display}，错误: {str(file_error)}")
                                         if len(error_paths) < 50:  # 只记录前50个错误路径
-                                            error_paths.append(file_path_str if file_path_str else str(file_path))
+                                            error_paths.append(path_str if path_str else 'unknown')
                                         continue
                                 elif file_path.is_dir():
                                     try:
@@ -1580,17 +1745,16 @@ class FileScanner:
                                     with entries:
                                         for entry in entries:
                                             try:
-                                                # 获取路径
+                                                # 优化：直接使用 entry.path 和 entry.stat()，不转换为 Path（除非需要）
+                                                entry_path_str = entry.path
+                                                
+                                                # 检查路径长度
                                                 try:
-                                                    entry_path = Path(entry.path)
-                                                    current_path_str = str(entry_path)
-                                                    path_len = len(current_path_str)
-                                                    
-                                                    # 检查路径长度
+                                                    path_len = len(entry_path_str)
                                                     if path_len > MAX_PATH_LENGTH:
                                                         error_count += 1
                                                         if error_count <= 10:
-                                                            logger.warning(f"扫描：路径过长（{path_len} 字符 > {MAX_PATH_LENGTH} 字符）: {format_path_for_log(current_path_str)}")
+                                                            logger.warning(f"扫描：路径过长（{path_len} 字符 > {MAX_PATH_LENGTH} 字符）: {format_path_for_log(entry_path_str)}")
                                                         continue
                                                 except Exception as path_str_err:
                                                     logger.debug(f"扫描：路径字符串化失败: {str(path_str_err)}")
@@ -1599,14 +1763,18 @@ class FileScanner:
                                                 # 处理目录和文件
                                                 try:
                                                     if entry.is_dir(follow_symlinks=False):
-                                                        # 目录：添加到待扫描队列
-                                                        dirs_to_scan.append(entry_path)
+                                                        # 目录：添加到待扫描队列（需要 Path 对象用于队列）
+                                                        dirs_to_scan.append(Path(entry_path_str))
                                                     elif entry.is_file(follow_symlinks=False):
                                                         # 文件：检查排除规则并处理
                                                         # 检查文件路径的父目录是否匹配排除规则
-                                                        if self.should_exclude_file(str(entry_path.parent), exclude_patterns):
-                                                            skipped_dirs += 1
-                                                            continue
+                                                        try:
+                                                            parent_path = str(Path(entry_path_str).parent)
+                                                            if self.should_exclude_file(parent_path, exclude_patterns):
+                                                                skipped_dirs += 1
+                                                                continue
+                                                        except Exception:
+                                                            pass
                                                         
                                                         scanned_count += 1
                                                         total_scanned += 1
@@ -1625,8 +1793,9 @@ class FileScanner:
                                                                 backup_task.progress_percent = 0.0
                                                             await self.update_progress_callback(backup_task, total_scanned, len(file_list))
                                                         
+                                                        # 优化：直接使用 entry.stat() 一次性获取文件信息，避免额外调用
                                                         try:
-                                                            file_info = await self.get_file_info(entry_path)
+                                                            file_info = self.get_file_info_from_entry(entry)
                                                             if file_info:
                                                                 # 排除规则从计划任务获取
                                                                 if not self.should_exclude_file(file_info['path'], exclude_patterns):
@@ -1635,31 +1804,32 @@ class FileScanner:
                                                                     excluded_count += 1
                                                         except (PermissionError, OSError, FileNotFoundError, IOError) as file_error:
                                                             error_count += 1
-                                                            error_paths.append(current_path_str)
+                                                            error_paths.append(entry_path_str)
                                                             if error_count <= 20:
-                                                                logger.warning(f"⚠️ 跳过无法访问的文件: {format_path_for_log(current_path_str)} (错误: {str(file_error)})")
+                                                                logger.warning(f"⚠️ 跳过无法访问的文件: {format_path_for_log(entry_path_str)} (错误: {str(file_error)})")
                                                             continue
                                                         except Exception as file_error:
                                                             error_count += 1
-                                                            error_paths.append(current_path_str)
+                                                            error_paths.append(entry_path_str)
                                                             if error_count <= 20:
-                                                                logger.warning(f"⚠️ 跳过出错的文件: {format_path_for_log(current_path_str)} (错误: {str(file_error)})")
+                                                                logger.warning(f"⚠️ 跳过出错的文件: {format_path_for_log(entry_path_str)} (错误: {str(file_error)})")
                                                             continue
                                                 except (OSError, PermissionError) as entry_err:
                                                     # 无法判断类型，尝试作为文件处理
                                                     try:
-                                                        if entry_path.is_file():
+                                                        if entry.is_file(follow_symlinks=False):
                                                             scanned_count += 1
                                                             total_scanned += 1
-                                                            file_info = await self.get_file_info(entry_path)
+                                                            # 优化：直接使用 entry.stat() 一次性获取文件信息
+                                                            file_info = self.get_file_info_from_entry(entry)
                                                             if file_info and not self.should_exclude_file(file_info['path'], exclude_patterns):
                                                                 file_list.append(file_info)
-                                                        elif entry_path.is_dir():
-                                                            dirs_to_scan.append(entry_path)
+                                                        elif entry.is_dir(follow_symlinks=False):
+                                                            dirs_to_scan.append(Path(entry_path_str))
                                                     except Exception:
                                                         error_count += 1
                                                         if error_count <= 20:
-                                                            logger.debug(f"扫描：无法访问路径: {format_path_for_log(current_path_str)}，错误: {str(entry_err)}")
+                                                            logger.debug(f"扫描：无法访问路径: {format_path_for_log(entry_path_str)}，错误: {str(entry_err)}")
                                                         continue
                                                     
                                             except (PermissionError, OSError, FileNotFoundError, IOError) as entry_err:

@@ -225,8 +225,9 @@
         const processedBytes = task.processed_bytes || 0;
         const totalBytes = task.total_bytes || task.total_bytes_actual || 0;
         const compressedBytes = task.compressed_bytes || 0;
-        let percent = task.progress_percent || 0;
-        if ((!percent || percent < 1) && totalFiles > 0) {
+        // 只按 (processedFiles / totalFiles) * 100 计算，上限 100%
+        let percent = 0;
+        if (totalFiles > 0) {
             percent = Math.min(100, (processedFiles / totalFiles) * 100);
         }
         let compressionRatio = task.compression_ratio || 0;
@@ -716,7 +717,7 @@
                     
                     batchProgressHtml = `
                         <div class="d-flex justify-content-between align-items-center mb-1">
-                            <small class="text-muted">各压缩任务进度:</small>
+                            <small class="text-muted">各任务:</small>
                             <small class="text-muted fw-semibold">${taskProgress}</small>
                         </div>
                     `;
@@ -725,7 +726,7 @@
                     console.log('[各压缩任务进度] 没有task_progress_list，显示任务数量:', compProg.running_count);
                     batchProgressHtml = `
                         <div class="d-flex justify-content-between align-items-center mb-1">
-                            <small class="text-muted">各压缩任务进度:</small>
+                            <small class="text-muted">各任务:</small>
                             <small class="text-muted fw-semibold">${compProg.running_count} 个任务运行中</small>
                         </div>
                     `;
@@ -989,7 +990,7 @@
                 <td>${completedTimeDisplay}</td>
                 <td>${dataSizeDisplay}</td>
                 <td>
-                    <div class="btn-group btn-group-sm" data-task-id="${task.task_id || task.id}" data-from-scheduler="${task.from_scheduler ? 'true' : 'false'}" data-enabled="${task.enabled !== false ? 'true' : 'false'}">
+                    <div class="btn-group btn-group-sm" data-task-id="${task.task_id || task.id}" data-scheduler-task-id="${task.scheduler_task_id || task.task_id || task.id}" data-from-scheduler="${task.from_scheduler ? 'true' : 'false'}" data-enabled="${task.enabled !== false ? 'true' : 'false'}">
                         ${task.from_scheduler ? `
                             ${task.enabled === false ? `
                                 <button class="btn btn-outline-success btn-action-enable" title="启用"><i class="bi bi-play"></i></button>
@@ -1076,8 +1077,20 @@
     }
 
     async function unlockSchedulerTask(taskId) {
-        await fetchJSON(`/api/scheduler/tasks/${taskId}/unlock`, { method: 'POST' });
-        alert('任务已解锁');
+        if (!confirm('确定要解锁此任务吗？这将释放任务锁并重置状态。')) {
+            return;
+        }
+        try {
+            await fetchJSON(`/api/scheduler/tasks/${taskId}/unlock`, { method: 'POST' });
+            alert('任务已解锁');
+            // 重新加载任务列表
+            if (typeof loadRunningTasks === 'function') {
+                loadRunningTasks();
+            }
+        } catch (error) {
+            console.error('解锁任务失败:', error);
+            alert('解锁任务失败: ' + (error.message || '未知错误'));
+        }
     }
 
     async function deleteBackupTask(taskId, fromScheduler) {
@@ -1190,6 +1203,8 @@
 
             const taskId = parseInt(group.dataset.taskId, 10);
             const fromScheduler = group.dataset.fromScheduler === 'true';
+            // 获取 scheduler_task_id（如果存在），用于启用/禁用操作
+            const schedulerTaskId = group.dataset.schedulerTaskId ? parseInt(group.dataset.schedulerTaskId, 10) : taskId;
             
             // 删除按钮的特殊处理：计划任务由 SchedulerManager 处理，非计划任务由 deleteBackupTask 处理
             if (button.classList.contains('btn-action-delete')) {
@@ -1224,11 +1239,20 @@
             event.stopImmediatePropagation(); // 阻止其他监听器处理
 
             if (button.classList.contains('btn-action-enable')) {
-                toggleSchedulerTask(taskId, true).catch(err => alert(err.message));
+                // 使用 scheduler_task_id 进行启用/禁用操作
+                toggleSchedulerTask(schedulerTaskId, true).catch(err => alert(err.message));
             } else if (button.classList.contains('btn-action-disable')) {
-                toggleSchedulerTask(taskId, false).catch(err => alert(err.message));
+                // 使用 scheduler_task_id 进行启用/禁用操作
+                toggleSchedulerTask(schedulerTaskId, false).catch(err => alert(err.message));
             } else if (button.classList.contains('btn-action-unlock')) {
-                unlockSchedulerTask(taskId).catch(err => alert(err.message));
+                // 使用 scheduler_task_id 进行解锁操作
+                const schedulerTaskId = button.closest('.btn-group')?.getAttribute('data-scheduler-task-id');
+                const unlockTaskId = schedulerTaskId ? parseInt(schedulerTaskId) : taskId;
+                if (!isNaN(unlockTaskId)) {
+                    unlockSchedulerTask(unlockTaskId).catch(err => alert(err.message));
+                } else {
+                    alert('无法获取任务ID');
+                }
             } else if (button.classList.contains('btn-action-edit')) {
                 editBackupTask(taskId, fromScheduler);
             }

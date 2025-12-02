@@ -695,10 +695,15 @@ const SchedulerManager = {
      */
     async unlockTask(taskId) {
         try {
+            if (!confirm('确定要解锁此任务吗？这将释放任务锁并重置状态。')) {
+                return;
+            }
             await SchedulerAPI.unlockTask(taskId);
             await this.loadTasks();
+            // 显示成功消息（SchedulerAPI.unlockTask 已经显示 alert，这里不需要重复）
         } catch (error) {
             console.error('解锁任务失败:', error);
+            alert('解锁任务失败: ' + (error.message || '未知错误'));
         }
     },
     

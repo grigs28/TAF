@@ -143,7 +143,7 @@ class BackupScanner:
                         use_memory_db = getattr(settings, 'USE_MEMORY_DB', True) and not is_redis_db
 
                         if use_memory_db:
-                            sync_batch_size = getattr(settings, 'MEMORY_DB_SYNC_BATCH_SIZE', 5000)
+                            sync_batch_size = getattr(settings, 'MEMORY_DB_SYNC_BATCH_SIZE', 3000)
                             sync_interval = getattr(settings, 'MEMORY_DB_SYNC_INTERVAL', 30)
                             max_memory_files = getattr(settings, 'MEMORY_DB_MAX_FILES', 5000000)
                             checkpoint_interval = getattr(settings, 'MEMORY_DB_CHECKPOINT_INTERVAL', 300)
@@ -436,6 +436,10 @@ class BackupScanner:
                 # 扫描器返回的每个批次大小 = SCAN_UPDATE_INTERVAL，直接写入内存数据库，无需再次累积
                 file_buffer = []  # 用于累积不满一个批次的文件
                 
+                # 初始化 source_path_str，用于日志输出（如果源路径列表不为空，使用第一个路径）
+                source_path_str = source_paths[0] if source_paths else "N/A"
+                current_scanning_dir = source_path_str  # 当前正在扫描的目录
+                
                 async for file_batch in self.file_scanner.scan_source_files_streaming(
                     source_paths,
                     exclude_patterns,
@@ -443,6 +447,29 @@ class BackupScanner:
                     batch_size=update_interval,  # 使用SCAN_UPDATE_INTERVAL作为批次大小
                     log_context="[后台扫描]"
                 ):
+                    # 从文件批次中提取当前正在扫描的目录（用于日志显示）
+                    if file_batch:
+                        # 从第一个文件的路径中提取当前目录
+                        first_file_path = file_batch[0].get('path', '')
+                        if first_file_path:
+                            try:
+                                from pathlib import Path
+                                file_path_obj = Path(first_file_path)
+                                # 获取文件的父目录
+                                parent_dir = str(file_path_obj.parent)
+                                # 如果父目录在源路径列表中，使用父目录；否则使用源路径
+                                if any(parent_dir.startswith(src) or src.startswith(parent_dir) for src in source_paths):
+                                    current_scanning_dir = parent_dir
+                                else:
+                                    # 找到包含该文件的源路径
+                                    for src_path in source_paths:
+                                        if first_file_path.startswith(src_path):
+                                            current_scanning_dir = src_path
+                                            break
+                            except Exception:
+                                # 如果提取失败，保持使用源路径
+                                pass
+                    
                     # 统计当前批次
                     for file_info in file_batch:
                         file_size = file_info.get('size', 0) or 0
@@ -574,7 +601,8 @@ class BackupScanner:
                                 logger.info(
                                     f"{scan_type_info}后台扫描任务：已扫描 {total_files} 个文件，总大小 {format_bytes(total_bytes)}，"
                                     f"平均速度 {files_total_rate:.1f} 个文件/秒，"
-                                    f"最近 {files_window} 个文件用时 {elapsed_window:.1f} 秒，✅速度 {files_window_rate:.1f} 个文件/秒"
+                                    f"最近 {files_window} 个文件用时 {elapsed_window:.1f} 秒，✅速度 {files_window_rate:.1f} 个文件/秒，"
+                                    f"当前目录: {current_scanning_dir}"
                                 )
                                 last_log_time = now
                                 last_log_files = total_files

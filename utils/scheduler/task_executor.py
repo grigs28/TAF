@@ -43,10 +43,14 @@ def create_task_executor(
         start_time = datetime.now()
         lock_acquired = False
         
+        logger.info(f"[任务执行器] 开始执行任务 - ID: {scheduled_task.id}, 名称: {scheduled_task.task_name}, 执行ID: {execution_id}, 手动运行: {manual_run}")
+        
         try:
             # 获取任务并发锁（openGauss原生），获取失败则跳过
+            logger.debug(f"[任务执行器] 尝试获取任务锁 - 任务ID: {scheduled_task.id}, 执行ID: {execution_id}")
             got_lock = await acquire_task_lock(scheduled_task.id, execution_id)
             if not got_lock:
+                logger.info(f"[任务执行器] 获取任务锁失败，任务已在执行中，跳过 - 任务ID: {scheduled_task.id}, 执行ID: {execution_id}")
                 await log_system(
                     level=LogLevel.INFO,
                     category=LogCategory.SYSTEM,
@@ -57,6 +61,8 @@ def create_task_executor(
                     details={"execution_id": execution_id}
                 )
                 return
+            
+            logger.info(f"[任务执行器] 成功获取任务锁 - 任务ID: {scheduled_task.id}, 执行ID: {execution_id}")
             
             lock_acquired = True
 
@@ -186,8 +192,10 @@ def create_task_executor(
                 raise
             
             # 根据动作类型执行
+            logger.info(f"[任务执行器] 准备调用动作处理器 - 动作类型: {action_type.value if hasattr(action_type, 'value') else action_type}, 任务: {scheduled_task.task_name}")
             if action_type == TaskActionType.BACKUP:
                 # 备份动作需要传递backup_task_id参数和manual_run参数
+                logger.info(f"[任务执行器] 调用备份动作处理器 - backup_task_id: {backup_task_id}, manual_run: {manual_run}")
                 result = await handler.execute(
                     action_config,
                     backup_task_id=backup_task_id,
@@ -195,13 +203,16 @@ def create_task_executor(
                     manual_run=manual_run,
                     run_options=run_options
                 )
+                logger.info(f"[任务执行器] 备份动作处理器执行完成 - 结果: {result}")
             else:
+                logger.info(f"[任务执行器] 调用动作处理器 - 动作类型: {action_type.value if hasattr(action_type, 'value') else action_type}")
                 result = await handler.execute(
                     action_config,
                     scheduled_task=scheduled_task,
                     manual_run=manual_run,
                     run_options=run_options
                 )
+                logger.info(f"[任务执行器] 动作处理器执行完成 - 结果: {result}")
             
             end_time = datetime.now()
             duration = int((end_time - start_time).total_seconds() * 1000)  # 转换为毫秒

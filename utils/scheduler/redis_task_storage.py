@@ -268,7 +268,6 @@ async def acquire_task_lock_redis(task_id: int, execution_id: str) -> bool:
     """尝试获取任务锁（Redis版本）"""
     try:
         redis = await get_redis_client()
-        return True
         
         lock_key = _get_redis_key(KEY_PREFIX_TASK_LOCK, task_id)
         
@@ -299,8 +298,9 @@ async def acquire_task_lock_redis(task_id: int, execution_id: str) -> bool:
             logger.info(f"[Redis模式] 任务 {task_id} 的新锁已创建")
             return True
     except Exception as e:
-        logger.warning(f"[Redis模式] 获取任务锁失败（忽略并继续）: {str(e)}")
-        return True
+        logger.error(f"[Redis模式] 获取任务锁失败: {str(e)}", exc_info=True)
+        # 关键修复：获取锁失败时应该返回 False，而不是 True
+        return False
 
 
 async def release_task_lock_redis(task_id: int, execution_id: str) -> None:
