@@ -88,17 +88,21 @@ class SimpleScanner:
         
         # 统计信息
         stats: Dict[str, Any] = {
-            "total_scanned": 0,  # 扫描到的文件数
-            "total_written": 0,  # 成功写入的文件数
-            "total_failed": 0,  # 写入失败的文件数
-            "total_bytes": 0,  # 成功写入的总字节数
-            "excluded_count": 0,  # 被排除的文件数
-            "excluded_dirs": 0,  # 被排除的目录数
-            "error_count": 0,  # 文件错误数
-            "error_dirs": 0,  # 目录错误数
-            "dirs_scanned": 0,  # 扫描到的目录数
-            "dirs_skipped": 0,  # 跳过的目录数
-            "symlinks_skipped": 0,  # 跳过的符号链接数
+            "total_scanned": 0,          # 扫描到的文件数
+            "total_scanned_bytes": 0,    # 扫描到的总字节数（新增）
+            "total_written": 0,          # 成功写入的文件数
+            "total_bytes": 0,            # 成功写入的总字节数（内部字段）
+            "total_written_bytes": 0,    # 成功写入的总字节数（用于日志展示，等于 total_bytes）
+            "total_failed": 0,           # 写入失败的文件数
+            "total_failed_bytes": 0,     # 写入失败的总字节数（新增，可选）
+            "excluded_count": 0,         # 被排除的文件数
+            "excluded_dirs": 0,          # 被排除的目录数
+            "excluded_bytes": 0,         # 被排除的总字节数（新增，可选，目前不单独统计）
+            "error_count": 0,            # 文件错误数
+            "error_dirs": 0,             # 目录错误数
+            "dirs_scanned": 0,           # 扫描到的目录数
+            "dirs_skipped": 0,           # 跳过的目录数
+            "symlinks_skipped": 0,       # 跳过的符号链接数
             "start_time": time.time(),
         }
         
@@ -163,6 +167,9 @@ class SimpleScanner:
                             f"[简洁扫描] 准备插入数据失败: {file_path[:200]}, 错误: {e}"
                         )
                         stats["total_failed"] += 1
+                        # 写入准备失败的文件也计入失败字节数
+                        file_size = file_info.get("size", 0) or 0
+                        stats["total_failed_bytes"] += file_size
                 
                 if not insert_data:
                     current_batch = []
@@ -192,9 +199,12 @@ class SimpleScanner:
                     # 只有成功写入后才统计（executemany 内部已自动提交）
                     written = len(insert_data)
                     stats["total_written"] += written
-                    stats["total_bytes"] += sum(
+                    # 计算本批次成功写入的总字节数
+                    batch_bytes = sum(
                         (fi.get("size", 0) or 0) for fi in current_batch[:written]
                     )
+                    stats["total_bytes"] += batch_bytes
+                    stats["total_written_bytes"] = stats["total_bytes"]
                     batch_number += 1
                     
                     # 更新内存中的任务对象统计信息（供 UI 使用）
@@ -232,7 +242,13 @@ class SimpleScanner:
                     except Exception:
                         pass
                     # 写入失败，这批文件未写入，计入失败统计
-                    stats["total_failed"] += len(insert_data)
+                    failed_count = len(insert_data)
+                    stats["total_failed"] += failed_count
+                    # 失败批次的总字节数
+                    failed_bytes = sum(
+                        (fi.get("size", 0) or 0) for fi in current_batch[:failed_count]
+                    )
+                    stats["total_failed_bytes"] += failed_bytes
                 
                 finally:
                     current_batch = []
@@ -260,7 +276,10 @@ class SimpleScanner:
                         file_info = await self.file_scanner.get_file_info(Path(source_path_str))
                         if file_info:
                             current_batch.append(file_info)
+                            # 在扫描到文件时立即统计扫描数量和字节数
+                            file_size = file_info.get("size", 0) or 0
                             stats["total_scanned"] += 1
+                            stats["total_scanned_bytes"] += file_size
                             if len(current_batch) >= batch_size:
                                 await flush_batch(source_path_str)
                     except Exception as e:
@@ -335,7 +354,10 @@ class SimpleScanner:
                                                 )
                                                 if file_info:
                                                     current_batch.append(file_info)
+                                                    # 在扫描到文件时立即统计扫描数量和字节数
+                                                    file_size = file_info.get("size", 0) or 0
                                                     stats["total_scanned"] += 1
+                                                    stats["total_scanned_bytes"] += file_size
                                                     
                                                     if len(current_batch) >= batch_size:
                                                         await flush_batch(current_dir_str)
@@ -386,15 +408,38 @@ class SimpleScanner:
                     logger.debug(
                         f"[简洁扫描] 扫描结束时同步扫描统计到数据库失败（忽略继续）: {sync_err}"
                     )
+                
+                # 使用已有的阶段描述机制，将紧凑统计信息写入 description -> operation_status（供UI显示）
+                try:
+                    if hasattr(self.backup_db, "update_task_stage_with_description"):
+                        summary_desc = (
+                            f"[扫描完成] "
+                            f"扫描 {stats['total_scanned']:,} 个文件 "
+                            f"({format_bytes(stats['total_scanned_bytes'])}), "
+                            f"写入 {stats['total_written']:,} 个, "
+                            f"失败 {stats['total_failed']:,} 个, "
+                            f"排除 {stats['excluded_count']:,} 个"
+                        )
+                        await self.backup_db.update_task_stage_with_description(
+                            backup_task,
+                            "scan",
+                            summary_desc,
+                        )
+                except Exception as stage_err:
+                    logger.debug(
+                        f"[简洁扫描] 更新扫描阶段描述失败（忽略继续）: {stage_err}"
+                    )
             
             elapsed = time.time() - stats["start_time"]
             files_per_sec = (
                 stats["total_written"] / elapsed if elapsed > 0 else 0.0
             )
             logger.info(
-                f"[简洁扫描] 扫描完成：成功写入 {stats['total_written']:,} 个文件，"
-                f"总大小 {format_bytes(stats['total_bytes'])}, 平均速度 {files_per_sec:.1f} 文件/秒, "
-                f"失败 {stats['total_failed']:,} 个, 排除 {stats['excluded_count']:,} 个"
+                f"[简洁扫描] 扫描完成："
+                f"扫描到 {stats['total_scanned']:,} 个文件 ({format_bytes(stats['total_scanned_bytes'])}), "
+                f"成功写入 {stats['total_written']:,} 个文件 ({format_bytes(stats['total_written_bytes'])}), "
+                f"失败 {stats['total_failed']:,} 个文件 ({format_bytes(stats['total_failed_bytes'])}), "
+                f"排除 {stats['excluded_count']:,} 个文件"
             )
             
             # 扫描全部结束后，在内存和数据库中设置 scan_status = 'completed'

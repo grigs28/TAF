@@ -1545,13 +1545,15 @@ class BackupDB:
             logger.info(f"[mark_files_as_queued] ❌ 无法获取 backup_set.id，跳过文件状态更新")
             return
         
-        # 收集所有文件路径
+        # 收集所有文件路径（去重，避免重复更新）
         all_file_paths = []
+        seen_paths = set()  # 用于去重
         for file_group in file_groups:
             for file_info in file_group:
                 file_path = file_info.get('file_path') or file_info.get('path')
-                if file_path:
+                if file_path and file_path not in seen_paths:
                     all_file_paths.append(file_path)
+                    seen_paths.add(file_path)
         
         if not all_file_paths:
             logger.info(f"[mark_files_as_queued] ❌ 没有有效的文件路径，跳过文件状态更新")
@@ -1585,21 +1587,67 @@ class BackupDB:
                 logger.error(f"[mark_files_as_queued] ❌ SQLite模式更新失败: {str(e)}", exc_info=True)
     
     async def _mark_files_as_queued_opengauss(self, conn, backup_set_db_id: int, file_paths: List[str]):
-        """openGauss模式：仅设置 is_copy_success = TRUE（优化版本：使用临时表和JOIN）"""
+        """openGauss模式：仅设置 is_copy_success = TRUE（优化版本：使用临时表 + JOIN UPDATE）"""
         import asyncio
+        import time
+        import uuid
         from utils.scheduler.db_utils import get_backup_files_table_by_set_id
 
-        # 优化：增加批次大小，减少事务开销（从1000增加到5000）
-        batch_size = 5000
+        # 优化：使用临时表 + JOIN UPDATE，批次大小 10000（利用索引 idx_backup_files_set_path）
+        # 优化：在一个事务中处理多个批次，重用临时表，减少创建/删除开销
+        batch_size = 10000
         total_updated = 0
+        start_time = time.time()
 
         # 多表方案：根据 backup_set_db_id 决定物理表名（只获取一次，避免重复查询）
         table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
 
+        total_batches = (len(file_paths) + batch_size - 1) // batch_size
+        logger.info(
+            f"[mark_files_as_queued] 开始批量更新：总文件数={len(file_paths)}, "
+            f"批次大小={batch_size}, 总批次数={total_batches}, 使用临时表+JOIN方式（重用临时表）"
+        )
+
+        # 创建可重用的临时表（在整个过程中只创建一次）
+        temp_table_name = f"temp_file_paths_{uuid.uuid4().hex[:8]}"
+        try:
+            await conn.execute("BEGIN")
+            # 创建 UNLOGGED 临时表（减少WAL日志开销，提升性能）
+            try:
+                await conn.execute(f"""
+                    CREATE UNLOGGED TEMP TABLE {temp_table_name} (
+                        backup_set_id INTEGER NOT NULL,
+                        file_path TEXT NOT NULL,
+                        PRIMARY KEY (backup_set_id, file_path)
+                    )
+                """)
+            except Exception:
+                # 如果 UNLOGGED 不支持，回退到普通临时表
+                await conn.execute(f"""
+                    CREATE TEMP TABLE {temp_table_name} (
+                        backup_set_id INTEGER NOT NULL,
+                        file_path TEXT NOT NULL,
+                        PRIMARY KEY (backup_set_id, file_path)
+                    )
+                """)
+            await conn.commit()
+        except Exception as e:
+            try:
+                await conn.rollback()
+            except Exception:
+                pass
+            logger.warning(f"[mark_files_as_queued] 创建临时表失败，回退到逐批次方式: {e}")
+            temp_table_name = None  # 标记为失败，使用逐批次方式
+
         for i in range(0, len(file_paths), batch_size):
             batch_paths = file_paths[i:i + batch_size]
             batch_num = i // batch_size + 1
-            total_batches = (len(file_paths) + batch_size - 1) // batch_size
+            batch_start_time = time.time()
+            
+            # 如果临时表创建失败，每个批次创建自己的临时表
+            batch_temp_table_name = temp_table_name
+            if temp_table_name is None:
+                batch_temp_table_name = f"temp_file_paths_{uuid.uuid4().hex[:8]}"
 
             # 重试机制：最多重试3次
             max_retries = 3
@@ -1611,62 +1659,111 @@ class BackupDB:
                     # 开始新事务
                     await conn.execute("BEGIN")
 
-                    # 设置语句超时
-                    await conn.execute("SET LOCAL statement_timeout = '180s'")
+                    # 1. 如果临时表不存在（逐批次模式），创建临时表
+                    if batch_temp_table_name and temp_table_name is None:
+                        # 逐批次模式：每个批次创建自己的临时表
+                        try:
+                            await conn.execute(f"""
+                                CREATE UNLOGGED TEMP TABLE {batch_temp_table_name} (
+                                    backup_set_id INTEGER NOT NULL,
+                                    file_path TEXT NOT NULL,
+                                    PRIMARY KEY (backup_set_id, file_path)
+                                )
+                            """)
+                        except Exception:
+                            await conn.execute(f"""
+                                CREATE TEMP TABLE {batch_temp_table_name} (
+                                    backup_set_id INTEGER NOT NULL,
+                                    file_path TEXT NOT NULL,
+                                    PRIMARY KEY (backup_set_id, file_path)
+                                )
+                            """)
 
-                    # openGauss 不支持 ON COMMIT DROP，改用 ANY 方式（性能仍然可以接受）
-                    # 注意：openGauss 的 ANY 操作在有索引的情况下性能良好
+                    # 2. 清空临时表（重用模式）或直接插入（逐批次模式）
+                    # 注意：临时表在事务回滚时不会自动清空，必须在每个批次开始时显式清空
+                    if batch_temp_table_name and temp_table_name is not None:
+                        # 重用模式：清空临时表（防止上一批次回滚导致的数据残留）
+                        try:
+                            await conn.execute(f"TRUNCATE TABLE {batch_temp_table_name}")
+                        except Exception as truncate_err:
+                            # 如果 TRUNCATE 失败，尝试 DELETE（更安全，但可能更慢）
+                            logger.warning(
+                                f"[mark_files_as_queued] TRUNCATE 失败，改用 DELETE: {truncate_err}"
+                            )
+                            await conn.execute(
+                                f"DELETE FROM {batch_temp_table_name} WHERE backup_set_id = $1",
+                                backup_set_db_id
+                            )
+
+                    # 3. 去重文件路径（避免重复键错误）
+                    # 使用 dict.fromkeys() 保持顺序并去重
+                    unique_batch_paths = list(dict.fromkeys(batch_paths))
+                    if len(unique_batch_paths) < len(batch_paths):
+                        logger.debug(
+                            f"[mark_files_as_queued] 批次 {batch_num} 去重："
+                            f"原始={len(batch_paths)}, 去重后={len(unique_batch_paths)}"
+                        )
+
+                    # 4. 使用批量插入将文件路径导入临时表（使用 executemany 批量插入）
+                    # 注意：openGauss 不支持 ON CONFLICT，依赖去重逻辑（已在步骤3完成）
+                    insert_params = [(backup_set_db_id, file_path) for file_path in unique_batch_paths]
+                    await conn.executemany(
+                        f"INSERT INTO {batch_temp_table_name} (backup_set_id, file_path) VALUES ($1, $2)",
+                        insert_params
+                    )
+
+                    # 4. 使用 JOIN UPDATE 批量更新（利用索引 idx_backup_files_set_path）
+                    # 优化：先过滤条件，减少 JOIN 的数据量
+                    # 注意：openGauss 的 JOIN UPDATE 可以利用索引，性能比 ANY 更好
                     update_result = await conn.execute(
                         f"""
-                        UPDATE {table_name}
+                        UPDATE {table_name} t
                         SET is_copy_success = TRUE,
                             copy_status_at = NOW(),
                             updated_at = NOW()
-                        WHERE backup_set_id = $1
-                          AND file_path = ANY($2)
-                          AND (is_copy_success = FALSE OR is_copy_success IS NULL)
+                        FROM {batch_temp_table_name} tmp
+                        WHERE t.backup_set_id = $1
+                          AND t.backup_set_id = tmp.backup_set_id
+                          AND t.file_path = tmp.file_path
+                          AND (t.is_copy_success = FALSE OR t.is_copy_success IS NULL)
                         """,
-                        backup_set_db_id, batch_paths
+                        backup_set_db_id
                     )
 
                     # 获取实际更新的行数
                     updated_count = update_result if hasattr(update_result, 'rowcount') else update_result
 
+                    # 5. 删除临时表（仅逐批次模式需要，重用模式在最后删除）
+                    if batch_temp_table_name and temp_table_name is None:
+                        # 逐批次模式：每个批次删除自己的临时表
+                        await conn.execute(f"DROP TABLE IF EXISTS {batch_temp_table_name}")
+
                     # openGauss 默认不开启 autocommit，需要显式提交事务
                     await conn.commit()
 
-                    # 验证事务提交状态
-                    actual_conn = conn._conn if hasattr(conn, '_conn') else conn
-                    transaction_status = actual_conn.info.transaction_status
-
-                    if transaction_status == 0:  # IDLE: 事务成功提交
-                        batch_success = True
-                        total_updated += updated_count
-                        logger.info(
-                            f"[mark_files_as_queued] ✅ 批次 {batch_num}/{total_batches} 事务提交成功："
-                            f"更新了 {updated_count} 个文件，事务状态={transaction_status}"
-                        )
-                    else:
-                        # 事务状态异常，尝试回滚
-                        logger.warning(
-                            f"[mark_files_as_queued] ⚠️ 批次 {batch_num}/{total_batches} 事务状态异常: {transaction_status}，"
-                            f"尝试回滚后重试 (重试 {retry_count + 1}/{max_retries})"
-                        )
-                        try:
-                            await conn.rollback()
-                        except Exception as rollback_error:
-                            logger.error(f"[mark_files_as_queued] 回滚失败: {rollback_error}")
-
-                        retry_count += 1
-                        if retry_count < max_retries:
-                            # 等待一段时间后重试
-                            await asyncio.sleep(0.5 * retry_count)  # 递增等待时间
-                        else:
-                            # 达到最大重试次数，抛出异常
-                            raise Exception(f"批次 {batch_num}/{total_batches} 事务提交失败，达到最大重试次数")
+                    # 批次成功
+                    batch_success = True
+                    total_updated += updated_count if updated_count else 0
+                    batch_elapsed = time.time() - batch_start_time
+                    total_elapsed = time.time() - start_time
+                    files_per_sec = len(batch_paths) / batch_elapsed if batch_elapsed > 0 else 0
+                    
+                    logger.info(
+                        f"[mark_files_as_queued] ✅ 批次 {batch_num}/{total_batches} 更新成功："
+                        f"更新了 {updated_count} 个文件（批次大小={len(batch_paths)}）, "
+                        f"批次耗时={batch_elapsed:.2f}秒, 速度={files_per_sec:.0f} 文件/秒, "
+                        f"总进度={total_updated}/{len(file_paths)}, 总耗时={total_elapsed:.2f}秒"
+                    )
 
                 except Exception as batch_error:
                     retry_count += 1
+                    # 清理临时表（如果存在，仅逐批次模式）
+                    if batch_temp_table_name and temp_table_name is None:
+                        try:
+                            await conn.execute(f"DROP TABLE IF EXISTS {batch_temp_table_name}")
+                        except Exception:
+                            pass  # 忽略删除临时表的错误
+
                     if retry_count >= max_retries:
                         # 达到最大重试次数，记录详细错误并抛出异常
                         logger.error(
@@ -1691,7 +1788,39 @@ class BackupDB:
                     # 等待一段时间后重试
                     await asyncio.sleep(1.0 * retry_count)  # 递增等待时间
 
-        logger.info(f"[mark_files_as_queued] ✅ 所有批次处理完成，总共更新了 {total_updated} 个文件的 is_copy_success 状态")
+        # 清理重用的临时表
+        if temp_table_name:
+            try:
+                await conn.execute("BEGIN")
+                await conn.execute(f"DROP TABLE IF EXISTS {temp_table_name}")
+                await conn.commit()
+            except Exception:
+                try:
+                    await conn.rollback()
+                except Exception:
+                    pass
+
+        total_elapsed = time.time() - start_time
+        avg_speed = len(file_paths) / total_elapsed if total_elapsed > 0 else 0
+        logger.info(
+            f"[mark_files_as_queued] ✅ 所有批次处理完成，总共更新了 {total_updated} 个文件的 is_copy_success 状态, "
+            f"总耗时={total_elapsed:.2f}秒, 平均速度={avg_speed:.0f} 文件/秒"
+        )
+    
+    async def _temp_table_exists(self, conn, table_name: str) -> bool:
+        """检查临时表是否存在"""
+        try:
+            result = await conn.fetchrow(
+                """
+                SELECT 1 FROM pg_temp.information_schema.tables 
+                WHERE table_name = $1
+                """,
+                table_name
+            )
+            return result is not None
+        except Exception:
+            # 如果查询失败，假设表不存在
+            return False
 
     async def mark_files_as_copied(
         self,

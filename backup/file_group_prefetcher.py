@@ -246,8 +246,8 @@ class FileGroupPrefetcher:
                         for group in file_groups
                     ) if file_groups else 0
                     
-                    # 获取扫描状态用于日志输出
-                    scan_status = await self.backup_db.get_scan_status(self.backup_task.id) if not file_groups else None
+                    # 获取扫描状态用于日志输出（总是获取，无论是否有文件组）
+                    scan_status = await self.backup_db.get_scan_status(self.backup_task.id)
                     
                     logger.info(
                         f"[文件组预取器] [循环 #{prefetch_loop_count}] 检索完成："
