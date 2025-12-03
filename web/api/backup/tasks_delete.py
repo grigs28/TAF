@@ -187,6 +187,10 @@ async def delete_backup_task(task_id: int, http_request: Request):
                     if backup_set_ids:
                         total_files_deleted = 0
                         for backup_set_id in backup_set_ids:
+                            # 多表方案：根据 backup_set_id 决定物理表名
+                            from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                            table_name = await get_backup_files_table_by_set_id(conn, backup_set_id)
+
                             # 尝试查询文件数量（用于日志），如果失败则直接删除
                             files_count = 0
                             query_success = False
@@ -194,7 +198,7 @@ async def delete_backup_task(task_id: int, http_request: Request):
                                 # 使用原生 openGauss SQL 查询文件数量
                                 count_row = await asyncio.wait_for(
                                     conn.fetchrow(
-                                        "SELECT COUNT(*) as count FROM backup_files WHERE backup_set_id = $1",
+                                        f"SELECT COUNT(*) as count FROM {table_name} WHERE backup_set_id = $1",
                                         backup_set_id
                                     ),
                                     timeout=30.0
@@ -205,23 +209,23 @@ async def delete_backup_task(task_id: int, http_request: Request):
                                 # 查询失败，记录警告但继续执行删除
                                 logger.warning(
                                     f"查询备份集 {backup_set_id} 的文件数量失败: {str(count_error)}，"
-                                    f"将直接执行删除操作（不统计文件数）"
+                                    f"将直接执行删除操作（不统计文件数，表={table_name}）"
                                 )
                             
                             # 执行删除操作（无论查询是否成功都执行）
                             # execute 方法会自动创建新事务，即使前面的查询失败也不会影响
                             try:
                                 await conn.execute(
-                                    "DELETE FROM backup_files WHERE backup_set_id = $1",
+                                    f"DELETE FROM {table_name} WHERE backup_set_id = $1",
                                     backup_set_id
                                 )
                                 
                                 # 只有查询成功时才统计文件数
                                 if query_success and files_count > 0:
                                     total_files_deleted += files_count
-                                    logger.debug(f"已删除备份集 {backup_set_id} 的 {files_count} 个文件记录")
+                                    logger.debug(f"已删除备份集 {backup_set_id} 的 {files_count} 个文件记录（表={table_name}）")
                                 else:
-                                    logger.debug(f"已删除备份集 {backup_set_id} 的文件记录（数量未知）")
+                                    logger.debug(f"已删除备份集 {backup_set_id} 的文件记录（数量未知，表={table_name}）")
                             except Exception as delete_error:
                                 error_msg = str(delete_error)
                                 # 如果表不存在，记录警告但不报错（可能是数据库未初始化）

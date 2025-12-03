@@ -233,6 +233,8 @@ class BackupEngine:
                 raise RuntimeError(error_msg)
 
             self._current_task = backup_task
+            # 同步到 task_manager，确保 get_task_status 能获取到内存统计
+            self.task_manager._current_task = backup_task
             
             # 清零压缩进度信息（新任务开始时）
             backup_task.current_compression_progress = None
@@ -452,9 +454,13 @@ class BackupEngine:
 
             # 4. 完整备份前使用 LtfsCmdFormat.exe 格式化（保留卷标信息）
             # 注意：格式化进度会显示在备份管理卡片中（0-100%），格式化完成后再继续后续备份流程
-            # 注意：手动运行时跳过格式化
+            # 注意：手动运行时跳过格式化；可以通过配置 ENABLE_TAPE_FORMAT_BEFORE_FULL 关闭自动格式化
+            from config.settings import get_settings
+            settings = get_settings()
+            enable_tape_format = getattr(settings, "ENABLE_TAPE_FORMAT_BEFORE_FULL", True)
+
             logger.info(f"========== 检查是否需要格式化 ==========")
-            logger.info(f"manual_run={manual_run}, 任务类型: {backup_task.task_type} (类型: {type(backup_task.task_type)}, FULL={BackupTaskType.FULL})")
+            logger.info(f"manual_run={manual_run}, enable_tape_format={enable_tape_format}, 任务类型: {backup_task.task_type} (类型: {type(backup_task.task_type)}, FULL={BackupTaskType.FULL})")
             
             # 确保任务类型比较正确（支持字符串和枚举值）
             task_type_value = backup_task.task_type
@@ -469,8 +475,10 @@ class BackupEngine:
             
             logger.info(f"任务类型值: {task_type_value} (期望: {full_type_value})")
             
-            # 手动运行时跳过格式化
-            if not manual_run and (task_type_value == full_type_value or backup_task.task_type == BackupTaskType.FULL):
+            # 手动运行时跳过格式化；当 ENABLE_TAPE_FORMAT_BEFORE_FULL=False 时也跳过格式化
+            if (not manual_run
+                and enable_tape_format
+                and (task_type_value == full_type_value or backup_task.task_type == BackupTaskType.FULL)):
                 logger.info("========== 完整备份前格式化处理（自动运行模式）==========")
                 logger.info("检测到完整备份任务，执行格式化前检查...")
                 
@@ -1110,6 +1118,8 @@ class BackupEngine:
             return False
         finally:
             self._current_task = None
+            # 同步清理 task_manager 的当前任务
+            self.task_manager._current_task = None
 
     async def _perform_backup(self, backup_task: BackupTask, scheduled_task=None) -> bool:
         """执行备份流程（流式处理：扫描和压缩循环执行）
@@ -1259,8 +1269,8 @@ class BackupEngine:
                     )
                 )
                 logger.info("后台扫描任务已启动")
-                logger.info("等待后台扫描写入文件记录（120秒）...")
-                await asyncio.sleep(120)
+                logger.info("等待后台扫描写入文件记录（300秒）...")
+                await asyncio.sleep(300)
             else:
                 logger.info("扫描状态为 completed，跳过扫描阶段")
             

@@ -85,6 +85,9 @@ class SystemEnvConfig(BaseModel):
     # 日志配置
     log_level: Optional[str] = Field(None, description="日志级别")
 
+    # 磁带自动格式化配置
+    enable_tape_format_before_full: Optional[bool] = Field(None, description="完整备份前是否自动格式化磁带（保留卷标）")
+
 
 @router.get("/env-config")
 async def get_env_config():
@@ -185,6 +188,9 @@ async def get_env_config():
             
             # 日志配置
             "log_level": env_vars.get("LOG_LEVEL", "INFO"),
+
+            # 磁带自动格式化配置
+            "enable_tape_format_before_full": parse_bool(env_vars.get("ENABLE_TAPE_FORMAT_BEFORE_FULL"), True),
         }
         
         return {
@@ -323,6 +329,10 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
         # 日志配置
         if config.log_level is not None:
             updates["LOG_LEVEL"] = config.log_level
+
+        # 磁带自动格式化配置
+        if config.enable_tape_format_before_full is not None:
+            updates["ENABLE_TAPE_FORMAT_BEFORE_FULL"] = str(config.enable_tape_format_before_full).lower()
         
         # 更新数据库URL（如果数据库配置有变化）
         if any(key in updates for key in ["DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_DATABASE"]):

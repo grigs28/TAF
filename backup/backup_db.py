@@ -179,7 +179,7 @@ class BatchDBWriter:
 
     async def _process_batch(self, file_batch: List[Dict]):
         """处理一个文件批次"""
-        from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
+        from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection, get_backup_files_table_by_set_id
         from utils.scheduler.sqlite_utils import is_sqlite
         from utils.datetime_utils import now
         from datetime import timezone
@@ -201,10 +201,14 @@ class BatchDBWriter:
 
                 # 批量查询已存在的文件
                 if file_paths:
+                    # 多表方案：根据 backup_set_db_id 决定物理表名
+                    from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                    table_name = await get_backup_files_table_by_set_id(conn, self.backup_set_db_id)
+
                     existing_files = await conn.fetch(
-                        """
+                        f"""
                         SELECT id, file_path, is_copy_success
-                        FROM backup_files
+                        FROM {table_name}
                         WHERE backup_set_id = $1 AND file_path = ANY($2)
                         """,
                         self.backup_set_db_id, file_paths
@@ -230,10 +234,10 @@ class BatchDBWriter:
                         insert_params = self._prepare_insert_params(file_info)
                         insert_data.append(insert_params)
 
-                # 执行批量操作
+                # 执行批量操作（openGauss 多表方案下，_batch_insert/_batch_update 内部会按 backup_set_id 选择表名）
                 if insert_data:
                     await self._batch_insert(conn, insert_data)
-
+                
                 if update_data:
                     await self._batch_update(conn, update_data)
         elif is_sqlite():
@@ -781,7 +785,8 @@ class BatchDBWriter:
     async def _batch_insert(self, conn, insert_data: List[tuple]):
         """批量插入文件记录"""
         import asyncio
-        from utils.scheduler.db_utils import is_opengauss
+        from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+        from utils.scheduler.db_utils import is_opengauss, get_backup_files_table_by_set_id
 
         # openGauss模式下需要手动管理事务
         if is_opengauss():
@@ -790,6 +795,12 @@ class BatchDBWriter:
             retry_count = 0
             insert_success = False
 
+            # 多表方案：根据批次中的 backup_set_id 决定物理表名
+            if not insert_data:
+                return
+            sample_backup_set_id = insert_data[0][0]
+            table_name = await get_backup_files_table_by_set_id(conn, sample_backup_set_id)
+
             while retry_count < max_retries and not insert_success:
                 try:
                     # 开始新事务
@@ -797,8 +808,8 @@ class BatchDBWriter:
 
                     # 执行批量插入
                     await conn.executemany(
-                        """
-                        INSERT INTO backup_files (
+                        f"""
+                        INSERT INTO {table_name} (
                             backup_set_id, file_path, file_name, directory_path, display_name,
                             file_type, file_size, compressed_size, file_permissions, file_owner,
                             file_group, created_time, modified_time, accessed_time, tape_block_start,
@@ -894,10 +905,15 @@ class BatchDBWriter:
     async def _batch_update(self, conn, update_data: List[tuple]):
         """批量更新文件记录"""
         import asyncio
-        from utils.scheduler.db_utils import is_opengauss
+        from utils.scheduler.db_utils import is_opengauss, get_backup_files_table_by_set_id
 
         # openGauss模式下需要手动管理事务
         if is_opengauss():
+            # 多表方案：根据批次中的 backup_set_id 决定物理表名
+            if not update_data:
+                return
+            sample_backup_set_id = update_data[0][0]
+            table_name = await get_backup_files_table_by_set_id(conn, sample_backup_set_id)
             # 在openGauss模式下，确保事务正确提交
             max_retries = 3
             retry_count = 0
@@ -910,8 +926,8 @@ class BatchDBWriter:
 
                     # 执行批量更新
                     await conn.executemany(
-                        """
-                        UPDATE backup_files
+                        f"""
+                        UPDATE {table_name}
                         SET file_name = $2,
                             directory_path = $3,
                             display_name = $4,
@@ -1569,12 +1585,16 @@ class BackupDB:
                 logger.error(f"[mark_files_as_queued] ❌ SQLite模式更新失败: {str(e)}", exc_info=True)
     
     async def _mark_files_as_queued_opengauss(self, conn, backup_set_db_id: int, file_paths: List[str]):
-        """openGauss模式：仅设置 is_copy_success = TRUE"""
+        """openGauss模式：仅设置 is_copy_success = TRUE（优化版本：使用临时表和JOIN）"""
         import asyncio
+        from utils.scheduler.db_utils import get_backup_files_table_by_set_id
 
-        # 分批更新，避免单次更新过多文件
-        batch_size = 1000
+        # 优化：增加批次大小，减少事务开销（从1000增加到5000）
+        batch_size = 5000
         total_updated = 0
+
+        # 多表方案：根据 backup_set_db_id 决定物理表名（只获取一次，避免重复查询）
+        table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
 
         for i in range(0, len(file_paths), batch_size):
             batch_paths = file_paths[i:i + batch_size]
@@ -1594,10 +1614,11 @@ class BackupDB:
                     # 设置语句超时
                     await conn.execute("SET LOCAL statement_timeout = '180s'")
 
-                    # psycopg3 的 execute 返回 rowcount（更新的行数）
+                    # openGauss 不支持 ON COMMIT DROP，改用 ANY 方式（性能仍然可以接受）
+                    # 注意：openGauss 的 ANY 操作在有索引的情况下性能良好
                     update_result = await conn.execute(
-                        """
-                        UPDATE backup_files
+                        f"""
+                        UPDATE {table_name}
                         SET is_copy_success = TRUE,
                             copy_status_at = NOW(),
                             updated_at = NOW()
@@ -1866,14 +1887,18 @@ class BackupDB:
 
     async def clear_backup_files_for_set(self, backup_set_db_id: int):
         """清理指定备份集的文件记录"""
-        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection, get_backup_files_table_by_set_id
         if not is_opengauss():
             return
         try:
             async with get_opengauss_connection() as conn:
                 try:
+                    # 多表方案：根据 backup_set_db_id 决定物理表名
+                    from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                    table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
+
                     await conn.execute(
-                        "DELETE FROM backup_files WHERE backup_set_id = $1",
+                        f"DELETE FROM {table_name} WHERE backup_set_id = $1",
                         backup_set_db_id
                     )
                     
@@ -1885,7 +1910,7 @@ class BackupDB:
                     if hasattr(actual_conn, 'info'):
                         transaction_status = actual_conn.info.transaction_status
                         if transaction_status == 0:  # IDLE: 事务成功提交
-                            logger.debug(f"clear_backup_files_for_set: 事务已提交（backup_set_db_id={backup_set_db_id}）")
+                            logger.debug(f"clear_backup_files_for_set: 事务已提交（backup_set_db_id={backup_set_db_id}, 表={table_name}）")
                         elif transaction_status == 1:  # INTRANS: 事务未提交
                             logger.warning(f"clear_backup_files_for_set: ⚠️ 事务未提交，状态={transaction_status}，尝试回滚")
                             await actual_conn.rollback()
@@ -1955,10 +1980,14 @@ class BackupDB:
 
         async with get_opengauss_connection() as conn:
             try:
+                # 多表方案：根据 backup_set_db_id 决定物理表名
+                from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
+
                 existing = await conn.fetchrow(
-                    """
+                    f"""
                     SELECT id, is_copy_success 
-                    FROM backup_files 
+                    FROM {table_name}
                     WHERE backup_set_id = $1 AND file_path = $2
                     """,
                     backup_set_db_id,
@@ -1974,8 +2003,8 @@ class BackupDB:
 
                 if existing:
                     await conn.execute(
-                        """
-                        UPDATE backup_files
+                        f"""
+                        UPDATE {table_name}
                         SET file_name = $3,
                             directory_path = $4,
                             display_name = $5,
@@ -2004,8 +2033,8 @@ class BackupDB:
                     )
                 else:
                     await conn.execute(
-                        """
-                        INSERT INTO backup_files (
+                        f"""
+                        INSERT INTO {table_name} (
                             backup_set_id, file_path, file_name, directory_path, display_name,
                             file_type, file_size, compressed_size, file_permissions,
                             created_time, modified_time, accessed_time, compressed,
@@ -2077,11 +2106,14 @@ class BackupDB:
             return []
         
         async with get_opengauss_connection() as conn:
+            # 多表方案：根据 backup_set_db_id 决定物理表名
+            table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
+
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT id, file_path, file_name, directory_path, display_name, file_type,
                        file_size, file_permissions, modified_time, accessed_time
-                FROM backup_files
+                FROM {table_name}
                 WHERE backup_set_id = $1
                   AND (is_copy_success = FALSE OR is_copy_success IS NULL)
                   AND file_type = 'file'::backupfiletype
@@ -2140,7 +2172,12 @@ class BackupDB:
         Returns:
             List[List[Dict]]: 包含一个文件组的列表，空列表表示等待或无文件
         """
-        from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
+        from utils.scheduler.db_utils import (
+            is_opengauss,
+            is_redis,
+            get_opengauss_connection,
+            get_backup_files_table_by_set_id,
+        )
         from backup.utils import format_bytes
         from config.settings import get_settings
 
@@ -2207,6 +2244,9 @@ class BackupDB:
         # 注意：整个方法使用同一个连接，确保连接复用
         # 第一次查询和后续循环都使用同一个conn对象，避免连接泄漏
         async with get_opengauss_connection() as conn:
+            # 多表方案：根据 backup_set_db_id 决定物理表名，避免直接访问基础表 backup_files
+            table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
+
             # 关键修复：先查询当前备份集中第一个未压缩文件的ID
             # 如果有多个备份集，需要确保从当前备份集的第一个文件开始
             # 使用索引优化：利用 idx_backup_files_set_copy_type_id 索引，使用 ORDER BY id LIMIT 1 比 MIN(id) 更高效
@@ -2216,9 +2256,9 @@ class BackupDB:
                 await conn.execute("SET LOCAL statement_timeout = '30s'")
                 first_pending_file_row = await asyncio.wait_for(
                     conn.fetchrow(
-                        """
+                        f"""
                         SELECT COALESCE(MIN(id), 0)::BIGINT as min_id
-                        FROM backup_files
+                        FROM {table_name}
                         WHERE backup_set_id = $1::INTEGER
                           AND (is_copy_success = FALSE OR is_copy_success IS NULL)
                           AND file_type = 'file'::backupfiletype
@@ -2313,9 +2353,9 @@ class BackupDB:
                 try:
                     total_pending_count_row = await asyncio.wait_for(
                         conn.fetchrow(
-                            """
+                            f"""
                             SELECT COUNT(*)::BIGINT as count
-                            FROM backup_files
+                            FROM {table_name}
                             WHERE backup_set_id = $1::INTEGER
                               AND (is_copy_success = FALSE OR is_copy_success IS NULL)
                               AND file_type = 'file'::backupfiletype
@@ -2329,9 +2369,9 @@ class BackupDB:
                     # 查询 id > last_processed_id 的未压缩文件数量
                     pending_after_id_row = await asyncio.wait_for(
                         conn.fetchrow(
-                            """
+                            f"""
                             SELECT COUNT(*)::BIGINT as count
-                            FROM backup_files
+                            FROM {table_name}
                             WHERE backup_set_id = $1::INTEGER
                               AND (is_copy_success = FALSE OR is_copy_success IS NULL)
                               AND file_type = 'file'::backupfiletype
@@ -2467,29 +2507,29 @@ class BackupDB:
                         # 使用 asyncio.wait_for 包装查询，设置超时保护
                         rows = await asyncio.wait_for(
                             conn.fetch(
-                            """
-                            SELECT 
-                                id,
-                                file_path,
-                                file_name,
-                                directory_path,
-                                display_name,
-                                file_type,
-                                file_size,
-                                file_permissions,
-                                modified_time,
-                                accessed_time
-                            FROM backup_files
-                            WHERE backup_set_id = $1
-                              AND (is_copy_success = FALSE OR is_copy_success IS NULL)
-                              AND file_type = 'file'
-                              AND id > $2
-                            ORDER BY id
-                            LIMIT $3
-                            """,
-                            backup_set_db_id,
-                            last_processed_id,
-                            current_batch_size
+                                f"""
+                                SELECT 
+                                    id,
+                                    file_path,
+                                    file_name,
+                                    directory_path,
+                                    display_name,
+                                    file_type,
+                                    file_size,
+                                    file_permissions,
+                                    modified_time,
+                                    accessed_time
+                                FROM {table_name}
+                                WHERE backup_set_id = $1
+                                  AND (is_copy_success = FALSE OR is_copy_success IS NULL)
+                                  AND file_type = 'file'
+                                  AND id > $2
+                                ORDER BY id
+                                LIMIT $3
+                                """,
+                                backup_set_db_id,
+                                last_processed_id,
+                                current_batch_size
                             ),
                             timeout=query_timeout  # 使用动态计算的超时时间
                         )
@@ -2641,9 +2681,9 @@ class BackupDB:
                     try:
                         total_pending_count_row = await asyncio.wait_for(
                             conn.fetchrow(
-                                """
+                                f"""
                                 SELECT COUNT(*)::BIGINT as count
-                                FROM backup_files
+                                FROM {table_name}
                                 WHERE backup_set_id = $1::INTEGER
                                   AND (is_copy_success = FALSE OR is_copy_success IS NULL)
                                   AND file_type = 'file'::backupfiletype
@@ -2657,9 +2697,9 @@ class BackupDB:
                         # 查询 id > last_processed_id 的未压缩文件数量
                         pending_after_id_row = await asyncio.wait_for(
                             conn.fetchrow(
-                                """
+                                f"""
                                 SELECT COUNT(*)::BIGINT as count
-                                FROM backup_files
+                                FROM {table_name}
                                 WHERE backup_set_id = $1::INTEGER
                                   AND (is_copy_success = FALSE OR is_copy_success IS NULL)
                                   AND file_type = 'file'::backupfiletype
@@ -2699,9 +2739,9 @@ class BackupDB:
                             try:
                                 first_pending_id_row = await asyncio.wait_for(
                                     conn.fetchrow(
-                                        """
+                                        f"""
                                         SELECT MIN(id)::BIGINT as min_id
-                                        FROM backup_files
+                                        FROM {table_name}
                                         WHERE backup_set_id = $1::INTEGER
                                           AND (is_copy_success = FALSE OR is_copy_success IS NULL)
                                           AND file_type = 'file'::backupfiletype
@@ -2868,6 +2908,9 @@ class BackupDB:
             # 进行全库检索，不限制 id > last_processed_id
             try:
                 async with get_opengauss_connection() as conn:
+                    # 多表方案：根据 backup_set_db_id 决定物理表名
+                    table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
+
                     # 全库搜索：检索本备份集所有未压缩文件（不限制ID范围）
                     full_search_timeout = 7200.0  # 7200秒超时（两小时）
                     await conn.execute(f"SET LOCAL statement_timeout = '{int(full_search_timeout)}s'")
@@ -2875,10 +2918,10 @@ class BackupDB:
                     logger.info(f"[openGauss优化] 开始全库检索所有未压缩文件（超时时间：{full_search_timeout}秒）...")
                     all_pending_rows = await asyncio.wait_for(
                         conn.fetch(
-                            """
+                            f"""
                             SELECT id, file_path, file_name, directory_path, display_name, file_type,
                                    file_size, file_permissions, modified_time, accessed_time
-                            FROM backup_files
+                            FROM {table_name}
                             WHERE backup_set_id = $1
                               AND (is_copy_success = FALSE OR is_copy_success IS NULL)
                               AND file_type = 'file'::backupfiletype
@@ -3065,16 +3108,19 @@ class BackupDB:
             
             try:
                 async with get_opengauss_connection() as conn:
+                    # 多表方案：根据 backup_set_db_id 决定物理表名
+                    table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
+
                     # 设置查询超时（使用原生 openGauss SQL）
                     await conn.execute(f"SET LOCAL statement_timeout = '{int(full_search_timeout)}s'")
                     
                     # 全库搜索：检索本备份集所有未压缩文件（使用原生 openGauss SQL）
                     all_pending_rows = await asyncio.wait_for(
                         conn.fetch(
-                            """
+                            f"""
                             SELECT id, file_path, file_name, directory_path, display_name, file_type,
                                    file_size, file_permissions, modified_time, accessed_time
-                            FROM backup_files
+                            FROM {table_name}
                             WHERE backup_set_id = $1
                               AND (is_copy_success = FALSE OR is_copy_success IS NULL)
                               AND file_type = 'file'::backupfiletype
@@ -3378,14 +3424,18 @@ class BackupDB:
                         
                         # 添加超时设置，防止查询阻塞（180秒超时）
                         # 使用显式类型转换，避免 openGauss 缓冲区错误
+                        # 多表方案：根据 backup_set_db_id 决定物理表名
+                        from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                        table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
+
                         batch_existing = await asyncio.wait_for(
                             conn.fetch(
-                                """
+                                f"""
                                 SELECT 
                                     id::INTEGER as id,
                                     file_path::TEXT as file_path,
                                     is_copy_success::BOOLEAN as is_copy_success
-                                FROM backup_files
+                                FROM {table_name}
                                 WHERE backup_set_id = $1 AND file_path = ANY($2)
                                 """,
                                 backup_set_db_id, batch_paths
@@ -3451,14 +3501,18 @@ class BackupDB:
                     
                     # 添加超时设置，防止查询阻塞（300秒超时，增加超时时间以处理大数据量）
                     # 使用显式类型转换，避免 openGauss 缓冲区错误
+                    # 多表方案：根据 backup_set_db_id 决定物理表名
+                    from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                    table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
+
                     existing_files = await asyncio.wait_for(
                         conn.fetch(
-                            """
+                            f"""
                             SELECT 
                                 id::INTEGER as id,
                                 file_path::TEXT as file_path,
                                 is_copy_success::BOOLEAN as is_copy_success
-                            FROM backup_files
+                            FROM {table_name}
                             WHERE backup_set_id = $1 AND file_path = ANY($2)
                             """,
                             backup_set_db_id, file_paths
@@ -3608,10 +3662,12 @@ class BackupDB:
                         # 根据是否使用 file_path 更新选择不同的 SQL
                         if use_file_path_update and len(batch_update) > 0 and isinstance(batch_update[0][0], str):
                             # 通过 file_path 更新（查询失败时的备用方案）
+                            from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                            table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
                             await asyncio.wait_for(
                                 conn.executemany(
-                                    """
-                                    UPDATE backup_files
+                                    f"""
+                                    UPDATE {table_name}
                                     SET compressed_size = $2,
                                         compressed = $3,
                                         checksum = $4,
@@ -3630,10 +3686,12 @@ class BackupDB:
                             )
                         else:
                             # 通过 id 更新（正常情况）
+                            from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                            table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
                             await asyncio.wait_for(
                                 conn.executemany(
-                                    """
-                                    UPDATE backup_files
+                                    f"""
+                                    UPDATE {table_name}
                                     SET compressed_size = $2,
                                         compressed = $3,
                                         checksum = $4,
@@ -3668,10 +3726,12 @@ class BackupDB:
                     # 根据是否使用 file_path 更新选择不同的 SQL
                     if use_file_path_update and len(update_data) > 0 and isinstance(update_data[0][0], str):
                         # 通过 file_path 更新（查询失败时的备用方案）
+                        from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                        table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
                         await asyncio.wait_for(
                             conn.executemany(
-                                """
-                                UPDATE backup_files
+                                f"""
+                                UPDATE {table_name}
                                 SET compressed_size = $2,
                                     compressed = $3,
                                     checksum = $4,
@@ -3689,10 +3749,12 @@ class BackupDB:
                         )
                     else:
                         # 通过 id 更新（正常情况）
+                        from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                        table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
                         await asyncio.wait_for(
                             conn.executemany(
-                                """
-                                UPDATE backup_files
+                                f"""
+                                UPDATE {table_name}
                                 SET compressed_size = $2,
                                     compressed = $3,
                                     checksum = $4,
@@ -3765,10 +3827,14 @@ class BackupDB:
                     
                     # 添加超时设置，防止插入阻塞（180秒超时）
                     import asyncio
+                    from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                    # insert_data 中每条的第一个元素是 backup_set_id
+                    sample_backup_set_id = insert_data[0][0]
+                    table_name = await get_backup_files_table_by_set_id(conn, sample_backup_set_id)
                     await asyncio.wait_for(
                         conn.executemany(
-                            """
-                            INSERT INTO backup_files (
+                            f"""
+                            INSERT INTO {table_name} (
                                 backup_set_id, file_path, file_name, file_type, file_size,
                                 compressed_size, file_permissions, created_time, modified_time,
                                 accessed_time, compressed, checksum, backup_time, chunk_number,
@@ -4261,10 +4327,13 @@ class BackupDB:
             elif is_opengauss():
                 # openGauss 版本：只统计真正压缩完成的文件（chunk_number IS NOT NULL）
                 async with get_opengauss_connection() as conn:
+                    # 多表方案：根据 backup_set_db_id 决定物理表名
+                    table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
+
                     row = await conn.fetchrow(
-                        """
+                        f"""
                         SELECT COUNT(*)::BIGINT as count
-                        FROM backup_files
+                        FROM {table_name}
                         WHERE backup_set_id = $1::INTEGER
                           AND (is_copy_success = TRUE)
                           AND chunk_number IS NOT NULL

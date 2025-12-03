@@ -390,13 +390,50 @@ class CompressionWorker:
         task_progress_list = []  # 各个任务的进度列表
         
         # 遍历所有运行中的压缩任务，从它们的compress_progress字典读取实际进度
+        logger.debug(
+            f"[压缩进度聚合] 开始聚合进度: compression_progress_map 大小={len(self.compression_progress_map)}, "
+            f"running_compression_futures 大小={running_count}"
+        )
+        
+        # 同时检查 running_compression_futures 中的任务，确保所有正在运行的任务都被计入
+        running_group_indices = set()
+        for task in self.running_compression_futures:
+            # 尝试从任务中获取 group_idx（如果任务有存储）
+            # 注意：asyncio.Task 对象可能没有直接存储 group_idx，需要通过其他方式关联
+            pass  # 暂时无法直接从 task 获取 group_idx
+        
         for group_idx, progress_info in self.compression_progress_map.items():
             compress_progress = progress_info.get('compress_progress')
+            if compress_progress:
+                running = compress_progress.get('running', False)
+                completed = compress_progress.get('completed', False)
+                total_files_in_group = compress_progress.get('total_files_in_group', 0)
+                logger.debug(
+                    f"[压缩进度聚合] 任务#{group_idx}: running={running}, completed={completed}, "
+                    f"total_files_in_group={total_files_in_group}, compress_progress存在={compress_progress is not None}"
+                )
+            
             if compress_progress and compress_progress.get('running', False) and not compress_progress.get('completed', False):
                 # 从compress_progress字典读取实际进度
                 current_file_index = compress_progress.get('current_file_index', 0)
                 total_files_in_group = compress_progress.get('total_files_in_group', 0)
                 group_size_bytes = progress_info.get('group_size_bytes', 0)
+                
+                logger.debug(
+                    f"[压缩进度聚合] 任务#{group_idx}: current_file_index={current_file_index}, "
+                    f"total_files_in_group={total_files_in_group}, group_size_bytes={group_size_bytes}"
+                )
+                
+                # 如果 total_files_in_group 为 0，尝试从 progress_info 中获取（作为后备）
+                if total_files_in_group == 0:
+                    total_files_in_group = progress_info.get('total_files', 0)
+                    if total_files_in_group > 0:
+                        logger.warning(
+                            f"[压缩进度聚合] 任务#{group_idx}: compress_progress.total_files_in_group=0，"
+                            f"使用 progress_info.total_files={total_files_in_group} 作为后备"
+                        )
+                        # 更新 compress_progress 中的值，避免下次还是 0
+                        compress_progress['total_files_in_group'] = total_files_in_group
                 
                 if total_files_in_group > 0:
                     # 累加每个任务的实际进度（这是正在处理任务的文件数和）
@@ -435,8 +472,35 @@ class CompressionWorker:
                         f"({size_percent:.1f}%), 大小={group_size_bytes / (1024**3):.2f}GB"
                     )
         
+        # 即使 total_total == 0，如果有 running_count > 0，也应该返回数据结构（包含空的 task_progress_list）
+        # 这样可以避免前端交替显示，让前端知道有任务在运行，只是暂时没有进度数据
         if total_total == 0:
-            return None
+            if running_count > 0:
+                # 有任务在运行，但暂时没有进度数据（可能是刚启动或初始化阶段）
+                logger.debug(
+                    f"[压缩进度聚合] total_total=0 但 running_count={running_count} > 0，"
+                    f"返回空进度数据结构。active_count={active_count}, "
+                    f"compression_progress_map大小={len(self.compression_progress_map)}, "
+                    f"task_progress_list大小={len(task_progress_list)}"
+                )
+                # 返回包含空 task_progress_list 的数据结构，而不是 None
+                return {
+                    'current': 0,
+                    'total': 0,
+                    'current_file_index': 0,
+                    'total_files_in_group': 0,
+                    'percent': 0.0,
+                    'group_size_bytes': 0,
+                    'running_count': running_count,
+                    'task_progress_list': []  # 空的进度列表，但至少表明有任务在运行
+                }
+            else:
+                # 没有任务在运行，返回 None
+                logger.debug(
+                    f"[压缩进度聚合] total_total=0 且 running_count=0，返回 None。"
+                    f"active_count={active_count}, compression_progress_map大小={len(self.compression_progress_map)}"
+                )
+                return None
         
         percent = (total_current / total_total * 100) if total_total > 0 else 0.0
         
@@ -480,10 +544,17 @@ class CompressionWorker:
                     
                     # 检查是否需要更新（每5秒更新一次）
                     if current_time - last_update_time >= update_interval:
-                        # 从数据库查询已压缩文件数（聚合所有进程的进度）
-                        compressed_count = await self.backup_db.get_compressed_files_count(
-                            self.backup_set.id
-                        )
+                        # 从内存获取已压缩文件数（不再依赖数据库状态）
+                        # 在 openGauss / 预取模式下，所有压缩进度都由当前进程维护在内存中
+                        from utils.scheduler.db_utils import is_opengauss
+                        if is_opengauss():
+                            # 使用 CompressionWorker 自身统计的 processed_files 作为已压缩文件数
+                            compressed_count = getattr(self, "processed_files", 0) or 0
+                        else:
+                            # 非 openGauss 模式保留原有行为（从数据库聚合查询进度）
+                            compressed_count = await self.backup_db.get_compressed_files_count(
+                                self.backup_set.id
+                            )
                         
                         # 调试日志：记录查询结果
                         logger.debug(
@@ -535,6 +606,20 @@ class CompressionWorker:
                                 self._last_logged_progress = progress_percent
                         else:
                             logger.debug("[压缩进度更新] 需要处理的总文件数为0，跳过进度更新")
+                        
+                        # 更新 backup_task.current_compression_progress（包含 task_progress_list，供前端显示各任务进度）
+                        # 使用 get_aggregated_compression_progress() 获取包含所有并行任务进度的聚合数据
+                        aggregated_progress = self.get_aggregated_compression_progress()
+                        if aggregated_progress:
+                            # 将聚合进度（包含 task_progress_list）设置到 backup_task，供 UI 使用
+                            if hasattr(self.backup_task, 'current_compression_progress'):
+                                self.backup_task.current_compression_progress = aggregated_progress
+                                logger.debug(
+                                    f"[压缩进度更新] 已更新 backup_task.current_compression_progress，"
+                                    f"包含 {len(aggregated_progress.get('task_progress_list', []))} 个任务进度"
+                                )
+                        # 注意：如果 get_aggregated_compression_progress() 返回 None（可能暂时没有活跃任务），
+                        # 不更新 backup_task.current_compression_progress，保留上一次的值，避免前端交替显示
                         
                         last_update_time = current_time
                     
@@ -683,7 +768,14 @@ class CompressionWorker:
                 compress_progress['running'] = True
                 compress_progress['completed'] = False
                 compress_progress['current_file_index'] = compress_progress.get('current_file_index', 0)
-                compress_progress['total_files_in_group'] = compress_progress.get('total_files_in_group', total_files)
+                # 如果 total_files_in_group 不存在或为 0，设置为 total_files
+                if compress_progress.get('total_files_in_group', 0) == 0:
+                    compress_progress['total_files_in_group'] = total_files
+                    logger.debug(f"[压缩任务#{group_idx + 1}] 初始化 total_files_in_group={total_files}")
+                else:
+                    # 确保值正确（如果传入的字典已经有值，但可能不正确，使用 total_files 覆盖）
+                    compress_progress['total_files_in_group'] = total_files
+                    logger.debug(f"[压缩任务#{group_idx + 1}] 更新 total_files_in_group={total_files}")
             
             # 更新进度映射中的信息
             if group_idx in self.compression_progress_map:

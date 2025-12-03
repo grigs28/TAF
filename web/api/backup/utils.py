@@ -133,8 +133,16 @@ def _build_stage_info(description: Optional[str], scan_status: Optional[str], st
             stage_code = "cancelled"
             operation_status = operation_status or "任务已取消"
         elif normalized_status in ("completed",):
-            stage_code = "finalize"
-            operation_status = operation_status or "备份完成"
+            # 只有当任务状态为 completed 且 operation_stage 为 finalize 时，才显示"备份完成"
+            # 避免扫描完成时误显示为整个任务完成
+            if operation_stage and operation_stage.lower() == "finalize":
+                stage_code = "finalize"
+                operation_status = operation_status or "备份完成"
+            else:
+                # 如果任务状态是 completed 但 operation_stage 不是 finalize，说明可能只是某个阶段完成
+                # 根据 scan_status 判断当前阶段
+                stage_code = normalized_scan if normalized_scan in STAGE_INDEX else "scan"
+                operation_status = operation_status or "正在处理"
         elif normalized_status in ("running",):
             stage_code = normalized_scan if normalized_scan in STAGE_INDEX else "scan"
             operation_status = operation_status or "正在处理"

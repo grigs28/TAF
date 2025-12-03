@@ -446,20 +446,24 @@ class RecoveryEngine:
 
                     backup_set_db_id = backup_set_row['id']
 
+                    # 多表方案：根据 backup_set_db_id 决定物理表名
+                    from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                    table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
+
                     # 查询该备份集的所有文件（恢复时应该显示所有已扫描的文件，不管是否已复制到磁带）
-                    sql = """
+                    sql = f"""
                         SELECT id, file_path, file_name, directory_path, display_name,
                                file_type, file_size, compressed_size,
                                file_permissions, created_time, modified_time, accessed_time,
                                compressed, checksum, backup_time, chunk_number
-                        FROM backup_files
+                        FROM {table_name}
                         WHERE backup_set_id = $1
                         ORDER BY file_path ASC
                     """
                     try:
                         rows = await conn.fetch(sql, backup_set_db_id)
                     except Exception as query_error:
-                        logger.error(f"[openGauss] 查询备份集文件列表失败: backup_set_id={backup_set_id}, backup_set_db_id={backup_set_db_id}, 错误: {str(query_error)}", exc_info=True)
+                        logger.error(f"[openGauss] 查询备份集文件列表失败: backup_set_id={backup_set_id}, backup_set_db_id={backup_set_db_id}, 表: {table_name}, 错误: {str(query_error)}", exc_info=True)
                         return []
 
                     # 转换为字典格式
@@ -786,16 +790,20 @@ class RecoveryEngine:
                         return []
                     
                     backup_set_db_id = backup_set_row['id']
+
+                    # 多表方案：根据 backup_set_db_id 决定物理表名
+                    from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                    table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
                     
                     # 使用SQL查询直接在数据库中提取唯一的顶层目录和文件
                     # 使用字符串函数提取第一级路径，并使用GROUP BY去重
                     # 这样可以避免在Python中遍历所有文件路径
-                    sql = """
+                    sql = f"""
                         WITH normalized_paths AS (
                             SELECT 
                                 file_path,
                                 REPLACE(file_path, '\\', '/') as normalized_path
-                            FROM backup_files
+                            FROM {table_name}
                             WHERE backup_set_id = $1
                         ),
                         first_levels AS (
@@ -888,11 +896,11 @@ class RecoveryEngine:
                                 try:
                                     # 简化查询，去掉不必要的类型转换
                                     file_row = await conn.fetchrow(
-                                        """
+                                        f"""
                                         SELECT id, file_path, file_name, file_type, file_size, compressed_size,
                                                file_permissions, created_time, modified_time, accessed_time,
                                                compressed, checksum, backup_time, chunk_number
-                                        FROM backup_files
+                                        FROM {table_name}
                                         WHERE backup_set_id = $1 AND file_path = $2
                                         LIMIT 1
                                         """,

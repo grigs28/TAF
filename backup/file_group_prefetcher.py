@@ -337,12 +337,16 @@ class FileGroupPrefetcher:
                                         f"[文件组预取器] [循环 #{prefetch_loop_count}] 开始全库检索所有未压缩文件"
                                         f"（超时时间：{full_search_timeout}秒）..."
                                     )
+                                    # 多表方案：根据 backup_set_db_id 决定物理表名，避免直接访问基础表 backup_files
+                                    from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                                    table_name = await get_backup_files_table_by_set_id(conn, self.backup_set.id)
+
                                     all_pending_rows = await asyncio.wait_for(
                                         conn.fetch(
-                                            """
+                                            f"""
                                             SELECT id, file_path, file_name, directory_path, display_name, file_type,
                                                    file_size, file_permissions, modified_time, accessed_time
-                                            FROM backup_files
+                                            FROM {table_name}
                                             WHERE backup_set_id = $1
                                               AND (is_copy_success = FALSE OR is_copy_success IS NULL)
                                               AND file_type = 'file'::backupfiletype

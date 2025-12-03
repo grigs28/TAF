@@ -207,8 +207,16 @@ async def get_backup_tasks(
                                 f"状态异常={status_mismatch}"
                             )
                         
-                        # 对于运行中的任务，尝试从内存中的压缩程序获取实时进度（不再从数据库description解析）
+                        # 对于运行中的任务，尝试从内存中的压缩程序/任务状态获取实时进度和统计（全部使用内存数据）
                         current_compression_progress = None
+                        in_memory_total_files = None
+                        in_memory_total_bytes = None
+                        in_memory_processed_files = None
+                        in_memory_processed_bytes = None
+                        in_memory_compressed_bytes = None
+                        in_memory_scan_status = None
+                        task_status = None
+                        
                         if status_value == 'running':
                             try:
                                 from web.api.backup.utils import get_system_instance
@@ -223,40 +231,100 @@ async def get_backup_tasks(
                                             # 从compression_worker获取聚合的压缩进度（包含所有并行任务的进度）
                                             aggregated_progress = compression_worker.get_aggregated_compression_progress()
                                             if aggregated_progress:
+                                                # 有新的聚合进度，使用它
                                                 current_compression_progress = aggregated_progress
                                                 logger.debug(f"[任务查询] 任务 {row['id']} 从内存压缩程序获取聚合进度: {aggregated_progress}")
-                                    # 如果从compression_worker获取不到，尝试从get_task_status获取
-                                    if not current_compression_progress:
-                                        task_status = await system.backup_engine.get_task_status(row["id"])
-                                        logger.debug(f"[任务查询] 任务 {row['id']} 状态: {task_status}")
-                                        if task_status and 'current_compression_progress' in task_status:
+                                            else:
+                                                # get_aggregated_compression_progress 返回 None（可能任务刚启动或暂时没有活跃任务）
+                                                # 保留上一次的 current_compression_progress，避免交替显示
+                                                if not current_compression_progress:
+                                                    # 如果还没有 current_compression_progress，尝试从 backup_task 获取
+                                                    if hasattr(compression_worker.backup_task, 'current_compression_progress') and compression_worker.backup_task.current_compression_progress:
+                                                        current_compression_progress = compression_worker.backup_task.current_compression_progress
+                                                        logger.debug(f"[任务查询] 任务 {row['id']} get_aggregated_compression_progress 返回 None，使用 backup_task 中的上一次进度")
+                                    # 从get_task_status获取所有内存统计（优先使用内存数据）
+                                    task_status = await system.backup_engine.get_task_status(row["id"])
+                                    logger.debug(f"[任务查询] 任务 {row['id']} 状态: {task_status}")
+                                    if task_status:
+                                        # 压缩进度：只有在 current_compression_progress 还没有设置时才使用 task_status 中的值
+                                        # 这样可以避免覆盖从 compression_worker 获取的实时数据
+                                        if not current_compression_progress and 'current_compression_progress' in task_status:
                                             current_compression_progress = task_status['current_compression_progress']
                                             logger.debug(f"[任务查询] 任务 {row['id']} 从get_task_status获取压缩进度: {current_compression_progress}")
+                                        # 所有统计字段（优先使用内存中的值）
+                                        if 'total_files' in task_status:
+                                            try:
+                                                in_memory_total_files = int(task_status.get('total_files') or 0)
+                                            except (ValueError, TypeError):
+                                                in_memory_total_files = None
+                                        if 'total_bytes' in task_status:
+                                            try:
+                                                in_memory_total_bytes = int(task_status.get('total_bytes') or 0)
+                                            except (ValueError, TypeError):
+                                                in_memory_total_bytes = None
+                                        if 'processed_files' in task_status:
+                                            try:
+                                                in_memory_processed_files = int(task_status.get('processed_files') or 0)
+                                            except (ValueError, TypeError):
+                                                in_memory_processed_files = None
+                                        if 'processed_bytes' in task_status:
+                                            try:
+                                                in_memory_processed_bytes = int(task_status.get('processed_bytes') or 0)
+                                            except (ValueError, TypeError):
+                                                in_memory_processed_bytes = None
+                                        if 'compressed_bytes' in task_status:
+                                            try:
+                                                in_memory_compressed_bytes = int(task_status.get('compressed_bytes') or 0)
+                                            except (ValueError, TypeError):
+                                                in_memory_compressed_bytes = None
+                                        if 'scan_status' in task_status:
+                                            in_memory_scan_status = task_status.get('scan_status')
                             except Exception as e:
                                 logger.error(f"[任务查询] 获取任务 {row['id']} 压缩进度失败: {str(e)}", exc_info=True)
                         
                         # 构建阶段信息，传入current_compression_progress用于构建operation_status
+                        # scan_status 优先使用内存中的值，其次回退到数据库字段
+                        scan_status_value = in_memory_scan_status if in_memory_scan_status is not None else row.get("scan_status")
+
                         # 预分组完成状态由预分组任务在完成时更新description字段来标记，不需要查询数据库
                         stage_info = _build_stage_info(
                             row.get("description"),
-                            row.get("scan_status"),
+                            scan_status_value,
                             status_value,
                             row.get("operation_stage"),  # 优先使用数据库中的 operation_stage 字段
                             current_compression_progress  # 传入从内存获取的压缩进度
                         )
+                        
+                        # 所有统计字段：优先使用内存中的实时统计，其次回退到数据库字段
+                        total_files_value = in_memory_total_files if in_memory_total_files is not None else (row["total_files"] or 0)
+                        total_bytes_value = in_memory_total_bytes if in_memory_total_bytes is not None else (row["total_bytes"] or 0)
+                        processed_files_value = in_memory_processed_files if in_memory_processed_files is not None else (row["processed_files"] or 0)
+                        processed_bytes_value = in_memory_processed_bytes if in_memory_processed_bytes is not None else (row["processed_bytes"] or 0)
+                        compressed_bytes_value = in_memory_compressed_bytes if in_memory_compressed_bytes is not None else (row["compressed_bytes"] or 0)
+
+                        # 计算进度百分比（基于内存统计）
+                        # 优先使用内存统计计算，如果内存统计不可用，使用数据库中的 progress_percent
+                        progress_percent_value = 0.0
+                        if total_files_value > 0 and processed_files_value >= 0:
+                            # 有总文件数，计算进度百分比
+                            progress_percent_value = min(100.0, (processed_files_value / total_files_value) * 100.0)
+                        elif row.get("progress_percent") is not None:
+                            # 没有总文件数，使用数据库中的进度百分比（包括 0 值）
+                            progress_percent_value = float(row["progress_percent"])
+                        # 如果 total_files 为 0，说明扫描刚开始，进度为 0% 是正常的，但仍需要返回 0.0 而不是 None
                         
                         tasks.append({
                             "task_id": row["id"],
                             "task_name": row["task_name"],
                             "task_type": row["task_type"].value if hasattr(row["task_type"], "value") else str(row["task_type"]),
                             "status": status_value,
-                            "progress_percent": float(row["progress_percent"]) if row["progress_percent"] else 0.0,
-                            "total_files": row["total_files"] or 0,  # 总文件数（由后台扫描任务更新）
-                            "processed_files": row["processed_files"] or 0,  # 已处理文件数
-                            "total_bytes": row["total_bytes"] or 0,  # 总字节数（由后台扫描任务更新）
+                            "progress_percent": progress_percent_value,  # 基于内存统计计算
+                            "total_files": total_files_value,  # 总文件数（优先使用内存中的实时统计）
+                            "processed_files": processed_files_value,  # 已处理文件数（优先使用内存中的实时统计）
+                            "total_bytes": total_bytes_value,  # 总字节数（优先使用内存中的实时统计）
                             "total_bytes_actual": total_bytes_actual,
-                            "processed_bytes": row["processed_bytes"] or 0,
-                            "compressed_bytes": row["compressed_bytes"] or 0,
+                            "processed_bytes": processed_bytes_value,  # 已处理容量（优先使用内存中的实时统计）
+                            "compressed_bytes": compressed_bytes_value,  # 压缩后大小（优先使用内存中的实时统计）
                             "compression_ratio": compression_ratio,
                             "estimated_archive_count": estimated_archive_count,  # 压缩包数量（从 result_summary.estimated_archive_count 读取）
                             "created_at": row["created_at"],

@@ -188,10 +188,14 @@ async def delete_backup_set(set_id: str):
                     raise HTTPException(status_code=404, detail=f"备份集 {set_id} 不存在")
                 
                 backup_set_id = set_row['id']
+
+                # 多表方案：根据 backup_set_id 决定物理表名
+                from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                table_name = await get_backup_files_table_by_set_id(conn, backup_set_id)
                 
                 # 删除关联的备份文件
                 files_result = await conn.execute(
-                    "DELETE FROM backup_files WHERE backup_set_id = $1",
+                    f"DELETE FROM {table_name} WHERE backup_set_id = $1",
                     backup_set_id
                 )
                 files_deleted = files_result if hasattr(files_result, '__int__') else 0

@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 class DatabaseConfig(BaseModel):
     """数据库配置模型"""
-    db_type: str = Field(..., description="数据库类型: sqlite, postgresql, opengauss, mysql, redis")
+    db_type: str = Field(..., description="数据库类型: sqlite（内存数据库）、opengauss")
     db_host: Optional[str] = Field(None, description="数据库主机")
     db_port: Optional[int] = Field(None, description="数据库端口")
     db_user: Optional[str] = Field(None, description="数据库用户名")

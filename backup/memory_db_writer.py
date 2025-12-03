@@ -387,10 +387,31 @@ class MemoryDBWriter:
                 logger.warning("批量插入：没有有效的数据可以插入")
                 return 0
             
-            # 使用原生SQL批量插入到openGauss
+            # 使用原生SQL批量插入到openGauss（支持多表方案：按任务写入对应的 backup_files_* 表）
             async with get_opengauss_connection() as conn:
-                await conn.executemany("""
-                    INSERT INTO backup_files (
+                # 确定目标表名：通过 backup_set_id 关联到 backup_tasks.backup_files_table
+                table_name = "backup_files"
+                try:
+                    # 从 backup_sets -> backup_tasks 获取表名
+                    row = await conn.fetchrow(
+                        """
+                        SELECT bt.backup_files_table
+                        FROM backup_sets bs
+                        JOIN backup_tasks bt ON bs.backup_task_id = bt.id
+                        WHERE bs.id = $1
+                        """,
+                        self.backup_set_db_id,
+                    )
+                    if row and row.get("backup_files_table"):
+                        candidate = row["backup_files_table"]
+                        if isinstance(candidate, str) and candidate.startswith("backup_files_"):
+                            table_name = candidate
+                except Exception as table_err:
+                    logger.warning(f"[openGauss直接写入] 获取 backup_files 目标表名失败，将回退到主表 backup_files: {table_err}")
+
+                await conn.executemany(
+                    f"""
+                    INSERT INTO {table_name} (
                         backup_set_id, file_path, file_name, directory_path, display_name,
                         file_type, file_size, compressed_size, file_permissions, file_owner,
                         file_group, created_time, modified_time, accessed_time, tape_block_start,
@@ -402,19 +423,21 @@ class MemoryDBWriter:
                         $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
                         $21, $22, $23, $24, $25::jsonb, $26::jsonb, NOW(), NOW()
                     )
-                """, insert_data)
-                
+                    """,
+                    insert_data,
+                )
+
                 # psycopg3 binary protocol 需要显式提交事务
                 actual_conn = conn._conn if hasattr(conn, '_conn') else conn
                 try:
                     await actual_conn.commit()
-                    logger.debug(f"[openGauss直接插入] 批量插入事务已提交: {len(insert_data)} 个文件")
+                    logger.debug(f"[openGauss直接插入] 批量插入事务已提交: {len(insert_data)} 个文件，到表 {table_name}")
                 except Exception as commit_err:
                     logger.warning(f"提交批量插入事务失败（可能已自动提交）: {commit_err}")
                     # 如果不在事务中，commit() 可能会失败，尝试回滚
                     try:
                         await actual_conn.rollback()
-                    except:
+                    except Exception:
                         pass
             
             # 更新统计信息

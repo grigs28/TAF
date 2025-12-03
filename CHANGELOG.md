@@ -1,5 +1,37 @@
 # 更新日志
 
+## [0.1.34] - 2025-12-02
+
+### 优化
+
+#### 扫描性能优化
+- ✅ 删除扫描阶段的 file_metadata 和 tags JSON 序列化
+  - 扫描阶段不再创建和序列化 file_metadata 和 tags 字段
+  - 压缩阶段会更新 file_metadata（添加 tape_file_path 等恢复所需信息）
+  - 每个文件减少 2 次 json.dumps() 调用，显著提升扫描速度
+  - 预计性能提升 5-10%（取决于文件数量）
+- ✅ 将 Path 对象替换为 os.path 函数
+  - 使用 `os.path.exists()`, `os.path.isfile()`, `os.path.isdir()` 替代 Path 对象方法
+  - 使用 `os.path.basename()` 替代 `Path().name`
+  - 使用 `os.path.dirname()` 替代 `Path().parent`
+  - 使用 `os.path.abspath()` 替代 `Path().resolve()`
+  - os.path 函数是 C 实现，比 Path 对象更快
+  - 每个文件减少 2-3 次 Path 对象创建，预计性能提升 3-5%
+- ✅ 优化路径处理逻辑
+  - 目录队列使用字符串而非 Path 对象
+  - 直接使用 entry.path 字符串，避免不必要的对象转换
+  - 减少内存分配和对象创建开销
+
+### 技术细节
+- `backup/simple_scanner.py`：
+  - 删除 file_metadata 和 tags 的 JSON 序列化代码
+  - 从 SQL INSERT 语句中移除 file_metadata 和 tags 字段
+  - 将 Path 对象操作替换为 os.path 函数
+  - 优化目录队列使用字符串而非 Path 对象
+- `backup/backup_scanner.py`：
+  - 删除 file_metadata 和 tags 的 JSON 序列化代码
+  - 从 SQL INSERT 语句中移除 file_metadata 和 tags 字段
+
 ## [0.1.33] - 2025-11-30
 
 ### 修改

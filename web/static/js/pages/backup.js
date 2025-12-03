@@ -220,16 +220,46 @@
         // totalFiles: 同步过来的总文件数（由后台扫描任务更新）
         // processedBytes: 已经压缩的文件原始大小（由压缩工作线程更新）
         // totalBytes: 同步过来的总文件大小（由后台扫描任务更新）
-        const processedFiles = task.processed_files || 0;
-        const totalFiles = task.total_files || 0;
+        let processedFiles = task.processed_files || 0;
+        let totalFiles = task.total_files || 0;
         const processedBytes = task.processed_bytes || 0;
-        const totalBytes = task.total_bytes || task.total_bytes_actual || 0;
+        let totalBytes = task.total_bytes || task.total_bytes_actual || 0;
         const compressedBytes = task.compressed_bytes || 0;
-        // 只按 (processedFiles / totalFiles) * 100 计算，上限 100%
+        
+        // 修复：如果 processedFiles > totalFiles，说明数据异常，使用 processedFiles 作为 totalFiles
+        // 这种情况可能是 total_files 没有正确更新，或者 processed_files 被重复累加
+        if (processedFiles > totalFiles && totalFiles > 0) {
+            // 如果差异很大（超过10%），说明数据异常，使用 processedFiles 作为上限
+            if (processedFiles > totalFiles * 1.1) {
+                console.warn(`任务 ${task.task_id || task.id} 数据异常: processedFiles (${processedFiles}) > totalFiles (${totalFiles})，使用 processedFiles 作为 totalFiles`);
+                totalFiles = processedFiles;
+            } else {
+                // 差异不大，可能是 totalFiles 更新滞后，使用 processedFiles 作为上限
+                totalFiles = processedFiles;
+            }
+        }
+        
+        // 如果 totalFiles 为 0 但 processedFiles > 0，使用 processedFiles 作为 totalFiles
+        if (totalFiles === 0 && processedFiles > 0) {
+            totalFiles = processedFiles;
+        }
+        
+        // 如果 totalBytes 为 0 但 processedBytes > 0，使用 processedBytes 作为 totalBytes
+        if (totalBytes === 0 && processedBytes > 0) {
+            totalBytes = processedBytes;
+        }
+        
+        // 优先使用后端返回的 progress_percent（后端已经基于内存统计计算好了）
+        // 如果后端没有返回，再自己计算
         let percent = 0;
-        if (totalFiles > 0) {
+        if (task.progress_percent !== null && task.progress_percent !== undefined) {
+            // 使用后端计算的进度百分比（包括 0 值）
+            percent = Math.min(100, Math.max(0, task.progress_percent));
+        } else if (totalFiles > 0) {
+            // 后端没有返回，自己计算
             percent = Math.min(100, (processedFiles / totalFiles) * 100);
         }
+        
         let compressionRatio = task.compression_ratio || 0;
         if ((!compressionRatio || compressionRatio <= 0) && processedBytes > 0 && compressedBytes > 0) {
             compressionRatio = compressedBytes / processedBytes;
@@ -238,9 +268,9 @@
         return {
             percent: Number(percent.toFixed(1)),
             processedFiles,  // 已经压缩的文件数
-            totalFiles,      // 同步过来的总文件数
+            totalFiles,      // 同步过来的总文件数（已修复异常情况）
             processedBytes,   // 已经压缩的文件原始大小
-            totalBytes: totalBytes || processedBytes,  // 同步过来的总文件大小
+            totalBytes: totalBytes || processedBytes,  // 同步过来的总文件大小（已修复异常情况）
             compressedBytes,
             compressionRatio
         };
@@ -699,42 +729,53 @@
             const progressSection = document.createElement('div');
             progressSection.className = 'mb-2';
             
-            // 检查是否有各压缩任务进度信息
+            // 压缩阶段：始终显示"各任务"行
             let batchProgressHtml = '';
-            if (task.operation_stage === 'compress' && task.current_compression_progress) {
-                const compProg = task.current_compression_progress;
-                console.log('[各压缩任务进度] compProg:', compProg);
+            if (task.operation_stage === 'compress') {
+                let taskProgressText = '';
+                let hasValidProgress = false;
                 
-                // 优先显示各压缩任务的进度百分比
-                if (compProg.task_progress_list && Array.isArray(compProg.task_progress_list) && compProg.task_progress_list.length > 0) {
-                    // 按文件大小显示各任务的进度：文件总数（百分比%）
-                    const taskProgress = compProg.task_progress_list.map(taskProg => {
-                        const total = taskProg.total || 0;
-                        const percent = taskProg.percent || 0;
-                        return `${total}（${percent.toFixed(0)}%）`;
-                    }).join('   ');
-                    console.log('[各压缩任务进度] 显示任务进度:', taskProgress);
+                if (task.current_compression_progress) {
+                    const compProg = task.current_compression_progress;
+                    console.log('[各压缩任务进度] compProg:', compProg);
                     
-                    batchProgressHtml = `
-                        <div class="d-flex justify-content-between align-items-center mb-1">
-                            <small class="text-muted">各任务:</small>
-                            <small class="text-muted fw-semibold">${taskProgress}</small>
-                        </div>
-                    `;
-                } else if (compProg.running_count && compProg.running_count > 0) {
-                    // 如果有running_count但没有task_progress_list，至少显示任务数量
-                    console.log('[各压缩任务进度] 没有task_progress_list，显示任务数量:', compProg.running_count);
-                    batchProgressHtml = `
-                        <div class="d-flex justify-content-between align-items-center mb-1">
-                            <small class="text-muted">各任务:</small>
-                            <small class="text-muted fw-semibold">${compProg.running_count} 个任务运行中</small>
-                        </div>
-                    `;
-                } else {
-                    console.log('[各压缩任务进度] 没有进度信息，不显示');
+                    // 优先显示各压缩任务的进度百分比
+                    if (compProg.task_progress_list && Array.isArray(compProg.task_progress_list) && compProg.task_progress_list.length > 0) {
+                        // 过滤出有效的进度数据（total > 0 或 percent > 0）
+                        const validProgressList = compProg.task_progress_list.filter(taskProg => {
+                            const total = taskProg.total || 0;
+                            const percent = taskProg.percent || 0;
+                            return total > 0 || percent > 0;
+                        });
+                        
+                        if (validProgressList.length > 0) {
+                            // 按文件大小显示各任务的进度：文件总数（百分比%）
+                            taskProgressText = validProgressList.map(taskProg => {
+                                const total = taskProg.total || 0;
+                                const percent = taskProg.percent || 0;
+                                return `${total}（${percent.toFixed(0)}%）`;
+                            }).join('   ');
+                            hasValidProgress = true;
+                            console.log('[各压缩任务进度] 显示任务进度:', taskProgressText);
+                        }
+                    }
+                    
+                    // 如果没有有效的 task_progress_list，但有 running_count，显示任务数量
+                    if (!hasValidProgress && compProg.running_count && compProg.running_count > 0) {
+                        taskProgressText = `${compProg.running_count} 个任务运行中`;
+                        hasValidProgress = true;
+                        console.log('[各压缩任务进度] 没有task_progress_list，显示任务数量:', compProg.running_count);
+                    }
                 }
-                // 不再显示聚合的文件数进度（如 2793/11972 个文件），只显示各任务的百分比
-                // 文件数进度只在"当前阶段"中显示（作为总体进度参考）
+                
+                // 无论是否有进度信息，都显示"各任务"行
+                // 只有当有有效进度数据时才显示进度，否则显示 "-"
+                batchProgressHtml = `
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                        <small class="text-muted">各任务:</small>
+                        <small class="text-muted fw-semibold">${hasValidProgress ? taskProgressText : '-'}</small>
+                    </div>
+                `;
             }
             
             progressSection.innerHTML = `

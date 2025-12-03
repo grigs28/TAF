@@ -22,6 +22,7 @@ class BackupTaskRequest(BaseModel):
     retention_days: int = Field(180, description="保留天数")
     description: str = Field("", description="任务描述")
     tape_device: Optional[str] = Field(None, description="目标磁带机设备（可选）")
+    enable_simple_scan: bool = Field(True, description="是否启用简洁扫描（默认开启）")
 
 
 class BackupTaskUpdate(BaseModel):
@@ -35,6 +36,7 @@ class BackupTaskUpdate(BaseModel):
     retention_days: Optional[int] = Field(None, description="保留天数")
     description: Optional[str] = Field(None, description="任务描述")
     tape_device: Optional[str] = Field(None, description="目标磁带机设备（可选）")
+    enable_simple_scan: Optional[bool] = Field(None, description="是否启用简洁扫描（默认开启）")
 
 
 class BackupTaskResponse(BaseModel):

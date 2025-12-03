@@ -442,6 +442,10 @@ class OpenGaussDBScheduler:
         async with get_opengauss_connection() as conn:
             actual_conn = None
             try:
+                # 多表方案：根据 backup_set_db_id 决定物理表名
+                from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                table_name = await get_backup_files_table_by_set_id(conn, self.backup_set_db_id)
+
                 # 获取实际连接对象（用于事务管理）
                 actual_conn = conn._conn if hasattr(conn, '_conn') else conn
                 
@@ -449,8 +453,8 @@ class OpenGaussDBScheduler:
                 # 注意：如果记录不存在（可能还在内存数据库中未同步），更新会失败（rowcount = 0）
                 # 这是正常的竞争条件，不会影响数据一致性
                 rowcount = await conn.executemany(
-                    """
-                    UPDATE backup_files
+                    f"""
+                    UPDATE {table_name}
                     SET chunk_number = $1,
                         compressed_size = $2,
                         updated_at = NOW()
@@ -597,11 +601,17 @@ class OpenGaussDBScheduler:
                 
                 if self._backup_files_table_exists is False:
                     return []
-                
+
+                # 根据第一个待同步记录的 backup_set_id 决定目标表（多表方案）
+                from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                sample_record = insert_data[0]  # data_tuple 的第一个字段约定为 backup_set_id
+                sample_backup_set_id = sample_record[0]
+                table_name = await get_backup_files_table_by_set_id(conn, sample_backup_set_id)
+
                 # 执行批量插入
                 rowcount = await conn.executemany(
-                    """
-                    INSERT INTO backup_files (
+                    f"""
+                    INSERT INTO {table_name} (
                         backup_set_id, file_path, file_name, directory_path, display_name,
                         file_type, file_size, compressed_size, file_permissions, file_owner,
                         file_group, created_time, modified_time, accessed_time, tape_block_start,

@@ -56,11 +56,11 @@ async def create_backup_task(
                     INSERT INTO backup_tasks (
                         task_name, task_type, status, is_template, source_paths, exclude_patterns,
                         compression_enabled, encryption_enabled, retention_days, description,
-                        tape_device, created_at, updated_at, created_by
+                        tape_device, enable_simple_scan, created_at, updated_at, created_by
                     ) VALUES (
                         $1, CAST($2 AS backuptasktype), CAST($3 AS backuptaskstatus), $4, $5, $6,
                         $7, $8, $9, $10,
-                        $11, $12, $13, $14
+                        $11, $12, $13, $14, $15
                     )
                     RETURNING id
                     """,
@@ -75,11 +75,56 @@ async def create_backup_task(
                     request.retention_days,
                     request.description,
                     request.tape_device,
+                    getattr(request, 'enable_simple_scan', True),  # enable_simple_scan，默认 True
                     datetime.now(),
                     datetime.now(),
                     'backup_api'
                 )
-                
+
+                # ========= 多表方案：为该模板任务预创建 backup_files 分组和物理表 =========
+                # 物理表名采用固定前缀 + 任务ID，避免 SQL 注入
+                table_name = f"backup_files_{task_id:06d}"
+
+                # 1. 在 backup_files_groups 中创建元数据记录
+                backup_files_group_id = await conn.fetchval(
+                    """
+                    INSERT INTO backup_files_groups (table_name, task_id)
+                    VALUES ($1, $2)
+                    RETURNING id
+                    """,
+                    table_name,
+                    task_id,
+                )
+
+                # 2. 更新 backup_tasks 表，写入 group_id 和 table_name
+                await conn.execute(
+                    """
+                    UPDATE backup_tasks
+                    SET backup_files_group_id = $1,
+                        backup_files_table = $2
+                    WHERE id = $3
+                    """,
+                    backup_files_group_id,
+                    table_name,
+                    task_id,
+                )
+
+                # 3. 为该任务创建物理表（基于 backup_files_template 结构）
+                # 注意：表名不能用参数占位符，只能通过受控字符串拼接
+                create_sql = f"""
+                CREATE TABLE IF NOT EXISTS {table_name} (
+                    LIKE backup_files_template INCLUDING ALL
+                )
+                """
+                await conn.execute(create_sql)
+
+                # openGauss / psycopg3 binary protocol 需要显式提交事务
+                actual_conn = conn._conn if hasattr(conn, "_conn") else conn
+                try:
+                    await actual_conn.commit()
+                except Exception as commit_err:
+                    logger.warning(f"[备份任务模板] 提交创建任务及其 backup_files 分组/表事务失败（可能已自动提交）: {commit_err}")
+
                 # 记录操作日志
                 client_ip = http_request.client.host if http_request.client else None
                 duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
@@ -104,7 +149,7 @@ async def create_backup_task(
                     request_url=str(http_request.url),
                     duration_ms=duration_ms
                 )
-                
+
                 return {
                     "success": True,
                     "task_id": task_id,
@@ -134,8 +179,8 @@ async def create_backup_task(
                     INSERT INTO backup_tasks (
                         task_name, task_type, source_paths, exclude_patterns,
                         compression_enabled, encryption_enabled, retention_days,
-                        description, tape_device, status, is_template, created_by
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        description, tape_device, enable_simple_scan, status, is_template, created_by
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     request.task_name,
                     request.task_type.value if hasattr(request.task_type, 'value') else str(request.task_type),
@@ -146,6 +191,7 @@ async def create_backup_task(
                     request.retention_days,
                     request.description or "",
                     request.tape_device,
+                    1 if getattr(request, 'enable_simple_scan', True) else 0,  # enable_simple_scan，默认 True
                     BackupTaskStatus.PENDING.value,
                     1,  # is_template
                     'backup_api'

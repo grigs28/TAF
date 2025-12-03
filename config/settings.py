@@ -91,6 +91,10 @@ class Settings(BaseSettings):
     TAPE_DRIVE_LETTER: str = "O"  # Windows盘符（大写，不带冒号，LTFS命令使用）
     DEFAULT_BLOCK_SIZE: int = 262144  # 256KB
     MAX_VOLUME_SIZE: int = 322122547200  # 300GB
+    # 是否在完整备份前自动格式化磁带（保留卷标信息）
+    # - True: 保持当前行为，自动执行 LtfsCmdFormat.exe
+    # - False: 跳过自动格式化，仅进行卷标校验，不对磁带做格式化操作
+    ENABLE_TAPE_FORMAT_BEFORE_FULL: bool = True
     # ITDT 接口配置
     TAPE_INTERFACE_TYPE: str = "itdt"  # 仅使用 ITDT
     ITDT_PATH: str = "C:\\itdt\\itdt.exe" if os.name == "nt" else "/usr/local/itdt/itdt"
@@ -156,6 +160,9 @@ class Settings(BaseSettings):
     # 扫描方法配置
     SCAN_METHOD: str = "default"  # 扫描方法: "default" (默认) 或 "es" (Everything搜索工具)
     ES_EXE_PATH: str = r"E:\app\TAF\ITDT\ES\es.exe"  # Everything搜索工具可执行文件路径
+    
+    # 简洁扫描配置
+    ENABLE_SIMPLE_SCAN: bool = True  # 是否启用简洁扫描（默认开启），使用简化的扫描和写入逻辑
     
     # 目录扫描并发配置
     SCAN_THREADS: int = 4  # 目录扫描并发线程数（默认4线程，可设置为1-16）

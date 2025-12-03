@@ -7,7 +7,7 @@ Database Utility Functions
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Optional, Tuple
 from contextlib import asynccontextmanager
 from config.database import db_manager
 from utils.opengauss.guard import get_opengauss_monitor
@@ -40,6 +40,33 @@ def is_redis() -> bool:
     # 从DATABASE_URL判断
     url_lower = str(database_url).lower()
     return url_lower.startswith("redis://") or url_lower.startswith("rediss://")
+
+
+async def get_backup_files_table_by_set_id(conn, backup_set_id: int) -> str:
+    """根据 backup_set_id 获取对应的 backup_files 物理表名（多表方案）
+
+    - 优先从 backup_tasks.backup_files_table 读取
+    - 表名必须以 'backup_files_' 开头，否则回退为主表 'backup_files'
+    - 仅在 openGauss 模式下使用
+    """
+    table_name = "backup_files"
+    try:
+        row = await conn.fetchrow(
+            """
+            SELECT bt.backup_files_table
+            FROM backup_sets bs
+            JOIN backup_tasks bt ON bs.backup_task_id = bt.id
+            WHERE bs.id = $1
+            """,
+            backup_set_id,
+        )
+        if row and row.get("backup_files_table"):
+            candidate = row["backup_files_table"]
+            if isinstance(candidate, str) and candidate.startswith("backup_files_"):
+                table_name = candidate
+    except Exception as e:
+        logger.warning(f"[多表方案] 根据 backup_set_id={backup_set_id} 获取 backup_files 表名失败，回退到主表 backup_files: {e}")
+    return table_name
 
 
 async def _create_opengauss_pool():

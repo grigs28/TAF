@@ -51,6 +51,7 @@ class BackupTask(BaseModel):
     compression_enabled = Column(Boolean, default=True, comment="是否启用压缩")
     encryption_enabled = Column(Boolean, default=False, comment="是否启用加密")
     retention_days = Column(Integer, default=180, comment="保留天数")
+    enable_simple_scan = Column(Boolean, default=True, comment="是否启用简洁扫描（默认开启）")
 
     # 时间信息
     scheduled_time = Column(DateTime(timezone=True), comment="计划执行时间")

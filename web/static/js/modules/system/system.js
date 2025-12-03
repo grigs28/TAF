@@ -4,6 +4,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const dbType = document.getElementById('dbType');
     if (dbType) {
         loadDatabaseConfig();
+        loadSystemConfig();
         
         // 数据库类型切换
         dbType.addEventListener('change', function() {
@@ -233,6 +234,22 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 
+// 加载系统常规配置（包含磁带自动格式化选项）
+async function loadSystemConfig() {
+    try {
+        const response = await fetch('/api/system/config');
+        const data = await response.json();
+        if (!data) return;
+
+        const enableTapeFormatCheckbox = document.getElementById('enableTapeFormatBeforeFull');
+        if (enableTapeFormatCheckbox && typeof data.enable_tape_format_before_full === 'boolean') {
+            enableTapeFormatCheckbox.checked = data.enable_tape_format_before_full;
+        }
+    } catch (e) {
+        console.error('加载系统配置失败:', e);
+    }
+}
+
 // 获取数据库配置
 function getDatabaseConfig() {
     const dbType = document.getElementById('dbType').value;
@@ -243,29 +260,10 @@ function getDatabaseConfig() {
     };
     
     if (dbType === 'sqlite') {
+        // 内存数据库（本地SQLite）只需要路径
         config.db_path = document.getElementById('dbPath').value;
-    } else if (dbType === 'redis') {
-        // Redis使用专门的配置项
-        const redisHostElement = document.getElementById('redisHost');
-        const redisPortElement = document.getElementById('redisPort');
-        const redisPasswordElement = document.getElementById('redisPassword');
-        const redisDbIndexElement = document.getElementById('redisDbIndex');
-        const redisConfigFilePathElement = document.getElementById('redisConfigFilePath');
-        
-        config.db_host = redisHostElement ? redisHostElement.value : '';
-        config.db_port = redisPortElement ? parseInt(redisPortElement.value) || 6379 : 6379;
-        config.db_password = redisPasswordElement ? redisPasswordElement.value : '';
-        config.db_index = redisDbIndexElement ? parseInt(redisDbIndexElement.value) || 0 : 0;
-        config.config_file_path = redisConfigFilePathElement ? redisConfigFilePathElement.value : '';
-        
-        // 兼容旧代码：如果没有redisHost，尝试使用dbHost
-        if (!config.db_host) {
-            const dbHostElement = document.getElementById('dbHost');
-            if (dbHostElement && dbHostElement.value) {
-                config.db_host = dbHostElement.value;
-            }
-        }
     } else {
+        // 仅支持 openGauss（服务器数据库）
         config.db_host = document.getElementById('dbHost').value;
         config.db_port = parseInt(document.getElementById('dbPort').value);
         config.db_user = document.getElementById('dbUser').value;
@@ -291,22 +289,14 @@ async function saveDatabaseConfigSection() {
             console.log('SQLite数据库路径为空，跳过保存数据库配置');
             return true;
         }
-    } else if (config.db_type === 'redis') {
-        // Redis需要主机和端口，密码可选，不需要用户名和数据库名
-        if (!config.db_host || config.db_host.trim() === '' ||
-            !config.db_port) {
-            console.log('Redis数据库配置不完整，跳过保存数据库配置');
-            return true;
-        }
     } else {
-        // 对于其他服务器数据库，如果任何必填字段为空，也跳过保存
+        // openGauss：需要完整的主机/端口/用户名/密码/数据库名
         if (!config.db_host || config.db_host.trim() === '' ||
             !config.db_port ||
             !config.db_user || config.db_user.trim() === '' ||
             !config.db_password || config.db_password.trim() === '' ||
             !config.db_database || config.db_database.trim() === '') {
-            // 服务器数据库配置不完整，跳过保存数据库配置（不抛出错误）
-            console.log('数据库配置不完整，跳过保存数据库配置');
+            console.log('openGauss 数据库配置不完整，跳过保存数据库配置');
             return true;
         }
     }
@@ -332,64 +322,18 @@ async function loadDatabaseConfig() {
         
         if (config) {
             document.getElementById('dbType').value = config.db_type || 'sqlite';
-            
+
             if (config.db_type === 'sqlite') {
                 // 如果配置中有路径，使用配置的路径；否则使用默认路径
                 const defaultPath = 'data\\backup_system.db';
                 document.getElementById('dbPath').value = config.db_path || defaultPath;
                 document.getElementById('sqliteConfig').style.display = 'block';
                 document.getElementById('serverDbConfig').style.display = 'none';
-                document.getElementById('redisConfig').style.display = 'none';
-                
+
                 // 加载 SQLite 配置（从环境配置中加载）
                 loadSQLiteConfig();
-            } else if (config.db_type === 'redis') {
-                // Redis使用专门的配置项
-                const redisHostElement = document.getElementById('redisHost');
-                const redisPortElement = document.getElementById('redisPort');
-                const redisPasswordElement = document.getElementById('redisPassword');
-                const redisDbIndexElement = document.getElementById('redisDbIndex');
-                const redisConfigFilePathElement = document.getElementById('redisConfigFilePath');
-                
-                if (redisHostElement && config.db_host) {
-                    redisHostElement.value = config.db_host;
-                } else if (config.db_host) {
-                    // 兼容旧代码：如果redisHost不存在，使用dbHost
-                    const dbHostElement = document.getElementById('dbHost');
-                    if (dbHostElement) dbHostElement.value = config.db_host;
-                }
-                
-                if (redisPortElement && config.db_port) {
-                    redisPortElement.value = config.db_port;
-                } else if (config.db_port) {
-                    // 兼容旧代码：如果redisPort不存在，使用dbPort
-                    const dbPortElement = document.getElementById('dbPort');
-                    if (dbPortElement) dbPortElement.value = config.db_port;
-                }
-                
-                if (redisPasswordElement && config.db_password) {
-                    redisPasswordElement.value = config.db_password;
-                } else if (config.db_password) {
-                    // 兼容旧代码：如果redisPassword不存在，使用dbPassword
-                    const dbPasswordElement = document.getElementById('dbPassword');
-                    if (dbPasswordElement) dbPasswordElement.value = config.db_password;
-                }
-                
-                if (redisDbIndexElement && config.db_index !== undefined) {
-                    redisDbIndexElement.value = config.db_index;
-                }
-                
-                if (redisConfigFilePathElement && config.config_file_path) {
-                    redisConfigFilePathElement.value = config.config_file_path;
-                }
-                
-                // 显示/隐藏相应配置区域
-                document.getElementById('sqliteConfig').style.display = 'none';
-                document.getElementById('serverDbConfig').style.display = 'none';
-                document.getElementById('redisConfig').style.display = 'block';
-                const redisSpecificConfig = document.getElementById('redisSpecificConfig');
-                if (redisSpecificConfig) redisSpecificConfig.style.display = 'block';
             } else {
+                // openGauss 配置
                 if (config.db_host) document.getElementById('dbHost').value = config.db_host;
                 if (config.db_port) document.getElementById('dbPort').value = config.db_port;
                 if (config.db_user) document.getElementById('dbUser').value = config.db_user;
@@ -1094,6 +1038,13 @@ async function saveEnvConfigSection() {
             sqlite_synchronous: document.getElementById('sqliteSynchronous')?.value || null,
             
             log_level: document.getElementById('logLevel')?.value || null,
+
+            // 磁带自动格式化配置
+            enable_tape_format_before_full: (() => {
+                const checkbox = document.getElementById('enableTapeFormatBeforeFull');
+                if (!checkbox) return undefined;
+                return checkbox.checked === true;
+            })(),
         };
         
         // 移除 null 值

@@ -8,11 +8,9 @@
                     <div class="mb-3">
                         <label class="form-label">数据库类型</label>
                         <select class="form-select" id="dbType">
-                            <option value="sqlite">SQLite</option>
-                            <option value="postgresql">PostgreSQL</option>
-                            <option value="opengauss">openGauss</option>
-                            <option value="mysql">MySQL</option>
-                            <option value="redis">Redis</option>
+                            <!-- 仅保留内存数据库（SQLite）和 openGauss -->
+                            <option value="sqlite">内存数据库（测试用，本地SQLite）</option>
+                            <option value="opengauss">openGauss（生产环境推荐）</option>
                         </select>
                     </div>
 
@@ -77,7 +75,7 @@
                         </div>
                     </div>
 
-                    <!-- PostgreSQL/openGauss/MySQL配置 -->
+                    <!-- openGauss 配置（服务器数据库） -->
                     <div id="serverDbConfig" style="display: none;">
                         <div class="row">
                             <div class="col-md-6 mb-3">
@@ -110,50 +108,7 @@
                         </div>
                     </div>
 
-                    <!-- Redis专用配置项 -->
-                    <div id="redisSpecificConfig" style="display: none;">
-                        <div class="row">
-                            <div class="col-md-6 mb-3">
-                                <label class="form-label">Redis主机</label>
-                                <input type="text" class="form-control" id="redisHost" placeholder="localhost">
-                                <small class="text-muted">Redis服务器地址</small>
-                            </div>
-                            <div class="col-md-6 mb-3">
-                                <label class="form-label">Redis端口</label>
-                                <input type="number" class="form-control" id="redisPort" placeholder="6379" min="1" max="65535" value="6379">
-                                <small class="text-muted">Redis服务器端口（默认6379）</small>
-                            </div>
-                        </div>
-                        <div class="row">
-                            <div class="col-md-6 mb-3">
-                                <label class="form-label">Redis密码</label>
-                                <input type="password" class="form-control" id="redisPassword" placeholder="••••••••">
-                                <small class="text-muted">Redis密码（可选，如果Redis未设置密码则留空）</small>
-                            </div>
-                            <div class="col-md-6 mb-3">
-                                <label class="form-label">数据库编号</label>
-                                <input type="number" class="form-control" id="redisDbIndex" placeholder="0" min="0" max="15" value="0">
-                                <small class="text-muted">Redis数据库编号 (0-15，默认0)</small>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Redis配置 -->
-                    <div id="redisConfig" style="display: none;">
-                        <div class="mb-3">
-                            <label class="form-label">配置文件路径</label>
-                            <div class="input-group">
-                                <input type="text" class="form-control" id="redisConfigFilePath" placeholder="C:\Program Files\Redis\redis.conf">
-                                <button class="btn btn-outline-secondary" type="button" id="browseRedisConfigBtn">
-                                    <i class="bi bi-folder2-open me-1"></i>浏览
-                                </button>
-                                <button class="btn btn-outline-info" type="button" id="detectRedisConfigBtn" title="自动检测Redis配置文件路径">
-                                    <i class="bi bi-search me-1"></i>自动检测
-                                </button>
-                            </div>
-                            <small class="text-muted">Redis持久化配置文件位置，用于查看配置信息</small>
-                        </div>
-                    </div>
+                    <!-- Redis 相关配置已移除：仅保留内存数据库（SQLite）与 openGauss -->
 
                     <hr>
                     <h6 class="card-title mt-3">连接池配置</h6>

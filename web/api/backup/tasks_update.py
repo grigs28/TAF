@@ -87,6 +87,8 @@ async def update_backup_task(
             updates["description"] = request.description
         if request.tape_device is not None:
             updates["tape_device"] = request.tape_device
+        if request.enable_simple_scan is not None:
+            updates["enable_simple_scan"] = request.enable_simple_scan
         
         if not updates:
             raise HTTPException(status_code=400, detail="没有提供要更新的字段")

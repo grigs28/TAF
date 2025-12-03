@@ -1128,8 +1128,34 @@ class Compressor:
             if compression_method == 'zstd' and zstd is None:
                 raise RuntimeError("未安装 zstandard 库，无法使用 zstd 压缩，请运行 pip install zstandard")
             
-            # 从系统配置获取线程数
-            compression_threads = self.settings.COMPRESSION_THREADS
+            # 从系统配置获取线程数（基础配置）
+            compression_threads = int(getattr(self.settings, "COMPRESSION_THREADS", 4))
+
+            # 在扫描阶段适当降低压缩并发 / IO 抢占：
+            # - 约定：在 scan_status 为 'running' 或 'retrieving' 时，认为扫描尚未完成
+            # - 策略：有效线程数 = max(1, 配置线程数 - 2)
+            try:
+                # 优先从内存对象获取，如果没有则从数据库查询
+                scan_status = getattr(backup_task, "scan_status", None)
+                if not scan_status and backup_task.id:
+                    try:
+                        from backup.backup_db import BackupDB
+                        backup_db = BackupDB()
+                        scan_status = await backup_db.get_scan_status(backup_task.id)
+                    except Exception:
+                        pass
+                
+                if scan_status in ("pending", "running", "retrieving"):
+                    adjusted_threads = max(1, compression_threads - 2)
+                    if adjusted_threads != compression_threads:
+                        logger.info(
+                            f"[压缩配置] 扫描未完成（scan_status={scan_status}），"
+                            f"将压缩线程数从 {compression_threads} 降为 {adjusted_threads}"
+                        )
+                        compression_threads = adjusted_threads
+            except Exception as e:
+                # 即使无法获取 scan_status，也不影响压缩主流程
+                logger.debug(f"[压缩配置] 根据 scan_status 调整线程数时出错，使用原始配置: {e}")
             
             # 从系统配置获取7-Zip命令行线程数
             # 优先使用 COMPRESSION_COMMAND_THREADS，如果没有设置则使用 WEB_WORKERS，最后回退到 COMPRESSION_THREADS

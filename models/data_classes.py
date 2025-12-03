@@ -132,6 +132,7 @@ class BackupTask:
     compression_enabled: bool = True
     encryption_enabled: bool = False
     retention_days: int = 180
+    enable_simple_scan: bool = True
 
     # 时间信息
     scheduled_time: Optional[datetime] = None
@@ -220,6 +221,7 @@ class BackupTask:
             compression_enabled=data.get('compression_enabled', True),
             encryption_enabled=data.get('encryption_enabled', False),
             retention_days=data.get('retention_days', 180),
+            enable_simple_scan=data.get('enable_simple_scan', True),
             scheduled_time=datetime.fromisoformat(data['scheduled_time']) if data.get('scheduled_time') else None,
             started_at=datetime.fromisoformat(data['started_at']) if data.get('started_at') else None,
             completed_at=datetime.fromisoformat(data['completed_at']) if data.get('completed_at') else None,

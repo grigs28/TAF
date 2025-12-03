@@ -153,9 +153,10 @@ export class ActionConfigManager {
                         taskType = val('#backupTaskType', 'full');
                     }
 
-                    // 获取压缩和加密选项 - 只有元素存在且可见时才获取
+                    // 获取压缩、加密和简洁扫描选项 - 只有元素存在且可见时才获取
                     let compressionEnabled = true; // 默认值
                     let encryptionEnabled = false; // 默认值
+                    let enableSimpleScan = true; // 默认值
 
                     if (isElementVisibleAndExists('#backupCompression')) {
                         compressionEnabled = checked('#backupCompression');
@@ -163,12 +164,16 @@ export class ActionConfigManager {
                     if (isElementVisibleAndExists('#backupEncryption')) {
                         encryptionEnabled = checked('#backupEncryption');
                     }
+                    if (isElementVisibleAndExists('#enableSimpleScan')) {
+                        enableSimpleScan = checked('#enableSimpleScan');
+                    }
 
                     config = {
                         source_paths: pathManager.backupSourcePaths,
                         task_type: taskType,
                         compression_enabled: compressionEnabled,
                         encryption_enabled: encryptionEnabled,
+                        enable_simple_scan: enableSimpleScan,
                         target_type: targetType
                     };
 

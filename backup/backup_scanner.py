@@ -12,7 +12,8 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
+from datetime import datetime, timezone
 
 from models.backup import BackupTask, BackupSet
 from backup.utils import format_bytes
@@ -57,6 +58,50 @@ class BackupScanner:
             source_paths: 源路径列表
             exclude_patterns: 排除模式列表
         """
+        # openGauss 模式下：根据 ENABLE_SIMPLE_SCAN 配置选择扫描方式
+        # 优先级：1. 备份任务的 enable_simple_scan（备份策略级别） 2. 系统配置 ENABLE_SIMPLE_SCAN（默认 True）
+        # 不再使用内存数据库/复杂队列，简化为：扫描 → 批量写入 backup_files → 更新任务状态
+        try:
+            from utils.scheduler.db_utils import is_opengauss
+            if is_opengauss():
+                # 优先从备份任务对象获取简洁扫描配置（备份策略级别）
+                enable_simple_scan = getattr(backup_task, "enable_simple_scan", None)
+                
+                # 如果备份任务中没有配置，则使用系统配置
+                if enable_simple_scan is None:
+                    enable_simple_scan = getattr(self.settings, "ENABLE_SIMPLE_SCAN", True)
+                    logger.debug(f"[后台扫描] 备份任务未配置 enable_simple_scan，使用系统配置 ENABLE_SIMPLE_SCAN={enable_simple_scan}")
+                else:
+                    logger.debug(f"[后台扫描] 使用备份任务配置 enable_simple_scan={enable_simple_scan}")
+                
+                if enable_simple_scan:
+                    # 使用简洁扫描模块（完全按照 memory_db_writer.py 的方法）
+                    logger.info(f"[后台扫描] 检测到 openGauss 模式，启用简洁扫描（enable_simple_scan=True）")
+                    from backup.simple_scanner import SimpleScanner
+                    simple_scanner = SimpleScanner(self.backup_db)
+                    await simple_scanner.scan_and_write(
+                        backup_task=backup_task,
+                        source_paths=source_paths,
+                        exclude_patterns=exclude_patterns,
+                        backup_set=backup_set,
+                        restart=restart,
+                    )
+                    return
+                else:
+                    # 使用原扫描方式
+                    logger.info(f"[后台扫描] 检测到 openGauss 模式，使用原扫描方式（enable_simple_scan=False）")
+                    await self._scan_opengauss_direct_scandir(
+                        backup_task=backup_task,
+                        source_paths=source_paths,
+                        exclude_patterns=exclude_patterns,
+                        backup_set=backup_set,
+                        restart=restart,
+                    )
+                    return
+        except Exception as e:
+            # 检测数据库类型失败时，回退到原有逻辑，避免影响其他数据库
+            logger.warning(f"[后台扫描] 检测 openGauss 模式失败，回退到原有扫描逻辑: {e}")
+
         backup_set_db_id = getattr(backup_set, 'id', None)
         logger.info(
             f"[后台扫描] 获取 backup_set_db_id: {backup_set_db_id}, "
@@ -470,13 +515,8 @@ class BackupScanner:
                                 # 如果提取失败，保持使用源路径
                                 pass
                     
-                    # 统计当前批次
-                    for file_info in file_batch:
-                        file_size = file_info.get('size', 0) or 0
-                        total_files += 1
-                        total_bytes += file_size
-                    
                     # 扫描器返回的批次大小 = SCAN_UPDATE_INTERVAL，直接写入内存数据库
+                    # 重要：只在写入成功后才统计，避免统计的文件数 > 实际写入的文件数
                     if file_batch:
                         if backup_set_db_id:
                             try:
@@ -484,6 +524,11 @@ class BackupScanner:
                                     # 直接批量写入内存数据库（批次大小由SCAN_UPDATE_INTERVAL控制）
                                     try:
                                         await memory_writer.add_files_batch(file_batch)
+                                        # 写入成功后才统计
+                                        for file_info in file_batch:
+                                            file_size = file_info.get('size', 0) or 0
+                                            total_files += 1
+                                            total_bytes += file_size
                                         logger.debug(f"[后台扫描] ✅ 已成功批量写入 {len(file_batch)} 个文件到内存数据库（批次大小由SCAN_UPDATE_INTERVAL控制）")
                                     except Exception as batch_error:
                                         logger.error(f"[后台扫描] ❌ 批量提交失败: {str(batch_error)}，尝试逐个添加", exc_info=True)
@@ -493,13 +538,17 @@ class BackupScanner:
                                         for buffered_file in file_batch:
                                             try:
                                                 await memory_writer.add_file(buffered_file)
+                                                # 写入成功后才统计
+                                                file_size = buffered_file.get('size', 0) or 0
+                                                total_files += 1
+                                                total_bytes += file_size
                                                 success_count += 1
                                             except Exception as file_error:
                                                 failed_count += 1
                                                 file_path = buffered_file.get('path', 'unknown')
                                                 logger.warning(f"[后台扫描] 添加文件到内存数据库失败: {file_path[:200]}, 错误: {str(file_error)}")
                                         if failed_count > 0:
-                                            logger.warning(f"[后台扫描] ⚠️ {failed_count} 个文件添加失败，已跳过")
+                                            logger.warning(f"[后台扫描] ⚠️ {failed_count} 个文件添加失败，已跳过（未计入统计）")
                                 else:
                                     # 顺序执行模式：直接同步写入数据库，等待全部写入完成后再继续扫描
                                     try:
@@ -524,6 +573,11 @@ class BackupScanner:
                                         # 批量写入内存数据库（使用批量插入优化性能）
                                         try:
                                             await memory_writer.add_files_batch(file_buffer)
+                                            # 写入成功后才统计
+                                            for buffered_file in file_buffer:
+                                                file_size = buffered_file.get('size', 0) or 0
+                                                total_files += 1
+                                                total_bytes += file_size
                                         except Exception as batch_error:
                                             logger.error(f"[后台扫描] ❌ 批量提交失败: {str(batch_error)}，尝试逐个添加", exc_info=True)
                                             # 回退到逐个添加（容错处理）
@@ -532,13 +586,17 @@ class BackupScanner:
                                             for buffered_file in file_buffer:
                                                 try:
                                                     await memory_writer.add_file(buffered_file)
+                                                    # 写入成功后才统计
+                                                    file_size = buffered_file.get('size', 0) or 0
+                                                    total_files += 1
+                                                    total_bytes += file_size
                                                     success_count += 1
                                                 except Exception as file_error:
                                                     failed_count += 1
                                                     file_path = buffered_file.get('path', 'unknown')
                                                     logger.warning(f"[后台扫描] 添加文件到内存数据库失败: {file_path[:200]}, 错误: {str(file_error)}")
                                             if failed_count > 0:
-                                                logger.warning(f"[后台扫描] ⚠️ {failed_count} 个文件添加失败，已跳过")
+                                                logger.warning(f"[后台扫描] ⚠️ {failed_count} 个文件添加失败，已跳过（未计入统计）")
                                     else:
                                         # 顺序执行模式：直接同步写入数据库，等待全部写入完成后再继续扫描
                                         if file_buffer:
@@ -846,6 +904,9 @@ class BackupScanner:
                                 last_progress_log_time = start_time
                                 last_dir_log_time = start_time
                                 
+                                # 文件信息批次（用于写入数据库）
+                                file_info_batch = []  # 存储文件信息字典列表
+                                
                                 # 使用 os.scandir() 替代 rglob() 以提高性能（特别是对于大量目录）
                                 # os.scandir() 在 Windows 上比 rglob() 更快，且内存占用更少
                                 # 使用迭代方式遍历目录（避免 rglob 的内存问题）
@@ -940,11 +1001,18 @@ class BackupScanner:
                                                                         scan_error = "用户中断（Ctrl+C）"
                                                                         break
                                                                     
-                                                                    # 文件：统计文件大小
+                                                                    # 文件：获取文件信息并统计
                                                                     try:
-                                                                        # 使用 entry.stat() 而不是 entry_path.stat()，因为 entry 已经缓存了 stat 信息
-                                                                        stat = entry.stat(follow_symlinks=False)
-                                                                        file_size = stat.st_size
+                                                                        # 使用 file_scanner 的方法获取文件信息（与流式扫描一致）
+                                                                        file_info = self.file_scanner.get_file_info_from_entry(entry)
+                                                                        if not file_info:
+                                                                            # 无法获取文件信息，跳过
+                                                                            continue
+                                                                        
+                                                                        file_size = file_info.get('size', 0) or 0
+                                                                        
+                                                                        # 添加到文件信息批次（用于写入数据库）
+                                                                        file_info_batch.append(file_info)
                                                                         
                                                                         # 在线程中统计（本地变量，线程安全）
                                                                         batch_files += 1
@@ -969,8 +1037,11 @@ class BackupScanner:
                                                                         if batch_files > 0 and elapsed_since_last_batch >= BATCH_FORCE_INTERVAL:
                                                                             # 强制提交当前批次（即使没有达到阈值，每20分钟强制提交一次）
                                                                             try:
+                                                                                # 提交文件信息批次和统计信息
+                                                                                batch_file_infos = file_info_batch.copy()
+                                                                                file_info_batch.clear()
                                                                                 asyncio.run_coroutine_threadsafe(
-                                                                                    scan_queue.put((batch_files, batch_bytes)),
+                                                                                    scan_queue.put((batch_files, batch_bytes, batch_file_infos)),
                                                                                     main_loop
                                                                                 )
                                                                                 current_dir_display = format_path_for_log(current_dir) if current_dir else "未知"
@@ -984,9 +1055,12 @@ class BackupScanner:
                                                                         # 检查文件数或字节数是否达到阈值（与压缩扫描使用相同的逻辑）
                                                                         elif batch_files >= batch_threshold or batch_bytes >= batch_bytes_threshold:
                                                                             try:
+                                                                                # 提交文件信息批次和统计信息
+                                                                                batch_file_infos = file_info_batch.copy()
+                                                                                file_info_batch.clear()
                                                                                 # 使用主事件循环（在启动线程前获取的）
                                                                                 asyncio.run_coroutine_threadsafe(
-                                                                                    scan_queue.put((batch_files, batch_bytes)),
+                                                                                    scan_queue.put((batch_files, batch_bytes, batch_file_infos)),
                                                                                     main_loop
                                                                                 )
                                                                                 current_dir_display = format_path_for_log(current_dir) if current_dir else "未知"
@@ -1147,9 +1221,12 @@ class BackupScanner:
                                     # 提交剩余的批次
                                     if batch_files > 0:
                                         try:
+                                            # 提交文件信息批次和统计信息
+                                            batch_file_infos = file_info_batch.copy()
+                                            file_info_batch.clear()
                                             # 使用主事件循环（在启动线程前获取的）
                                             asyncio.run_coroutine_threadsafe(
-                                                scan_queue.put((batch_files, batch_bytes)),
+                                                scan_queue.put((batch_files, batch_bytes, batch_file_infos)),
                                                 main_loop
                                             )
                                             logger.info(f"后台扫描任务：提交剩余批次到队列，文件数={batch_files}, 字节数={format_bytes(batch_bytes)}（目录: {source_path_str}）")
@@ -1255,7 +1332,17 @@ class BackupScanner:
                                                     item = scan_queue.get_nowait()
                                                     if item is None:
                                                         break
-                                                    batch_files, batch_bytes = item
+                                                    # 处理批次（可能是旧格式或新格式）
+                                                    if isinstance(item, tuple) and len(item) == 3:
+                                                        batch_files, batch_bytes, file_info_batch = item
+                                                        # 写入文件信息（如果有）
+                                                        if file_info_batch and backup_set_db_id and use_memory_db and 'memory_writer' in locals():
+                                                            try:
+                                                                await memory_writer.add_files_batch(file_info_batch)
+                                                            except Exception:
+                                                                pass  # 忽略写入错误，只统计
+                                                    else:
+                                                        batch_files, batch_bytes = item[0], item[1]
                                                     total_files += batch_files
                                                     total_bytes += batch_bytes
                                                     remaining_count += 1
@@ -1292,7 +1379,17 @@ class BackupScanner:
                                                         item = scan_queue.get_nowait()
                                                         if item is None:
                                                             continue
-                                                        batch_files, batch_bytes = item
+                                                        # 处理批次（可能是旧格式或新格式）
+                                                        if isinstance(item, tuple) and len(item) == 3:
+                                                            batch_files, batch_bytes, file_info_batch = item
+                                                            # 写入文件信息（如果有）
+                                                            if file_info_batch and backup_set_db_id and use_memory_db and 'memory_writer' in locals():
+                                                                try:
+                                                                    await memory_writer.add_files_batch(file_info_batch)
+                                                                except Exception:
+                                                                    pass  # 忽略写入错误，只统计
+                                                        else:
+                                                            batch_files, batch_bytes = item[0], item[1]
                                                         total_files += batch_files
                                                         total_bytes += batch_bytes
                                                         remaining_count += 1
@@ -1333,7 +1430,17 @@ class BackupScanner:
                                                     error_msg, error_file_count = batch_item[1], batch_item[2] if len(batch_item) > 2 else 0
                                                     logger.error(f"后台扫描任务：队列中发现错误信号（目录: {source_path_str}），错误: {error_msg}，已扫描: {error_file_count} 个文件")
                                                     break
-                                                batch_files, batch_bytes = batch_item
+                                                # 处理批次（可能是旧格式或新格式）
+                                                if isinstance(batch_item, tuple) and len(batch_item) == 3:
+                                                    batch_files, batch_bytes, file_info_batch = batch_item
+                                                    # 写入文件信息（如果有）
+                                                    if file_info_batch and backup_set_db_id and use_memory_db and 'memory_writer' in locals():
+                                                        try:
+                                                            await memory_writer.add_files_batch(file_info_batch)
+                                                        except Exception:
+                                                            pass  # 忽略写入错误，只统计
+                                                else:
+                                                    batch_files, batch_bytes = batch_item[0], batch_item[1]
                                                 total_files += batch_files
                                                 total_bytes += batch_bytes
                                                 remaining_count += 1
@@ -1361,7 +1468,17 @@ class BackupScanner:
                                                 batch_item = scan_queue.get_nowait()
                                                 if batch_item is None or (isinstance(batch_item, tuple) and len(batch_item) >= 2 and batch_item[0] == 'ERROR'):
                                                     continue
-                                                batch_files, batch_bytes = batch_item
+                                                # 处理批次（可能是旧格式或新格式）
+                                                if isinstance(batch_item, tuple) and len(batch_item) == 3:
+                                                    batch_files, batch_bytes, file_info_batch = batch_item
+                                                    # 写入文件信息（如果有）
+                                                    if file_info_batch and backup_set_db_id and use_memory_db and 'memory_writer' in locals():
+                                                        try:
+                                                            await memory_writer.add_files_batch(file_info_batch)
+                                                        except Exception:
+                                                            pass  # 忽略写入错误，只统计
+                                                else:
+                                                    batch_files, batch_bytes = batch_item[0], batch_item[1]
                                                 total_files += batch_files
                                                 total_bytes += batch_bytes
                                                 remaining_count += 1
@@ -1376,7 +1493,54 @@ class BackupScanner:
                                     else:
                                         # 处理正常批次
                                         try:
-                                            batch_files, batch_bytes = item
+                                            # 检查是否是新的格式（包含文件信息批次）
+                                            if isinstance(item, tuple) and len(item) == 3:
+                                                batch_files, batch_bytes, file_info_batch = item
+                                            else:
+                                                # 旧格式（只有统计信息，没有文件信息）
+                                                batch_files, batch_bytes = item
+                                                file_info_batch = []
+                                            
+                                            # 写入文件信息到数据库（如果有）
+                                            if file_info_batch and backup_set_db_id:
+                                                try:
+                                                    if use_memory_db and 'memory_writer' in locals():
+                                                        # 写入内存数据库
+                                                        try:
+                                                            await memory_writer.add_files_batch(file_info_batch)
+                                                            logger.debug(f"[后台扫描] ✅ 已成功批量写入 {len(file_info_batch)} 个文件到内存数据库")
+                                                        except Exception as batch_error:
+                                                            logger.error(f"[后台扫描] ❌ 批量写入失败: {str(batch_error)}，尝试逐个添加", exc_info=True)
+                                                            # 回退到逐个添加
+                                                            success_count = 0
+                                                            failed_count = 0
+                                                            for file_info in file_info_batch:
+                                                                try:
+                                                                    await memory_writer.add_file(file_info)
+                                                                    success_count += 1
+                                                                except Exception as file_error:
+                                                                    failed_count += 1
+                                                                    logger.warning(f"[后台扫描] 添加文件到内存数据库失败: {file_info.get('path', 'unknown')[:200]}, 错误: {str(file_error)}")
+                                                            if failed_count > 0:
+                                                                logger.warning(f"[后台扫描] ⚠️ {failed_count} 个文件添加失败，已跳过（未计入统计）")
+                                                            # 只统计成功写入的文件
+                                                            batch_files = success_count
+                                                            batch_bytes = sum(f.get('size', 0) or 0 for f in file_info_batch[:success_count])
+                                                    else:
+                                                        # 顺序执行模式：直接同步写入数据库
+                                                        try:
+                                                            await batch_writer.write_batch_sync(file_info_batch)
+                                                            logger.debug(f"[后台扫描] ✅ 批次已全部写入数据库: {len(file_info_batch)} 个文件")
+                                                        except Exception as batch_error:
+                                                            logger.error(f"[后台扫描] ❌ 批量写入失败: {str(batch_error)}", exc_info=True)
+                                                            # 只统计成功写入的文件（这里无法知道具体成功数，使用原值）
+                                                except Exception as e:
+                                                    logger.error(f"[后台扫描] 写入文件信息失败: {str(e)}", exc_info=True)
+                                                    # 写入失败，不统计这些文件
+                                                    batch_files = 0
+                                                    batch_bytes = 0
+                                            
+                                            # 只在写入成功后才统计
                                             total_files += batch_files
                                             total_bytes += batch_bytes
                                             batch_received_count += 1
@@ -1508,3 +1672,570 @@ class BackupScanner:
             if backup_task and backup_task.id:
                 await self.backup_db.update_scan_status(backup_task.id, 'failed')
 
+
+    async def _scan_opengauss_direct_scandir(
+        self,
+        backup_task: BackupTask,
+        source_paths: List[str],
+        exclude_patterns: List[str],
+        backup_set: BackupSet,
+        restart: bool = False,
+    ):
+        """
+        openGauss 模式下的简化扫描任务：
+        - 直接使用 os.scandir + FileScanner 扫描文件系统
+        - 参考 tests/test_scan_direct_write.py 的实现
+        - 按批次直接批量写入 openGauss 的 backup_files 表（不使用内存数据库）
+        - 定期更新 backup_task.total_files / total_bytes 和任务阶段描述
+        - 作为后台任务运行，不阻塞压缩流程，自己使用短事务，避免长事务锁表
+        """
+        from utils.scheduler.db_utils import get_opengauss_connection
+
+        backup_set_db_id = getattr(backup_set, "id", None)
+        logger.info(
+            f"[后台扫描-openGauss直写] backup_task_id={getattr(backup_task, 'id', 'N/A')}, "
+            f"backup_set_id={backup_set_db_id}, source_paths={source_paths}, exclude_patterns={exclude_patterns}"
+        )
+
+        # 初始化/清理状态：同时在内存和数据库中设置 scan_status = 'running'
+        try:
+            if backup_task and backup_task.id:
+                backup_task.scan_status = "running"
+                await self.backup_db.update_scan_status(backup_task.id, "running")
+            if restart and backup_set_db_id:
+                # 清理原有 backup_files 记录，重新扫描
+                await self.backup_db.clear_backup_files_for_set(backup_set_db_id)
+        except Exception as e:
+            logger.warning(f"[后台扫描-openGauss直写] 初始化扫描状态失败（忽略继续）: {e}")
+
+        # 记录关键阶段：扫描文件开始（仅日志，不再写入数据库的 operation_stage/description）
+        logger.info("[后台扫描-openGauss直写] 开始扫描文件（不再通过数据库传递阶段和进度，仅使用内存状态）")
+
+        # 处理源路径为空的情况
+        if not source_paths:
+            logger.warning("[后台扫描-openGauss直写] source_paths 为空列表，没有文件要扫描")
+            # 不再通过数据库更新进度/状态，直接更新内存中的任务对象
+            if backup_task:
+                backup_task.total_files = 0
+                backup_task.total_bytes = 0
+            return
+
+        # 统计信息（与 tests/test_scan_direct_write.py 保持一致，并增加目录统计）
+        stats: Dict[str, Any] = {
+            "total_scanned": 0,  # 扫描到的文件数（尝试写入）
+            "total_written": 0,  # 成功写入 backup_files 的文件数
+            "total_failed": 0,  # 写入失败/准备数据失败
+            "total_bytes": 0,  # 成功写入的总字节数
+            "excluded_count": 0,  # 被排除的文件数
+            "excluded_dirs": 0,  # 被排除的目录数
+            "error_count": 0,  # 文件错误数
+            "error_dirs": 0,  # 目录错误数
+            "dirs_scanned": 0,  # 扫描到的目录数
+            "dirs_skipped": 0,  # 跳过的目录数（重复等）
+            "symlinks_skipped": 0,  # 跳过的符号链接数
+            "start_time": time.time(),
+        }
+
+        # 优化：从内存获取分表名（backup_task.backup_files_table），避免查询数据库
+        table_name = None
+        if backup_task:
+            table_name = getattr(backup_task, "backup_files_table", None)
+            if table_name and isinstance(table_name, str) and table_name.startswith("backup_files_"):
+                logger.debug(f"[后台扫描-openGauss直写] 从内存获取分表名: {table_name}")
+            else:
+                # 如果内存中没有，回退到查询数据库（仅一次）
+                if backup_set_db_id:
+                    try:
+                        from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                        async with get_opengauss_connection() as conn:
+                            table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
+                            # 同时更新内存中的 backup_task，供后续使用
+                            if backup_task and table_name:
+                                backup_task.backup_files_table = table_name
+                            logger.debug(f"[后台扫描-openGauss直写] 从数据库获取分表名: {table_name}")
+                    except Exception as e:
+                        logger.warning(f"[后台扫描-openGauss直写] 获取分表名失败: {e}")
+
+        if not table_name:
+            logger.error("[后台扫描-openGauss直写] 无法获取分表名，扫描无法继续")
+            return
+
+        # 批次相关：沿用 SCAN_UPDATE_INTERVAL 作为批次大小
+        batch_size = getattr(self.settings, "SCAN_UPDATE_INTERVAL", 1000) or 1000
+        current_batch: List[Dict[str, Any]] = []
+        batch_number = 0
+
+        # 进度输出相关（仅日志，不再写入数据库）
+        last_progress_time = time.time()
+        progress_interval = getattr(self.settings, "SCAN_LOG_INTERVAL_SECONDS", 60) or 60
+        last_log_count = 0
+        log_interval_count = 10000
+
+        # 优化：打开数据库连接后持续复用，不关闭（提高速度）
+        scan_conn = None
+        try:
+            # 手动打开连接，不使用 context manager（避免自动关闭）
+            conn_context = get_opengauss_connection()
+            scan_conn = await conn_context.__aenter__()
+            logger.debug("[后台扫描-openGauss直写] 已打开数据库连接，将在整个扫描过程中复用")
+
+            async def flush_batch(current_dir_str: str = ""):
+                """将当前批次写入 backup_files_* 分表，并更新统计（按实际写入成功的文件数统计）
+                
+                Args:
+                    current_dir_str: 当前正在处理的目录路径，仅用于日志输出，便于排查性能问题
+                """
+                nonlocal current_batch, batch_number, stats, last_progress_time, last_log_count, scan_conn
+                if not current_batch or not backup_set_db_id or not table_name or not scan_conn:
+                    current_batch = []
+                    return
+
+                insert_data = []
+                for file_info in current_batch:
+                    try:
+                        data_tuple = self._prepare_insert_data_for_backup_files(file_info, backup_set_db_id)
+                        insert_data.append(data_tuple)
+                    except Exception as e:
+                        file_path = file_info.get("path", "unknown")
+                        logger.warning(
+                            f"[后台扫描-openGauss直写] 准备插入数据失败: {file_path[:200]}, 错误: {e}"
+                        )
+                        stats["total_failed"] += 1
+
+                if not insert_data:
+                    current_batch = []
+                    return
+
+                # 批量插入 backup_files_*（使用复用的连接，短事务，避免长事务锁表）
+                try:
+                    await scan_conn.executemany(
+                        f"""
+                        INSERT INTO {table_name} (
+                            backup_set_id, file_path, file_name, directory_path, display_name,
+                            file_type, file_size, compressed_size, file_permissions, file_owner,
+                            file_group, created_time, modified_time, accessed_time, tape_block_start,
+                            tape_block_count, compressed, encrypted, checksum, is_copy_success,
+                            copy_status_at, backup_time, chunk_number, version,
+                            created_at, updated_at
+                        ) VALUES (
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                            $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+                            $21, $22, $23, $24, NOW(), NOW()
+                        )
+                        """,
+                        insert_data,
+                    )
+
+                    actual_conn = scan_conn._conn if hasattr(scan_conn, "_conn") else scan_conn
+                    try:
+                        await actual_conn.commit()
+                    except Exception as commit_err:
+                        # 提交失败时尝试回滚，避免长事务锁表
+                        logger.warning(
+                            f"[后台扫描-openGauss直写] 提交批次事务失败（可能已自动提交）: {commit_err}"
+                        )
+                        try:
+                            await actual_conn.rollback()
+                        except Exception:
+                            pass
+                        # 提交失败，这批文件未写入，计入失败统计
+                        stats["total_failed"] += len(insert_data)
+                        current_batch = []
+                        return
+
+                    # 只有成功提交后才统计（按实际写入成功的文件数统计，确保统计正确）
+                    written = len(insert_data)
+                    stats["total_written"] += written
+                    # 统计写入的总字节数（只统计成功写入的文件）
+                    stats["total_bytes"] += sum(
+                        (fi.get("size", 0) or 0) for fi in current_batch[:written]
+                    )
+                    batch_number += 1
+
+                    # 更新内存中的任务对象统计信息（供 UI 使用，基于实际写入成功的文件数）
+                    if backup_task:
+                        backup_task.total_files = stats["total_written"]
+                        backup_task.total_bytes = stats["total_bytes"]
+
+                    # 进度日志（减少日志频率，提高速度）
+                    now_ts = time.time()
+                    elapsed = now_ts - stats["start_time"]
+                    files_per_sec = stats["total_written"] / elapsed if elapsed > 0 else 0
+                    # 只在批次较大或达到日志间隔时输出，减少日志开销
+                    if written >= 5000 or (now_ts - last_progress_time >= progress_interval):
+                        current_dir_display = current_dir_str[:80] + "..." if current_dir_str and len(current_dir_str) > 80 else (current_dir_str or "")
+                        logger.info(
+                            f"[后台扫描-openGauss直写] 批次 {batch_number}: 已写入 {stats['total_written']:,} 个文件, "
+                            f"总容量: {format_bytes(stats['total_bytes'])}, 速度: {files_per_sec:.0f} 文件/秒"
+                            + (f", 当前目录: {current_dir_display}" if current_dir_display else "")
+                        )
+                        last_progress_time = now_ts
+
+                    # 定期将扫描统计同步到数据库，用于前端卡片显示 total_files / total_bytes
+                    try:
+                        if backup_task and hasattr(self.backup_db, "update_scan_progress_only"):
+                            # 每 progress_interval 秒同步一次，避免过于频繁
+                            if now_ts - last_progress_time >= progress_interval:
+                                await self.backup_db.update_scan_progress_only(
+                                    backup_task,
+                                    stats["total_written"],
+                                    stats["total_bytes"],
+                                )
+                                last_progress_time = now_ts
+                    except Exception as sync_err:
+                        # 同步失败仅记录调试日志，不影响扫描主流程
+                        logger.debug(
+                            f"[后台扫描-openGauss直写] 同步扫描统计到数据库失败（忽略继续）: {sync_err}"
+                        )
+
+                    last_log_count = stats["total_written"]  # 使用 total_written 而不是 total_scanned
+                except Exception as e:
+                    logger.error(
+                        f"[后台扫描-openGauss直写] 批次写入 backup_files 失败: {e}", exc_info=True
+                    )
+                    # 异常时回滚，避免长事务锁表
+                    try:
+                        actual_conn = scan_conn._conn if hasattr(scan_conn, "_conn") else scan_conn
+                        if hasattr(actual_conn, "rollback"):
+                            await actual_conn.rollback()
+                    except Exception:
+                        pass
+                    # 写入失败，这批文件未写入，计入失败统计（确保不丢文件：失败会被记录）
+                    stats["total_failed"] += len(insert_data)
+
+                finally:
+                    current_batch = []
+
+            # 辅助函数：查询数据库中的总文件数和总容量（使用复用的连接）
+            async def get_db_stats(backup_set_db_id: int) -> tuple:
+                """查询数据库中该备份集的总文件数和总容量
+                
+                使用复用的 scan_conn，避免新建连接
+                
+                Returns:
+                    (db_total_files, db_total_bytes): 数据库中的总文件数和总字节数
+                """
+                if not scan_conn or not table_name:
+                    return (0, 0)
+                try:
+                    row = await scan_conn.fetchrow(
+                        f"""
+                        SELECT 
+                            COUNT(*)::BIGINT as total_files,
+                            COALESCE(SUM(file_size), 0)::BIGINT as total_bytes
+                        FROM {table_name}
+                        WHERE backup_set_id = $1::INTEGER
+                          AND file_type = 'file'::backupfiletype
+                        """,
+                        backup_set_db_id
+                    )
+                    # openGauss 模式下需要显式提交事务（fetchrow 后）
+                    actual_conn = scan_conn._conn if hasattr(scan_conn, '_conn') else scan_conn
+                    if hasattr(actual_conn, 'commit'):
+                        try:
+                            await actual_conn.commit()
+                        except Exception:
+                            pass  # 可能不在事务中
+                    
+                    if row:
+                        return (row.get("total_files", 0) or 0, row.get("total_bytes", 0) or 0)
+                except Exception as e:
+                    logger.debug(f"[后台扫描-openGauss直写] 查询数据库统计失败: {e}")
+                return (0, 0)
+
+            # 主扫描循环（os.scandir + FileScanner）
+            for idx, source_path_str in enumerate(source_paths):
+                source_path = Path(source_path_str)
+                logger.info(
+                    f"[后台扫描-openGauss直写] 扫描源路径 {idx + 1}/{len(source_paths)}: {source_path_str}"
+                )
+
+                if not source_path.exists():
+                    logger.warning(
+                        f"[后台扫描-openGauss直写] 源路径不存在，跳过: {source_path_str}"
+                    )
+                    continue
+
+                # 单个文件
+                if source_path.is_file():
+                    try:
+                        if self.file_scanner.should_exclude_file(
+                            str(source_path), exclude_patterns
+                        ):
+                            stats["excluded_count"] += 1
+                            continue
+                        file_info = await self.file_scanner.get_file_info(source_path)
+                        if file_info:
+                            current_batch.append(file_info)
+                            stats["total_scanned"] += 1
+                            if len(current_batch) >= batch_size:
+                                await flush_batch(str(source_path))
+                    except Exception as e:
+                        logger.warning(
+                            f"[后台扫描-openGauss直写] 处理单个文件失败: {source_path_str}, 错误: {e}"
+                        )
+                        stats["error_count"] += 1
+
+                    # 单个文件处理完成，直接继续下一个源路径（不做额外数据库统计，以提高性能）
+                    continue
+
+                # 目录：使用 os.scandir 递归扫描
+                if source_path.is_dir():
+                    logger.info(
+                        f"[后台扫描-openGauss直写] 扫描目录: {source_path_str}（os.scandir 模式）"
+                    )
+
+                    # 检查目录本身是否被排除
+                    if self.file_scanner.should_exclude_file(
+                        str(source_path), exclude_patterns
+                    ):
+                        logger.info(
+                            f"[后台扫描-openGauss直写] 目录匹配排除规则，跳过整个目录: {source_path_str}"
+                        )
+                        stats["excluded_dirs"] += 1
+                        continue
+
+                    dirs_to_scan = [source_path]
+                    scanned_dirs = set()
+
+                    try:
+                        while dirs_to_scan:
+                            current_dir = dirs_to_scan.pop(0)
+                            current_dir_str = str(current_dir.resolve())
+
+                            if current_dir_str in scanned_dirs:
+                                stats["dirs_skipped"] += 1
+                                continue
+                            scanned_dirs.add(current_dir_str)
+                            stats["dirs_scanned"] += 1
+
+                            # 检查目录排除
+                            if self.file_scanner.should_exclude_file(
+                                current_dir_str, exclude_patterns
+                            ):
+                                stats["excluded_dirs"] += 1
+                                continue
+
+                            try:
+                                with os.scandir(current_dir_str) as entries:
+                                    for entry in entries:
+                                        try:
+                                            entry_path = Path(entry.path)
+                                            entry_path_str = str(entry_path)
+
+                                            if self.file_scanner.should_exclude_file(
+                                                entry_path_str, exclude_patterns
+                                            ):
+                                                stats["excluded_count"] += 1
+                                                continue
+
+                                            # 目录：加入队列
+                                            if entry.is_dir(follow_symlinks=False):
+                                                dirs_to_scan.append(entry_path)
+                                                continue
+
+                                            # 文件：获取文件信息
+                                            if entry.is_file(follow_symlinks=False):
+                                                file_info = self.file_scanner.get_file_info_from_entry(
+                                                    entry
+                                                )
+                                                if file_info:
+                                                    current_batch.append(file_info)
+                                                    stats["total_scanned"] += 1
+
+                                                    if len(current_batch) >= batch_size:
+                                                        await flush_batch(current_dir_str)
+                                                else:
+                                                    stats["error_count"] += 1
+                                                continue
+
+                                            # 其他情况（符号链接等）简单跳过并计数
+                                            if entry.is_symlink():
+                                                stats["symlinks_skipped"] += 1
+                                            else:
+                                                stats["error_count"] += 1
+                                        except (PermissionError, OSError, FileNotFoundError):
+                                            stats["error_count"] += 1
+                                            continue
+                            except (PermissionError, OSError) as e:
+                                logger.warning(
+                                    f"[后台扫描-openGauss直写] 无法访问目录: {current_dir_str}, 错误: {e}"
+                                )
+                                stats["error_dirs"] += 1
+                                continue
+                    except Exception as e:
+                        logger.warning(
+                            f"[后台扫描-openGauss直写] 扫描目录失败: {source_path_str}, 错误: {e}"
+                        )
+                        stats["error_count"] += 1
+
+                    # 目录扫描完成后，直接继续下一个源路径（不做额外数据库统计，以提高性能）
+                    continue
+
+            # 写入最后一个批次
+            if current_batch:
+                logger.info(
+                    f"[后台扫描-openGauss直写] 写入最后批次 ({len(current_batch)} 个文件)..."
+                )
+                # 此处无法精确知道最后批次对应的目录，传空字符串只输出汇总信息
+                await flush_batch("")
+
+            # 扫描结束：更新内存状态，并做一次最终数据库同步（用于前端展示总文件数/总字节数）
+            if backup_task:
+                backup_task.total_files = stats["total_written"]
+                backup_task.total_bytes = stats["total_bytes"]
+                try:
+                    if hasattr(self.backup_db, "update_scan_progress_only"):
+                        await self.backup_db.update_scan_progress_only(
+                            backup_task,
+                            stats["total_written"],
+                            stats["total_bytes"],
+                        )
+                except Exception as sync_err:
+                    logger.debug(
+                        f"[后台扫描-openGauss直写] 扫描结束时同步扫描统计到数据库失败（忽略继续）: {sync_err}"
+                    )
+
+            elapsed = time.time() - stats["start_time"]
+            files_per_sec = (
+                stats["total_written"] / elapsed if elapsed > 0 else 0.0
+            )
+            logger.info(
+                f"[后台扫描-openGauss直写] 扫描完成：成功写入 {stats['total_written']:,} 个文件，"
+                f"总大小 {format_bytes(stats['total_bytes'])}, 平均速度 {files_per_sec:.1f} 文件/秒, "
+                f"失败 {stats['total_failed']:,} 个, 排除 {stats['excluded_count']:,} 个"
+            )
+
+            # 扫描全部结束后，在内存和数据库中设置 scan_status = 'completed'
+            if backup_task and backup_task.id:
+                try:
+                    backup_task.scan_status = "completed"
+                    await self.backup_db.update_scan_status(backup_task.id, "completed")
+                except Exception as e:
+                    logger.warning(f"[后台扫描-openGauss直写] 更新扫描状态为 completed 失败（忽略继续）: {e}")
+
+            # 扫描全部结束后，统一做一次真实对账（内存统计 vs 数据库统计，确保统计正确、不丢文件）
+            if backup_set_db_id:
+                try:
+                    db_total_files, db_total_bytes = await get_db_stats(backup_set_db_id)
+                    memory_files = stats["total_written"]
+                    memory_bytes = stats["total_bytes"]
+                    
+                    # 对账：计算差异
+                    file_diff = memory_files - db_total_files
+                    bytes_diff = memory_bytes - db_total_bytes
+                    
+                    if file_diff == 0 and bytes_diff == 0:
+                        logger.info(
+                            f"[后台扫描-openGauss直写] ✅ 对账一致：内存统计={memory_files:,} 文件/{format_bytes(memory_bytes)}, "
+                            f"数据库统计={db_total_files:,} 文件/{format_bytes(db_total_bytes)}"
+                        )
+                    else:
+                        logger.warning(
+                            f"[后台扫描-openGauss直写] ⚠️ 对账差异：内存统计={memory_files:,} 文件/{format_bytes(memory_bytes)}, "
+                            f"数据库统计={db_total_files:,} 文件/{format_bytes(db_total_bytes)}, "
+                            f"差异={file_diff:,} 文件/{format_bytes(bytes_diff)}。"
+                            f"可能原因：部分批次写入失败但未重试，或数据库事务未完全提交"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"[后台扫描-openGauss直写] 扫描结束时查询数据库对账失败: {e}"
+                    )
+        finally:
+            # 关闭数据库连接（整个扫描过程结束）
+            if scan_conn:
+                try:
+                    # 需要保存 conn_context 以便在 finally 中关闭
+                    # 但由于 conn_context 在 try 块内，我们需要用另一种方式
+                    actual_conn = scan_conn._conn if hasattr(scan_conn, "_conn") else scan_conn
+                    if hasattr(actual_conn, "close"):
+                        await actual_conn.close()
+                    logger.debug("[后台扫描-openGauss直写] 已关闭数据库连接")
+                except Exception as e:
+                    logger.warning(f"[后台扫描-openGauss直写] 关闭数据库连接失败: {e}")
+
+    def _prepare_insert_data_for_backup_files(
+        self, file_info: Dict[str, Any], backup_set_id: int
+    ) -> tuple:
+        """
+        为 openGauss 的 backup_files 表准备插入数据元组。
+        逻辑参考 MemoryDBWriter._prepare_insert_data_for_opengauss，保持字段一致性。
+        """
+        file_path = file_info.get("path", "")
+        file_name = file_info.get("name") or Path(file_path).name
+
+        # 目录路径
+        directory_path = (
+            str(Path(file_path).parent)
+            if file_path and Path(file_path).parent != Path(file_path).anchor
+            else None
+        )
+
+        display_name = file_name
+
+        # 文件类型
+        if file_info.get("is_file", True):
+            file_type = "file"
+        elif file_info.get("is_dir", False):
+            file_type = "directory"
+        elif file_info.get("is_symlink", False):
+            file_type = "symlink"
+        else:
+            file_type = "file"
+
+        file_size = file_info.get("size", 0) or 0
+        compressed_size = None
+        file_permissions = file_info.get("permissions")
+        file_owner = None
+        file_group = None
+
+        # 时间戳处理
+        modified_time = file_info.get("modified_time")
+        if isinstance(modified_time, datetime):
+            modified_time = modified_time.replace(tzinfo=timezone.utc)
+        else:
+            modified_time = datetime.now(timezone.utc)
+
+        created_time = modified_time
+        accessed_time = modified_time
+
+        tape_block_start = None
+        tape_block_count = None
+        compressed = False
+        encrypted = False
+        checksum = None
+        is_copy_success = False
+        copy_status_at = None
+
+        backup_time = datetime.now(timezone.utc)
+        chunk_number = None
+        version = 1
+
+        # 注意：file_metadata 和 tags 字段已从扫描阶段删除，压缩阶段会更新 file_metadata
+
+        return (
+            backup_set_id,
+            file_path,
+            file_name,
+            directory_path,
+            display_name,
+            file_type,
+            file_size,
+            compressed_size,
+            file_permissions,
+            file_owner,
+            file_group,
+            created_time,
+            modified_time,
+            accessed_time,
+            tape_block_start,
+            tape_block_count,
+            compressed,
+            encrypted,
+            checksum,
+            is_copy_success,
+            copy_status_at,
+            backup_time,
+            chunk_number,
+            version,
+        )

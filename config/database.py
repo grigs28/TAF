@@ -420,6 +420,11 @@ class DatabaseManager:
                 logger.info(f"表创建顺序: {', '.join(table_names)}")
                 for table in Base.metadata.sorted_tables:
                     logger.debug(f"处理表: {table.name}")
+                    # 多表方案：跳过基础表 backup_files，仅使用 backup_files_template 和分表
+                    if table.name == "backup_files":
+                        logger.info("跳过基础表 backup_files（多表方案仅使用 backup_files_template 和分表）")
+                        existing_tables.append(table.name)
+                        continue
                     # 检查表是否已存在
                     cur.execute("""
                         SELECT 1 FROM information_schema.tables WHERE table_name = %s
@@ -487,61 +492,6 @@ class DatabaseManager:
                         else:
                             logger.error(f"无法为表 {table.name} 生成 SQL 定义，跳过（这可能导致功能异常）")
                             logger.error(f"表 {table.name} 的元数据: {table}")
-                            # 尝试从 Base.metadata 直接获取表信息
-                            try:
-                                from models.base import Base
-                                if table.name in Base.metadata.tables:
-                                    logger.error(f"表 {table.name} 存在于 Base.metadata.tables 中")
-                                    logger.error(f"表列: {[col.name for col in Base.metadata.tables[table.name].columns]}")
-                                    # 如果表存在于元数据中但无法生成 SQL，尝试手动创建
-                                    if table.name == 'backup_files':
-                                        logger.warning(f"⚠️ backup_files 表无法自动生成，尝试手动创建...")
-                                        try:
-                                            # 手动创建 backup_files 表
-                                            manual_create_sql = """
-                                            CREATE TABLE backup_files (
-                                                id SERIAL PRIMARY KEY,
-                                                backup_set_id INTEGER NOT NULL REFERENCES backup_sets(id),
-                                                file_path TEXT NOT NULL,
-                                                file_name TEXT NOT NULL,
-                                                directory_path TEXT,
-                                                display_name TEXT,
-                                                file_type backupfiletype NOT NULL DEFAULT 'file',
-                                                file_size BIGINT NOT NULL,
-                                                compressed_size BIGINT,
-                                                file_permissions VARCHAR(20),
-                                                file_owner VARCHAR(100),
-                                                file_group VARCHAR(100),
-                                                created_time TIMESTAMP WITH TIME ZONE,
-                                                modified_time TIMESTAMP WITH TIME ZONE,
-                                                accessed_time TIMESTAMP WITH TIME ZONE,
-                                                tape_block_start BIGINT,
-                                                tape_block_count INTEGER,
-                                                compressed BOOLEAN DEFAULT FALSE,
-                                                encrypted BOOLEAN DEFAULT FALSE,
-                                                checksum VARCHAR(128),
-                                                is_copy_success BOOLEAN DEFAULT FALSE,
-                                                copy_status_at TIMESTAMP WITH TIME ZONE,
-                                                backup_time TIMESTAMP WITH TIME ZONE NOT NULL,
-                                                chunk_number INTEGER,
-                                                version INTEGER DEFAULT 1,
-                                                file_metadata JSONB,
-                                                tags JSONB
-                                                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                                                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                                            )
-                                            """
-                                            cur.execute(manual_create_sql)
-                                            conn.commit()
-                                            logger.info(f"✅ 手动创建 backup_files 表成功")
-                                            created_tables.append(table.name)
-                                            continue
-                                        except Exception as manual_create_err:
-                                            logger.error(f"❌ 手动创建 backup_files 表失败: {str(manual_create_err)}", exc_info=True)
-                                else:
-                                    logger.error(f"表 {table.name} 不存在于 Base.metadata.tables 中")
-                            except Exception as meta_err:
-                                logger.error(f"检查表 {table.name} 元数据时出错: {meta_err}")
                             existing_tables.append(table.name)
                     else:
                         # 表已存在，检查是否需要添加唯一约束（特别是对于外键引用的字段）
@@ -586,10 +536,97 @@ class DatabaseManager:
                     logger.info(f"创建了 {len(created_tables)} 个新表: {', '.join(created_tables[:5])}{'...' if len(created_tables) > 5 else ''}")
                 if existing_tables:
                     logger.debug(f"跳过 {len(existing_tables)} 个已存在的表")
-                
+
+                # ========= 多表方案：为 backup_files 创建模板表和分组元数据表 =========
+                try:
+                    # 1. 创建 backup_files_template（如果不存在），结构与模型定义的 backup_files 相同
+                    logger.info("检查并创建 backup_files_template（多表方案模板表）...")
+                    cur.execute(
+                        """
+                        SELECT 1
+                        FROM information_schema.tables
+                        WHERE table_name = 'backup_files_template'
+                        """
+                    )
+                    exists_template = cur.fetchone()
+                    if not exists_template:
+                        # 直接从模型定义提取 backup_files 的列定义，生成 backup_files_template 表
+                        columns = get_table_definition_from_model("backup_files")
+                        if columns:
+                            logger.info("根据模型定义创建表 backup_files_template（不再依赖基础表 backup_files）")
+                            create_template_sql = generate_create_table_sql("backup_files_template", columns)
+                            cur.execute(create_template_sql)
+                            conn.commit()
+                        else:
+                            logger.warning("无法从模型定义提取 backup_files 结构，跳过创建 backup_files_template")
+
+                    # 2. 创建 backup_files_groups 元数据表（记录每个任务对应的物理文件表）
+                    logger.info("检查并创建 backup_files_groups（多表方案元数据表）...")
+                    cur.execute(
+                        """
+                        SELECT 1
+                        FROM information_schema.tables
+                        WHERE table_name = 'backup_files_groups'
+                        """
+                    )
+                    exists_groups = cur.fetchone()
+                    if not exists_groups:
+                        cur.execute(
+                            """
+                            CREATE TABLE backup_files_groups (
+                                id BIGSERIAL PRIMARY KEY,
+                                table_name TEXT NOT NULL,
+                                task_id BIGINT NOT NULL,
+                                created_at TIMESTAMPTZ DEFAULT NOW()
+                            )
+                            """
+                        )
+                        conn.commit()
+
+                    # 3. 为 backup_tasks 增加 backup_files_group_id / backup_files_table 字段（如果不存在）
+                    logger.info("检查并为 backup_tasks 添加多表方案相关字段...")
+                    # backup_files_group_id
+                    cur.execute(
+                        """
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_name = 'backup_tasks' AND column_name = 'backup_files_group_id'
+                        """
+                    )
+                    has_group_id = cur.fetchone()
+                    if not has_group_id:
+                        cur.execute(
+                            """
+                            ALTER TABLE backup_tasks
+                            ADD COLUMN backup_files_group_id BIGINT
+                            """
+                        )
+                        conn.commit()
+                    # backup_files_table
+                    cur.execute(
+                        """
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_name = 'backup_tasks' AND column_name = 'backup_files_table'
+                        """
+                    )
+                    has_table_name = cur.fetchone()
+                    if not has_table_name:
+                        cur.execute(
+                            """
+                            ALTER TABLE backup_tasks
+                            ADD COLUMN backup_files_table TEXT
+                            """
+                        )
+                        conn.commit()
+
+                except Exception as multi_err:
+                    # 多表方案相关结构创建失败时，仅记录警告，不阻止主流程
+                    logger.warning(f"创建多表方案相关结构时出错（backup_files_template / backup_files_groups 等）: {multi_err}", exc_info=True)
+
                 # 检查并添加缺失的字段（字段迁移）
                 self._migrate_missing_columns(cur)
-                
+
                 # 关键修复：无论表是新创建还是已存在，都强制检查并修改字段类型为 TEXT
                 # 在提交前执行，确保在同一事务中完成
                 logger.info("========== 开始检查 backup_files 表字段类型 ==========")

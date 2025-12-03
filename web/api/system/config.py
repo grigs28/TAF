@@ -32,7 +32,8 @@ async def get_system_config():
             "dingtalk_default_phone": settings.DINGTALK_DEFAULT_PHONE,
             "scheduler_enabled": settings.SCHEDULER_ENABLED,
             "compression_level": settings.COMPRESSION_LEVEL,
-            "max_file_size": settings.MAX_FILE_SIZE
+            "max_file_size": settings.MAX_FILE_SIZE,
+            "enable_tape_format_before_full": getattr(settings, "ENABLE_TAPE_FORMAT_BEFORE_FULL", True),
         }
 
     except Exception as e:

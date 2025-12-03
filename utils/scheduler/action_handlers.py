@@ -621,17 +621,54 @@ class BackupActionHandler(ActionHandler):
                             now(),  # $13: created_at
                             now()   # $14: updated_at (之前错误地使用了 $13)
                         )
-                        
+
+                        # ========= 多表方案：为该执行任务创建 backup_files 分组和物理表 =========
+                        # 物理表名采用固定前缀 + 任务ID，避免 SQL 注入
+                        table_name = f"backup_files_{backup_task_id:06d}"
+
+                        # 1. 在 backup_files_groups 中创建元数据记录
+                        backup_files_group_id = await conn.fetchval(
+                            """
+                            INSERT INTO backup_files_groups (table_name, task_id)
+                            VALUES ($1, $2)
+                            RETURNING id
+                            """,
+                            table_name,
+                            backup_task_id,
+                        )
+
+                        # 2. 更新 backup_tasks 表，写入 group_id 和 table_name
+                        await conn.execute(
+                            """
+                            UPDATE backup_tasks
+                            SET backup_files_group_id = $1,
+                                backup_files_table = $2
+                            WHERE id = $3
+                            """,
+                            backup_files_group_id,
+                            table_name,
+                            backup_task_id,
+                        )
+
+                        # 3. 为该任务创建物理表（基于 backup_files_template 结构）
+                        # 注意：表名不能用参数占位符，只能通过受控字符串拼接
+                        create_sql = f"""
+                        CREATE TABLE IF NOT EXISTS {table_name} (
+                            LIKE backup_files_template INCLUDING ALL
+                        )
+                        """
+                        await conn.execute(create_sql)
+
                         # 确保事务已提交（psycopg3 需要显式提交，否则其他连接看不到数据）
-                        # 获取实际连接对象
                         actual_conn = conn._conn if hasattr(conn, '_conn') else conn
                         if hasattr(actual_conn, 'commit'):
                             try:
                                 await actual_conn.commit()
-                                logger.debug(f"备份任务 {backup_task_id} 已提交到数据库")
+                                logger.debug(f"备份任务 {backup_task_id} 及其 backup_files 分表已提交到数据库")
                             except Exception as commit_err:
                                 logger.warning(f"提交备份任务事务失败（可能已自动提交）: {commit_err}")
-                        
+
+                        # 构造内存中的 BackupTask 对象，包含 backup_files_table 字段，供扫描器使用
                         backup_task = type('BackupTask', (), {
                             'id': backup_task_id,
                             'task_name': task_name,
@@ -649,6 +686,7 @@ class BackupActionHandler(ActionHandler):
                             'created_by': 'scheduled_task',
                             'scan_status': 'pending',
                             'backup_set_id': None,
+                            'backup_files_table': table_name,
                         })()
                 elif is_redis():
                     # Redis模式：使用备份引擎创建备份任务
