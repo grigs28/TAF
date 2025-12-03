@@ -170,6 +170,7 @@ class SimpleScanner:
                 
                 # 批量插入（使用复用的连接，完全按照 memory_db_writer 的方法）
                 try:
+                    # 注意：psycopg3_compat.executemany() 内部已经自动 commit，无需再次 commit
                     await scan_conn.executemany(
                         f"""
                         INSERT INTO {table_name} (
@@ -188,24 +189,7 @@ class SimpleScanner:
                         insert_data,
                     )
                     
-                    # psycopg3 binary protocol 需要显式提交事务
-                    actual_conn = scan_conn._conn if hasattr(scan_conn, "_conn") else scan_conn
-                    try:
-                        await actual_conn.commit()
-                    except Exception as commit_err:
-                        logger.warning(
-                            f"[简洁扫描] 提交批次事务失败（可能已自动提交）: {commit_err}"
-                        )
-                        try:
-                            await actual_conn.rollback()
-                        except Exception:
-                            pass
-                        # 提交失败，这批文件未写入，计入失败统计
-                        stats["total_failed"] += len(insert_data)
-                        current_batch = []
-                        return
-                    
-                    # 只有成功提交后才统计
+                    # 只有成功写入后才统计（executemany 内部已自动提交）
                     written = len(insert_data)
                     stats["total_written"] += written
                     stats["total_bytes"] += sum(
