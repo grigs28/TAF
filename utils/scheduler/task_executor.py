@@ -246,10 +246,17 @@ def create_task_executor(
                     if current_task['average_duration']:
                         avg_duration = int((current_task['average_duration'] + avg_duration) / 2)
                     
-                    # 计算下次执行时间
+                    # 先更新内存中的 scheduled_task 对象，确保 calculate_next_run_time 能读取到最新数据
+                    scheduled_task.last_success_time = end_time
+                    scheduled_task.total_runs = total_runs
+                    scheduled_task.success_runs = success_runs
+                    scheduled_task.average_duration = avg_duration
+                    scheduled_task.status = ScheduledTaskStatus.ACTIVE
+                    
+                    # 计算下次执行时间（此时 scheduled_task 已更新，能正确读取 last_success_time）
                     next_run = calculate_next_run_time(scheduled_task)
                     
-                    # 更新任务
+                    # 更新任务到数据库
                     await conn.execute(
                         """
                         UPDATE scheduled_tasks
@@ -263,6 +270,9 @@ def create_task_executor(
                         """,
                         'active', end_time, total_runs, success_runs, avg_duration, next_run, scheduled_task.id
                     )
+                    
+                    # 更新内存中的 next_run_time
+                    scheduled_task.next_run_time = next_run
             elif is_redis():
                 # Redis模式下，任务日志和统计更新由 record_run_end 和 storage_update_task 处理
                 # 这里只需要记录成功日志，不需要额外更新

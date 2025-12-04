@@ -865,6 +865,10 @@ async function loadAllSystemConfig() {
                 const scanLogIntervalInput = document.getElementById('scanLogIntervalSeconds');
                 if (scanLogIntervalInput) scanLogIntervalInput.value = config.scan_log_interval_seconds;
             }
+            if (config.scan_wait_timeout) {
+                const scanWaitTimeoutInput = document.getElementById('scanWaitTimeout');
+                if (scanWaitTimeoutInput) scanWaitTimeoutInput.value = config.scan_wait_timeout;
+            }
             if (config.scan_method) {
                 const scanMethodInput = document.getElementById('scanMethod');
                 if (scanMethodInput) {
@@ -989,8 +993,30 @@ async function saveEnvConfigSection() {
             auto_erase_expired: document.getElementById('autoEraseExpired')?.checked || null,
             max_file_size: parseFloat(document.getElementById('maxFileSizeGB')?.value) * 1024 * 1024 * 1024 || null,
             backup_compress_dir: document.getElementById('backupCompressDir')?.value || null,
-            scan_update_interval: parseInt(document.getElementById('scanUpdateInterval')?.value) || null,
-            scan_log_interval_seconds: parseInt(document.getElementById('scanLogIntervalSeconds')?.value) || null,
+            scan_update_interval: (() => {
+                const input = document.getElementById('scanUpdateInterval');
+                if (!input) return null;
+                const value = input.value;
+                if (value === '' || value === null || value === undefined) return null;
+                const parsed = parseInt(value);
+                return isNaN(parsed) ? null : parsed;
+            })(),
+            scan_log_interval_seconds: (() => {
+                const input = document.getElementById('scanLogIntervalSeconds');
+                if (!input) return null;
+                const value = input.value;
+                if (value === '' || value === null || value === undefined) return null;
+                const parsed = parseInt(value);
+                return isNaN(parsed) ? null : parsed;
+            })(),
+            scan_wait_timeout: (() => {
+                const input = document.getElementById('scanWaitTimeout');
+                if (!input) return null;
+                const value = input.value;
+                if (value === '' || value === null || value === undefined) return null;
+                const parsed = parseInt(value);
+                return isNaN(parsed) ? null : parsed;
+            })(),
             scan_method: document.getElementById('scanMethod')?.value || null,
             es_exe_path: document.getElementById('esExePath')?.value || null,
             use_scan_multithread: document.getElementById('useScanMultithread')?.checked ?? null,

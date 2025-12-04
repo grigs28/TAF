@@ -367,18 +367,22 @@ async def _acquire_connection():
             # 从连接池获取连接
             if is_psycopg3:
                 # psycopg3: 使用 getconn() 获取连接（异步）
+                # 关键修复：psycopg3 的 getconn() 没有内置超时，需要显式添加超时保护
                 acquire_coro = pool.getconn()
+                # 使用 asyncio.wait_for 显式添加超时，避免无限等待
+                acquire_coro = asyncio.wait_for(acquire_coro, timeout=acquire_timeout)
             else:
-                # asyncpg: 使用 acquire()
+                # asyncpg: 使用 acquire()（已有超时参数）
                 import asyncpg
                 acquire_coro = pool.acquire(timeout=acquire_timeout)
             
             if monitor.enabled:
                 monitor.ensure_running()
+                # monitor.watch 的超时时间应该大于 acquire_timeout，确保能捕获到超时
                 conn = await monitor.watch(
                     acquire_coro,
                     operation="pool.acquire" if not is_psycopg3 else "pool.getconn",
-                    timeout=acquire_timeout + 1,
+                    timeout=acquire_timeout + 5,  # 增加缓冲时间，确保能捕获超时
                     metadata={"retry": retry_count},
                     critical=True,
                 )
@@ -393,10 +397,40 @@ async def _acquire_connection():
             return pool, conn
         except asyncio.TimeoutError:
             retry_count += 1
+            # 记录连接池状态，帮助诊断问题
+            pool_status = "未知"
+            try:
+                if is_psycopg3:
+                    # psycopg3 连接池状态
+                    if hasattr(pool, '_pool'):
+                        pool_obj = pool._pool
+                        if hasattr(pool_obj, 'stats'):
+                            stats = pool_obj.stats()
+                            pool_status = f"psycopg3连接池: 已用={stats.get('used', 'N/A')}, 空闲={stats.get('idle', 'N/A')}, 等待={stats.get('waiting', 'N/A')}"
+                        elif hasattr(pool_obj, '_pool'):
+                            # 尝试获取内部状态
+                            pool_status = f"psycopg3连接池: 状态检查失败（可能连接池已满）"
+                    else:
+                        pool_status = f"psycopg3连接池: 无法获取状态信息"
+                else:
+                    # asyncpg 连接池状态
+                    if hasattr(pool, 'get_size'):
+                        size = pool.get_size()
+                        idle = pool.get_idle_size()
+                        pool_status = f"asyncpg连接池: 总大小={size}, 空闲={idle}, 已用={size - idle}"
+            except Exception as status_err:
+                pool_status = f"连接池状态检查失败: {str(status_err)}"
+            
             if retry_count >= max_retries:
-                logger.error(f"获取数据库连接超时，已重试{retry_count}次")
+                logger.error(
+                    f"获取数据库连接超时，已重试{retry_count}次。连接池状态: {pool_status}。"
+                    f"可能原因：1) 连接池已满（所有连接被占用） 2) 数据库响应慢 3) 网络问题。"
+                    f"建议：检查是否有连接泄漏，或增加 DB_POOL_SIZE / DB_MAX_OVERFLOW 配置。"
+                )
                 raise
-            logger.warning(f"获取数据库连接超时，重试 {retry_count}/{max_retries}")
+            logger.warning(
+                f"获取数据库连接超时，重试 {retry_count}/{max_retries}。连接池状态: {pool_status}"
+            )
             await asyncio.sleep(0.5 * retry_count)  # 指数退避
         except (ConnectionError, OSError) as e:
             # 连接丢失或网络错误，重置连接池并重试

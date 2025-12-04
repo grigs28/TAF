@@ -1269,8 +1269,9 @@ class BackupEngine:
                     )
                 )
                 logger.info("后台扫描任务已启动")
-                logger.info("等待后台扫描写入文件记录（300秒）...")
-                await asyncio.sleep(300)
+                scan_wait_timeout = getattr(self.settings, "SCAN_WAIT_TIMEOUT", 300) or 300
+                logger.info(f"等待后台扫描写入文件记录（{scan_wait_timeout}秒）...")
+                await asyncio.sleep(scan_wait_timeout)
             else:
                 logger.info("扫描状态为 completed，跳过扫描阶段")
             
@@ -1381,11 +1382,23 @@ class BackupEngine:
                 if file_group_prefetcher:
                     await file_group_prefetcher.stop()
             
-            logger.info(f"========== 数据库压缩完成，共处理 {compression_worker.group_idx} 个文件组 ==========")
+            # 压缩完成日志：换行输出，与其他日志有明显差异
+            logger.info("=" * 80)
+            logger.info("[备份引擎] ========== 数据库压缩完成 ==========")
+            logger.info(f"  处理文件组数: {compression_worker.group_idx}")
+            logger.info(f"  处理文件数: {compression_worker.processed_files:,} 个文件")
+            logger.info(f"  原始总大小: {format_bytes(compression_worker.total_original_size)}")
+            logger.info(f"  压缩后总大小: {format_bytes(total_size)}")
+            if compression_worker.total_original_size > 0:
+                compression_ratio = (1 - total_size / compression_worker.total_original_size) * 100
+                logger.info(f"  压缩率: {compression_ratio:.2f}%")
+            logger.info("=" * 80)
 
-            # 等待所有文件移动到磁带（检查final目录是否为空）
+            # 等待所有文件移动到final目录（检查final目录是否为空）
+            # 注意：移动到final就算完成，不需要等待移动到磁带
+            final_move_completed = True  # 默认完成（如果没有final_dir_monitor）
             if self.final_dir_monitor:
-                logger.info("[备份引擎] 压缩完成，等待所有文件移动到磁带...")
+                logger.info("[备份引擎] 压缩完成，等待所有文件移动到final目录...")
                 max_wait_time = 3600  # 最多等待1小时
                 check_interval = 10  # 每10秒检查一次
                 wait_count = 0
@@ -1393,7 +1406,8 @@ class BackupEngine:
                 
                 while wait_count < max_checks:
                     if self.final_dir_monitor.is_final_dir_empty():
-                        logger.info("[备份引擎] ✅ final目录已为空，所有文件已移动到磁带")
+                        logger.info("[备份引擎] ✅ final目录已为空，所有文件已移动到final目录")
+                        final_move_completed = True
                         break
                     
                     remaining_files = self.final_dir_monitor.get_processed_count()
@@ -1402,18 +1416,73 @@ class BackupEngine:
                     wait_count += 1
                 
                 if wait_count >= max_checks:
-                    logger.warning(f"[备份引擎] ⚠️ 等待文件移动到磁带超时（{max_wait_time}秒），但继续完成备份任务")
+                    logger.warning(f"[备份引擎] ⚠️ 等待文件移动到final目录超时（{max_wait_time}秒），但继续完成备份任务")
+                    final_move_completed = False  # 超时，视为未完成
                 else:
-                    logger.info(f"[备份引擎] ✅ 所有文件已移动到磁带，等待时间: {wait_count * check_interval}秒")
+                    logger.info(f"[备份引擎] ✅ 所有文件已移动到final目录，等待时间: {wait_count * check_interval}秒")
+                    final_move_completed = True
 
             # 注意：不再在这里调用 finalize_backup_set
             # 只有文件压缩任务（compression_worker）可以标记任务集状态为完成并发钉钉
             # 压缩任务会在收不到队列且任务集完成标记为 completed 时自动调用 _finalize_backup_set_and_notify
             
-            # 更新操作状态
-            await self.backup_db.update_scan_progress(backup_task, processed_files, backup_task.total_files, "[压缩完成...]")
-
-            logger.info(f"备份完成，共处理 {processed_files} 个文件，总大小 {format_bytes(total_size)}")
+            # 检查所有完成条件：扫描完成 + 文件组预取完成 + 压缩完成 + 文件移动到final目录完成
+            scan_status = await self.backup_db.get_scan_status(backup_task.id)
+            scan_completed = scan_status == 'completed'
+            
+            # 检查预取器是否完成（执行次数 > 0 且已停止）
+            prefetch_completed = False
+            if file_group_prefetcher:
+                prefetch_loop_count = getattr(file_group_prefetcher, 'prefetch_loop_count', 0)
+                prefetch_running = getattr(file_group_prefetcher, '_running', False)
+                prefetch_completed = prefetch_loop_count > 0 and not prefetch_running
+            else:
+                prefetch_completed = True  # 没有预取器，视为已完成
+            
+            # 检查压缩是否完成（内存状态）
+            compression_completed = getattr(backup_task, 'compression_completed', False)
+            
+            # 所有条件都满足，标记任务完成
+            if scan_completed and prefetch_completed and compression_completed and final_move_completed:
+                # 备份任务完成日志：换行输出，与其他日志有明显差异
+                logger.info("=" * 80)
+                logger.info("[备份引擎] ========== 备份任务完成 ==========")
+                logger.info(f"  任务ID: {backup_task.id}")
+                logger.info(f"  任务名称: {backup_task.task_name}")
+                logger.info(f"  扫描完成: ✅")
+                logger.info(f"  预取完成: ✅ (执行次数: {getattr(file_group_prefetcher, 'prefetch_loop_count', 0) if file_group_prefetcher else 0})")
+                logger.info(f"  压缩完成: ✅")
+                logger.info(f"  文件移动到final目录完成: ✅" if final_move_completed else "  文件移动到final目录完成: ⚠️ (超时)")
+                logger.info(f"  处理文件数: {processed_files:,} 个文件")
+                logger.info(f"  总文件大小: {format_bytes(total_size)}")
+                logger.info("=" * 80)
+                
+                # 更新数据库和内存中的任务状态为完成
+                from models.backup import BackupTaskStatus
+                backup_task.status = BackupTaskStatus.COMPLETED
+                await self.backup_db.update_task_status(backup_task, BackupTaskStatus.COMPLETED)
+                
+                # 更新操作状态
+                await self.backup_db.update_scan_progress(
+                    backup_task, 
+                    processed_files, 
+                    backup_task.total_files, 
+                    f"[备份完成] 处理了 {processed_files} 个文件，总大小 {format_bytes(total_size)}"
+                )
+            else:
+                logger.warning(
+                    f"⚠️ 任务未完全完成："
+                    f"扫描完成={scan_completed}，"
+                    f"预取完成={prefetch_completed}，"
+                    f"压缩完成={compression_completed}，"
+                    f"文件移动到final目录完成={final_move_completed}"
+                )
+                # 更新操作状态（但不标记为完成）
+                if not final_move_completed:
+                    await self.backup_db.update_scan_progress(backup_task, processed_files, backup_task.total_files, "[等待文件移动到final目录...]")
+                else:
+                    await self.backup_db.update_scan_progress(backup_task, processed_files, backup_task.total_files, "[压缩完成...]")
+            
             return True
 
         except KeyboardInterrupt:

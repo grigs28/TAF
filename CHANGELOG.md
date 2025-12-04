@@ -1,5 +1,92 @@
 # 更新日志
 
+## [0.1.35] - 2025-12-04
+
+### 新增
+
+#### 简洁扫描直写模式（openGauss）
+- ✅ 新增 `backup/simple_scanner.py` 简洁扫描器
+  - 完全对齐 `test_scan_direct_write.py` 的扫描与写库流程
+  - 使用 `os.scandir` 顺序扫描 + 单连接同步批量 `INSERT`
+  - 分表名从内存读取（`backup_task.backup_files_table`），必要时回退数据库查询一次
+  - 单线程同步模式，扫描和写入在同一循环中完成，便于排查与压测
+  - 详细统计扫描/写入/排除/错误等指标并输出日志
+
+#### 压缩并行批次与进度聚合（openGauss 模式）
+- ✅ 为 openGauss 模式引入压缩并行批次配置
+  - 设置项 `COMPRESSION_PARALLEL_BATCHES`（默认 2），预取队列容量为 `parallel_batches + 1`
+  - 系统配置 API 与前端新增对应表单项，支持在“系统配置 → 常规/备份策略”中调整
+- ✅ `FileGroupPrefetcher` 并发预取增强
+  - 使用 `asyncio.Queue(maxsize = parallel_batches + 1)` 管理文件组
+  - 精细统计：当前队列文件数、累计入队文件数、累计字节数、预取循环次数等
+  - 针对“扫描完成但不足一组”的场景，增加全库补偿扫描与遗漏文件重检逻辑
+  - 提前为入队文件设置 `is_copy_success = TRUE`，避免重复检索和状态不一致
+- ✅ `CompressionWorker` 并行压缩与进度聚合
+  - openGauss 模式下按 `parallel_batches` 控制同时运行的压缩任务数
+  - 为每个批次维护 `compress_progress` 字典，并在内存中聚合多任务进度
+  - 新增 `get_aggregated_compression_progress()`，返回聚合进度和各任务明细列表
+  - 进度更新任务 `_update_compression_progress_periodically()` 改为优先使用内存统计，
+    在 openGauss 模式下不再强依赖数据库统计结果
+
+#### openGauss 任务调度与运行记录
+- ✅ `utils/scheduler/task_storage.py`
+  - 为 openGauss 增加 `task_runs` 运行记录表的创建与读写逻辑（`record_run_start` / `record_run_end`）
+  - 使用原生 SQL + `JSONB` 存储任务执行结果与错误信息
+  - 新增基于表 `task_locks` 的任务并发锁实现，支持 `is_active` 字段与自动迁移
+  - 修复异常路径下事务未提交 / 未回滚导致的长事务锁表问题（显式 `commit()` / `rollback()`）
+  - 关键修复：获取锁失败时统一返回 `False`，防止任务在锁获取失败时仍然继续执行
+- ✅ `utils/scheduler/task_executor.py`
+  - 执行前先通过 `acquire_task_lock` 获取任务锁，失败时记录系统日志并直接跳过执行
+  - openGauss 模式下所有状态更新（`RUNNING` / `ACTIVE` / `ERROR` 等）统一使用原生 SQL，
+    并在每次执行后显式 `commit()` 与校验 `transaction_status`
+  - 执行成功/失败路径分别更新 `total_runs`/`success_runs`/`failure_runs`/`average_duration`，
+    并重新计算 `next_run_time`
+  - 极大增强任务执行前后日志：输出执行 ID、耗时、统计信息以及详细错误堆栈
+
+#### 环境与系统配置扩展
+- ✅ `web/api/system/env_config.py` / `web/static/js/modules/system/system.js` / `web/templates/system/_tab_general.html`
+  - 新增扫描等待超时配置：`SCAN_WAIT_TIMEOUT`，在“常规 → 扫描配置”中可视化编辑
+  - 新增压缩并行批次配置：`COMPRESSION_PARALLEL_BATCHES`，UI 与 API 完整打通
+  - 扩展 SQLite 优化参数在系统配置页的加载与保存（缓存大小 / 页面大小 / 日志模式 / 同步策略）
+  - 新增“磁带自动格式化”开关 `ENABLE_TAPE_FORMAT_BEFORE_FULL`，控制是否在完整备份前自动调用格式化命令
+  - `loadAllSystemConfig()` / `saveEnvConfigSection()` 同步支持新增所有字段，保证 .env 与 UI 双向同步
+
+#### openGauss 连接池与多表支持（调度器通用）
+- ✅ `utils/scheduler/db_utils.py`
+  - 引入基于 psycopg3 `AsyncConnectionPool` 的 openGauss 连接池（binary protocol），
+    出错时自动回退到 asyncpg
+  - 新增 `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` / `DB_MAX_INACTIVE_CONNECTION_LIFETIME` /
+    `DB_ACQUIRE_TIMEOUT` / `DB_QUERY_DOP` 等配置的统一读取与应用
+  - 在连接创建时执行 `SET query_dop = N`，并通过 `reset_connection` 与
+    连接释放逻辑在返回池前彻底清理事务状态
+  - 为池连接获取/释放增加 watchdog 监控与超时保护，附带连接池状态日志（used/idle/waiting）
+  - 新增多表方案辅助函数 `get_backup_files_table_by_set_id()`，根据 `backup_set_id`
+    决定物理表名，避免直接访问基础表 `backup_files`
+
+### 改进
+
+#### 扫描状态与检索阶段保护
+- ✅ `backup/backup_db.py`
+  - 修复扫描完成后仍被错误标记为 `retrieving` 的问题
+  - 仅在当前 `scan_status` 不为 `retrieving` 且不为 `completed` 时，才更新为 `retrieving`
+  - 避免压缩阶段或后续操作覆盖“扫描完成”状态
+
+#### 压缩循环与统计更新
+- ✅ `backup/compression_worker.py`
+  - 压缩任务开始前创建 `OpenGaussDBScheduler`，将 chunk 信息与压缩统计统一交给后台调度器批量写库
+  - `_compress_file_group` 中仅维护内存统计与必要字段，openGauss 模式下通过调度器异步更新
+  - 更新 `backup_tasks` 的 `processed_files` / `processed_bytes` / `compressed_bytes` /
+    `progress_percent` 时先从数据库读取当前值，再累加，避免多进程/多实例并发覆盖
+  - 压缩完成日志增加整体统计输出（处理组数 / 文件数 / 原始大小 / 压缩大小 / 压缩率）
+
+#### 文件组预取鲁棒性
+- ✅ `backup/file_group_prefetcher.py`
+  - 明确停止条件：扫描完成 + 预取至少执行一次 + 队列空 + 所有压缩任务完成 + 结束信号已入队
+  - 针对 BufferError / 大结果集等异常增加重试与降级日志，引导调优 `MAX_FILE_SIZE` 与批次大小
+  - 记录更详细的性能数据：单次检索耗时 / 累计耗时 / 平均耗时 / 最后处理 ID / 队列状态
+
+---
+
 ## [0.1.34] - 2025-12-02
 
 ### 优化

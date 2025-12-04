@@ -49,8 +49,9 @@ class Settings(BaseSettings):
 
     # 数据库配置
     DATABASE_URL: str = "opengauss://username:password@localhost:5432/backup_db"
-    DB_POOL_SIZE: int = 10
-    DB_MAX_OVERFLOW: int = 20
+    # 连接池大小：进一步调大，适应扫描 + 压缩 + 其他任务的并发
+    DB_POOL_SIZE: int = 40          # 基础连接数（可通过 .env 覆盖）
+    DB_MAX_OVERFLOW: int = 80       # 允许的额外临时连接数
     DB_POOL_TIMEOUT: float = 30.0  # 连接池连接超时时间（秒）
     DB_COMMAND_TIMEOUT: float = 60.0  # 命令超时时间（秒）
     DB_ACQUIRE_TIMEOUT: float = 10.0  # 从连接池获取连接的超时时间（秒）
@@ -152,6 +153,7 @@ class Settings(BaseSettings):
     # 优化：从500增加到2000，减少数据库写入频率，提升扫描速度
     # 如需更快速度，可增加到5000（需要更多内存，但写入速度更快）
     SCAN_LOG_INTERVAL_SECONDS: int = 60  # 后台扫描进度日志输出的时间间隔（秒）
+    SCAN_WAIT_TIMEOUT: int = 300  # 等待后台扫描写入文件记录的超时时间（秒），默认300秒（5分钟）
     ENABLE_BACKGROUND_COPY_UPDATE: bool = False  # 是否启用压缩线程后台标记 is_copy_success
     
     # 压缩并行批次配置

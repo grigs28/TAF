@@ -161,6 +161,7 @@ class BackupTask:
     result_summary: Dict[str, Any] = field(default_factory=dict)
     scan_status: str = "pending"
     scan_completed_at: Optional[datetime] = None
+    compression_completed: bool = False  # 压缩完成状态（内存设置）
 
     # 系统字段
     created_by: str = ""

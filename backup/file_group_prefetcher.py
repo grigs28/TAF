@@ -55,9 +55,13 @@ class FileGroupPrefetcher:
         # 最后处理的文件ID（用于连续查询）
         self.last_processed_file_id = 0
         
+        # 是否正在重新检索遗漏文件（用于压缩循环判断是否应该继续等待）
+        self.is_rescanning_missing_files = False
+        
         # 统计信息
         self.prefetched_groups = 0
         self.total_retrieval_time = 0.0
+        self.prefetch_loop_count = 0  # 预取循环执行次数（内存设置）
         
         # 队列中的文件总数（用于进度显示）- 使用计数器维护
         self.queued_files_count = 0  # 当前队列中所有文件组的总文件数
@@ -167,12 +171,12 @@ class FileGroupPrefetcher:
         settings = get_settings()
         wait_retry_count = 0
         max_wait_retries = 6
-        prefetch_loop_count = 0  # 预取循环计数
+        self.prefetch_loop_count = 0  # 预取循环计数（内存设置）
         queue_check_interval = 6.0  # 6秒轮询检测队列大小
         
         try:
             while self._running:
-                prefetch_loop_count += 1
+                self.prefetch_loop_count += 1
                 try:
                     # 6秒轮询检测队列大小
                     current_queue_size = self.file_group_queue.qsize()
@@ -198,7 +202,7 @@ class FileGroupPrefetcher:
                     retrieval_start_time = time.time()
                     
                     logger.info(
-                        f"[文件组预取器] [循环 #{prefetch_loop_count}] 开始检索文件组："
+                        f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 开始检索文件组："
                         f"队列大小✅={self.file_group_queue.qsize()}/{self.queue_maxsize}, "
                         f"last_processed_id={self.last_processed_file_id}, "
                         f"max_file_size={settings.MAX_FILE_SIZE}"
@@ -250,15 +254,15 @@ class FileGroupPrefetcher:
                     scan_status = await self.backup_db.get_scan_status(self.backup_task.id)
                     
                     logger.info(
-                        f"[文件组预取器] [循环 #{prefetch_loop_count}] 检索完成："
-                        f"耗时={retrieval_elapsed:.2f}秒, "
-                        f"文件组数量={len(file_groups) if file_groups else 0}, "
-                        f"文件总数={total_files_in_groups}, "
-                        f"当前组大小={format_bytes(total_size_in_groups)}, "
-                        f"累计总大小={format_bytes(self.total_queued_size)}, "
-                        f"last_processed_id={last_processed_id}, "
-                        f"扫描状态={scan_status if scan_status else 'N/A'}, "
-                        f"累计预取组数={self.prefetched_groups}, "
+                        f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 检索完成："
+                        f"耗时 {retrieval_elapsed:.2f}秒 | "
+                        f"文件组 {len(file_groups) if file_groups else 0} 个 | "
+                        f"文件总数 {total_files_in_groups:,} 个 | "
+                        f"当前组大小 {format_bytes(total_size_in_groups)} | "
+                        f"累计总大小 {format_bytes(self.total_queued_size)} | "
+                        f"last_processed_id={last_processed_id} | "
+                        f"扫描状态={scan_status if scan_status else 'N/A'} | "
+                        f"累计预取组数={self.prefetched_groups} | "
                         f"累计检索时间={self.total_retrieval_time:.2f}秒"
                     )
                     
@@ -267,7 +271,7 @@ class FileGroupPrefetcher:
                         # 在放入队列前，直接设置 is_copy_success = TRUE
                         try:
                             logger.info(
-                                f"[文件组预取器] [循环 #{prefetch_loop_count}] 开始标记文件为已入队："
+                                f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 开始标记文件为已入队："
                                 f"{len(file_groups)} 个文件组，共 {total_files_in_groups} 个文件，"
                                 f"总大小={format_bytes(total_size_in_groups)}"
                             )
@@ -276,12 +280,12 @@ class FileGroupPrefetcher:
                                 file_groups=file_groups
                             )
                             logger.info(
-                                f"[文件组预取器] [循环 #{prefetch_loop_count}] ✅ 文件标记完成，"
+                                f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ✅ 文件标记完成，"
                                 f"is_copy_success 已设置为 TRUE"
                             )
                         except Exception as mark_error:
                             logger.error(
-                                f"[文件组预取器] [循环 #{prefetch_loop_count}] ⚠️ 标记文件失败: {str(mark_error)}",
+                                f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ⚠️ 标记文件失败: {str(mark_error)}",
                                 exc_info=True
                             )
                             # 即使标记失败，也继续放入队列，避免阻塞流程
@@ -303,15 +307,17 @@ class FileGroupPrefetcher:
                             self.total_queued_size += total_size_in_groups
                             wait_retry_count = 0  # 重置等待计数
                             logger.info(
-                                f"[文件组预取器] [循环 #{prefetch_loop_count}] 已预取 {len(file_groups)} 个文件组"
-                                f"（共 {total_files_in_groups} 个文件，当前组大小={format_bytes(total_size_in_groups)}，累计总大小={format_bytes(self.total_queued_size)}），"
-                                f"✅队列大小: {self.file_group_queue.qsize()}/{self.queue_maxsize}, "
-                                f"当前队列文件数: {self.queued_files_count}, "
-                                f"累计队列文件数: {self.total_queued_files_count}"
+                                f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ✅ 已预取 {len(file_groups)} 个文件组："
+                                f"文件数 {total_files_in_groups:,} 个 | "
+                                f"当前组大小 {format_bytes(total_size_in_groups)} | "
+                                f"累计总大小 {format_bytes(self.total_queued_size)} | "
+                                f"队列大小 {self.file_group_queue.qsize()}/{self.queue_maxsize} | "
+                                f"当前队列文件数 {self.queued_files_count:,} | "
+                                f"累计队列文件数 {self.total_queued_files_count:,}"
                             )
                         except Exception as put_error:
                             logger.error(
-                                f"[文件组预取器] [循环 #{prefetch_loop_count}] 放入队列失败: {put_error}",
+                                f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 放入队列失败: {put_error}",
                                 exc_info=True
                             )
                     else:
@@ -322,7 +328,7 @@ class FileGroupPrefetcher:
                         if scan_status == 'completed':
                             # 扫描任务已完成，如果不够一组，先进行全库扫描避免遗漏
                             logger.info(
-                                f"[文件组预取器] [循环 #{prefetch_loop_count}] 扫描任务已完成，"
+                                f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 扫描任务已完成，"
                                 f"但未检索到文件组，进行全库扫描检查是否有遗漏..."
                             )
                             
@@ -334,7 +340,7 @@ class FileGroupPrefetcher:
                                     await conn.execute(f"SET LOCAL statement_timeout = '{int(full_search_timeout)}s'")
                                     
                                     logger.info(
-                                        f"[文件组预取器] [循环 #{prefetch_loop_count}] 开始全库检索所有未压缩文件"
+                                        f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 开始全库检索所有未压缩文件"
                                         f"（超时时间：{full_search_timeout}秒）..."
                                     )
                                     # 多表方案：根据 backup_set_db_id 决定物理表名，避免直接访问基础表 backup_files
@@ -358,24 +364,77 @@ class FileGroupPrefetcher:
                                     )
                                     
                                     logger.info(
-                                        f"[文件组预取器] [循环 #{prefetch_loop_count}] 全库检索完成，"
+                                        f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 全库检索完成，"
                                         f"找到 {len(all_pending_rows)} 个未压缩文件"
                                     )
                                     
                                     if all_pending_rows:
-                                        # 全库扫描找到文件，重置 last_processed_file_id 为 0，重新开始检索
+                                        # 全库扫描找到文件，重置 last_processed_file_id 为 0，立即重新检索
                                         logger.warning(
-                                            f"[文件组预取器] [循环 #{prefetch_loop_count}] ⚠️ 全库扫描发现遗漏的未压缩文件："
-                                            f"{len(all_pending_rows)} 个，重置 last_processed_file_id=0，重新检索..."
+                                            f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ⚠️ 全库扫描发现遗漏的未压缩文件："
+                                            f"{len(all_pending_rows)} 个，重置 last_processed_file_id=0，立即重新检索..."
                                         )
                                         self.last_processed_file_id = 0
-                                        await asyncio.sleep(1.0)  # 短暂等待后继续检索
+                                        self.is_rescanning_missing_files = True  # 标记正在重新检索
+                                        
+                                        # 立即重新检索，不等待，确保遗漏的文件能被处理
+                                        result = await self.backup_db.fetch_pending_files_grouped_by_size(
+                                            self.backup_set.id,
+                                            settings.MAX_FILE_SIZE,
+                                            self.backup_task.id,
+                                            should_wait_if_small=False,  # 不再等待，立即返回
+                                            start_from_id=0  # 从0开始重新检索
+                                        )
+                                        
+                                        if isinstance(result, tuple) and len(result) == 2:
+                                            file_groups, last_processed_id = result
+                                        else:
+                                            file_groups = result
+                                            last_processed_id = 0
+                                        
+                                        # 更新最后处理的文件ID
+                                        if last_processed_id > 0:
+                                            self.last_processed_file_id = last_processed_id
+                                        
+                                        if file_groups:
+                                            # 有文件组，立即放入队列
+                                            total_files_in_groups = sum(len(group) for group in file_groups)
+                                            total_size_in_groups = sum(
+                                                sum(f.get('size', 0) or 0 for f in group) for group in file_groups
+                                            )
+                                            
+                                            for group in file_groups:
+                                                try:
+                                                    await self.file_group_queue.put((group, self.last_processed_file_id))
+                                                    self.prefetched_groups += 1
+                                                    self.queued_files_count += len(group)
+                                                    self.total_queued_files_count += len(group)
+                                                    self.total_queued_size += sum(f.get('size', 0) or 0 for f in group)
+                                                except Exception as e:
+                                                    logger.error(f"[文件组预取器] 放入队列失败: {e}", exc_info=True)
+                                            
+                                            logger.info(
+                                                f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ✅ 重新检索成功，"
+                                                f"找到 {len(file_groups)} 个文件组，"
+                                                f"总文件数={total_files_in_groups}，"
+                                                f"总大小={format_bytes(total_size_in_groups)}，"
+                                                f"已放入队列"
+                                            )
+                                            self.is_rescanning_missing_files = False  # 重新检索完成
+                                        else:
+                                            logger.warning(
+                                                f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ⚠️ 重新检索未找到文件组，"
+                                                f"但全库扫描发现 {len(all_pending_rows)} 个未压缩文件，"
+                                                f"可能文件组大小不足，继续等待..."
+                                            )
+                                            # 保持 is_rescanning_missing_files = True，继续等待
+                                        # 继续循环，等待更多文件或下次检索
                                         continue
                                     else:
                                         # 全库扫描也没有文件，再次调用 fetch_pending_files_grouped_by_size
                                         # 这次应该会返回文件组（即使大小不足，因为扫描已完成）
                                         logger.info(
-                                            f"[文件组预取器] [循环 #{prefetch_loop_count}] 全库扫描确认没有遗漏文件，"
+                                            f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 全库扫描确认没有遗漏文件，"
                                             f"再次调用 fetch_pending_files_grouped_by_size 获取文件组（即使大小不足）..."
                                         )
                                         # 再次查询，这次应该会返回文件组（因为扫描已完成）
@@ -402,7 +461,7 @@ class FileGroupPrefetcher:
                                             )
                                             try:
                                                 logger.info(
-                                                    f"[文件组预取器] [循环 #{prefetch_loop_count}] 开始标记文件为已入队："
+                                                    f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 开始标记文件为已入队："
                                                     f"{len(file_groups)} 个文件组，共 {total_files_in_groups} 个文件，"
                                                     f"总大小={format_bytes(total_size_in_groups)}"
                                                 )
@@ -411,12 +470,12 @@ class FileGroupPrefetcher:
                                                     file_groups=file_groups
                                                 )
                                                 logger.info(
-                                                    f"[文件组预取器] [循环 #{prefetch_loop_count}] ✅ 文件标记完成，"
+                                                    f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ✅ 文件标记完成，"
                                                     f"is_copy_success 已设置为 TRUE"
                                                 )
                                             except Exception as mark_error:
                                                 logger.error(
-                                                    f"[文件组预取器] [循环 #{prefetch_loop_count}] ⚠️ 标记文件失败: {str(mark_error)}",
+                                                    f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ⚠️ 标记文件失败: {str(mark_error)}",
                                                     exc_info=True
                                                 )
                                             
@@ -435,17 +494,19 @@ class FileGroupPrefetcher:
                                             # 更新累计放入队列的总文件大小（用于进度显示，不减少）
                                             self.total_queued_size += total_size_in_groups
                                             logger.info(
-                                                f"[文件组预取器] [循环 #{prefetch_loop_count}] 已预取 {len(file_groups)} 个文件组"
-                                                f"（共 {total_files_in_groups} 个文件，当前组大小={format_bytes(total_size_in_groups)}，累计总大小={format_bytes(self.total_queued_size)}），"
-                                                f"✅队列大小: {self.file_group_queue.qsize()}/{self.queue_maxsize}, "
-                                                f"当前队列文件数: {self.queued_files_count}, "
-                                                f"累计队列文件数: {self.total_queued_files_count}"
+                                                f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ✅ 已预取 {len(file_groups)} 个文件组："
+                                                f"文件数 {total_files_in_groups:,} 个 | "
+                                                f"当前组大小 {format_bytes(total_size_in_groups)} | "
+                                                f"累计总大小 {format_bytes(self.total_queued_size)} | "
+                                                f"队列大小 {self.file_group_queue.qsize()}/{self.queue_maxsize} | "
+                                                f"当前队列文件数 {self.queued_files_count:,} | "
+                                                f"累计队列文件数 {self.total_queued_files_count:,}"
                                             )
                                             continue
                                         else:
                                             # 全库扫描后仍然没有文件组，停止线程
                                             logger.info(
-                                                f"[文件组预取器] [循环 #{prefetch_loop_count}] 全库扫描后仍然没有文件组，"
+                                                f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 全库扫描后仍然没有文件组，"
                                                 f"不够1组，停止预取线程"
                                             )
                                             # 更新任务状态，标记分组完成
@@ -458,18 +519,26 @@ class FileGroupPrefetcher:
                                                 logger.info(f"[文件组预取器] ✅ 已更新任务状态为分组完成")
                                             except Exception as update_error:
                                                 logger.warning(f"[文件组预取器] ⚠️ 更新任务状态失败: {str(update_error)}")
-                                            await self.file_group_queue.put(([], -1))  # -1 表示结束
+                                            # 放入结束信号（-1 表示结束），压缩循环会识别并停止
+                                            await self.file_group_queue.put(([], -1))
+                                            queue_size_after = self.file_group_queue.qsize()
+                                            actual_groups = queue_size_after - 1  # 减去结束信号
+                                            logger.info(
+                                                f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 已放入结束信号到队列 | "
+                                                f"队列大小: {queue_size_after}/{self.queue_maxsize} "
+                                                f"(实际文件组: {actual_groups}, 结束信号: 1)"
+                                            )
                                             break
                             except asyncio.TimeoutError:
                                 logger.error(
-                                    f"[文件组预取器] [循环 #{prefetch_loop_count}] 全库扫描超时，"
+                                    f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 全库扫描超时，"
                                     f"停止预取线程"
                                 )
                                 await self.file_group_queue.put(([], -1))  # -1 表示结束
                                 break
                             except Exception as full_search_error:
                                 logger.error(
-                                    f"[文件组预取器] [循环 #{prefetch_loop_count}] 全库扫描失败: {full_search_error}，"
+                                    f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 全库扫描失败: {full_search_error}，"
                                     f"停止预取线程",
                                     exc_info=True
                                 )
@@ -479,7 +548,7 @@ class FileGroupPrefetcher:
                             # 扫描任务未完成，文件大小不足无法组成新文件组，队列保持当前状态
                             # 6秒后再次检查队列大小和扫描状态
                             logger.info(
-                                f"[文件组预取器] [循环 #{prefetch_loop_count}] 扫描任务未完成"
+                                f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 扫描任务未完成"
                                 f"（扫描状态={scan_status}），文件大小不足无法组成新文件组，"
                                 f"队列保持当前状态（{current_queue_size}/{self.queue_maxsize}），"
                                 f"{queue_check_interval}秒后再次检查..."
@@ -488,7 +557,7 @@ class FileGroupPrefetcher:
                             continue
                 
                 except asyncio.CancelledError:
-                    logger.info(f"[文件组预取器] [循环 #{prefetch_loop_count}] 预取循环被取消")
+                    logger.info(f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 预取循环被取消")
                     break
                 except Exception as e:
                     error_type = type(e).__name__
@@ -504,43 +573,48 @@ class FileGroupPrefetcher:
                     
                     if is_buffer_error:
                         logger.warning(
-                            f"[文件组预取器] [循环 #{prefetch_loop_count}] 数据库缓冲区错误："
+                            f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 数据库缓冲区错误："
                             f"{error_type}: {error_msg}\n"
                             f"这通常是由于查询结果太大或网络传输问题导致的。"
                             f"数据库查询函数会自动重试并减小批次大小。"
                         )
                     else:
                         logger.error(
-                            f"[文件组预取器] [循环 #{prefetch_loop_count}] 预取文件组时出错："
+                            f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 预取文件组时出错："
                             f"{error_type}: {error_msg}",
                             exc_info=True
                         )
                     
                     # 出错后等待一段时间再重试
                     logger.info(
-                        f"[文件组预取器] [循环 #{prefetch_loop_count}] 5秒后重试..."
+                        f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 5秒后重试..."
                     )
                     await asyncio.sleep(5.0)
         
         except Exception as e:
             logger.error(
-                f"[文件组预取器] 预取循环异常（循环 #{prefetch_loop_count}）: {e}",
+                f"[文件组预取器] 预取循环异常（循环 #{self.prefetch_loop_count}）: {e}",
                 exc_info=True
             )
         finally:
             avg_retrieval_time = (
-                self.total_retrieval_time / prefetch_loop_count 
-                if prefetch_loop_count > 0 else 0
+                self.total_retrieval_time / self.prefetch_loop_count 
+                if self.prefetch_loop_count > 0 else 0
             )
-            logger.info(
-                f"[文件组预取器] ========== 预取循环已结束 ==========\n"
-                f"总循环次数: {prefetch_loop_count}\n"
-                f"预取文件组数: {self.prefetched_groups}\n"
-                f"总检索时间: {self.total_retrieval_time:.2f}秒\n"
-                f"平均检索时间: {avg_retrieval_time:.2f}秒/次\n"
-                f"最后处理的文件ID: {self.last_processed_file_id}\n"
-                f"队列剩余大小: {self.file_group_queue.qsize()}/{self.queue_maxsize}"
-            )
+            # 计算队列中的实际文件组数（排除结束信号）
+            queue_size = self.file_group_queue.qsize()
+            # 结束信号是 ([], -1)，如果有结束信号，实际文件组数 = queue_size - 1
+            actual_file_groups_in_queue = queue_size - (1 if queue_size > 0 else 0)
+            
+            logger.info("=" * 80)
+            logger.info("[文件组预取器] ========== 预取循环已结束 ==========")
+            logger.info(f"  总循环次数: {self.prefetch_loop_count}")
+            logger.info(f"  预取文件组数: {self.prefetched_groups}")
+            logger.info(f"  总检索时间: {self.total_retrieval_time:.2f} 秒")
+            logger.info(f"  平均检索时间: {avg_retrieval_time:.2f} 秒/次")
+            logger.info(f"  最后处理的文件ID: {self.last_processed_file_id}")
+            logger.info(f"  队列大小: {queue_size}/{self.queue_maxsize} (实际文件组: {actual_file_groups_in_queue}, 结束信号: {1 if queue_size > actual_file_groups_in_queue else 0})")
+            logger.info("=" * 80)
     
     def get_stats(self) -> Dict[str, Any]:
         """获取统计信息"""

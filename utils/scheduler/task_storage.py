@@ -140,6 +140,9 @@ async def record_run_start(task_id: int, execution_id: str, started_at: datetime
         if is_opengauss():
             # 使用连接池
             async with get_opengauss_connection() as conn:
+                # 获取实际连接对象（用于 commit/rollback）
+                actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                
                 # 确保表存在
                 await conn.execute(
                     """
@@ -155,6 +158,10 @@ async def record_run_start(task_id: int, execution_id: str, started_at: datetime
                     )
                     """
                 )
+                # openGauss 模式下需要显式提交 CREATE TABLE
+                if hasattr(actual_conn, 'commit'):
+                    await actual_conn.commit()
+                
                 # 插入记录
                 await conn.execute(
                     """
@@ -163,6 +170,9 @@ async def record_run_start(task_id: int, execution_id: str, started_at: datetime
                     """,
                     task_id, execution_id, started_at
                 )
+                # openGauss 模式下需要显式提交 INSERT
+                if hasattr(actual_conn, 'commit'):
+                    await actual_conn.commit()
         else:
             # SQLite 版本
             from utils.scheduler.sqlite_task_storage import record_run_start_sqlite
@@ -188,6 +198,22 @@ async def record_run_end(execution_id: str, completed_at: datetime, status: str,
             # 使用连接池
             async with get_opengauss_connection() as conn:
                 try:
+                    # 确保表存在（如果 record_run_start 没有被调用，表可能不存在）
+                    await conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS task_runs (
+                            id SERIAL PRIMARY KEY,
+                            task_id INTEGER NOT NULL,
+                            execution_id VARCHAR(64) UNIQUE NOT NULL,
+                            started_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                            completed_at TIMESTAMP WITH TIME ZONE,
+                            status VARCHAR(16) DEFAULT 'running',
+                            result JSONB,
+                            error_message TEXT
+                        )
+                        """
+                    )
+                    
                     await conn.execute(
                         """
                         UPDATE task_runs

@@ -56,6 +56,21 @@
                 </div>
             </div>
         </div>
+
+        <div class="col-md-6">
+            <div class="setting-card service-card mb-3">
+                <div class="card-body">
+                    <h6 class="card-title">扫描配置</h6>
+                    <div class="mb-3">
+                        <label class="form-label">扫描等待超时（秒）</label>
+                        <input type="number" class="form-control" id="scanWaitTimeout" min="60" step="60" value="300">
+                        <small class="form-text text-secondary">
+                            等待后台扫描写入文件记录的超时时间（秒），默认300秒（5分钟）。扫描完成后会等待此时间再开始压缩。
+                        </small>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- 磁带自动格式化选项 -->

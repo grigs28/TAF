@@ -2337,11 +2337,13 @@ class BackupDB:
             # 这里简化处理，通过should_wait_if_small判断是否应该继续等待
             retry_count = 0 if should_wait_if_small else max_retries
 
-        # 标记检索开始（仅在第一次调用时标记）
+        # 标记检索开始（仅在第一次调用时标记，且扫描未完成时）
         if backup_task_id:
             current_scan_status = await self.get_scan_status(backup_task_id)
-            if current_scan_status != 'retrieving':
-                logger.info(f"[openGauss优化] 标记检索状态为开始检索（backup_task_id={backup_task_id}）")
+            # 如果扫描已经完成（completed），不应该再设置为 retrieving
+            # 只有在扫描未完成（pending, running, None）时才设置为 retrieving
+            if current_scan_status not in ('retrieving', 'completed'):
+                logger.info(f"[openGauss优化] 标记检索状态为开始检索（backup_task_id={backup_task_id}，当前状态={current_scan_status}）")
                 await self.update_scan_status(backup_task_id, 'retrieving')
         
         # openGauss 优化：分批检索文件，避免一次性检索所有未压缩文件
@@ -3026,6 +3028,34 @@ class BackupDB:
                 # 检索到文件组不等于扫描完成，文件可能还在扫描中
                 # 返回文件组和最后处理的文件ID
                 return ([current_group], last_processed_id)
+            
+            # 关键修复：扫描完成后，无论文件组大小如何，只要有文件就必须返回，不能丢弃
+            if scan_status == 'completed' and current_group and len(current_group) > 0:
+                # 扫描已完成，强制返回剩余文件组（不能丢弃）
+                logger.info(
+                    f"[openGauss优化] ✅ 扫描已完成，强制返回剩余文件组："
+                    f"文件组大小 {format_bytes(current_group_size)} "
+                    f"({size_ratio*100:.1f}% of 目标，< {format_bytes(min_group_size)})，"
+                    f"文件数: {len(current_group)} 个，确保所有文件都被压缩"
+                )
+                return ([current_group], last_processed_id)
+            
+            # 文件组大小不足且扫描未完成，继续等待（返回空列表，等待更多文件）
+            logger.info(
+                f"[openGauss优化] 文件组大小不足：{format_bytes(current_group_size)} < {format_bytes(min_group_size)}，"
+                f"扫描状态：{scan_status}，等待更多文件..."
+            )
+            # 关键修复：已累积的文件不能丢弃！如果已检索到文件但大小不够，应该从第一个累积文件的ID-1开始查询
+            if current_group and len(current_group) > 0:
+                first_file_id = current_group[0].get('id')
+                if first_file_id:
+                    resume_id = first_file_id - 1
+                    logger.info(
+                        f"[openGauss优化] 已检索到 {len(current_group)} 个文件但大小不够，"
+                        f"第一个文件ID: {first_file_id}，下次查询将从 id > {resume_id} 开始（确保不丢弃未成组文件）"
+                    )
+                    return ([], resume_id)
+            return ([], last_processed_id)
         
         # 检查是否需要进行全库检索（只有扫描完成时才进行）
         # 注意：异常检测逻辑已在循环内的 if not rows 块中处理
@@ -3172,7 +3202,18 @@ class BackupDB:
         
         # 如果达到重试上限或扫描已完成，即使大小不足也返回当前文件组
         if current_group_size < min_group_size:
-            # 检查文件组大小是否太小，即使扫描已完成也不应该返回
+            # 关键修复：扫描完成后，无论文件组大小如何，只要有文件就必须返回，不能丢弃
+            if scan_status == 'completed' and current_group and len(current_group) > 0:
+                # 扫描已完成，强制返回剩余文件组（不能丢弃）
+                logger.info(
+                    f"[openGauss优化] ✅ 扫描已完成，强制返回剩余文件组："
+                    f"文件组大小 {format_bytes(current_group_size)} "
+                    f"({size_ratio*100:.1f}% of 目标，< {format_bytes(min_group_size)})，"
+                    f"文件数: {len(current_group)} 个，确保所有文件都被压缩"
+                )
+                return ([current_group], last_processed_id)
+            
+            # 检查文件组大小是否太小，扫描未完成时继续等待
             if current_group_size < min_acceptable_group_size:
                 reason = '扫描已完成' if scan_status == 'completed' else '达到重试上限'
                 logger.warning(
