@@ -1,5 +1,68 @@
 # 更新日志
 
+## [0.2.0] - 2025-12-04
+
+### 新增
+
+#### 文件组预取器去重机制
+- ✅ `backup/file_group_prefetcher.py` 添加去重逻辑
+  - 对 `fetch_pending_files_grouped_by_size` 返回的文件组进行去重处理
+  - 相同 `file_path` 只保留第一个，重复部分不计入容量和文件数
+  - 所有队列统计（`queued_files_count`、`total_queued_files_count`、`total_queued_size`）使用去重后的值
+  - 日志中明确显示去重信息：`去重（数量）` 格式，即使没有重复也显示 `去重（0）`
+
+#### 查询条件统一优化
+- ✅ `backup/backup_db.py` 统一查询条件
+  - 将所有 `is_copy_success = FALSE OR is_copy_success IS NULL` 替换为 `is_copy_success IS DISTINCT FROM TRUE`
+  - 语义一致但更简洁，与更新条件保持一致
+  - 确保查询和更新逻辑的一致性
+
+#### 文件处理统计增强
+- ✅ `backup/backup_db.py` 添加本次文件累计统计
+  - 在 `fetch_pending_files_grouped_by_size` 中添加 `total_files_processed` 累计变量
+  - 日志中显示"本次文件累计"信息，便于跟踪本次函数调用处理的文件数
+  - 累计数是去重后的文件数，确保统计准确性
+
+#### 测试工具
+- ✅ 新增 `tests/check_duplicate_paths_in_table.py`
+  - 检查指定表中是否有重复路径
+  - 先全部加载到内存，然后在内存中快速统计重复路径
+  - 支持按重复次数分组统计和状态分布分析
+- ✅ 新增 `tests/analyze_duplicate_paths_in_prefetcher.py`
+  - 分析文件组预取器为什么会有重复路径
+  - 模拟查询逻辑，检查查询结果中的重复情况
+  - 分析数据库中所有记录的重复情况和混合状态
+
+### 改进
+
+#### 文件组预取器去重与日志优化
+- ✅ `backup/file_group_prefetcher.py`
+  - 在主循环、全库扫描后重新检索、全库扫描后再次调用等所有位置添加去重逻辑
+  - 日志格式统一为 `去重（数量）`，替代之前的 `（去重后）` 格式
+  - 确保重复路径不会影响文件数和容量统计
+
+#### 数据库查询优化
+- ✅ `backup/backup_db.py`
+  - `fetch_pending_files_grouped_by_size` 在内存中去重，相同 `file_path` 只保留 `id` 最小的记录
+  - 添加重复路径统计和日志输出，便于诊断问题
+  - 优化查询条件，使用 `IS DISTINCT FROM TRUE` 提高可读性
+
+#### 恢复引擎修复
+- ✅ `recovery/recovery_engine.py`
+  - 修复 `get_top_level_directories` 和 `get_directory_contents` 中的硬编码表名问题
+  - 使用 `get_backup_files_table_by_set_id` 动态获取正确的表名（`backup_files_xxx`）
+  - 解决 openGauss 模式下 `relation "backup_files" does not exist` 错误
+
+### 修复
+
+#### 事务提交与验证
+- ✅ `backup/backup_db.py`
+  - 确保 `mark_files_as_queued` 中每批次更新后都执行 `commit()`
+  - 添加二次校验逻辑，确认 `is_copy_success` 已成功设置为 `TRUE`
+  - 如果校验失败，自动重试一次批量更新
+
+---
+
 ## [0.1.35] - 2025-12-04
 
 ### 新增

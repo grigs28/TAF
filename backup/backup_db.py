@@ -163,10 +163,8 @@ class BatchDBWriter:
 
                     queue_size = self.file_queue.qsize()
                     speed = len(batch) / batch_time if batch_time > 0 else float('inf')
-                    # Redis模式下，详细日志在_process_batch_redis中输出，这里只记录简要信息
-                    from utils.scheduler.db_utils import is_redis
-                    if not is_redis():
-                        logger.info(f"[批量写入] 批次 #{self._stats['batch_count']}: {len(batch)} 个文件，耗时 {batch_time:.2f}s，速度 {speed:.1f} 个/秒，队列剩余 {queue_size} 个")
+                    # 仅保留 openGauss / 内存数据库模式的日志
+                    logger.info(f"[批量写入] 批次 #{self._stats['batch_count']}: {len(batch)} 个文件，耗时 {batch_time:.2f}s，速度 {speed:.1f} 个/秒，队列剩余 {queue_size} 个")
 
         except Exception as e:
             logger.error(f"批量写入worker异常: {e}")
@@ -178,26 +176,23 @@ class BatchDBWriter:
                        f"完成 {self._stats['batch_count']} 个批次，总耗时 {total_time:.1f}s")
 
     async def _process_batch(self, file_batch: List[Dict]):
-        """处理一个文件批次"""
-        from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection, get_backup_files_table_by_set_id
-        from utils.scheduler.sqlite_utils import is_sqlite
+        """处理一个文件批次（仅保留 openGauss / 内存数据库）"""
+        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection, get_backup_files_table_by_set_id
         from utils.datetime_utils import now
         from datetime import timezone
 
         if not file_batch:
             return
 
-        if is_redis():
-            # Redis 版本：直接批量插入到 Redis
-            await self._process_batch_redis(file_batch)
-        elif is_opengauss():
+        # 仅保留 openGauss 分支；内存数据库不在此方法中处理持久化
+        if is_opengauss():
             async with get_opengauss_connection() as conn:
                 # 准备数据分类
                 insert_data = []
                 update_data = []
 
-                # 提取文件路径用于查询
-                file_paths = [f.get('path', '') for f in file_batch]
+                # 提取文件路径用于查询（去重，避免重复查询）
+                file_paths = list(dict.fromkeys(f.get('path', '') for f in file_batch if f.get('path')))
 
                 # 批量查询已存在的文件
                 if file_paths:
@@ -213,13 +208,32 @@ class BatchDBWriter:
                         """,
                         self.backup_set_db_id, file_paths
                     )
-                    existing_map = {row['file_path']: row for row in existing_files}
+                    # 注意：如果有多条相同 file_path 的记录，只保留第一条（id 最小的）
+                    existing_map = {}
+                    for row in existing_files:
+                        file_path = row['file_path']
+                        if file_path not in existing_map:
+                            existing_map[file_path] = row
+                        else:
+                            # 如果已存在，保留 id 较小的记录（避免更新错误的记录）
+                            if row['id'] < existing_map[file_path]['id']:
+                                existing_map[file_path] = row
                 else:
                     existing_map = {}
+
+                # 用于跟踪本批次中已处理的路径，避免同一批次内重复插入
+                processed_paths_in_batch = set()
 
                 # 分类处理文件
                 for file_info in file_batch:
                     file_path = file_info.get('path', '')
+                    if not file_path:
+                        continue  # 跳过空路径
+
+                    # 检查本批次内是否已处理过该路径（避免同一批次内重复插入）
+                    if file_path in processed_paths_in_batch:
+                        logger.debug(f"[_process_batch] 跳过本批次内重复路径: {file_path}")
+                        continue
 
                     if file_path in existing_map:
                         existing = existing_map[file_path]
@@ -229,10 +243,12 @@ class BatchDBWriter:
                         # 准备更新参数
                         update_params = self._prepare_update_params(file_info, existing['id'])
                         update_data.append(update_params)
+                        processed_paths_in_batch.add(file_path)
                     else:
                         # 准备插入参数
                         insert_params = self._prepare_insert_params(file_info)
                         insert_data.append(insert_params)
+                        processed_paths_in_batch.add(file_path)
 
                 # 执行批量操作（openGauss 多表方案下，_batch_insert/_batch_update 内部会按 backup_set_id 选择表名）
                 if insert_data:
@@ -240,27 +256,8 @@ class BatchDBWriter:
                 
                 if update_data:
                     await self._batch_update(conn, update_data)
-        elif is_sqlite():
-            # SQLite 版本：使用原生 SQL
-            from backup.sqlite_backup_db import insert_backup_files_sqlite
-            # 将文件信息转换为字典列表
-            file_dicts = []
-            for file_info in file_batch:
-                file_dict = {
-                    'backup_set_id': self.backup_set_db_id,
-                    'file_path': file_info.get('path', ''),
-                    'file_name': file_info.get('name') or Path(file_info.get('path', '')).name,
-                    'file_type': 'file',
-                    'file_size': file_info.get('size', 0),
-                    'file_stat': file_info.get('file_stat'),
-                    'file_metadata': file_info.get('file_metadata', {})
-                }
-                file_dicts.append(file_dict)
-            
-            if file_dicts:
-                await insert_backup_files_sqlite(file_dicts)
         else:
-            logger.info(f"不支持的数据库类型，跳过批量写入 {len(file_batch)} 个文件")
+            logger.info(f"当前仅支持 openGauss，跳过批量写入 {len(file_batch)} 个文件")
 
     async def _process_batch_redis(self, file_batch: List[Dict]):
         """处理一个文件批次（Redis版本，优化10000条记录写入速度）"""
@@ -1154,14 +1151,10 @@ class BackupDB:
             backup_time = datetime.now()
             retention_until = backup_time + timedelta(days=backup_task.retention_days)
             
-            # 使用原生 openGauss SQL，避免 SQLAlchemy 版本解析
-            from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
+            # 使用原生 openGauss SQL，避免 SQLAlchemy 版本解析（仅保留 openGauss）
+            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
-            if is_redis():
-                # Redis 版本
-                from backup.redis_backup_db import create_backup_set_redis
-                backup_set = await create_backup_set_redis(backup_task, tape)
-            elif is_opengauss():
+            if is_opengauss():
                 # 使用连接池
                 async with get_opengauss_connection() as conn:
                     try:
@@ -1526,8 +1519,8 @@ class BackupDB:
         backup_set: BackupSet,
         file_groups: List[List[Dict]]
     ):
-        """标记文件组为已入队（仅设置 is_copy_success = TRUE，不更新压缩信息）"""
-        from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
+        """标记文件组为已入队（仅设置 is_copy_success = TRUE，不更新压缩信息，仅支持 openGauss / 内存数据库）"""
+        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
         
         # 修复2：空列表检查，避免执行无意义的SQL
         if not file_groups or len(file_groups) == 0:
@@ -1545,267 +1538,231 @@ class BackupDB:
             logger.info(f"[mark_files_as_queued] ❌ 无法获取 backup_set.id，跳过文件状态更新")
             return
         
-        # 收集所有文件路径（去重，避免重复更新）
+        # 收集所有文件路径（不去重，文件组预取器返回多少就标记多少）
         all_file_paths = []
-        seen_paths = set()  # 用于去重
+        empty_path_count = 0
+        
         for file_group in file_groups:
             for file_info in file_group:
                 file_path = file_info.get('file_path') or file_info.get('path')
-                if file_path and file_path not in seen_paths:
-                    all_file_paths.append(file_path)
-                    seen_paths.add(file_path)
+                if not file_path:
+                    empty_path_count += 1
+                    continue
+                all_file_paths.append(file_path)
+        
+        total_files_in_groups = sum(len(group) for group in file_groups if group)
         
         if not all_file_paths:
             logger.info(f"[mark_files_as_queued] ❌ 没有有效的文件路径，跳过文件状态更新")
             return
         
-        logger.info(f"[mark_files_as_queued] 开始标记 {len(all_file_paths)} 个文件为已入队（is_copy_success = TRUE）")
+        logger.info(
+            f"[mark_files_as_queued] 开始标记 {len(all_file_paths)} 个文件为已入队（is_copy_success = TRUE，openGauss），"
+            f"文件组条目总数={total_files_in_groups}，空路径数={empty_path_count}"
+        )
         
-        if is_redis():
-            # Redis 模式
-            from backup.redis_backup_db import mark_files_as_queued_redis
-            try:
-                await mark_files_as_queued_redis(backup_set_db_id, all_file_paths)
-                logger.info(f"[mark_files_as_queued] ✅ Redis模式：{len(all_file_paths)} 个文件的 is_copy_success 已设置为 TRUE")
-            except Exception as e:
-                logger.error(f"[mark_files_as_queued] ❌ Redis模式更新失败: {str(e)}", exc_info=True)
-        elif is_opengauss():
+        if is_opengauss():
             # openGauss 模式
+            total_updated = 0  # SQL 实际更新的数据库行数（可能包含重复路径的记录）
             try:
                 async with get_opengauss_connection() as conn:
-                    await self._mark_files_as_queued_opengauss(conn, backup_set_db_id, all_file_paths)
-                logger.info(f"[mark_files_as_queued] ✅ openGauss模式：{len(all_file_paths)} 个文件的 is_copy_success 已设置为 TRUE")
+                    total_updated = await self._mark_files_as_queued_opengauss(conn, backup_set_db_id, all_file_paths)
+                    # 二次校验：确认 is_copy_success 已成功设置为 TRUE
+                    try:
+                        await self._verify_and_retry_files_queued_opengauss(conn, backup_set_db_id, all_file_paths)
+                    except Exception as verify_err:
+                        # 校验失败不影响主流程，但需要明确日志提示
+                        logger.warning(
+                            f"[mark_files_as_queued] ⚠️ 标记完成后校验 is_copy_success 状态失败：{verify_err}",
+                            exc_info=True,
+                        )
+                # 说明：total_updated 是 SQL 实际更新的数据库行数（可能包含重复路径的记录）
+                # len(all_file_paths) 是传入的唯一路径数
+                # SQL 使用 file_path = ANY($2) 会更新所有匹配路径的记录（包括重复路径的记录）
+                logger.info(
+                    f"[mark_files_as_queued] ✅ openGauss模式："
+                    f"SQL实际更新行数={total_updated}，"
+                    f"传入唯一路径数={len(all_file_paths)}，"
+                    f"所有匹配路径的记录的 is_copy_success 已设置为 TRUE"
+                )
             except Exception as e:
                 logger.error(f"[mark_files_as_queued] ❌ openGauss模式更新失败: {str(e)}", exc_info=True)
         else:
-            # SQLite 模式
-            from backup.sqlite_backup_db import mark_files_as_queued_sqlite
-            try:
-                await mark_files_as_queued_sqlite(backup_set_db_id, all_file_paths)
-                logger.info(f"[mark_files_as_queued] ✅ SQLite模式：{len(all_file_paths)} 个文件的 is_copy_success 已设置为 TRUE")
-            except Exception as e:
-                logger.error(f"[mark_files_as_queued] ❌ SQLite模式更新失败: {str(e)}", exc_info=True)
+            logger.info("[mark_files_as_queued] 当前仅支持 openGauss，跳过数据库持久化更新")
     
-    async def _mark_files_as_queued_opengauss(self, conn, backup_set_db_id: int, file_paths: List[str]):
-        """openGauss模式：仅设置 is_copy_success = TRUE（优化版本：使用临时表 + JOIN UPDATE）"""
-        import asyncio
+    async def _mark_files_as_queued_opengauss(self, conn, backup_set_db_id: int, file_paths: List[str]) -> int:
+        """openGauss模式：仅设置 is_copy_success = TRUE（使用 ANY 批量更新，不在这里做去重）
+        
+        Args:
+            conn: 数据库连接
+            backup_set_db_id: 备份集ID
+            file_paths: 需要标记为已入队的文件路径列表（可以包含重复路径）
+        
+        Returns:
+            int: SQL 实际更新的数据库行数
+        """
         import time
-        import uuid
         from utils.scheduler.db_utils import get_backup_files_table_by_set_id
 
-        # 优化：使用临时表 + JOIN UPDATE，批次大小 10000（利用索引 idx_backup_files_set_path）
-        # 优化：在一个事务中处理多个批次，重用临时表，减少创建/删除开销
-        batch_size = 10000
+        if not file_paths:
+            return 0
+
+        # 过滤掉空路径，其余路径全部参与更新（不在这里做去重，文件组预取器返回多少就标记多少）
+        effective_paths = [p for p in file_paths if p]
+        if not effective_paths:
+            return 0
+
+        table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
+
+        batch_size = 1000  # 每批最多 1000 条路径
         total_updated = 0
         start_time = time.time()
 
-        # 多表方案：根据 backup_set_db_id 决定物理表名（只获取一次，避免重复查询）
-        table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
-
-        total_batches = (len(file_paths) + batch_size - 1) // batch_size
+        total_batches = (len(effective_paths) + batch_size - 1) // batch_size
         logger.info(
-            f"[mark_files_as_queued] 开始批量更新：总文件数={len(file_paths)}, "
-            f"批次大小={batch_size}, 总批次数={total_batches}, 使用临时表+JOIN方式（重用临时表）"
+            f"[mark_files_as_queued] 开始批量更新：传入路径总数={len(file_paths)}，"
+            f"有效路径数={len(effective_paths)}，"
+            f"批次大小={batch_size}, 总批次数={total_batches}, 使用 ANY 方式直接更新"
         )
 
-        # 创建可重用的临时表（在整个过程中只创建一次）
-        temp_table_name = f"temp_file_paths_{uuid.uuid4().hex[:8]}"
-        try:
-            await conn.execute("BEGIN")
-            # 创建 UNLOGGED 临时表（减少WAL日志开销，提升性能）
-            try:
-                await conn.execute(f"""
-                    CREATE UNLOGGED TEMP TABLE {temp_table_name} (
-                        backup_set_id INTEGER NOT NULL,
-                        file_path TEXT NOT NULL,
-                        PRIMARY KEY (backup_set_id, file_path)
-                    )
-                """)
-            except Exception:
-                # 如果 UNLOGGED 不支持，回退到普通临时表
-                await conn.execute(f"""
-                    CREATE TEMP TABLE {temp_table_name} (
-                        backup_set_id INTEGER NOT NULL,
-                        file_path TEXT NOT NULL,
-                        PRIMARY KEY (backup_set_id, file_path)
-                    )
-                """)
-            await conn.commit()
-        except Exception as e:
-            try:
-                await conn.rollback()
-            except Exception:
-                pass
-            logger.warning(f"[mark_files_as_queued] 创建临时表失败，回退到逐批次方式: {e}")
-            temp_table_name = None  # 标记为失败，使用逐批次方式
-
-        for i in range(0, len(file_paths), batch_size):
-            batch_paths = file_paths[i:i + batch_size]
+        for i in range(0, len(effective_paths), batch_size):
+            batch_paths = effective_paths[i:i + batch_size]
             batch_num = i // batch_size + 1
             batch_start_time = time.time()
-            
-            # 如果临时表创建失败，每个批次创建自己的临时表
-            batch_temp_table_name = temp_table_name
-            if temp_table_name is None:
-                batch_temp_table_name = f"temp_file_paths_{uuid.uuid4().hex[:8]}"
 
-            # 重试机制：最多重试3次
-            max_retries = 3
-            retry_count = 0
-            batch_success = False
-
-            while retry_count < max_retries and not batch_success:
-                try:
-                    # 开始新事务
-                    await conn.execute("BEGIN")
-
-                    # 1. 如果临时表不存在（逐批次模式），创建临时表
-                    if batch_temp_table_name and temp_table_name is None:
-                        # 逐批次模式：每个批次创建自己的临时表
-                        try:
-                            await conn.execute(f"""
-                                CREATE UNLOGGED TEMP TABLE {batch_temp_table_name} (
-                                    backup_set_id INTEGER NOT NULL,
-                                    file_path TEXT NOT NULL,
-                                    PRIMARY KEY (backup_set_id, file_path)
-                                )
-                            """)
-                        except Exception:
-                            await conn.execute(f"""
-                                CREATE TEMP TABLE {batch_temp_table_name} (
-                                    backup_set_id INTEGER NOT NULL,
-                                    file_path TEXT NOT NULL,
-                                    PRIMARY KEY (backup_set_id, file_path)
-                                )
-                            """)
-
-                    # 2. 清空临时表（重用模式）或直接插入（逐批次模式）
-                    # 注意：临时表在事务回滚时不会自动清空，必须在每个批次开始时显式清空
-                    if batch_temp_table_name and temp_table_name is not None:
-                        # 重用模式：清空临时表（防止上一批次回滚导致的数据残留）
-                        try:
-                            await conn.execute(f"TRUNCATE TABLE {batch_temp_table_name}")
-                        except Exception as truncate_err:
-                            # 如果 TRUNCATE 失败，尝试 DELETE（更安全，但可能更慢）
-                            logger.warning(
-                                f"[mark_files_as_queued] TRUNCATE 失败，改用 DELETE: {truncate_err}"
-                            )
-                            await conn.execute(
-                                f"DELETE FROM {batch_temp_table_name} WHERE backup_set_id = $1",
-                                backup_set_db_id
-                            )
-
-                    # 3. 去重文件路径（避免重复键错误）
-                    # 使用 dict.fromkeys() 保持顺序并去重
-                    unique_batch_paths = list(dict.fromkeys(batch_paths))
-                    if len(unique_batch_paths) < len(batch_paths):
-                        logger.debug(
-                            f"[mark_files_as_queued] 批次 {batch_num} 去重："
-                            f"原始={len(batch_paths)}, 去重后={len(unique_batch_paths)}"
-                        )
-
-                    # 4. 使用批量插入将文件路径导入临时表（使用 executemany 批量插入）
-                    # 注意：openGauss 不支持 ON CONFLICT，依赖去重逻辑（已在步骤3完成）
-                    insert_params = [(backup_set_db_id, file_path) for file_path in unique_batch_paths]
-                    await conn.executemany(
-                        f"INSERT INTO {batch_temp_table_name} (backup_set_id, file_path) VALUES ($1, $2)",
-                        insert_params
-                    )
-
-                    # 4. 使用 JOIN UPDATE 批量更新（利用索引 idx_backup_files_set_path）
-                    # 优化：先过滤条件，减少 JOIN 的数据量
-                    # 注意：openGauss 的 JOIN UPDATE 可以利用索引，性能比 ANY 更好
-                    update_result = await conn.execute(
-                        f"""
-                        UPDATE {table_name} t
-                        SET is_copy_success = TRUE,
-                            copy_status_at = NOW(),
-                            updated_at = NOW()
-                        FROM {batch_temp_table_name} tmp
-                        WHERE t.backup_set_id = $1
-                          AND t.backup_set_id = tmp.backup_set_id
-                          AND t.file_path = tmp.file_path
-                          AND (t.is_copy_success = FALSE OR t.is_copy_success IS NULL)
-                        """,
-                        backup_set_db_id
-                    )
-
-                    # 获取实际更新的行数
-                    updated_count = update_result if hasattr(update_result, 'rowcount') else update_result
-
-                    # 5. 删除临时表（仅逐批次模式需要，重用模式在最后删除）
-                    if batch_temp_table_name and temp_table_name is None:
-                        # 逐批次模式：每个批次删除自己的临时表
-                        await conn.execute(f"DROP TABLE IF EXISTS {batch_temp_table_name}")
-
-                    # openGauss 默认不开启 autocommit，需要显式提交事务
-                    await conn.commit()
-
-                    # 批次成功
-                    batch_success = True
-                    total_updated += updated_count if updated_count else 0
-                    batch_elapsed = time.time() - batch_start_time
-                    total_elapsed = time.time() - start_time
-                    files_per_sec = len(batch_paths) / batch_elapsed if batch_elapsed > 0 else 0
-                    
-                    logger.info(
-                        f"[mark_files_as_queued] ✅ 批次 {batch_num}/{total_batches} 更新成功："
-                        f"更新了 {updated_count} 个文件（批次大小={len(batch_paths)}）, "
-                        f"批次耗时={batch_elapsed:.2f}秒, 速度={files_per_sec:.0f} 文件/秒, "
-                        f"总进度={total_updated}/{len(file_paths)}, 总耗时={total_elapsed:.2f}秒"
-                    )
-
-                except Exception as batch_error:
-                    retry_count += 1
-                    # 清理临时表（如果存在，仅逐批次模式）
-                    if batch_temp_table_name and temp_table_name is None:
-                        try:
-                            await conn.execute(f"DROP TABLE IF EXISTS {batch_temp_table_name}")
-                        except Exception:
-                            pass  # 忽略删除临时表的错误
-
-                    if retry_count >= max_retries:
-                        # 达到最大重试次数，记录详细错误并抛出异常
-                        logger.error(
-                            f"[mark_files_as_queued] ❌ 批次 {batch_num}/{total_batches} 更新失败，"
-                            f"达到最大重试次数 {max_retries}: {str(batch_error)}",
-                            exc_info=True
-                        )
-                        raise
-
-                    # 记录重试信息
-                    logger.warning(
-                        f"[mark_files_as_queued] ⚠️ 批次 {batch_num}/{total_batches} 更新失败，"
-                        f"重试 {retry_count}/{max_retries}: {str(batch_error)}"
-                    )
-
-                    # 尝试回滚可能的事务
-                    try:
-                        await conn.rollback()
-                    except Exception:
-                        pass  # 忽略回滚错误
-
-                    # 等待一段时间后重试
-                    await asyncio.sleep(1.0 * retry_count)  # 递增等待时间
-
-        # 清理重用的临时表
-        if temp_table_name:
             try:
-                await conn.execute("BEGIN")
-                await conn.execute(f"DROP TABLE IF EXISTS {temp_table_name}")
+                # 直接使用 ANY 批量更新；只更新尚未标记为 TRUE 的行
+                # 更新条件：is_copy_success IS DISTINCT FROM TRUE（即 is_copy_success = FALSE OR is_copy_success IS NULL）
+                # 确保查询到的所有记录（FALSE 或 NULL）都能被正确标记为 TRUE
+                update_result = await conn.execute(
+                    f"""
+                    UPDATE {table_name}
+                    SET is_copy_success = TRUE,
+                        copy_status_at = NOW(),
+                        updated_at = NOW()
+                    WHERE backup_set_id = $1
+                      AND file_path = ANY($2)
+                      -- 更新条件：is_copy_success = FALSE OR is_copy_success IS NULL（与查询条件一致）
+                      -- 确保查询到的所有记录都能被正确标记为 TRUE
+                      AND (is_copy_success IS DISTINCT FROM TRUE)
+                    """,
+                    backup_set_db_id,
+                    batch_paths,
+                )
+
+                # asyncpg 返回受影响行数为整数；psycopg3 返回 cursor，rowcount 在不同实现中可能不同，这里统一按返回值/属性处理
+                updated_count = getattr(update_result, "rowcount", None)
+                if updated_count is None:
+                    # asyncpg 会直接返回受影响的行数（int）
+                    if isinstance(update_result, int):
+                        updated_count = update_result
+
                 await conn.commit()
-            except Exception:
+
+                total_updated += updated_count if updated_count else 0
+                batch_elapsed = time.time() - batch_start_time
+                total_elapsed = time.time() - start_time
+                files_per_sec = len(batch_paths) / batch_elapsed if batch_elapsed > 0 else 0.0
+
+                # 说明：updated_count 是 SQL 实际更新的数据库行数
+                logger.info(
+                    f"[mark_files_as_queued] ✅ 批次 {batch_num}/{total_batches} 更新完成："
+                    f"SQL实际更新行数={updated_count or 0}（本批路径数={len(batch_paths)}），"
+                    f"批次耗时={batch_elapsed:.2f}秒，速度={files_per_sec:.0f} 路径/秒，"
+                    f"累计更新行数={total_updated}"
+                )
+            except Exception as e:
+                # 出错时回滚本批次，记录日志后抛出异常，由上层处理
                 try:
                     await conn.rollback()
                 except Exception:
                     pass
+                logger.error(
+                    f"[mark_files_as_queued] ❌ 批次 {batch_num}/{total_batches} 更新失败：{e}",
+                    exc_info=True,
+                )
+                raise
+        
+        # 返回实际更新的数据库行数（可能包含重复路径的记录）
+        return total_updated
 
-        total_elapsed = time.time() - start_time
-        avg_speed = len(file_paths) / total_elapsed if total_elapsed > 0 else 0
-        logger.info(
-            f"[mark_files_as_queued] ✅ 所有批次处理完成，总共更新了 {total_updated} 个文件的 is_copy_success 状态, "
-            f"总耗时={total_elapsed:.2f}秒, 平均速度={avg_speed:.0f} 文件/秒"
+    async def _verify_and_retry_files_queued_opengauss(
+        self,
+        conn,
+        backup_set_db_id: int,
+        file_paths: List[str],
+    ) -> None:
+        """
+        校验并重试：确认指定文件的 is_copy_success 已设置为 TRUE。
+
+        逻辑：
+        1. 按 backup_set_id + file_path 查询仍未标记成功的行数
+        2. 如果存在未标记成功的记录，重新调用一次 _mark_files_as_queued_opengauss
+        3. 再次检查，仍然不一致则输出错误日志，交由后续流程或人工排查
+        """
+        from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+
+        if not file_paths:
+            return
+
+        # 不再去重，直接使用传入的路径数组进行校验（去重对 COUNT 结果无影响，但会让日志更难理解）
+        effective_paths = [p for p in file_paths if p]
+        if not effective_paths:
+            return
+
+        table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
+
+        async def _count_pending() -> int:
+            # 查询仍未成功标记为 TRUE 的记录
+            return await conn.fetchval(
+                f"""
+                SELECT COUNT(*)
+                FROM {table_name}
+                WHERE backup_set_id = $1
+                  AND file_path = ANY($2)
+                  AND (is_copy_success IS DISTINCT FROM TRUE)
+                """,
+                backup_set_db_id,
+                effective_paths,
+            )
+
+        # 第一次检查
+        pending = await _count_pending()
+        if pending == 0:
+            logger.info(
+                f"[mark_files_as_queued] ✅ 校验通过：backup_set_id={backup_set_db_id}, "
+                f"校验路径数={len(effective_paths)}，所有 is_copy_success 均已为 TRUE"
+            )
+            return
+
+        logger.warning(
+            f"[mark_files_as_queued] ⚠️ 校验发现仍有 {pending} 条记录 is_copy_success 未设置为 TRUE，"
+            f"backup_set_id={backup_set_db_id}，准备重试一次批量更新"
         )
+
+        # 发现未标记成功的记录后，重试一次批量更新
+        try:
+            await self._mark_files_as_queued_opengauss(conn, backup_set_db_id, effective_paths)
+        except Exception as retry_err:
+            logger.error(
+                f"[mark_files_as_queued] ❌ 重试设置 is_copy_success 失败：{retry_err}",
+                exc_info=True,
+            )
+            return
+
+        # 重试后再次校验
+        pending_after_retry = await _count_pending()
+        if pending_after_retry == 0:
+            logger.info(
+                f"[mark_files_as_queued] ✅ 重试后校验通过：backup_set_id={backup_set_db_id}, "
+                f"校验路径数={len(effective_paths)}，所有 is_copy_success 均已为 TRUE"
+            )
+        else:
+            logger.error(
+                f"[mark_files_as_queued] ❌ 重试后仍有 {pending_after_retry} 条记录 is_copy_success "
+                f"未成功置为 TRUE（backup_set_id={backup_set_db_id}，校验路径数={len(effective_paths)}）。"
+                f"建议检查数据库连接/事务状态或手动校验这些文件记录。"
+            )
     
     async def _temp_table_exists(self, conn, table_name: str) -> bool:
         """检查临时表是否存在"""
@@ -1838,59 +1795,12 @@ class BackupDB:
         
         logger.info(f"[mark_files_as_copied] 开始标记文件为复制成功: backup_set={backup_set}, file_group数量={len(file_group)}, chunk_number={chunk_number}")
         
-        from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
+        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
         
         backup_set_db_id = getattr(backup_set, 'id', None)
         
-        if is_redis():
-            # Redis 版本
-            if not backup_set_db_id:
-                logger.error(f"[mark_files_as_copied] ❌ Redis 模式下无法获取 backup_set.id，跳过文件状态更新！backup_set对象属性: {dir(backup_set)}")
-                logger.error(f"[mark_files_as_copied] backup_set.set_id={getattr(backup_set, 'set_id', None)}, backup_set类型={type(backup_set)}")
-                return
-            
-            from backup.redis_backup_db import mark_files_as_copied_redis
-            
-            logger.info(f"[mark_files_as_copied] 调用 mark_files_as_copied_redis: backup_set_db_id={backup_set_db_id}, 文件数={len(file_group)}")
-            try:
-                await mark_files_as_copied_redis(
-                    backup_set_db_id=backup_set_db_id,
-                    processed_files=file_group,
-                    compressed_file=compressed_file,
-                    tape_file_path=tape_file_path,
-                    chunk_number=chunk_number,
-                    backup_time=datetime.now()
-                )
-                logger.info(f"[mark_files_as_copied] ✅ mark_files_as_copied_redis 执行完成")
-            except Exception as e:
-                logger.error(f"[mark_files_as_copied] ❌ mark_files_as_copied_redis 执行失败: {str(e)}", exc_info=True)
-                raise
-            return
-        elif not is_opengauss():
-            # SQLite 版本
-            logger.info(f"[mark_files_as_copied] SQLite模式: backup_set.id={backup_set_db_id}, backup_set对象={backup_set}")
-            
-            if not backup_set_db_id:
-                logger.error(f"[mark_files_as_copied] ❌ SQLite 模式下无法获取 backup_set.id，跳过文件状态更新！backup_set对象属性: {dir(backup_set)}")
-                logger.error(f"[mark_files_as_copied] backup_set.set_id={getattr(backup_set, 'set_id', None)}, backup_set类型={type(backup_set)}")
-                return
-
-            from backup.sqlite_backup_db import mark_files_as_copied_sqlite
-
-            logger.info(f"[mark_files_as_copied] 调用 mark_files_as_copied_sqlite: backup_set_db_id={backup_set_db_id}, 文件数={len(file_group)}")
-            try:
-                await mark_files_as_copied_sqlite(
-                    backup_set_db_id=backup_set_db_id,
-                    processed_files=file_group,
-                    compressed_file=compressed_file,
-                    tape_file_path=tape_file_path,
-                    chunk_number=chunk_number,
-                    backup_time=datetime.now()
-                )
-                logger.info(f"[mark_files_as_copied] ✅ mark_files_as_copied_sqlite 执行完成")
-            except Exception as e:
-                logger.error(f"[mark_files_as_copied] ❌ mark_files_as_copied_sqlite 执行失败: {str(e)}", exc_info=True)
-                raise
+        if not is_opengauss():
+            logger.info("[mark_files_as_copied] 当前仅支持 openGauss，跳过数据库持久化更新")
             return
 
         # openGauss 版本
@@ -2244,7 +2154,7 @@ class BackupDB:
                        file_size, file_permissions, modified_time, accessed_time
                 FROM {table_name}
                 WHERE backup_set_id = $1
-                  AND (is_copy_success = FALSE OR is_copy_success IS NULL)
+                  AND (is_copy_success IS DISTINCT FROM TRUE)
                   AND file_type = 'file'::backupfiletype
                 ORDER BY id
                 LIMIT $2
@@ -2303,31 +2213,15 @@ class BackupDB:
         """
         from utils.scheduler.db_utils import (
             is_opengauss,
-            is_redis,
             get_opengauss_connection,
             get_backup_files_table_by_set_id,
         )
         from backup.utils import format_bytes
         from config.settings import get_settings
 
-        if is_redis():
-            # Redis 版本
-            from backup.redis_backup_db import fetch_pending_files_grouped_by_size_redis
-            return await fetch_pending_files_grouped_by_size_redis(
-                backup_set_db_id,
-                max_file_size,
-                backup_task_id,
-                should_wait_if_small,
-            )
-        elif not is_opengauss():
-            # SQLite 版本
-            from backup.sqlite_backup_db import fetch_pending_files_grouped_by_size_sqlite
-            return await fetch_pending_files_grouped_by_size_sqlite(
-                backup_set_db_id,
-                max_file_size,
-                backup_task_id,
-                should_wait_if_small,
-            )
+        if not is_opengauss():
+            logger.info("[fetch_pending_files_grouped_by_size] 当前仅支持 openGauss，返回空结果")
+            return []
 
         # 获取重试计数（如果没有backup_task_id则使用0）
         retry_count = 0
@@ -2362,6 +2256,9 @@ class BackupDB:
         
         all_files = []  # 累积的文件列表
         current_group_size = 0  # 当前组的大小
+        seen_paths = {}  # 用于去重：file_path -> (file_info, id)，只保留 id 最小的记录
+        total_duplicate_count = 0  # 总重复路径数量（跨所有批次）
+        total_files_processed = 0  # 本次累计处理的文件数（去重后）
         
         # 新策略参数：简化版本
         tolerance = max_file_size * 0.05  # 5% 容差（用于计算最小目标大小）
@@ -2391,7 +2288,7 @@ class BackupDB:
                         SELECT COALESCE(MIN(id), 0)::BIGINT as min_id
                         FROM {table_name}
                         WHERE backup_set_id = $1::INTEGER
-                          AND (is_copy_success = FALSE OR is_copy_success IS NULL)
+                          AND (is_copy_success IS DISTINCT FROM TRUE)
                           AND file_type = 'file'::backupfiletype
                         """,
                         backup_set_db_id
@@ -2504,7 +2401,7 @@ class BackupDB:
                             SELECT COUNT(*)::BIGINT as count
                             FROM {table_name}
                             WHERE backup_set_id = $1::INTEGER
-                              AND (is_copy_success = FALSE OR is_copy_success IS NULL)
+                              AND (is_copy_success IS DISTINCT FROM TRUE)
                               AND file_type = 'file'::backupfiletype
                               AND id > $2::BIGINT
                             """,
@@ -2517,7 +2414,8 @@ class BackupDB:
                     
                     logger.info(
                         f"[openGauss优化] 未压缩文件统计: 总计={total_pending}, "
-                        f"id > {last_processed_id} 的数量={pending_after_id}"
+                        f"id > {last_processed_id} 的数量={pending_after_id}, "
+                        f"本次文件累计={total_files_processed}"
                     )
                 except Exception as e:
                     error_msg = str(e)
@@ -2557,6 +2455,7 @@ class BackupDB:
                 min_batch_size = 50  # 最小批次大小（从100降低到50，避免缓冲区错误）
                 retry_count = 0
                 rows = None
+                duplicate_count_in_batch = 0  # 用于统计本批次重复路径数量
                 while True:  # 无限循环直到成功
                     try:
                         # 如果批次大小已经是50且重试次数很多，尝试进一步减小批次
@@ -2652,7 +2551,9 @@ class BackupDB:
                                     accessed_time
                                 FROM {table_name}
                                 WHERE backup_set_id = $1
-                                  AND (is_copy_success = FALSE OR is_copy_success IS NULL)
+                                  -- 查询 is_copy_success = FALSE OR is_copy_success IS NULL 的记录（未标记为 TRUE 的记录）
+                                  -- 这些记录将在成组后通过 mark_files_as_queued 设置为 is_copy_success = TRUE
+                                  AND (is_copy_success IS DISTINCT FROM TRUE)
                                   AND file_type = 'file'
                                   AND id > $2
                                 ORDER BY id
@@ -2804,6 +2705,14 @@ class BackupDB:
                     f"最后一行ID={rows[-1]['id'] if rows else 'N/A'}"
                 )
                 
+                # 记录重复路径统计（在处理完 rows 后）
+                if duplicate_count_in_batch > 0:
+                    total_duplicate_count += duplicate_count_in_batch
+                    logger.warning(
+                        f"[openGauss优化] ⚠️ 本批次发现 {duplicate_count_in_batch} 条重复路径记录，"
+                        f"已去重（只保留 id 最小的记录），累计重复 {total_duplicate_count} 条"
+                    )
+                
                 if not rows:
                     # 没有更多文件了，检查是否有异常情况
                     # 先查询一下总共有多少未压缩文件（用于调试）
@@ -2816,7 +2725,7 @@ class BackupDB:
                                 SELECT COUNT(*)::BIGINT as count
                                 FROM {table_name}
                                 WHERE backup_set_id = $1::INTEGER
-                                  AND (is_copy_success = FALSE OR is_copy_success IS NULL)
+                                  AND (is_copy_success IS DISTINCT FROM TRUE)
                                   AND file_type = 'file'::backupfiletype
                                 """,
                                 backup_set_db_id
@@ -2874,7 +2783,7 @@ class BackupDB:
                                         SELECT MIN(id)::BIGINT as min_id
                                         FROM {table_name}
                                         WHERE backup_set_id = $1::INTEGER
-                                          AND (is_copy_success = FALSE OR is_copy_success IS NULL)
+                                          AND (is_copy_success IS DISTINCT FROM TRUE)
                                           AND file_type = 'file'::backupfiletype
                                         """,
                                         backup_set_db_id
@@ -2910,13 +2819,16 @@ class BackupDB:
                         # 正常情况：没有更多文件了
                         break
                 
-                # 转换为文件信息字典并累积
+                # 转换为文件信息字典并累积（去重：相同 file_path 只保留 id 最小的记录）
+                # 重置本批次重复计数（每次查询新批次时重置）
+                duplicate_count_in_batch = 0
                 for row in rows:
                     file_type = row['file_type']
+                    file_path = row['file_path']
                     file_info = {
                         'id': row['id'],
-                        'path': row['file_path'],
-                        'file_path': row['file_path'],
+                        'path': file_path,
+                        'file_path': file_path,
                         'name': row['file_name'],
                         'file_name': row['file_name'],
                         'directory_path': row['directory_path'],
@@ -2929,6 +2841,31 @@ class BackupDB:
                         'is_file': str(file_type).lower() == 'file',
                         'is_symlink': str(file_type).lower() == 'symlink'
                     }
+                    
+                    # 去重逻辑：相同 file_path 只保留 id 最小的记录
+                    should_skip = False
+                    if file_path in seen_paths:
+                        existing_id, existing_info = seen_paths[file_path]
+                        if row['id'] < existing_id:
+                            # 当前记录的 id 更小，需要替换已保存的记录
+                            duplicate_count_in_batch += 1
+                            # 如果旧记录已经在 all_files 中，需要移除并更新大小
+                            if existing_info in all_files:
+                                all_files.remove(existing_info)
+                                current_group_size -= existing_info.get('size', 0)
+                            # 保存新记录
+                            seen_paths[file_path] = (row['id'], file_info)
+                        else:
+                            # 当前记录的 id 更大，跳过（保留已保存的记录）
+                            duplicate_count_in_batch += 1
+                            should_skip = True
+                    else:
+                        # 首次遇到该路径，保存
+                        seen_paths[file_path] = (row['id'], file_info)
+                    
+                    # 如果是重复路径且已跳过，不进行后续处理
+                    if should_skip:
+                        continue
                     
                     file_size = file_info['size']
                     
@@ -2949,9 +2886,11 @@ class BackupDB:
                                 f"超大文件优先单独处理，被丢弃的文件保持 is_copy_success = FALSE，下次重新累积"
                             )
                             # 丢弃当前组，只返回超大文件单独成组，last_processed_id 从丢弃文件前一个ID算起
+                            total_files_processed += 1  # 累计处理的文件数（超大文件）
                             return ([[file_info]], resume_id)
                         
                         # 超大文件单独成组
+                        total_files_processed += 1  # 累计处理的文件数（超大文件）
                         logger.info(
                             f"[第一原则] 超大文件单独成组：{format_bytes(file_size)} "
                             f"(超过阈值 {format_bytes(min_group_size)} = MAX_FILE_SIZE - 5%)"
@@ -2967,6 +2906,7 @@ class BackupDB:
                         all_files.append(file_info)
                         current_group_size = new_group_size
                         last_processed_id = row['id']
+                        total_files_processed += 1  # 累计处理的文件数
                         # 继续处理下一个文件
                         continue
                     
@@ -2976,6 +2916,7 @@ class BackupDB:
                         all_files.append(file_info)
                         current_group_size = new_group_size
                         last_processed_id = row['id']
+                        total_files_processed += 1  # 累计处理的文件数
                         logger.info(
                             f"[openGauss优化] 文件组大小超过阈值：{format_bytes(new_group_size)} > {format_bytes(min_group_size)}，返回文件组"
                         )
@@ -3007,6 +2948,7 @@ class BackupDB:
                 f"总大小 {format_bytes(current_group_size)}，"
                 f"阈值：{format_bytes(min_group_size)}（文件组大小 > {format_bytes(min_group_size)} 时返回），"
                 f"重试次数：{retry_count}/{max_retries}"
+                + (f"，去重：发现并过滤了 {total_duplicate_count} 条重复路径记录" if total_duplicate_count > 0 else "")
             )
             
             # 检查文件组是否为空
@@ -3057,82 +2999,8 @@ class BackupDB:
                     return ([], resume_id)
             return ([], last_processed_id)
         
-        # 检查是否需要进行全库检索（只有扫描完成时才进行）
-        # 注意：异常检测逻辑已在循环内的 if not rows 块中处理
-        need_full_search = 'need_full_search' in locals() and locals().get('need_full_search', False)
-        if not all_files and need_full_search:
-            logger.info(
-                f"[openGauss优化] 检测到异常且重置后仍查询不到，进行全库检索（不限制ID范围）"
-            )
-            # 进行全库检索，不限制 id > last_processed_id
-            try:
-                async with get_opengauss_connection() as conn:
-                    # 多表方案：根据 backup_set_db_id 决定物理表名
-                    table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
-
-                    # 全库搜索：检索本备份集所有未压缩文件（不限制ID范围）
-                    full_search_timeout = 7200.0  # 7200秒超时（两小时）
-                    await conn.execute(f"SET LOCAL statement_timeout = '{int(full_search_timeout)}s'")
-                    
-                    logger.info(f"[openGauss优化] 开始全库检索所有未压缩文件（超时时间：{full_search_timeout}秒）...")
-                    all_pending_rows = await asyncio.wait_for(
-                        conn.fetch(
-                            f"""
-                            SELECT id, file_path, file_name, directory_path, display_name, file_type,
-                                   file_size, file_permissions, modified_time, accessed_time
-                            FROM {table_name}
-                            WHERE backup_set_id = $1
-                              AND (is_copy_success = FALSE OR is_copy_success IS NULL)
-                              AND file_type = 'file'::backupfiletype
-                            ORDER BY id
-                            """,
-                            backup_set_db_id
-                        ),
-                        timeout=full_search_timeout
-                    )
-                    
-                    logger.info(f"[openGauss优化] 全库检索完成，找到 {len(all_pending_rows)} 个未压缩文件")
-                    
-                    if all_pending_rows:
-                        # 使用全库检索结果重新构建文件组
-                        all_files = []
-                        for row in all_pending_rows:
-                            file_type = row['file_type']
-                            file_info = {
-                                'id': row['id'],
-                                'path': row['file_path'],
-                                'file_path': row['file_path'],
-                                'name': row['file_name'],
-                                'file_name': row['file_name'],
-                                'directory_path': row['directory_path'],
-                                'display_name': row['display_name'],
-                                'size': row['file_size'] or 0,
-                                'permissions': row['file_permissions'],
-                                'modified_time': row['modified_time'],
-                                'accessed_time': row['accessed_time'],
-                                'is_dir': str(file_type).lower() == 'directory',
-                                'is_file': str(file_type).lower() == 'file',
-                                'is_symlink': str(file_type).lower() == 'symlink'
-                            }
-                            all_files.append(file_info)
-                        
-                        # 更新 last_processed_id 为最后一个文件的ID
-                        if all_files:
-                            last_processed_id = all_files[-1]['id']
-                            logger.info(
-                                f"[openGauss优化] 全库检索成功，找到 {len(all_files)} 个文件，"
-                                f"last_processed_id={last_processed_id}"
-                            )
-                    else:
-                        logger.info(
-                            f"[openGauss优化] 全库检索未找到任何文件，返回空列表"
-                        )
-                        return ([], start_from_id)
-            except Exception as e:
-                logger.error(
-                    f"[openGauss优化] 全库检索失败: {e}，返回空列表"
-                )
-                return ([], start_from_id)
+        # 注意：已禁用全库检索，避免对900万记录进行全库查询（性能问题）
+        # 异常检测逻辑已在循环内的 if not rows 块中处理，通过重置查询起点（MIN(id)）来继续查询
         else:
             logger.info(
                 f"[openGauss优化] 没有检索到任何文件，返回空列表，"
@@ -3151,6 +3019,7 @@ class BackupDB:
             f"总大小 {format_bytes(current_group_size)}，"
             f"阈值：{format_bytes(min_group_size)}（文件组大小 > {format_bytes(min_group_size)} 时返回），"
             f"重试次数：{retry_count}/{max_retries}"
+            + (f"，去重：发现并过滤了 {total_duplicate_count} 条重复路径记录" if total_duplicate_count > 0 else "")
         )
 
         # 处理最终的文件组
@@ -3292,7 +3161,7 @@ class BackupDB:
                                    file_size, file_permissions, modified_time, accessed_time
                             FROM {table_name}
                             WHERE backup_set_id = $1
-                              AND (is_copy_success = FALSE OR is_copy_success IS NULL)
+                              AND (is_copy_success IS DISTINCT FROM TRUE)
                               AND file_type = 'file'::backupfiletype
                             ORDER BY id
                             """,
@@ -3422,12 +3291,8 @@ class BackupDB:
 
     async def get_scan_status(self, backup_task_id: int) -> Optional[str]:
         """获取扫描状态"""
-        from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
-        if is_redis():
-            # Redis 版本
-            from backup.redis_backup_db import get_scan_status_redis
-            return await get_scan_status_redis(backup_task_id)
-        elif is_opengauss():
+        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+        if is_opengauss():
             async with get_opengauss_connection() as conn:
                 try:
                     row = await conn.fetchrow(
@@ -3449,18 +3314,13 @@ class BackupDB:
                         logger.warning(f"get_scan_status: 回滚事务失败: {str(rollback_err)}")
                     raise  # 重新抛出异常
         else:
-            # SQLite 版本
-            from backup.sqlite_backup_db import get_scan_status_sqlite
-            return await get_scan_status_sqlite(backup_task_id)
+            logger.info("[get_scan_status] 当前仅支持 openGauss，返回 None")
+            return None
 
     async def update_scan_status(self, backup_task_id: int, status: str):
         """更新扫描状态"""
-        from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
-        if is_redis():
-            # Redis 版本
-            from backup.redis_backup_db import update_scan_status_redis
-            await update_scan_status_redis(backup_task_id, status)
-        elif is_opengauss():
+        from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+        if is_opengauss():
             current_time = datetime.now()
             async with get_opengauss_connection() as conn:
                 try:
@@ -3522,9 +3382,7 @@ class BackupDB:
                         logger.warning(f"update_scan_status: 回滚事务失败: {str(rollback_err)}")
                     raise  # 重新抛出异常
         else:
-            # SQLite 版本
-            from backup.sqlite_backup_db import update_scan_status_sqlite
-            await update_scan_status_sqlite(backup_task_id, status)
+            logger.info("[update_scan_status] 当前仅支持 openGauss，跳过数据库更新")
 
     async def _mark_files_as_copied(
         self,
@@ -4065,14 +3923,9 @@ class BackupDB:
                 # 关键阶段日志应该只在阶段开始时调用一次（如压缩循环开始时）
                 operation_status = normalized_status
             
-            from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
-            from utils.scheduler.sqlite_utils import is_sqlite
+            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
-            if is_redis():
-                # Redis 版本
-                from backup.redis_backup_db import update_scan_progress_redis
-                await update_scan_progress_redis(backup_task, scanned_count, valid_count, operation_status)
-            elif is_opengauss():
+            if is_opengauss():
                 # 使用连接池
                 async with get_opengauss_connection() as conn:
                     # 重要：不再更新 total_files 字段（压缩包数量）
@@ -4249,12 +4102,8 @@ class BackupDB:
                             except:
                                 pass
                         # 注意：total_bytes 字段不更新，由后台扫描任务负责更新
-            elif is_sqlite():
-                # SQLite 版本
-                from backup.sqlite_backup_db import update_scan_progress_sqlite
-                await update_scan_progress_sqlite(backup_task, scanned_count, valid_count, operation_status)
             else:
-                logger.info(f"不支持的数据库类型，跳过更新扫描进度")
+                logger.info(f"不支持的数据库类型（当前仅支持 openGauss），跳过更新扫描进度")
         except Exception as e:
             logger.info(f"更新扫描进度失败（忽略继续）: {str(e)}")
     
@@ -4291,9 +4140,8 @@ class BackupDB:
                 update_fields.append('completed_at')
                 update_values.append(current_time)
             
-            # 使用原生 openGauss SQL
-            from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
-            from utils.scheduler.sqlite_utils import is_sqlite
+            # 使用原生 openGauss SQL（仅支持 openGauss）
+            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
             if is_redis():
                 # Redis 版本
@@ -4391,11 +4239,7 @@ class BackupDB:
 
             current_time = datetime.now()
 
-            if is_redis():
-                # Redis 版本
-                from backup.redis_backup_db import update_task_stage_async_redis
-                await update_task_stage_async_redis(backup_task, stage_code, description)
-            elif is_opengauss():
+            if is_opengauss():
                 import asyncio
                 max_retries = 3
                 retry_count = 0
@@ -4454,10 +4298,8 @@ class BackupDB:
                 if not update_success:
                     logger.error(f"任务 {task_id} 阶段更新最终失败: {stage_code}")
                     raise Exception(f"阶段更新失败: {stage_code}")
-            elif is_sqlite():
-                # SQLite 版本
-                from backup.sqlite_backup_db import update_task_stage_async_sqlite
-                await update_task_stage_async_sqlite(backup_task, stage_code, description)
+            else:
+                logger.info("[update_task_stage_async] 当前仅支持 openGauss，跳过数据库更新")
 
             logger.debug(f"任务 {task_id} 阶段更新为: {stage_code}" + (f", 描述: {description}" if description else ""))
 
@@ -4487,14 +4329,9 @@ class BackupDB:
             已压缩文件数（is_copy_success = TRUE 且 chunk_number IS NOT NULL 的文件数）
         """
         try:
-            from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
-            from utils.scheduler.sqlite_utils import is_sqlite
-            
-            if is_redis():
-                # Redis 版本
-                from backup.redis_backup_db import get_compressed_files_count_redis
-                return await get_compressed_files_count_redis(backup_set_db_id)
-            elif is_opengauss():
+            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
+
+            if is_opengauss():
                 # openGauss 版本：只统计真正压缩完成的文件（chunk_number IS NOT NULL）
                 async with get_opengauss_connection() as conn:
                     # 多表方案：根据 backup_set_db_id 决定物理表名
@@ -4512,11 +4349,8 @@ class BackupDB:
                         backup_set_db_id
                     )
                     return row['count'] if row else 0
-            elif is_sqlite():
-                # SQLite 版本
-                from backup.sqlite_backup_db import get_compressed_files_count_sqlite
-                return await get_compressed_files_count_sqlite(backup_set_db_id)
             else:
+                logger.info("[get_compressed_files_count] 当前仅支持 openGauss，返回 0")
                 return 0
         except Exception as e:
             logger.error(f"查询已压缩文件数失败: {str(e)}", exc_info=True)
@@ -4583,15 +4417,10 @@ class BackupDB:
                 if hasattr(backup_task, field):
                     setattr(backup_task, field, value)
             
-            # 使用原生 openGauss SQL
-            from utils.scheduler.db_utils import is_opengauss, is_redis, get_opengauss_connection
-            from utils.scheduler.sqlite_utils import is_sqlite
+            # 使用原生 openGauss SQL（仅支持 openGauss）
+            from utils.scheduler.db_utils import is_opengauss, get_opengauss_connection
             
-            if is_redis():
-                # Redis 版本
-                from backup.redis_backup_db import update_task_fields_redis
-                await update_task_fields_redis(backup_task, **fields)
-            elif is_opengauss():
+            if is_opengauss():
                 # 使用连接池
                 async with get_opengauss_connection() as conn:
                     # 动态构建UPDATE语句
@@ -4625,9 +4454,7 @@ class BackupDB:
                         *params
                     )
             else:
-                # SQLite 版本
-                from backup.sqlite_backup_db import update_task_fields_sqlite
-                await update_task_fields_sqlite(backup_task, **fields)
+                logger.info("[update_task_fields] 当前仅支持 openGauss，跳过数据库更新")
         except Exception as e:
             logger.error(f"更新任务字段失败: {str(e)}")
     

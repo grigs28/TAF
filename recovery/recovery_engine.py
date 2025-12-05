@@ -986,16 +986,19 @@ class RecoveryEngine:
                             while retry_count < max_retries:
                                 try:
                                     # 使用 EXISTS 代替 COUNT，只返回布尔值，减少数据传输
-                                    has_children_sql = """
+                                    # 多表方案：根据 backup_set_id 决定物理表名，避免直接访问基础表 backup_files
+                                    from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                                    table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
+                                    has_children_sql = f"""
                                         SELECT EXISTS(
                                             SELECT 1
-                                            FROM backup_files
+                                            FROM {table_name}
                                             WHERE backup_set_id = $1 
                                               AND (
-                                                  REPLACE(file_path, '\\', '/') LIKE $2 
-                                                  OR REPLACE(file_path, '\\', '/') LIKE $3
+                                                  REPLACE(file_path, '\\\\', '/') LIKE $2 
+                                                  OR REPLACE(file_path, '\\\\', '/') LIKE $3
                                               )
-                                              AND REPLACE(file_path, '\\', '/') != $4
+                                              AND REPLACE(file_path, '\\\\', '/') != $4
                                               LIMIT 1
                                         ) as has_children
                                     """
@@ -1467,12 +1470,14 @@ class RecoveryEngine:
                             return []
                     else:
                         # 根目录
-                        sql = """
+                        from utils.scheduler.db_utils import get_backup_files_table_by_set_id
+                        table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
+                        sql = f"""
                             SELECT id, file_path, file_name, directory_path, display_name,
                                    file_type, file_size, compressed_size,
                                    file_permissions, created_time, modified_time, accessed_time,
                                    compressed, checksum, backup_time, chunk_number
-                            FROM backup_files
+                            FROM {table_name}
                             WHERE backup_set_id = $1
                             ORDER BY file_path ASC
                         """

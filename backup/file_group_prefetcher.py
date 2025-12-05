@@ -243,21 +243,44 @@ class FileGroupPrefetcher:
                             f"{old_last_processed_id} -> {self.last_processed_file_id}"
                         )
                     
-                    # 计算文件组中的文件总数和总大小
-                    total_files_in_groups = sum(len(group) for group in file_groups) if file_groups else 0
+                    # 计算文件组中的文件总数和总大小（去重后）
+                    # 对文件组进行去重：相同 file_path 只保留一个（虽然 fetch_pending_files_grouped_by_size 已经去重，但这里再次确保）
+                    seen_paths_in_groups = set()
+                    deduplicated_groups = []
+                    duplicate_count_in_groups = 0
+                    
+                    if file_groups:
+                        for group in file_groups:
+                            deduplicated_group = []
+                            for file_info in group:
+                                file_path = file_info.get('path') or file_info.get('file_path')
+                                if file_path:
+                                    if file_path not in seen_paths_in_groups:
+                                        seen_paths_in_groups.add(file_path)
+                                        deduplicated_group.append(file_info)
+                                    else:
+                                        duplicate_count_in_groups += 1
+                            if deduplicated_group:
+                                deduplicated_groups.append(deduplicated_group)
+                    
+                    # 使用去重后的文件组计算文件数和大小
+                    total_files_in_groups = sum(len(group) for group in deduplicated_groups) if deduplicated_groups else 0
                     total_size_in_groups = sum(
                         sum(file_info.get('size', 0) for file_info in group)
-                        for group in file_groups
-                    ) if file_groups else 0
+                        for group in deduplicated_groups
+                    ) if deduplicated_groups else 0
                     
                     # 获取扫描状态用于日志输出（总是获取，无论是否有文件组）
                     scan_status = await self.backup_db.get_scan_status(self.backup_task.id)
                     
+                    # 构建去重信息日志（始终显示去重数量，即使为0）
+                    dedup_info = f"，去重（{duplicate_count_in_groups}）"
+                    
                     logger.info(
                         f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 检索完成："
                         f"耗时 {retrieval_elapsed:.2f}秒 | "
-                        f"文件组 {len(file_groups) if file_groups else 0} 个 | "
-                        f"文件总数 {total_files_in_groups:,} 个 | "
+                        f"文件组 {len(deduplicated_groups) if deduplicated_groups else 0} 个 | "
+                        f"文件总数 {total_files_in_groups:,} 个{dedup_info} | "
                         f"当前组大小 {format_bytes(total_size_in_groups)} | "
                         f"累计总大小 {format_bytes(self.total_queued_size)} | "
                         f"last_processed_id={last_processed_id} | "
@@ -266,18 +289,19 @@ class FileGroupPrefetcher:
                         f"累计检索时间={self.total_retrieval_time:.2f}秒"
                     )
                     
-                    # 将文件组放入队列
-                    if file_groups:
+                    # 将文件组放入队列（使用去重后的文件组）
+                    if deduplicated_groups:
                         # 在放入队列前，直接设置 is_copy_success = TRUE
                         try:
+                            dedup_log = f"，去重（{duplicate_count_in_groups}）"
                             logger.info(
                                 f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 开始标记文件为已入队："
-                                f"{len(file_groups)} 个文件组，共 {total_files_in_groups} 个文件，"
+                                f"{len(deduplicated_groups)} 个文件组，共 {total_files_in_groups} 个文件{dedup_log}，"
                                 f"总大小={format_bytes(total_size_in_groups)}"
                             )
                             await self.backup_db.mark_files_as_queued(
                                 backup_set=self.backup_set,
-                                file_groups=file_groups
+                                file_groups=deduplicated_groups
                             )
                             logger.info(
                                 f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ✅ 文件标记完成，"
@@ -297,21 +321,22 @@ class FileGroupPrefetcher:
                                 logger.debug(
                                     f"[文件组预取器] 队列已满，等待放入文件组..."
                                 )
-                            await self.file_group_queue.put((file_groups, last_processed_id))
-                            self.prefetched_groups += len(file_groups)
-                            # 更新队列中的文件总数（放入队列时增加）
+                            await self.file_group_queue.put((deduplicated_groups, last_processed_id))
+                            self.prefetched_groups += len(deduplicated_groups)
+                            # 更新队列中的文件总数（放入队列时增加，使用去重后的文件数）
                             self.queued_files_count += total_files_in_groups
-                            # 更新累计放入队列的总文件数（用于进度显示，不减少）
+                            # 更新累计放入队列的总文件数（用于进度显示，不减少，使用去重后的文件数）
                             self.total_queued_files_count += total_files_in_groups
-                            # 更新累计放入队列的总文件大小（用于进度显示，不减少）
+                            # 更新累计放入队列的总文件大小（用于进度显示，不减少，使用去重后的大小）
                             self.total_queued_size += total_size_in_groups
                             wait_retry_count = 0  # 重置等待计数
+                            dedup_log = f"，去重（{duplicate_count_in_groups}）"
                             logger.info(
-                                f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ✅ 已预取 {len(file_groups)} 个文件组："
-                                f"文件数 {total_files_in_groups:,} 个 | "
+                                f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ✅ 已预取 {len(deduplicated_groups)} 个文件组："
+                                f"✅队列大小 {self.file_group_queue.qsize()}/{self.queue_maxsize} | "
+                                f"文件数 {total_files_in_groups:,} 个{dedup_log} | "
                                 f"当前组大小 {format_bytes(total_size_in_groups)} | "
                                 f"累计总大小 {format_bytes(self.total_queued_size)} | "
-                                f"队列大小 {self.file_group_queue.qsize()}/{self.queue_maxsize} | "
                                 f"当前队列文件数 {self.queued_files_count:,} | "
                                 f"累计队列文件数 {self.total_queued_files_count:,}"
                             )
@@ -397,15 +422,56 @@ class FileGroupPrefetcher:
                                             self.last_processed_file_id = last_processed_id
                                         
                                         if file_groups:
-                                            # 有文件组，立即放入队列
-                                            total_files_in_groups = sum(len(group) for group in file_groups)
-                                            total_size_in_groups = sum(
-                                                sum(f.get('size', 0) or 0 for f in group) for group in file_groups
-                                            )
+                                            # 对文件组进行去重
+                                            seen_paths_in_groups = set()
+                                            deduplicated_groups = []
+                                            duplicate_count_in_groups = 0
                                             
                                             for group in file_groups:
+                                                deduplicated_group = []
+                                                for file_info in group:
+                                                    file_path = file_info.get('path') or file_info.get('file_path')
+                                                    if file_path:
+                                                        if file_path not in seen_paths_in_groups:
+                                                            seen_paths_in_groups.add(file_path)
+                                                            deduplicated_group.append(file_info)
+                                                        else:
+                                                            duplicate_count_in_groups += 1
+                                                if deduplicated_group:
+                                                    deduplicated_groups.append(deduplicated_group)
+                                            
+                                            # 使用去重后的文件组计算文件数和大小
+                                            total_files_in_groups = sum(len(group) for group in deduplicated_groups)
+                                            total_size_in_groups = sum(
+                                                sum(f.get('size', 0) or 0 for f in group) for group in deduplicated_groups
+                                            )
+                                            
+                                            # 标记文件为已入队
+                                            try:
+                                                dedup_log = f"，去重（{duplicate_count_in_groups}）"
+                                                logger.info(
+                                                    f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 开始标记文件为已入队："
+                                                    f"{len(deduplicated_groups)} 个文件组，共 {total_files_in_groups} 个文件{dedup_log}，"
+                                                    f"总大小={format_bytes(total_size_in_groups)}"
+                                                )
+                                                await self.backup_db.mark_files_as_queued(
+                                                    backup_set=self.backup_set,
+                                                    file_groups=deduplicated_groups
+                                                )
+                                                logger.info(
+                                                    f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ✅ 文件标记完成，"
+                                                    f"is_copy_success 已设置为 TRUE"
+                                                )
+                                            except Exception as mark_error:
+                                                logger.error(
+                                                    f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ⚠️ 标记文件失败: {str(mark_error)}",
+                                                    exc_info=True
+                                                )
+                                            
+                                            # 有文件组，立即放入队列（使用去重后的文件组）
+                                            for group in deduplicated_groups:
                                                 try:
-                                                    await self.file_group_queue.put((group, self.last_processed_file_id))
+                                                    await self.file_group_queue.put(([group], self.last_processed_file_id))
                                                     self.prefetched_groups += 1
                                                     self.queued_files_count += len(group)
                                                     self.total_queued_files_count += len(group)
@@ -413,10 +479,11 @@ class FileGroupPrefetcher:
                                                 except Exception as e:
                                                     logger.error(f"[文件组预取器] 放入队列失败: {e}", exc_info=True)
                                             
+                                            dedup_log = f"，去重（{duplicate_count_in_groups}）"
                                             logger.info(
                                                 f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ✅ 重新检索成功，"
-                                                f"找到 {len(file_groups)} 个文件组，"
-                                                f"总文件数={total_files_in_groups}，"
+                                                f"找到 {len(deduplicated_groups)} 个文件组，"
+                                                f"总文件数={total_files_in_groups}{dedup_log}，"
                                                 f"总大小={format_bytes(total_size_in_groups)}，"
                                                 f"已放入队列"
                                             )
@@ -453,21 +520,40 @@ class FileGroupPrefetcher:
                                             last_processed_id = self.last_processed_file_id
                                         
                                         if file_groups:
-                                            # 有文件组，标记并放入队列
-                                            total_files_in_groups = sum(len(group) for group in file_groups)
+                                            # 对文件组进行去重
+                                            seen_paths_in_groups = set()
+                                            deduplicated_groups = []
+                                            duplicate_count_in_groups = 0
+                                            
+                                            for group in file_groups:
+                                                deduplicated_group = []
+                                                for file_info in group:
+                                                    file_path = file_info.get('path') or file_info.get('file_path')
+                                                    if file_path:
+                                                        if file_path not in seen_paths_in_groups:
+                                                            seen_paths_in_groups.add(file_path)
+                                                            deduplicated_group.append(file_info)
+                                                        else:
+                                                            duplicate_count_in_groups += 1
+                                                if deduplicated_group:
+                                                    deduplicated_groups.append(deduplicated_group)
+                                            
+                                            # 使用去重后的文件组计算文件数和大小
+                                            total_files_in_groups = sum(len(group) for group in deduplicated_groups)
                                             total_size_in_groups = sum(
                                                 sum(file_info.get('size', 0) for file_info in group)
-                                                for group in file_groups
+                                                for group in deduplicated_groups
                                             )
                                             try:
+                                                dedup_log = f"，去重（{duplicate_count_in_groups}）"
                                                 logger.info(
                                                     f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 开始标记文件为已入队："
-                                                    f"{len(file_groups)} 个文件组，共 {total_files_in_groups} 个文件，"
+                                                    f"{len(deduplicated_groups)} 个文件组，共 {total_files_in_groups} 个文件{dedup_log}，"
                                                     f"总大小={format_bytes(total_size_in_groups)}"
                                                 )
                                                 await self.backup_db.mark_files_as_queued(
                                                     backup_set=self.backup_set,
-                                                    file_groups=file_groups
+                                                    file_groups=deduplicated_groups
                                                 )
                                                 logger.info(
                                                     f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ✅ 文件标记完成，"
@@ -479,26 +565,22 @@ class FileGroupPrefetcher:
                                                     exc_info=True
                                                 )
                                             
-                                            await self.file_group_queue.put((file_groups, last_processed_id))
-                                            self.prefetched_groups += len(file_groups)
+                                            await self.file_group_queue.put((deduplicated_groups, last_processed_id))
+                                            self.prefetched_groups += len(deduplicated_groups)
                                             self.last_processed_file_id = last_processed_id
-                                            # 计算当前组大小
-                                            total_size_in_groups = sum(
-                                                sum(file_info.get('size', 0) for file_info in group)
-                                                for group in file_groups
-                                            )
-                                            # 更新队列中的文件总数（放入队列时增加）
+                                            # 更新队列中的文件总数（放入队列时增加，使用去重后的文件数）
                                             self.queued_files_count += total_files_in_groups
-                                            # 更新累计放入队列的总文件数（用于进度显示，不减少）
+                                            # 更新累计放入队列的总文件数（用于进度显示，不减少，使用去重后的文件数）
                                             self.total_queued_files_count += total_files_in_groups
-                                            # 更新累计放入队列的总文件大小（用于进度显示，不减少）
+                                            # 更新累计放入队列的总文件大小（用于进度显示，不减少，使用去重后的大小）
                                             self.total_queued_size += total_size_in_groups
+                                            dedup_log = f"，去重（{duplicate_count_in_groups}）"
                                             logger.info(
-                                                f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ✅ 已预取 {len(file_groups)} 个文件组："
-                                                f"文件数 {total_files_in_groups:,} 个 | "
+                                                f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ✅ 已预取 {len(deduplicated_groups)} 个文件组："
+                                                f"✅队列大小 {self.file_group_queue.qsize()}/{self.queue_maxsize} | "
+                                                f"文件数 {total_files_in_groups:,} 个{dedup_log} | "
                                                 f"当前组大小 {format_bytes(total_size_in_groups)} | "
                                                 f"累计总大小 {format_bytes(self.total_queued_size)} | "
-                                                f"队列大小 {self.file_group_queue.qsize()}/{self.queue_maxsize} | "
                                                 f"当前队列文件数 {self.queued_files_count:,} | "
                                                 f"累计队列文件数 {self.total_queued_files_count:,}"
                                             )
