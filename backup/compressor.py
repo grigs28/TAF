@@ -19,7 +19,7 @@ try:
 except ImportError:
     zstd = None
 from pathlib import Path
-from typing import List, Dict, Optional, Callable, Awaitable
+from typing import List, Dict, Optional, Callable, Awaitable, Any
 
 from models.backup import BackupSet, BackupTask
 from utils.datetime_utils import now, format_datetime
@@ -773,15 +773,58 @@ def _compress_with_zstd(
     logger.warning(f"[zstd] 开始创建压缩文件: {archive_path_abs} (level={level}, threads={threads})")
     logger.info(f"[zstd] 待压缩文件数: {total_files_in_group} 个，预计耗时较长")
     
-    # 获取 zstd 写入缓冲区大小配置（默认1MB = 1048576字节）
+    # 计算平均文件大小
+    total_size = sum(f.get('size', 0) or f.get('file_size', 0) or 0 for f in file_group)
+    avg_file_size = total_size / max(total_files_in_group, 1) if total_files_in_group > 0 else 0
+    
+    # 根据平均文件大小设置 zstd_write_size（细分策略）
+    # 策略：
+    # - 平均文件大小 < 128KB → 使用 128KB
+    # - 平均文件大小 < 256KB → 使用 256KB
+    # - 平均文件大小 < 512KB → 使用 512KB
+    # - 平均文件大小 < 1MB → 使用 1MB
+    # - 平均文件大小 < 5MB → 使用 2MB
+    # - 平均文件大小 < 10MB → 使用 4MB
+    # - 平均文件大小 < 100MB → 使用平均文件大小的 1/10（最小4MB，最大10MB）
+    # - 平均文件大小 >= 100MB → 使用 10MB
+    # 范围：最小 128KB，最大 10MB
+    if avg_file_size < 128 * 1024:  # < 64KB
+        zstd_write_size = 128 * 1024  # 128KB
+    elif avg_file_size < 256 * 1024:  # < 256KB
+        zstd_write_size = 256 * 1024  # 256KB
+    elif avg_file_size < 512 * 1024:  # < 512KB
+        zstd_write_size = 512 * 1024  # 512KB
+    elif avg_file_size < 1024 * 1024:  # < 1MB
+        zstd_write_size = 1024 * 1024  # 1MB
+    elif avg_file_size < 5 * 1024 * 1024:  # < 5MB
+        zstd_write_size = 2 * 1024 * 1024  # 2MB
+    elif avg_file_size < 10 * 1024 * 1024:  # < 10MB
+        zstd_write_size = 4 * 1024 * 1024  # 4MB
+    elif avg_file_size < 100 * 1024 * 1024:  # < 100MB
+        # 使用平均文件大小的 1/10，最小4MB，最大10MB
+        calculated_size = int(avg_file_size / 10)
+        zstd_write_size = max(4 * 1024 * 1024, min(calculated_size, 10 * 1024 * 1024))  # 4MB ~ 10MB
+    else:  # >= 100MB
+        zstd_write_size = 10 * 1024 * 1024  # 10MB
+    
+    # 如果配置中有 ZSTD_WRITE_SIZE，优先使用配置值（但需要在合理范围内）
     from config.settings import get_settings
     settings = get_settings()
-    zstd_write_size = getattr(settings, 'ZSTD_WRITE_SIZE', 1048576)
+    config_write_size = getattr(settings, 'ZSTD_WRITE_SIZE', None)
+    if config_write_size is not None:
+        # 如果配置值在合理范围内，使用配置值
+        config_write_size = int(config_write_size)
+        if 128 * 1024 <= config_write_size <= 10 * 1024 * 1024:
+            zstd_write_size = config_write_size
+        else:
+            logger.warning(f"[zstd] 配置的 ZSTD_WRITE_SIZE ({config_write_size}) 不在合理范围内 (128KB ~ 10MB)，使用根据平均文件大小计算的值: {zstd_write_size}")
+    
+    logger.info(f"[zstd] 文件组总大小: {format_bytes(total_size)}, 平均文件大小: {format_bytes(avg_file_size)}, 写入缓冲区大小: {format_bytes(zstd_write_size)}")
     
     try:
         with archive_path_abs.open('wb') as raw_out:
             compressor = zstd.ZstdCompressor(level=level, threads=threads)
-            logger.info(f"[zstd] 使用写入缓冲区大小: {format_bytes(zstd_write_size)}")
+            logger.debug(f"[zstd] 使用写入缓冲区大小: {format_bytes(zstd_write_size)}")
             with compressor.stream_writer(raw_out, closefd=False, write_size=zstd_write_size) as zstd_stream:
                 with tarfile.open(fileobj=zstd_stream, mode='w|') as tar:
                     for file_idx, file_info in enumerate(file_group):
@@ -985,6 +1028,9 @@ class Compressor:
             settings: 系统设置对象
         """
         self.settings = settings
+        # 记录每个备份集的上次压缩文件名和序号，确保文件名不重复
+        # 格式: {backup_set_id: {'last_filename': str, 'sequence': int}}
+        self._last_archive_info: Dict[str, Dict[str, Any]] = {}
     
     async def group_files_for_compression(self, file_list: List[Dict]) -> List[List[Dict]]:
         """将文件分组以进行压缩
@@ -1131,9 +1177,9 @@ class Compressor:
             # 从系统配置获取线程数（基础配置）
             compression_threads = int(getattr(self.settings, "COMPRESSION_THREADS", 4))
 
-            # 在扫描阶段适当降低压缩并发 / IO 抢占：
-            # - 约定：在 scan_status 为 'running' 或 'retrieving' 时，认为扫描尚未完成
-            # - 策略：有效线程数 = max(1, 配置线程数 - 2)
+            # 判断是否在扫描阶段（扫描未完成）
+            # 策略：扫描阶段线程数 -1，扫描结束后恢复正常线程数
+            is_scanning_phase = False
             try:
                 # 优先从内存对象获取，如果没有则从数据库查询
                 scan_status = getattr(backup_task, "scan_status", None)
@@ -1145,17 +1191,12 @@ class Compressor:
                     except Exception:
                         pass
                 
-                if scan_status in ("pending", "running", "retrieving"):
-                    adjusted_threads = max(1, compression_threads - 2)
-                    if adjusted_threads != compression_threads:
-                        logger.info(
-                            f"[压缩配置] 扫描未完成（scan_status={scan_status}），"
-                            f"将压缩线程数从 {compression_threads} 降为 {adjusted_threads}"
-                        )
-                        compression_threads = adjusted_threads
+                # 如果扫描未完成，认为是在扫描阶段
+                if scan_status not in (None, "completed"):
+                    is_scanning_phase = True
             except Exception as e:
                 # 即使无法获取 scan_status，也不影响压缩主流程
-                logger.debug(f"[压缩配置] 根据 scan_status 调整线程数时出错，使用原始配置: {e}")
+                logger.debug(f"[压缩配置] 获取 scan_status 时出错，使用默认配置: {e}")
             
             # 从系统配置获取7-Zip命令行线程数
             # 优先使用 COMPRESSION_COMMAND_THREADS，如果没有设置则使用 WEB_WORKERS，最后回退到 COMPRESSION_THREADS
@@ -1192,12 +1233,28 @@ class Compressor:
                 logger.warning(f"pgzip_threads 值无效: {pgzip_threads}，使用默认值 {compression_threads}")
                 pgzip_threads = int(compression_threads)
             
+            # 获取 zstd 线程数配置
             zstd_threads = getattr(self.settings, 'ZSTD_THREADS', compression_threads)
             try:
                 zstd_threads = int(zstd_threads)
             except (ValueError, TypeError):
                 logger.warning(f"zstd_threads 值无效: {zstd_threads}，使用默认值 {compression_threads}")
                 zstd_threads = int(compression_threads)
+            
+            # 扫描阶段：线程数 -1；扫描结束后：恢复正常线程数
+            if is_scanning_phase:
+                adjusted_zstd_threads = max(1, zstd_threads - 1)
+                if adjusted_zstd_threads != zstd_threads:
+                    logger.info(
+                        f"[压缩配置] 扫描阶段（scan_status={scan_status}），"
+                        f"将 zstd 线程数从 {zstd_threads} 降为 {adjusted_zstd_threads}"
+                    )
+                    zstd_threads = adjusted_zstd_threads
+            else:
+                logger.debug(
+                    f"[压缩配置] 扫描已完成（scan_status=completed），"
+                    f"使用正常 zstd 线程数: {zstd_threads}"
+                )
             
             # 计算内存需求：内存需求 ≈ 字典大小 × 线程数 × 1.5（安全系数）
             # 解析字典大小（支持格式：64m, 128m, 512m, 1g, 2g等）
@@ -1224,19 +1281,20 @@ class Compressor:
             calculated_memory_gb = dict_size_gb * compression_command_threads * 1.5
             memory_gb = max(16, min(64, int(calculated_memory_gb)))
             
-            # 记录内存信息（如果可用）
-            if PSUTIL_AVAILABLE:
-                try:
-                    mem = psutil.virtual_memory()
-                    total_memory_gb = mem.total / (1024 ** 3)
-                    available_memory_gb = mem.available / (1024 ** 3)
-                    logger.info(f"系统内存: 总计={total_memory_gb:.1f}GB, 可用={available_memory_gb:.1f}GB | "
-                               f"固定字典={dict_size_str} ({dict_size_gb:.3f}GB), "
-                               f"线程={compression_command_threads}, 预计内存={memory_gb}GB")
-                except Exception as e:
+            # 记录内存信息（如果可用，zstd 压缩方法不执行）
+            if compression_method != 'zstd':
+                if PSUTIL_AVAILABLE:
+                    try:
+                        mem = psutil.virtual_memory()
+                        total_memory_gb = mem.total / (1024 ** 3)
+                        available_memory_gb = mem.available / (1024 ** 3)
+                        logger.info(f"系统内存: 总计={total_memory_gb:.1f}GB, 可用={available_memory_gb:.1f}GB | "
+                                   f"固定字典={dict_size_str} ({dict_size_gb:.3f}GB), "
+                                   f"线程={compression_command_threads}, 预计内存={memory_gb}GB")
+                    except Exception as e:
+                        logger.info(f"固定字典={dict_size_str}, 线程={compression_command_threads}, 预计内存={memory_gb}GB")
+                else:
                     logger.info(f"固定字典={dict_size_str}, 线程={compression_command_threads}, 预计内存={memory_gb}GB")
-            else:
-                logger.info(f"固定字典={dict_size_str}, 线程={compression_command_threads}, 预计内存={memory_gb}GB")
             
             # 统一使用相同的压缩流程：先压缩到temp目录
             # 根据配置决定是否移动文件（直接压缩到磁带时，不移动文件）
@@ -1278,8 +1336,55 @@ class Compressor:
                     archive_suffix = ".7z"
             else:
                 archive_suffix = ".tar"
-            archive_path = backup_dir / f"backup_{backup_set.set_id}_{timestamp}{archive_suffix}"
+            
+            # 生成唯一的压缩文件名，确保不重复
+            backup_set_id = backup_set.set_id
+            base_filename = f"backup_{backup_set_id}_{timestamp}"
+            
+            # 获取或初始化该备份集的序号信息
+            if backup_set_id not in self._last_archive_info:
+                self._last_archive_info[backup_set_id] = {'last_filename': None, 'sequence': 0}
+            
+            archive_info = self._last_archive_info[backup_set_id]
+            sequence = archive_info['sequence']
+            
+            # 生成文件名，如果序号 > 0，添加序号后缀
+            if sequence > 0:
+                filename = f"{base_filename}_{sequence:04d}{archive_suffix}"
+            else:
+                filename = f"{base_filename}{archive_suffix}"
+            
+            archive_path = backup_dir / filename
             temp_archive_path = archive_path.absolute()
+            
+            # 检查文件是否已存在，如果存在则增加序号
+            max_attempts = 1000  # 最多尝试1000次
+            attempt = 0
+            while temp_archive_path.exists() and attempt < max_attempts:
+                sequence += 1
+                archive_info['sequence'] = sequence
+                if sequence > 0:
+                    filename = f"{base_filename}_{sequence:04d}{archive_suffix}"
+                else:
+                    filename = f"{base_filename}{archive_suffix}"
+                archive_path = backup_dir / filename
+                temp_archive_path = archive_path.absolute()
+                attempt += 1
+            
+            if attempt >= max_attempts:
+                logger.error(f"[压缩] 无法生成唯一的压缩文件名，已尝试 {max_attempts} 次，使用带微秒时间戳的文件名")
+                # 使用更精确的时间戳（包含微秒）
+                from datetime import datetime
+                precise_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+                filename = f"backup_{backup_set_id}_{precise_timestamp}{archive_suffix}"
+                archive_path = backup_dir / filename
+                temp_archive_path = archive_path.absolute()
+            
+            # 记录本次使用的文件名和序号
+            archive_info['last_filename'] = filename
+            archive_info['sequence'] = sequence
+            
+            logger.info(f"[压缩] 生成压缩文件名: {filename} (序号={sequence}, 上次文件名={archive_info.get('last_filename', '无')})")
             
             # 进度跟踪变量：如果有共享的进度字典，使用它；否则创建新的
             if shared_compress_progress is not None:
