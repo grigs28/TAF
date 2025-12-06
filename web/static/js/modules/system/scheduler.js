@@ -687,6 +687,8 @@ const SchedulerManager = {
             await this.loadTasks();
         } catch (error) {
             console.error('运行任务失败:', error);
+            // SchedulerAPI.runTask 已经显示 alert，这里不需要重复
+            // 但如果需要额外的错误处理，可以在这里添加
         }
     },
     

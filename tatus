@@ -1,0 +1,56 @@
+warning: in the working copy of 'backup/simple_scanner.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'config/settings.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'models/data_classes.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'utils/scheduler/task_executor.py', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/backup/backup_db.py b/backup/backup_db.py[m
+[1mindex 38c99b8..4567dba 100644[m
+[1m--- a/backup/backup_db.py[m
+[1m+++ b/backup/backup_db.py[m
+[36m@@ -2337,11 +2337,13 @@[m [mclass BackupDB:[m
+             # 这里简化处理，通过should_wait_if_small判断是否应该继续等待[m
+             retry_count = 0 if should_wait_if_small else max_retries[m
+ [m
+[31m-        # 标记检索开始（仅在第一次调用时标记）[m
+[32m+[m[32m        # 标记检索开始（仅在第一次调用时标记，且扫描未完成时）[m
+         if backup_task_id:[m
+             current_scan_status = await self.get_scan_status(backup_task_id)[m
+[31m-            if current_scan_status != 'retrieving':[m
+[31m-                logger.info(f"[openGauss优化] 标记检索状态为开始检索（backup_task_id={backup_task_id}）")[m
+[32m+[m[32m            # 如果扫描已经完成（completed），不应该再设置为 retrieving[m
+[32m+[m[32m            # 只有在扫描未完成（pending, running, None）时才设置为 retrieving[m
+[32m+[m[32m            if current_scan_status not in ('retrieving', 'completed'):[m
+[32m+[m[32m                logger.info(f"[openGauss优化] 标记检索状态为开始检索（backup_task_id={backup_task_id}，当前状态={current_scan_status}）")[m
+                 await self.update_scan_status(backup_task_id, 'retrieving')[m
+         [m
+         # openGauss 优化：分批检索文件，避免一次性检索所有未压缩文件[m
+[36m@@ -3026,6 +3028,34 @@[m [mclass BackupDB:[m
+                 # 检索到文件组不等于扫描完成，文件可能还在扫描中[m
+                 # 返回文件组和最后处理的文件ID[m
+                 return ([current_group], last_processed_id)[m
+[32m+[m[41m            [m
+[32m+[m[32m            # 关键修复：扫描完成后，无论文件组大小如何，只要有文件就必须返回，不能丢弃[m
+[32m+[m[32m            if scan_status == 'completed' and current_group and len(current_group) > 0:[m
+[32m+[m[32m                # 扫描已完成，强制返回剩余文件组（不能丢弃）[m
+[32m+[m[32m                logger.info([m
+[32m+[m[32m                    f"[openGauss优化] ✅ 扫描已完成，强制返回剩余文件组："[m
+[32m+[m[32m                    f"文件组大小 {format_bytes(current_group_size)} "[m
+[32m+[m[32m                    f"({size_ratio*100:.1f}% of 目标，< {format_bytes(min_group_size)})，"[m
+[32m+[m[32m                    f"文件数: {len(current_group)} 个，确保所有文件都被压缩"[m
+[32m+[m[32m                )[m
+[32m+[m[32m                return ([current_group], last_processed_id)[m
+[32m+[m[41m            [m
+[32m+[m[32m            # 文件组大小不足且扫描未完成，继续等待（返回空列表，等待更多文件）[m
+[32m+[m[32m            logger.info([m
+[32m+[m[32m                f"[openGauss优化] 文件组大小不足：{format_bytes(current_group_size)} < {format_bytes(min_group_size)}，"[m
+[32m+[m[32m                f"扫描状态：{scan_status}，等待更多文件..."[m
+[32m+[m[32m            )[m
+[32m+[m[32m            # 关键修复：已累积的文件不能丢弃！如果已检索到文件但大小不够，应该从第一个累积文件的ID-1开始查询[m
+[32m+[m[32m            if current_group and len(current_group) > 0:[m
+[32m+[m[32m                first_file_id = current_group[0].get('id')[m
+[32m+[m[32m                if first_file_id:[m
+[32m+[m[32m                    resume_id = first_file_id - 1[m
+[32m+[m[32m                    logger.info([m
+[32m+[m[32m                        f"[openGauss优化] 已检索到 {len(current_group)} 个文件但大小不够，"[m
+[32m+[m[32m                        f"第一个文件ID: {first_file_id}，下次查询将从 id > {resume_id} 开始（确保不丢弃未成组文件）"[m
+[32m+[m[32m                    )[m
+[32m+[m[32m                    return 

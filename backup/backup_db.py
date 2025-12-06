@@ -15,6 +15,11 @@ from typing import Any, Dict, List, Optional
 
 from models.backup import BackupTask, BackupSet, BackupFile, BackupTaskStatus, BackupFileType, BackupSetStatus
 from utils.datetime_utils import now, format_datetime
+from backup.queued_files_optimizer import (
+    mark_files_as_queued_optimized,
+    verify_files_queued_optimized,
+    ensure_index_exists
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1591,7 +1596,7 @@ class BackupDB:
             logger.info("[mark_files_as_queued] 当前仅支持 openGauss，跳过数据库持久化更新")
     
     async def _mark_files_as_queued_opengauss(self, conn, backup_set_db_id: int, file_paths: List[str]) -> int:
-        """openGauss模式：仅设置 is_copy_success = TRUE（使用 ANY 批量更新，不在这里做去重）
+        """openGauss模式：仅设置 is_copy_success = TRUE（使用优化版本：临时表+JOIN）
         
         Args:
             conn: 数据库连接
@@ -1601,7 +1606,6 @@ class BackupDB:
         Returns:
             int: SQL 实际更新的数据库行数
         """
-        import time
         from utils.scheduler.db_utils import get_backup_files_table_by_set_id
 
         if not file_paths:
@@ -1614,74 +1618,22 @@ class BackupDB:
 
         table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
 
-        batch_size = 1000  # 每批最多 1000 条路径
-        total_updated = 0
-        start_time = time.time()
-
-        total_batches = (len(effective_paths) + batch_size - 1) // batch_size
+        # 使用优化版本：临时表 + JOIN 更新方式
         logger.info(
-            f"[mark_files_as_queued] 开始批量更新：传入路径总数={len(file_paths)}，"
+            f"[mark_files_as_queued] 使用优化版本（临时表+JOIN）："
+            f"传入路径总数={len(file_paths)}，"
             f"有效路径数={len(effective_paths)}，"
-            f"批次大小={batch_size}, 总批次数={total_batches}, 使用 ANY 方式直接更新"
+            f"表名={table_name}"
         )
-
-        for i in range(0, len(effective_paths), batch_size):
-            batch_paths = effective_paths[i:i + batch_size]
-            batch_num = i // batch_size + 1
-            batch_start_time = time.time()
-
-            try:
-                # 直接使用 ANY 批量更新；只更新尚未标记为 TRUE 的行
-                # 更新条件：is_copy_success IS DISTINCT FROM TRUE（即 is_copy_success = FALSE OR is_copy_success IS NULL）
-                # 确保查询到的所有记录（FALSE 或 NULL）都能被正确标记为 TRUE
-                update_result = await conn.execute(
-                    f"""
-                    UPDATE {table_name}
-                    SET is_copy_success = TRUE,
-                        copy_status_at = NOW(),
-                        updated_at = NOW()
-                    WHERE backup_set_id = $1
-                      AND file_path = ANY($2)
-                      -- 更新条件：is_copy_success = FALSE OR is_copy_success IS NULL（与查询条件一致）
-                      -- 确保查询到的所有记录都能被正确标记为 TRUE
-                      AND (is_copy_success IS DISTINCT FROM TRUE)
-                    """,
-                    backup_set_db_id,
-                    batch_paths,
-                )
-
-                # asyncpg 返回受影响行数为整数；psycopg3 返回 cursor，rowcount 在不同实现中可能不同，这里统一按返回值/属性处理
-                updated_count = getattr(update_result, "rowcount", None)
-                if updated_count is None:
-                    # asyncpg 会直接返回受影响的行数（int）
-                    if isinstance(update_result, int):
-                        updated_count = update_result
-
-                await conn.commit()
-
-                total_updated += updated_count if updated_count else 0
-                batch_elapsed = time.time() - batch_start_time
-                total_elapsed = time.time() - start_time
-                files_per_sec = len(batch_paths) / batch_elapsed if batch_elapsed > 0 else 0.0
-
-                # 说明：updated_count 是 SQL 实际更新的数据库行数
-                logger.info(
-                    f"[mark_files_as_queued] ✅ 批次 {batch_num}/{total_batches} 更新完成："
-                    f"SQL实际更新行数={updated_count or 0}（本批路径数={len(batch_paths)}），"
-                    f"批次耗时={batch_elapsed:.2f}秒，速度={files_per_sec:.0f} 路径/秒，"
-                    f"累计更新行数={total_updated}"
-                )
-            except Exception as e:
-                # 出错时回滚本批次，记录日志后抛出异常，由上层处理
-                try:
-                    await conn.rollback()
-                except Exception:
-                    pass
-                logger.error(
-                    f"[mark_files_as_queued] ❌ 批次 {batch_num}/{total_batches} 更新失败：{e}",
-                    exc_info=True,
-                )
-                raise
+        
+        total_updated = await mark_files_as_queued_optimized(
+            conn=conn,
+            table_name=table_name,
+            backup_set_db_id=backup_set_db_id,
+            file_paths=effective_paths,
+            batch_size=10000,  # 优化：批次大小从1000增加到10000
+            commit_interval=1  # 临时表方式一次性更新，只需提交一次
+        )
         
         # 返回实际更新的数据库行数（可能包含重复路径的记录）
         return total_updated
@@ -1693,10 +1645,10 @@ class BackupDB:
         file_paths: List[str],
     ) -> None:
         """
-        校验并重试：确认指定文件的 is_copy_success 已设置为 TRUE。
+        校验并重试：确认指定文件的 is_copy_success 已设置为 TRUE（使用优化版本：快速检查）
 
         逻辑：
-        1. 按 backup_set_id + file_path 查询仍未标记成功的行数
+        1. 使用快速检查（LIMIT 1）替代全量 COUNT，提升性能
         2. 如果存在未标记成功的记录，重新调用一次 _mark_files_as_queued_opengauss
         3. 再次检查，仍然不一致则输出错误日志，交由后续流程或人工排查
         """
@@ -1712,23 +1664,17 @@ class BackupDB:
 
         table_name = await get_backup_files_table_by_set_id(conn, backup_set_db_id)
 
-        async def _count_pending() -> int:
-            # 查询仍未成功标记为 TRUE 的记录
-            return await conn.fetchval(
-                f"""
-                SELECT COUNT(*)
-                FROM {table_name}
-                WHERE backup_set_id = $1
-                  AND file_path = ANY($2)
-                  AND (is_copy_success IS DISTINCT FROM TRUE)
-                """,
-                backup_set_db_id,
-                effective_paths,
-            )
+        # 使用优化版本：快速检查（LIMIT 1）替代全量 COUNT
+        # 对于大数据量自动使用采样校验，提升性能
+        all_verified = await verify_files_queued_optimized(
+            conn=conn,
+            table_name=table_name,
+            backup_set_db_id=backup_set_db_id,
+            file_paths=effective_paths,
+            sample_size=None,  # None 表示自动选择（大数据量采样1000条）
+        )
 
-        # 第一次检查
-        pending = await _count_pending()
-        if pending == 0:
+        if all_verified:
             logger.info(
                 f"[mark_files_as_queued] ✅ 校验通过：backup_set_id={backup_set_db_id}, "
                 f"校验路径数={len(effective_paths)}，所有 is_copy_success 均已为 TRUE"
@@ -1736,7 +1682,7 @@ class BackupDB:
             return
 
         logger.warning(
-            f"[mark_files_as_queued] ⚠️ 校验发现仍有 {pending} 条记录 is_copy_success 未设置为 TRUE，"
+            f"[mark_files_as_queued] ⚠️ 校验发现仍有未标记的记录，"
             f"backup_set_id={backup_set_db_id}，准备重试一次批量更新"
         )
 
@@ -1751,16 +1697,22 @@ class BackupDB:
             return
 
         # 重试后再次校验
-        pending_after_retry = await _count_pending()
-        if pending_after_retry == 0:
+        all_verified_after_retry = await verify_files_queued_optimized(
+            conn=conn,
+            table_name=table_name,
+            backup_set_db_id=backup_set_db_id,
+            file_paths=effective_paths,
+        )
+        
+        if all_verified_after_retry:
             logger.info(
                 f"[mark_files_as_queued] ✅ 重试后校验通过：backup_set_id={backup_set_db_id}, "
                 f"校验路径数={len(effective_paths)}，所有 is_copy_success 均已为 TRUE"
             )
         else:
             logger.error(
-                f"[mark_files_as_queued] ❌ 重试后仍有 {pending_after_retry} 条记录 is_copy_success "
-                f"未成功置为 TRUE（backup_set_id={backup_set_db_id}，校验路径数={len(effective_paths)}）。"
+                f"[mark_files_as_queued] ❌ 重试后仍有未标记的记录 "
+                f"（backup_set_id={backup_set_db_id}，校验路径数={len(effective_paths)}）。"
                 f"建议检查数据库连接/事务状态或手动校验这些文件记录。"
             )
     
@@ -2367,56 +2319,66 @@ class BackupDB:
             )
             # 循环检索文件，直到累积到足够的文件或没有更多文件
             should_stop = False  # 是否应该停止检索
+            query_count = 0  # 查询次数计数器
             while not should_stop:
+                query_count += 1
                 # 使用原生 openGauss SQL 分批检索（使用 LIMIT 和 WHERE id > last_processed_id）
-                logger.info(
-                    f"[openGauss优化] 执行查询: backup_set_id={backup_set_db_id}, "
-                    f"id > {last_processed_id}, LIMIT {batch_size}"
-                )
+                # 减少日志输出：只在每10次查询或第一次查询时输出
+                if query_count == 1 or query_count % 10 == 0:
+                    logger.debug(
+                        f"[openGauss优化] 执行查询 #{query_count}: backup_set_id={backup_set_db_id}, "
+                        f"id > {last_processed_id}, LIMIT {batch_size}"
+                    )
+                else:
+                    logger.debug(
+                        f"[openGauss优化] 执行查询 #{query_count}: id > {last_processed_id}, LIMIT {batch_size}"
+                    )
                 
                 # 先查询一下总共有多少未压缩文件（用于调试）
                 # 添加超时和错误处理，避免缓冲区错误导致整个函数失败
                 total_pending = 0
                 pending_after_id = 0
                 try:
-                    total_pending_count_row = await asyncio.wait_for(
-                        conn.fetchrow(
-                            f"""
-                            SELECT COUNT(*)::BIGINT as count
-                            FROM {table_name}
-                            WHERE backup_set_id = $1::INTEGER
-                              AND (is_copy_success = FALSE OR is_copy_success IS NULL)
-                              AND file_type = 'file'::backupfiletype
-                            """,
-                            backup_set_db_id
-                        ),
-                        timeout=10.0
-                    )
-                    total_pending = total_pending_count_row['count'] if total_pending_count_row else 0
-                    
-                    # 查询 id > last_processed_id 的未压缩文件数量
-                    pending_after_id_row = await asyncio.wait_for(
-                        conn.fetchrow(
-                            f"""
-                            SELECT COUNT(*)::BIGINT as count
-                            FROM {table_name}
-                            WHERE backup_set_id = $1::INTEGER
-                              AND (is_copy_success IS DISTINCT FROM TRUE)
-                              AND file_type = 'file'::backupfiletype
-                              AND id > $2::BIGINT
-                            """,
-                            backup_set_db_id,
-                            last_processed_id
-                        ),
-                        timeout=10.0
-                    )
-                    pending_after_id = pending_after_id_row['count'] if pending_after_id_row else 0
-                    
-                    logger.info(
-                        f"[openGauss优化] 未压缩文件统计: 总计={total_pending}, "
-                        f"id > {last_processed_id} 的数量={pending_after_id}, "
-                        f"本次文件累计={total_files_processed}"
-                    )
+                    # 只在每10次查询或第一次查询时执行统计查询（减少开销）
+                    if query_count == 1 or query_count % 10 == 0:
+                        total_pending_count_row = await asyncio.wait_for(
+                            conn.fetchrow(
+                                f"""
+                                SELECT COUNT(*)::BIGINT as count
+                                FROM {table_name}
+                                WHERE backup_set_id = $1::INTEGER
+                                  AND (is_copy_success = FALSE OR is_copy_success IS NULL)
+                                  AND file_type = 'file'::backupfiletype
+                                """,
+                                backup_set_db_id
+                            ),
+                            timeout=10.0
+                        )
+                        total_pending = total_pending_count_row['count'] if total_pending_count_row else 0
+                        
+                        # 查询 id > last_processed_id 的未压缩文件数量
+                        pending_after_id_row = await asyncio.wait_for(
+                            conn.fetchrow(
+                                f"""
+                                SELECT COUNT(*)::BIGINT as count
+                                FROM {table_name}
+                                WHERE backup_set_id = $1::INTEGER
+                                  AND (is_copy_success IS DISTINCT FROM TRUE)
+                                  AND file_type = 'file'::backupfiletype
+                                  AND id > $2::BIGINT
+                                """,
+                                backup_set_db_id,
+                                last_processed_id
+                            ),
+                            timeout=10.0
+                        )
+                        pending_after_id = pending_after_id_row['count'] if pending_after_id_row else 0
+                        
+                        logger.debug(
+                            f"[openGauss优化] 未压缩文件统计（查询 #{query_count}）: 总计={total_pending}, "
+                            f"id > {last_processed_id} 的数量={pending_after_id}, "
+                            f"本次文件累计={total_files_processed}"
+                        )
                 except Exception as e:
                     error_msg = str(e)
                     # 如果表不存在，返回空结果
@@ -2697,13 +2659,15 @@ class BackupDB:
                             )
                         # 立即重试，不等待
                         continue  # 继续重试
-                logger.info(
-                    f"[openGauss优化] 查询结果: 返回 {len(rows)} 行, "
-                    f"last_processed_id={last_processed_id}, "
-                    f"实际批次大小={current_batch_size}, "
-                    f"第一行ID={rows[0]['id'] if rows else 'N/A'}, "
-                    f"最后一行ID={rows[-1]['id'] if rows else 'N/A'}"
-                )
+                # 减少日志输出：只在每10次查询或第一次查询时输出详细信息
+                if query_count == 1 or query_count % 10 == 0:
+                    logger.debug(
+                        f"[openGauss优化] 查询结果 #{query_count}: 返回 {len(rows)} 行, "
+                        f"last_processed_id={last_processed_id}, "
+                        f"实际批次大小={current_batch_size}, "
+                        f"第一行ID={rows[0]['id'] if rows else 'N/A'}, "
+                        f"最后一行ID={rows[-1]['id'] if rows else 'N/A'}"
+                    )
                 
                 # 记录重复路径统计（在处理完 rows 后）
                 if duplicate_count_in_batch > 0:
@@ -2923,15 +2887,20 @@ class BackupDB:
                         should_stop = True
                         break  # 跳出内层循环（处理 rows 的循环）
                 
-                # 如果检索到的文件数少于当前批次大小，说明没有更多文件了
-                # 确保 last_processed_id 更新为最后一批的最后一个文件ID
-                if len(rows) < current_batch_size:
-                    if rows:
-                        # 更新 last_processed_id 为最后一批的最后一个文件ID
-                        last_processed_id = rows[-1]['id']
+                # 关键修复：无论是否提前break，都要将 last_processed_id 更新为查询返回的最后一个文件ID
+                # 这样可以确保下次查询不会跳过任何文件（即使有些文件被跳过处理，也要确保查询范围覆盖所有文件）
+                if rows:
+                    # 更新 last_processed_id 为查询返回的最后一个文件ID（不是实际处理的最后一个）
+                    last_row_id = rows[-1]['id']
+                    if last_row_id > last_processed_id:
                         logger.debug(
-                            f"[openGauss优化] 最后一批文件处理完成，更新 last_processed_id={last_processed_id}"
+                            f"[openGauss优化] 批次处理完成，更新 last_processed_id: {last_processed_id} -> {last_row_id} "
+                            f"（查询返回的最后一行ID，确保不跳过任何文件）"
                         )
+                        last_processed_id = last_row_id
+                
+                # 如果检索到的文件数少于当前批次大小，说明没有更多文件了
+                if len(rows) < current_batch_size:
                     break
                 
                 # 如果已经达到容差范围，跳出外层循环
@@ -2947,7 +2916,8 @@ class BackupDB:
                 f"[openGauss优化] 检索到 {len(current_group)} 个未压缩文件，"
                 f"总大小 {format_bytes(current_group_size)}，"
                 f"阈值：{format_bytes(min_group_size)}（文件组大小 > {format_bytes(min_group_size)} 时返回），"
-                f"重试次数：{retry_count}/{max_retries}"
+                f"重试次数：{retry_count}/{max_retries}，"
+                f"执行查询次数：{query_count} 次（每次查询 {batch_size} 条）"
                 + (f"，去重：发现并过滤了 {total_duplicate_count} 条重复路径记录" if total_duplicate_count > 0 else "")
             )
             

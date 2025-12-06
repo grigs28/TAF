@@ -151,12 +151,19 @@ export class SchedulerAPI {
      */
     static async runTask(taskId) {
         try {
-            await fetchJSON(`/api/scheduler/tasks/${taskId}/run`, { method: 'POST' });
+            const result = await fetchJSON(`/api/scheduler/tasks/${taskId}/run`, { method: 'POST' });
+            // 检查返回的 success 字段
+            if (result && result.success === false) {
+                const errorMsg = result.message || result.detail || '任务运行失败';
+                alert('运行任务失败: ' + errorMsg);
+                throw new Error(errorMsg);
+            }
             alert('任务已提交运行');
             return true;
         } catch (error) {
             console.error('运行任务失败:', error);
-            alert('运行任务失败: ' + (error.message || '未知错误'));
+            const errorMsg = error.message || '未知错误';
+            alert('运行任务失败: ' + errorMsg);
             throw error;
         }
     }

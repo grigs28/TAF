@@ -55,11 +55,13 @@ class CompressionWorker:
         self.total_original_size = 0  # 原始文件的总大小（未压缩）
         self.group_idx = 0  # 文件组索引
 
-        # 并行批次设置
+        # 并行批次设置（基础值，会在异步方法中根据扫描状态动态调整）
         if self.use_prefetcher:
             settings = get_settings()
-            self.parallel_batches = getattr(settings, 'COMPRESSION_PARALLEL_BATCHES', 2)
+            self.base_parallel_batches = getattr(settings, 'COMPRESSION_PARALLEL_BATCHES', 2)
+            self.parallel_batches = self.base_parallel_batches  # 初始值，会在异步方法中调整
         else:
+            self.base_parallel_batches = 1
             self.parallel_batches = 1  # 非openGauss模式，顺序执行
         
         # 存储每个压缩任务的进度（用于实时查询）
@@ -185,13 +187,59 @@ class CompressionWorker:
                 except asyncio.CancelledError:
                     pass
                 logger.info("压缩进度更新任务已停止")
+    
+    async def _adjust_parallel_batches(self):
+        """根据扫描状态调整并行批次数量
+        
+        策略：扫描阶段减少同时运行的压缩任务数量，扫描结束后恢复正常
+        """
+        try:
+            # 优先从内存对象获取，如果没有则从数据库查询
+            scan_status = getattr(self.backup_task, "scan_status", None)
+            if not scan_status and self.backup_task.id:
+                try:
+                    scan_status = await self.backup_db.get_scan_status(self.backup_task.id)
+                except Exception:
+                    pass
+            
+            # 如果扫描未完成，减少并行批次数量（降低同时运行的压缩任务数）
+            if scan_status not in (None, "completed"):
+                adjusted_batches = max(1, self.base_parallel_batches - 1)
+                if adjusted_batches != self.parallel_batches:
+                    logger.info(
+                        f"[压缩配置] 扫描阶段（scan_status={scan_status}），"
+                        f"将并行批次数量从 {self.base_parallel_batches} 降为 {adjusted_batches}"
+                    )
+                    self.parallel_batches = adjusted_batches
+            else:
+                if self.parallel_batches != self.base_parallel_batches:
+                    logger.info(
+                        f"[压缩配置] 扫描已完成（scan_status=completed），"
+                        f"将并行批次数量从 {self.parallel_batches} 恢复为 {self.base_parallel_batches}"
+                    )
+                    self.parallel_batches = self.base_parallel_batches
+                else:
+                    logger.debug(
+                        f"[压缩配置] 扫描已完成（scan_status=completed），"
+                        f"使用正常并行批次数量: {self.parallel_batches}"
+                    )
+        except Exception as e:
+            # 即使无法获取 scan_status，也不影响压缩主流程
+            logger.debug(f"[压缩配置] 获取 scan_status 时出错，使用默认配置: {e}")
 
     async def _process_prefetched_file_groups(self):
         """处理预取的文件组（openGauss模式）- 并发控制"""
+        # 根据扫描状态动态调整并行批次数量
+        if self.use_prefetcher:
+            await self._adjust_parallel_batches()
         logger.info(f"开始处理预取的文件组（并发控制模式，parallel_batches={self.parallel_batches}）")
 
         while self._running:
             try:
+                # 定期检查扫描状态，动态调整并行批次数量（每10次循环检查一次，避免频繁查询）
+                if self.use_prefetcher and self.group_idx % 10 == 0:
+                    await self._adjust_parallel_batches()
+                
                 # 并发控制：如果达到并行限制，等待部分任务完成
                 if len(self.running_compression_futures) >= self.parallel_batches:
                     logger.debug(f"达到并行限制 ({self.parallel_batches})，等待部分任务完成...")
@@ -214,6 +262,10 @@ class CompressionWorker:
                 result = await self.file_group_prefetcher.get_file_group(timeout=2.0)
 
                 if result is None:
+                    # 在等待文件组时，也检查扫描状态并调整并行批次数量
+                    if self.use_prefetcher:
+                        await self._adjust_parallel_batches()
+                    
                     # 关键修复：先检查队列是否还有文件组，如果有则继续处理
                     queue_size = self.file_group_prefetcher.file_group_queue.qsize() if self.file_group_prefetcher else 0
                     if queue_size > 0:
@@ -390,6 +442,10 @@ class CompressionWorker:
 
                 self.group_idx += 1
                 
+                # 在启动任务后，也检查扫描状态并调整并行批次数量（确保及时恢复）
+                if self.use_prefetcher:
+                    await self._adjust_parallel_batches()
+                
                 # 顺序启动：启动一个任务后，等待3秒，再启动下一个（启动后的任务并行执行）
                 # 这样可以避免队列竞争，确保任务顺序启动
                 if len(self.running_compression_futures) < self.parallel_batches:
@@ -403,6 +459,9 @@ class CompressionWorker:
 
             except asyncio.TimeoutError:
                 # 超时时检查扫描状态，如果扫描未完成，继续等待
+                # 同时检查并调整并行批次数量
+                if self.use_prefetcher:
+                    await self._adjust_parallel_batches()
                 scan_status = await self.backup_db.get_scan_status(self.backup_task.id)
                 if scan_status != 'completed':
                     logger.info(f"获取文件组超时，但扫描未完成（状态={scan_status}），继续等待...")

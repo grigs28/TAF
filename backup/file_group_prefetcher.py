@@ -45,7 +45,7 @@ class FileGroupPrefetcher:
         
         self.parallel_batches = parallel_batches
         # 文件组队列：容量为 parallel_batches + 1（N个正在压缩的 + 1个待压缩的）
-        self.queue_maxsize = parallel_batches + 1
+        self.queue_maxsize = parallel_batches + 2
         self.file_group_queue: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
         
         # 预取任务

@@ -1469,6 +1469,54 @@ class BackupEngine:
                     backup_task.total_files, 
                     f"[备份完成] 处理了 {processed_files} 个文件，总大小 {format_bytes(total_size)}"
                 )
+                
+                # 发送钉钉通知（任务集完成）
+                try:
+                    if self.dingtalk_notifier:
+                        # 计算任务耗时
+                        task_start_time = backup_task.started_at if hasattr(backup_task, 'started_at') and backup_task.started_at else None
+                        task_end_time = now()
+                        duration_seconds = 0
+                        if task_start_time:
+                            duration_seconds = (task_end_time - task_start_time).total_seconds()
+                        
+                        # 格式化耗时
+                        if duration_seconds < 60:
+                            duration_str = f"{duration_seconds:.1f}秒"
+                        elif duration_seconds < 3600:
+                            duration_str = f"{duration_seconds / 60:.1f}分钟"
+                        else:
+                            hours = int(duration_seconds / 3600)
+                            minutes = int((duration_seconds % 3600) / 60)
+                            duration_str = f"{hours}小时{minutes}分钟"
+                        
+                        # 计算每小时G数（备份速度）
+                        speed_gb_per_hour = 0
+                        speed_str = "N/A"
+                        if duration_seconds > 0:
+                            total_size_gb = total_size / (1024 ** 3)  # 转换为GB
+                            duration_hours = duration_seconds / 3600  # 转换为小时
+                            speed_gb_per_hour = total_size_gb / duration_hours if duration_hours > 0 else 0
+                            speed_str = f"{speed_gb_per_hour:.2f} GB/小时"
+                        
+                        await self.dingtalk_notifier.send_backup_notification(
+                            backup_name=backup_task.task_name,
+                            status="success",
+                            details={
+                                'file_count': processed_files,
+                                'size': format_bytes(total_size),
+                                'duration': duration_str,
+                                'speed': speed_str,
+                                'speed_gb_per_hour': speed_gb_per_hour,
+                                'task_id': backup_task.id,
+                                'backup_set_id': backup_set.set_id if backup_set else None
+                            }
+                        )
+                        logger.info(f"[备份引擎] ✅ 任务集完成钉钉通知已发送（速度: {speed_str}）")
+                    else:
+                        logger.debug(f"[备份引擎] 钉钉通知器未初始化，跳过通知")
+                except Exception as notify_error:
+                    logger.error(f"[备份引擎] 发送任务集完成钉钉通知异常: {str(notify_error)}", exc_info=True)
             else:
                 logger.warning(
                     f"⚠️ 任务未完全完成："

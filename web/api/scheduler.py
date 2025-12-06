@@ -879,10 +879,16 @@ async def run_scheduled_task(
             if 'mode' not in run_options or not run_options['mode']:
                 run_options['mode'] = "auto"
         
-        success = await scheduler.run_task(task_id, run_options=run_options)
-        
-        if not success:
-            raise HTTPException(status_code=404, detail="计划任务不存在")
+        try:
+            success = await scheduler.run_task(task_id, run_options=run_options)
+            
+            if not success:
+                raise HTTPException(status_code=404, detail="计划任务不存在")
+        except RuntimeError as e:
+            # 捕获任务锁获取失败的错误
+            if "任务已在执行中" in str(e):
+                raise HTTPException(status_code=409, detail=str(e))
+            raise
         
         # 记录操作日志
         await log_operation(

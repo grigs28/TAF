@@ -203,6 +203,7 @@ class DingTalkNotifier:
                 content += f"**文件数量**: {details.get('file_count', 'N/A')}\n"
                 content += f"**压缩率**: {details.get('compression_ratio', 'N/A')}\n"
                 content += f"**耗时**: {details.get('duration', 'N/A')}\n"
+                content += f"**备份速度**: {details.get('speed', 'N/A')}\n"
 
         elif status == "failed":
             title = "❌ 备份任务失败"

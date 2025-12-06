@@ -50,7 +50,8 @@ def create_task_executor(
             logger.debug(f"[任务执行器] 尝试获取任务锁 - 任务ID: {scheduled_task.id}, 执行ID: {execution_id}")
             got_lock = await acquire_task_lock(scheduled_task.id, execution_id)
             if not got_lock:
-                logger.info(f"[任务执行器] 获取任务锁失败，任务已在执行中，跳过 - 任务ID: {scheduled_task.id}, 执行ID: {execution_id}")
+                error_msg = f"获取任务锁失败，任务已在执行中 - 任务ID: {scheduled_task.id}, 执行ID: {execution_id}"
+                logger.info(f"[任务执行器] {error_msg}")
                 await log_system(
                     level=LogLevel.INFO,
                     category=LogCategory.SYSTEM,
@@ -60,6 +61,9 @@ def create_task_executor(
                     task_id=scheduled_task.id,
                     details={"execution_id": execution_id}
                 )
+                # 如果是手动运行，抛出异常以便调用者能够捕获并返回错误信息
+                if manual_run:
+                    raise RuntimeError("任务已在执行中，无法重复运行")
                 return
             
             logger.info(f"[任务执行器] 成功获取任务锁 - 任务ID: {scheduled_task.id}, 执行ID: {execution_id}")

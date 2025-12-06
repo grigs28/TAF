@@ -617,6 +617,28 @@ class TaskScheduler:
             logger.info(f"[手动运行] 创建后台执行任务 - 任务ID: {task_id}, 任务名称: {task.task_name}")
             execution_task = asyncio.create_task(execute_func())
             self._running_executions[task_id] = execution_task
+            
+            # 等待一小段时间，检查任务是否因为获取锁失败而立即退出
+            await asyncio.sleep(0.1)
+            
+            # 如果任务已完成且是因为锁失败，捕获异常
+            if execution_task.done():
+                try:
+                    await execution_task
+                except RuntimeError as e:
+                    if "任务已在执行中" in str(e):
+                        logger.warning(f"[手动运行] 任务获取锁失败: {str(e)}")
+                        # 从运行列表中移除
+                        if task_id in self._running_executions:
+                            del self._running_executions[task_id]
+                        raise RuntimeError(str(e))
+                    raise
+                except Exception as e:
+                    # 其他异常也抛出
+                    if task_id in self._running_executions:
+                        del self._running_executions[task_id]
+                    raise
+            
             logger.info(f"[手动运行] 后台执行任务已创建并启动 - 任务ID: {task_id}, 任务名称: {task.task_name}")
             
             logger.info(f"立即运行计划任务: {task.task_name} (ID: {task_id}, 手动运行)")

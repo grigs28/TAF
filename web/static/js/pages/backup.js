@@ -16,6 +16,8 @@
     };
 
     let runningInterval = null;
+    // 记录已完成的任务ID，这些任务不再刷新
+    const completedTaskIds = new Set();
 
     function formatBytes(bytes) {
         if (!bytes || bytes <= 0) return '0 B';
@@ -508,7 +510,7 @@
         tape.innerHTML = `<small class="text-muted">目标:</small><br><span class="${highlightClass}">${target}</span>`;
         body.appendChild(tape);
 
-        // 根据 operation_stage 动态构建阶段步骤
+        // 优先使用后端返回的 operation_stage 和 stage_steps（这些已经是基于内存变量构建的）
         const operationStage = (task.operation_stage || '').toLowerCase();
         const isCompleted = (task.status || '').toLowerCase() === 'completed';
         
@@ -522,10 +524,11 @@
             'finalize': '完成'
         };
         
-        // 构建阶段步骤，根据 operation_stage 动态设置状态
+        // 构建阶段步骤，优先使用后端返回的 stage_steps（基于内存变量）
         let stageSteps = [];
         
-        // 如果后端已经提供了 stage_steps，先使用后端的（但需要转换 status 为 state）
+        // 如果后端已经提供了 stage_steps，优先使用后端的（这些是基于内存变量构建的）
+        // 后端的 stage_steps 已经根据内存变量动态更新了标签（如"预分组中"、"写入磁带中"等）
         if (Array.isArray(task.stage_steps) && task.stage_steps.length > 0) {
             // 转换后端的 status 字段为前端的 state 字段
             stageSteps = task.stage_steps.map(step => {
@@ -534,15 +537,29 @@
                 let state = step.state || step.status || 'pending';
                 if (state === 'completed') state = 'done';
                 if (state === 'active') state = 'current';
+                
+                // 优先使用后端返回的 label（基于内存变量动态构建，如"预分组中"、"分组完成"、"写入磁带中"等）
+                let label = step.label || stageLabels[step.code] || step.code;
+                
+                // 特殊处理：如果 prefetch 阶段的状态是 completed/done，确保显示"分组完成"
+                if (step.code === 'prefetch' && (state === 'done' || step.status === 'completed')) {
+                    // 如果后端返回的 label 不是"分组完成"，则更新为"分组完成"
+                    if (!label.includes('分组完成') && !label.includes('完成')) {
+                        label = '分组完成';
+                    }
+                }
+                
                 return {
                     code: step.code,
-                    label: step.label,
+                    label: label,
                     state: state
                 };
             });
+            // 使用后端返回的 stage_steps，不再需要自己构建
+            // 这些步骤已经根据内存变量（scan_status, operation_stage等）动态更新
         }
         
-        // 如果后端没有提供 stage_steps 或为空，根据 operation_stage 动态构建
+        // 如果后端没有提供 stage_steps 或为空，根据 operation_stage 动态构建（回退方案）
         if (stageSteps.length === 0 && operationStage) {
             if (isCompleted) {
                 // 完成状态：所有阶段都是 done，finalize 是 current
@@ -575,15 +592,36 @@
                         }
                         
                         let label = stageLabels[code] || code;
-                        // 根据状态调整标签
-                        if (code === 'scan' && isScanCompleted) {
+                        // 根据状态调整标签（优先使用后端返回的 operation_stage_label）
+                        if (code === operationStage && task.operation_stage_label) {
+                            // 如果当前阶段有后端返回的标签（基于内存变量），优先使用
+                            label = task.operation_stage_label;
+                        } else if (code === 'scan' && isScanCompleted) {
                             label = '扫描完成';
                         } else if (code === 'prefetch') {
-                            // 预分组：如果已开始压缩或已完成，显示"分组完成"
-                            if (index < currentIndex || (isScanCompleted && currentIndex > index)) {
+                            // 预分组：根据当前阶段和状态动态显示
+                            if (index < currentIndex) {
+                                // 预分组已完成（已进入下一阶段），显示"分组完成"
+                                label = '分组完成';
+                            } else if (code === operationStage) {
+                                // 当前正在预分组，检查 operation_status 判断是否完成
+                                const operationStatus = (task.operation_status || '').toLowerCase();
+                                if (operationStatus.includes('分组完成')) {
+                                    label = '分组完成';
+                                } else {
+                                    label = '预分组中';
+                                }
+                            } else if (isScanCompleted && currentIndex > index) {
+                                // 扫描完成且预分组已完成，显示"分组完成"
                                 label = '分组完成';
                             } else {
                                 label = '预分组';
+                            }
+                        } else if (code === 'copy') {
+                            // 写入磁带：根据当前阶段动态显示
+                            if (code === operationStage) {
+                                // 当前正在写入磁带，显示"写入磁带中"
+                                label = '写入磁带中';
                             }
                         }
                         
@@ -623,7 +661,26 @@
                         <small class="text-success"><strong>${currentStageLabel}</strong></small>
                     </div>
                     <div class="d-flex flex-wrap gap-1 mt-1">
-                        ${stageSteps.map(step => `<span class="badge ${getCompletedStageBadgeClass(step.state, step.code, task)}">${step.label}</span>`).join('')}
+                        ${stageSteps.map(step => {
+                            // 特殊处理：finalize 阶段正在写入磁带时，copy 阶段应该亮起
+                            let badgeClass = getCompletedStageBadgeClass(step.state, step.code, task);
+                            if (step.code === 'copy' && operationStage === 'finalize') {
+                                // 检查是否正在写入磁带
+                                const operationStatus = (task.operation_status || '').toLowerCase();
+                                const isWritingToTape = operationStatus.includes('写入') || 
+                                                       operationStatus.includes('复制') ||
+                                                       operationStatus.includes('向磁带');
+                                
+                                if (isWritingToTape) {
+                                    // 正在写入磁带，copy 阶段亮起（红色脉冲）
+                                    badgeClass = 'bg-danger text-white pulse-badge';
+                                } else {
+                                    // 写入完成，copy 阶段熄灭（灰色）
+                                    badgeClass = 'bg-secondary';
+                                }
+                            }
+                            return `<span class="badge ${badgeClass}">${step.label}</span>`;
+                        }).join('')}
                     </div>
                 `;
                 body.appendChild(stageSection);
@@ -717,7 +774,26 @@
                         ${stageSteps.map(step => {
                             // 如果是当前阶段且有进度信息，传递进度百分比
                             const progress = (step.state === 'current' && progressPercent !== null) ? progressPercent : null;
-                            return `<span class="badge ${getStageBadgeClass(step.state, step.code, progress, task)}">${step.label}</span>`;
+                            
+                            // 特殊处理：finalize 阶段正在写入磁带时，copy 阶段应该亮起
+                            let badgeClass = getStageBadgeClass(step.state, step.code, progress, task);
+                            if (step.code === 'copy' && operationStage === 'finalize') {
+                                // 检查是否正在写入磁带
+                                const operationStatus = (task.operation_status || '').toLowerCase();
+                                const isWritingToTape = operationStatus.includes('写入') || 
+                                                       operationStatus.includes('复制') ||
+                                                       operationStatus.includes('向磁带');
+                                
+                                if (isWritingToTape) {
+                                    // 正在写入磁带，copy 阶段亮起（红色脉冲）
+                                    badgeClass = 'bg-danger text-white pulse-badge';
+                                } else {
+                                    // 写入完成，copy 阶段熄灭（灰色）
+                                    badgeClass = 'bg-secondary';
+                                }
+                            }
+                            
+                            return `<span class="badge ${badgeClass}">${step.label}</span>`;
                         }).join('')}
                     </div>
                 `;
@@ -862,7 +938,20 @@
                 })));
             }
             
-            // 清空容器
+            // 清空容器（但保留已完成任务的卡片）
+            const existingCards = Array.from(dom.runningList.children);
+            const existingTaskIds = new Set();
+            existingCards.forEach(card => {
+                // 检查卡片本身或卡片内的元素是否有任务ID
+                const taskIdAttr = card.getAttribute('data-task-id') ||
+                                   card.querySelector('[data-task-id]')?.getAttribute('data-task-id') ||
+                                   card.querySelector('[data-task-speed]')?.getAttribute('data-task-speed');
+                if (taskIdAttr) {
+                    existingTaskIds.add(parseInt(taskIdAttr, 10));
+                }
+            });
+            
+            // 清空容器，但稍后会重新添加需要显示的任务
             dom.runningList.innerHTML = '';
             const tasks = [];
             
@@ -893,14 +982,45 @@
                 }
             }
             
+            // 检查任务状态，标记已完成的任务
+            tasks.forEach(task => {
+                const taskId = task.task_id || task.id;
+                const taskStatus = (task.status || '').toLowerCase();
+                if (taskStatus === 'completed' && taskId) {
+                    completedTaskIds.add(taskId);
+                }
+            });
+            
             console.log('loadRunningTasks: total tasks to display:', tasks.length);
             console.log('loadRunningTasks: tasks data:', tasks);
+            console.log('loadRunningTasks: completed task IDs:', Array.from(completedTaskIds));
             
             if (tasks.length === 0) {
-                dom.runningList.innerHTML = '<div class="col-12"><p class="text-muted">暂无运行中的任务和最近失败的任务</p></div>';
+                // 如果没有新任务，但有待显示已完成的任务卡片，保留它们
+                if (existingCards.length > 0) {
+                    existingCards.forEach(card => {
+                        const taskIdAttr = card.getAttribute('data-task-id') ||
+                                           card.querySelector('[data-task-id]')?.getAttribute('data-task-id') ||
+                                           card.querySelector('[data-task-speed]')?.getAttribute('data-task-speed');
+                        if (taskIdAttr) {
+                            const taskId = parseInt(taskIdAttr, 10);
+                            // 只保留已完成的任务卡片
+                            if (completedTaskIds.has(taskId)) {
+                                dom.runningList.appendChild(card);
+                            }
+                        }
+                    });
+                    if (dom.runningList.children.length === 0) {
+                        dom.runningList.innerHTML = '<div class="col-12"><p class="text-muted">暂无运行中的任务和最近失败的任务</p></div>';
+                    }
+                } else {
+                    dom.runningList.innerHTML = '<div class="col-12"><p class="text-muted">暂无运行中的任务和最近失败的任务</p></div>';
+                }
             } else {
-                // 验证并创建卡片
+                // 验证并创建/更新卡片
                 let cardsCreated = 0;
+                const processedTaskIds = new Set();
+                
                 tasks.forEach((task, index) => {
                     try {
                         // 验证任务数据是否完整
@@ -915,6 +1035,27 @@
                             return;
                         }
                         
+                        const taskId = task.task_id || task.id;
+                        const taskStatus = (task.status || '').toLowerCase();
+                        
+                        // 如果任务已完成且已经在 completedTaskIds 中，且已有卡片存在，则跳过刷新
+                        if (taskStatus === 'completed' && taskId && completedTaskIds.has(taskId)) {
+                            // 查找是否已有该任务的卡片
+                            const existingCard = existingCards.find(card => {
+                                const cardTaskId = card.getAttribute('data-task-id') ||
+                                                  card.querySelector('[data-task-id]')?.getAttribute('data-task-id') ||
+                                                  card.querySelector('[data-task-speed]')?.getAttribute('data-task-speed');
+                                return cardTaskId && parseInt(cardTaskId, 10) === taskId;
+                            });
+                            
+                            if (existingCard) {
+                                // 保留现有卡片，不刷新
+                                dom.runningList.appendChild(existingCard);
+                                processedTaskIds.add(taskId);
+                                return;
+                            }
+                        }
+                        
                         // 如果没有 task_name，尝试使用 task_id 或 id 作为名称
                         if (!task.task_name) {
                             if (task.task_id) {
@@ -927,8 +1068,13 @@
                         // 使用 createRunningCard 创建卡片元素
                         const card = createRunningCard(task);
                         if (card && card.nodeType === 1) { // 检查是否是有效的DOM元素
+                            // 为卡片添加 data-task-id 属性，便于后续识别
+                            if (taskId) {
+                                card.setAttribute('data-task-id', taskId);
+                            }
                             dom.runningList.appendChild(card);
                             cardsCreated++;
+                            processedTaskIds.add(taskId);
                         } else {
                             console.error('loadRunningTasks: createRunningCard returned invalid element for task:', task);
                             console.error('loadRunningTasks: card value:', card);
@@ -940,8 +1086,22 @@
                     }
                 });
                 
+                // 保留其他已完成任务的卡片（如果它们不在当前任务列表中）
+                existingCards.forEach(card => {
+                    const taskIdAttr = card.getAttribute('data-task-id') ||
+                                       card.querySelector('[data-task-id]')?.getAttribute('data-task-id') ||
+                                       card.querySelector('[data-task-speed]')?.getAttribute('data-task-speed');
+                    if (taskIdAttr) {
+                        const taskId = parseInt(taskIdAttr, 10);
+                        // 如果该任务已完成且不在当前处理的任务列表中，保留其卡片
+                        if (completedTaskIds.has(taskId) && !processedTaskIds.has(taskId)) {
+                            dom.runningList.appendChild(card);
+                        }
+                    }
+                });
+                
                 // 如果没有创建任何卡片，显示提示
-                if (cardsCreated === 0 && tasks.length > 0) {
+                if (cardsCreated === 0 && tasks.length > 0 && dom.runningList.children.length === 0) {
                     console.error('loadRunningTasks: 有任务但无法创建卡片，任务数据:', tasks);
                     dom.runningList.innerHTML = '<div class="col-12"><p class="text-warning">无法生成任务卡片，请检查控制台错误信息</p></div>';
                 }
@@ -1107,13 +1267,20 @@
         if (!confirm('确定要立即运行此计划任务吗？')) return;
         
         try {
-            await fetchJSON(`/api/scheduler/tasks/${taskId}/run`, { method: 'POST' });
+            const result = await fetchJSON(`/api/scheduler/tasks/${taskId}/run`, { method: 'POST' });
+            // 检查返回的 success 字段
+            if (result && result.success === false) {
+                const errorMsg = result.message || result.detail || '任务运行失败';
+                alert('运行任务失败: ' + errorMsg);
+                return;
+            }
             alert('任务已提交运行');
             loadRunningTasks();
             loadAllTasks();
         } catch (error) {
             console.error('运行任务失败:', error);
-            alert('运行任务失败: ' + (error.message || '未知错误'));
+            const errorMsg = error.message || '未知错误';
+            alert('运行任务失败: ' + errorMsg);
         }
     }
 
