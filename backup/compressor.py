@@ -1176,27 +1176,6 @@ class Compressor:
             
             # 从系统配置获取线程数（基础配置）
             compression_threads = int(getattr(self.settings, "COMPRESSION_THREADS", 4))
-
-            # 判断是否在扫描阶段（扫描未完成）
-            # 策略：扫描阶段线程数 -1，扫描结束后恢复正常线程数
-            is_scanning_phase = False
-            try:
-                # 优先从内存对象获取，如果没有则从数据库查询
-                scan_status = getattr(backup_task, "scan_status", None)
-                if not scan_status and backup_task.id:
-                    try:
-                        from backup.backup_db import BackupDB
-                        backup_db = BackupDB()
-                        scan_status = await backup_db.get_scan_status(backup_task.id)
-                    except Exception:
-                        pass
-                
-                # 如果扫描未完成，认为是在扫描阶段
-                if scan_status not in (None, "completed"):
-                    is_scanning_phase = True
-            except Exception as e:
-                # 即使无法获取 scan_status，也不影响压缩主流程
-                logger.debug(f"[压缩配置] 获取 scan_status 时出错，使用默认配置: {e}")
             
             # 从系统配置获取7-Zip命令行线程数
             # 优先使用 COMPRESSION_COMMAND_THREADS，如果没有设置则使用 WEB_WORKERS，最后回退到 COMPRESSION_THREADS
@@ -1240,21 +1219,6 @@ class Compressor:
             except (ValueError, TypeError):
                 logger.warning(f"zstd_threads 值无效: {zstd_threads}，使用默认值 {compression_threads}")
                 zstd_threads = int(compression_threads)
-            
-            # 扫描阶段：线程数 -1；扫描结束后：恢复正常线程数
-            if is_scanning_phase:
-                adjusted_zstd_threads = max(1, zstd_threads - 1)
-                if adjusted_zstd_threads != zstd_threads:
-                    logger.info(
-                        f"[压缩配置] 扫描阶段（scan_status={scan_status}），"
-                        f"将 zstd 线程数从 {zstd_threads} 降为 {adjusted_zstd_threads}"
-                    )
-                    zstd_threads = adjusted_zstd_threads
-            else:
-                logger.debug(
-                    f"[压缩配置] 扫描已完成（scan_status=completed），"
-                    f"使用正常 zstd 线程数: {zstd_threads}"
-                )
             
             # 计算内存需求：内存需求 ≈ 字典大小 × 线程数 × 1.5（安全系数）
             # 解析字典大小（支持格式：64m, 128m, 512m, 1g, 2g等）
