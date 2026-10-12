@@ -1,5 +1,14 @@
 # 更新日志
 
+## [0.6.8] - 2026-10-12
+
+### 修复
+
+- 修复磁带格式化完成后 "Task was destroyed but it is pending" 及连接池事务异常：
+  tape_handler/backup_engine 中 9 处审计日志改为直接 await（原为 fire-and-forget
+  的 create_task，线程事件循环关闭时任务被销毁，导致审计记录回滚丢失、连接进入
+  UNKNOWN 状态）；prepare_tape_thread 关闭事件循环前排空残留任务兜底
+
 ## [0.6.7] - 2026-10-12
 
 ### 修复

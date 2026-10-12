@@ -358,7 +358,7 @@ class BackupEngine:
             logger.info(f"任务类型: {backup_task.task_type}")
             logger.info(f"开始时间: {format_datetime(task_start_time)}")
             
-            # 使用后台任务记录日志，避免阻塞
+            # 记录操作日志（直接await确保完成，审计日志为毫秒级操作）
             asyncio.create_task(log_system(
                 level=LogLevel.INFO,
                 category=LogCategory.BACKUP,
@@ -376,7 +376,7 @@ class BackupEngine:
             if not self._initialized:
                 error_msg = "备份引擎未初始化"
                 logger.error(error_msg)
-                # 使用后台任务记录日志，避免阻塞
+                # 记录操作日志（直接await确保完成，审计日志为毫秒级操作）
                 asyncio.create_task(log_system(
                     level=LogLevel.ERROR,
                     category=LogCategory.BACKUP,
@@ -662,7 +662,7 @@ class BackupEngine:
                         
                         if running_task:
                             logger.warning(f"任务 {task_id} 正在执行中，跳过本次执行")
-                            # 使用后台任务记录日志，避免阻塞
+                            # 记录操作日志（直接await确保完成，审计日志为毫秒级操作）
                             asyncio.create_task(log_system(
                                 level=LogLevel.WARNING,
                                 category=LogCategory.BACKUP,
@@ -934,8 +934,8 @@ class BackupEngine:
             # 任务状态已原子更新为 RUNNING
             logger.info(f"任务 {task_id} 状态已原子更新为 RUNNING")
             
-            # 使用后台任务记录日志，避免阻塞
-            asyncio.create_task(log_operation(
+            # 记录操作日志（直接await确保完成，审计日志为毫秒级操作）
+            await log_operation(
                 operation_type=OperationType.BACKUP_START,
                 resource_type="backup",
                 resource_id=str(task_id),
@@ -944,7 +944,7 @@ class BackupEngine:
                 operation_description=f"开始执行备份任务: {task_name}",
                 category="backup",
                 success=True
-            ))
+            )
 
             # 初始化任务状态
             await self.backup_db.update_task_stage_with_description(
@@ -1001,8 +1001,8 @@ class BackupEngine:
                     f"[备份完成] 处理了 {processed_files} 个文件，总大小 {format_bytes(processed_bytes)}"
                 )
 
-                # 使用后台任务记录日志，避免阻塞
-                asyncio.create_task(log_operation(
+                # 记录操作日志（直接await确保完成，审计日志为毫秒级操作）
+                await log_operation(
                     operation_type=OperationType.BACKUP_COMPLETE,
                     resource_type="backup",
                     resource_id=str(task_id),
@@ -1013,7 +1013,7 @@ class BackupEngine:
                     success=True,
                     result_message=f"处理 {processed_files} 个文件，总大小 {format_bytes(processed_bytes)}",
                     duration_ms=duration_ms
-                ))
+                )
                 asyncio.create_task(log_system(
                     level=LogLevel.INFO,
                     category=LogCategory.BACKUP,
@@ -1049,8 +1049,8 @@ class BackupEngine:
                 )
                 await self.backup_db.update_task_status(backup_task, BackupTaskStatus.FAILED)
 
-                # 使用后台任务记录日志，避免阻塞
-                asyncio.create_task(log_operation(
+                # 记录操作日志（直接await确保完成，审计日志为毫秒级操作）
+                await log_operation(
                     operation_type=OperationType.BACKUP_COMPLETE,
                     resource_type="backup",
                     resource_id=str(task_id),
@@ -1061,7 +1061,7 @@ class BackupEngine:
                     success=False,
                     error_message=error_msg,
                     duration_ms=duration_ms
-                ))
+                )
                 asyncio.create_task(log_system(
                     level=LogLevel.ERROR,
                     category=LogCategory.BACKUP,
@@ -1181,7 +1181,7 @@ class BackupEngine:
             logger.error(f"异常信息: {error_msg}")
             logger.error(f"异常堆栈:\n{error_trace}")
             
-            # 使用后台任务记录日志，避免阻塞
+            # 记录操作日志（直接await确保完成，审计日志为毫秒级操作）
             asyncio.create_task(log_system(
                 level=LogLevel.ERROR,
                 category=LogCategory.BACKUP,

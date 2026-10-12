@@ -364,6 +364,20 @@ async def create_tape(request: CreateTapeRequest, http_request: Request, backgro
                         except Exception as notify_error:
                             logger.error(f"发送磁带格式化失败钉钉通知异常: {str(notify_error)}")
                 finally:
+                    # 关闭前排空未完成的异步任务（如审计日志写入），
+                    # 避免任务被销毁时出现 "Task was destroyed but it is pending"
+                    try:
+                        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+                        if pending:
+                            logger.debug(f"[LTFS格式化] 等待 {len(pending)} 个残留异步任务完成...")
+                            loop.run_until_complete(
+                                asyncio.wait_for(
+                                    asyncio.gather(*pending, return_exceptions=True),
+                                    timeout=10.0
+                                )
+                            )
+                    except Exception as drain_err:
+                        logger.warning(f"[LTFS格式化] 排空残留任务失败（忽略）: {drain_err}")
                     loop.close()
 
             except Exception as e:

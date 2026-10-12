@@ -422,7 +422,7 @@ class TapeHandler:
                 try:
                     from utils.log_utils import log_operation
                     from models.system_log import OperationType
-                    asyncio.create_task(log_operation(
+                    await log_operation(
                         operation_type=OperationType.TAPE_FORMAT,
                         resource_type="tape",
                         resource_name=volume_name or "",
@@ -430,7 +430,7 @@ class TapeHandler:
                         operation_description=f"磁带格式化成功: 卷名={volume_name}, 序列号={serial}",
                         category="tape",
                         success=True,
-                    ))
+                    )
                 except Exception:
                     pass
 
@@ -595,14 +595,14 @@ class TapeHandler:
             try:
                 from utils.log_utils import log_operation
                 from models.system_log import OperationType
-                asyncio.create_task(log_operation(
+                await log_operation(
                     operation_type=OperationType.TAPE_UNMOUNT,
                     resource_type="tape",
                     operation_name="磁带卸载",
                     operation_description=msg,
                     category="tape",
                     success=success,
-                ))
+                )
             except Exception:
                 pass
             return success
@@ -680,14 +680,14 @@ class TapeHandler:
                         try:
                             from utils.log_utils import log_operation
                             from models.system_log import OperationType
-                            asyncio.create_task(log_operation(
+                            await log_operation(
                                 operation_type=OperationType.TAPE_MOUNT,
                                 resource_type="tape",
                                 operation_name="磁带挂载",
                                 operation_description=f"磁带挂载成功（第{attempt}次尝试）",
                                 category="tape",
                                 success=True,
-                            ))
+                            )
                         except Exception:
                             pass
                         return True, f"挂载成功（第{attempt}次尝试）"
@@ -701,14 +701,14 @@ class TapeHandler:
                             try:
                                 from utils.log_utils import log_operation
                                 from models.system_log import OperationType
-                                asyncio.create_task(log_operation(
+                                await log_operation(
                                     operation_type=OperationType.TAPE_MOUNT,
                                     resource_type="tape",
                                     operation_name="磁带挂载",
                                     operation_description=f"磁带挂载成功（第{attempt}次尝试，daemon化退出）",
                                     category="tape",
                                     success=True,
-                                ))
+                                )
                             except Exception:
                                 pass
                             return True, f"挂载成功（第{attempt}次尝试）"
@@ -730,14 +730,14 @@ class TapeHandler:
                     try:
                         from utils.log_utils import log_operation
                         from models.system_log import OperationType
-                        asyncio.create_task(log_operation(
+                        await log_operation(
                             operation_type=OperationType.TAPE_MOUNT,
                             resource_type="tape",
                             operation_name="磁带挂载",
                             operation_description=f"磁带挂载成功（第{attempt}次尝试，延迟检测）",
                             category="tape",
                             success=True,
-                        ))
+                        )
                     except Exception:
                         pass
                     return True, f"挂载成功（第{attempt}次尝试，延迟检测）"
@@ -1010,7 +1010,7 @@ class TapeHandler:
                         try:
                             from utils.log_utils import log_operation
                             from models.system_log import OperationType
-                            asyncio.create_task(log_operation(
+                            await log_operation(
                                 operation_type=OperationType.TAPE_SCAN,
                                 resource_type="tape",
                                 resource_name=tape_id,
@@ -1018,7 +1018,7 @@ class TapeHandler:
                                 operation_description=f"从驱动器扫描到磁带卷标: {tape_id}",
                                 category="tape",
                                 success=True,
-                            ))
+                            )
                         except Exception:
                             pass
 
