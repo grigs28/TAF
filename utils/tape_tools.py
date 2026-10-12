@@ -26,7 +26,15 @@ class TapeToolsManager:
     def __init__(self):
         self.settings = get_settings()
         self.device_path = getattr(self.settings, 'TAPE_DEVICE_PATH', '/dev/nst0')
-        self.ltfs_device = getattr(self.settings, 'LTFS_DEVICE_PATH', '/dev/sg3')
+        # 优先动态解析磁带机的 sg 设备（sg 编号随重启漂移），失败回退配置
+        try:
+            from utils.ltfs_ops import resolve_ltfs_sg_device
+            self.ltfs_device = (
+                resolve_ltfs_sg_device(self.settings, self.device_path)
+                or getattr(self.settings, 'LTFS_DEVICE_PATH', '/dev/sg3')
+            )
+        except Exception:
+            self.ltfs_device = getattr(self.settings, 'LTFS_DEVICE_PATH', '/dev/sg3')
         self.ltfs_mount_point = getattr(self.settings, 'LTFS_MOUNT_POINT', '/mnt/ltfs')
         self.mkltfs_path = self._find_mkltfs()
         self.ltfs_path = self._find_ltfs()

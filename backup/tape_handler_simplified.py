@@ -59,17 +59,17 @@ class TapeHandlerSimplified:
         return getattr(self.settings, 'TAPE_DRIVE_LETTER', '/dev/nst0')
 
     def _get_ltfs_device(self) -> str:
+        # 优先通过 sysfs 动态解析磁带机的 sg 设备（sg 编号随重启漂移），
+        # 失败才回退配置值
+        from utils.ltfs_ops import resolve_ltfs_sg_device
+
+        resolved = resolve_ltfs_sg_device(self.settings, self._get_tape_device())
+        if resolved:
+            return resolved
         ltfs_device = getattr(self.settings, 'LTFS_DEVICE_PATH', None)
         if ltfs_device:
             return ltfs_device
-        tape_device = self._get_tape_device()
-        if tape_device.startswith('/dev/nst') or tape_device.startswith('/dev/st'):
-            import os
-            for i in range(10):
-                sg_path = f'/dev/sg{i}'
-                if os.path.exists(sg_path):
-                    return sg_path
-        return tape_device
+        return self._get_tape_device()
 
     def _get_ltfs_mount_point(self) -> Path:
         mount_point = getattr(self.settings, 'LTFS_MOUNT_POINT', DEFAULT_LTFS_MOUNT)

@@ -547,11 +547,12 @@ async def prepare_tape(request: PrepareTapeRequest):
 
         operator = get_tape_operator()
 
-        # 确定LTFS设备路径
+        # 确定LTFS设备路径（优先动态解析磁带机的 sg 设备，避免 sg 编号漂移）
         ltfs_device = request.ltfs_device
         if not ltfs_device:
             settings = get_settings()
-            ltfs_device = getattr(settings, 'LTFS_DEVICE_PATH', None)
+            from utils.ltfs_ops import resolve_ltfs_sg_device
+            ltfs_device = resolve_ltfs_sg_device(settings) or getattr(settings, 'LTFS_DEVICE_PATH', None)
 
         # 执行准备流程
         result = operator.check_and_prepare_tape_sync(

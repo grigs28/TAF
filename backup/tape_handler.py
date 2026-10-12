@@ -64,29 +64,28 @@ class TapeHandler:
     def _get_ltfs_device(self) -> str:
         """获取 LTFS 挂载使用的设备路径（SCSI generic 设备）
 
-        LTFS 需要 SCSI generic 设备（/dev/sg*），而不是 tape 设备（/dev/nst*）
+        LTFS 需要 SCSI generic 设备（/dev/sg*），而不是 tape 设备（/dev/nst*）。
+        优先通过 sysfs 从磁带机动态解析 sg 节点——/dev/sgN 编号会随重启漂移，
+        配置中的 LTFS_DEVICE_PATH 可能是过期值（曾因此导致格式化失败）。
+        解析失败时才回退到配置值。
         """
-        # 优先使用专用配置
+        from utils.ltfs_ops import resolve_ltfs_sg_device
+
+        resolved = resolve_ltfs_sg_device(self.settings, self._get_tape_device())
         ltfs_device = getattr(self.settings, 'LTFS_DEVICE_PATH', None)
+        if resolved:
+            if ltfs_device and ltfs_device != resolved:
+                logger.warning(
+                    f"[LTFS] 配置 LTFS_DEVICE_PATH={ltfs_device} 与磁带机实际 sg 设备 "
+                    f"{resolved} 不一致，使用动态解析结果（建议更新配置）"
+                )
+            return resolved
+
+        # 动态解析失败，回退到配置值
         if ltfs_device:
             return ltfs_device
 
-        # 如果没有配置，通过 sysfs 找到对应的 sg 设备
-        tape_device = self._get_tape_device()
-        if tape_device.startswith('/dev/nst') or tape_device.startswith('/dev/st'):
-            import os
-            # 从 /dev/nst0 提取设备名 nst0
-            dev_name = os.path.basename(tape_device)
-            # 通过 sysfs 查找对应的 SCSI generic 设备
-            # /sys/class/scsi_tape/nst0/device/generic -> scsi_generic/sg2
-            generic_path = f'/sys/class/scsi_tape/{dev_name}/device/generic'
-            if os.path.exists(generic_path):
-                sg_name = os.path.basename(os.readlink(generic_path))
-                logger.info(f"自动检测 LTFS 设备: {tape_device} -> /dev/{sg_name}")
-                return f'/dev/{sg_name}'
-            logger.warning(f"无法通过 sysfs 找到 {tape_device} 对应的 sg 设备")
-
-        return tape_device
+        return self._get_tape_device()
 
     def _get_ltfs_mount_point(self) -> Path:
         """获取 LTFS 挂载点"""

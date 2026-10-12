@@ -247,8 +247,15 @@ class LinuxTapeOperator:
         Returns:
             包含 success, stdout, stderr, returncode 的字典
         """
-        # 优先使用 LTFS 专用设备路径（SCSI generic 设备）
-        dev = getattr(self.settings, 'LTFS_DEVICE_PATH', None) or device_path or self.device_path
+        # 优先通过 sysfs 动态解析磁带机的 sg 设备（/dev/sgN 编号随重启漂移，
+        # LTFS_DEVICE_PATH 配置可能是过期值），失败才回退配置
+        dev = None
+        try:
+            from utils.ltfs_ops import resolve_ltfs_sg_device
+            dev = resolve_ltfs_sg_device(self.settings, device_path or self.device_path)
+        except Exception as e:
+            logger.debug(f"[同步] sg 设备动态解析失败（回退配置）: {e}")
+        dev = dev or getattr(self.settings, 'LTFS_DEVICE_PATH', None) or device_path or self.device_path
         logger.info(f"[同步] LTFS 格式化磁带: {dev}")
 
         def report_progress(msg):

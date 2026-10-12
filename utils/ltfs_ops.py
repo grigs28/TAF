@@ -21,11 +21,55 @@ https://www.ibm.com/docs/en/storage-archive-sde/2.4.7?topic=systems-unmounting-t
 
 import asyncio
 import logging
+import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_ltfs_sg_device(settings=None, tape_device: str = None) -> Optional[str]:
+    """通过 sysfs 从磁带设备动态解析对应的 SCSI generic(sg) 设备路径。
+
+    /dev/sgN 的编号会随系统重启/设备枚举顺序漂移（本次格式化失败的根因：
+    重启后磁带从 sg2 变成 sg1，而配置写死 sg2）。sysfs 映射
+    /sys/class/scsi_tape/<st设备>/device/generic 由内核 st 驱动维护，
+    是当前磁带机 sg 节点的权威配对，始终准确。
+
+    Args:
+        settings: 配置对象（读取 TAPE_DEVICE_PATH / TAPE_DRIVE_LETTER）
+        tape_device: 优先使用的磁带设备路径（如 /dev/nst0）
+
+    Returns:
+        解析成功返回 "/dev/sgN"；失败返回 None（调用方回退配置值）
+    """
+    candidates = []
+    if tape_device:
+        candidates.append(tape_device)
+    if settings is not None:
+        for attr in ('TAPE_DEVICE_PATH', 'TAPE_DRIVE_LETTER'):
+            dev = getattr(settings, attr, None)
+            if dev and dev not in candidates:
+                candidates.append(dev)
+    candidates.extend(['/dev/nst0', '/dev/st0'])
+
+    for dev in candidates:
+        m = re.match(r'^/dev/(n?st\d+)', str(dev))
+        if not m:
+            continue
+        st_name = m.group(1)
+        generic = f'/sys/class/scsi_tape/{st_name}/device/generic'
+        try:
+            if os.path.exists(generic):
+                sg_path = f'/dev/{os.path.basename(os.readlink(generic))}'
+                if os.path.exists(sg_path):
+                    logger.info(f"[LTFS] sg 设备动态解析: {dev} -> {sg_path}")
+                    return sg_path
+        except OSError:
+            continue
+    return None
 
 
 async def safe_unmount_ltfs(

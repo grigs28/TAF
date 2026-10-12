@@ -1,5 +1,15 @@
 # 更新日志
 
+## [0.6.7] - 2026-10-12
+
+### 修复
+
+- 修复重启后磁带格式化失败（LTFS15009E Cannot open device）：/dev/sgN 编号随设备枚举漂移，
+  LTFS 设备获取统一改为优先通过 sysfs（/sys/class/scsi_tape/*/device/generic）从磁带机
+  动态解析真实 sg 节点，解析失败才回退 LTFS_DEVICE_PATH 配置值；覆盖 tape_handler、
+  tape_handler_simplified、linux_tape 格式化、tape_tools、web 工具页五个出口，
+  配置与实际不一致时输出警告日志提示更新配置
+
 ## [0.6.6] - 2026-10-08
 
 ### 运维
