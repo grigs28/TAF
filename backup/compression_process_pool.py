@@ -49,7 +49,8 @@ def _compress_worker_entry(payload: Dict[str, Any]):
                 self._progress_q.put({'a': name, 'v': value})
 
     task = _ShimTask(payload.get('progress_queue'))
-    compress_progress = payload.get('compress_progress') or _ProgressDict(payload.get('progress_queue'), payload.get('compress_progress'))
+    # 必须使用代理字典：or 短路时非空原字典会导致泵完全失效（进度始终为 0）
+    compress_progress = _ProgressDict(payload.get('progress_queue'), payload.get('compress_progress'))
     try:
         result = _compress_with_zstd_cli(
             payload['archive_path'],
