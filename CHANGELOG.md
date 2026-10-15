@@ -1,5 +1,15 @@
 # 更新日志
 
+## [0.8.7] - 2026-10-16
+
+### 重构
+
+- 拆分 compressor.py（2049 行 → 821 行）：压缩算法实现按模块独立——
+  compress_helpers.py（公共辅助）、compress_7zip.py、compress_pgzip.py、
+  compress_tar.py、compress_zstd.py；compressor.py 保留 Compressor 类并
+  re-export 全部符号，既有 import 零改动。本地验证与拆分前行为等价
+  （结果字典/归档清单/压缩产物一致），纯搬迁无逻辑变更
+
 ## [0.8.6] - 2026-10-15
 
 ### 改进
