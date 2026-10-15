@@ -165,6 +165,18 @@ const SchedulerManager = {
                 return;
             }
 
+            // 停止按钮（任务运行中时替换"立即运行"显示）
+            if (button.classList.contains('btn-action-stop')) {
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+                const taskId = parseInt(button.getAttribute('data-task-id'));
+                if (!isNaN(taskId)) {
+                    this.stopTask(taskId);
+                }
+                return;
+            }
+
             // 禁用按钮
             if (button.classList.contains('btn-action-disable')) {
                 e.preventDefault();
@@ -762,6 +774,22 @@ const SchedulerManager = {
         }
     },
     
+    /**
+     * 停止任务（运行中的计划任务）
+     */
+    async stopTask(taskId) {
+        try {
+            if (!confirm('确定要停止正在运行的计划任务吗？')) {
+                return;
+            }
+            await SchedulerAPI.stopTask(taskId);
+            await this.loadTasks();
+            // SchedulerAPI.stopTask 已经显示 alert，这里不需要重复
+        } catch (error) {
+            console.error('停止任务失败:', error);
+        }
+    },
+
     /**
      * 解锁任务
      */

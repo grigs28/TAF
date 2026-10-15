@@ -169,6 +169,27 @@ export class SchedulerAPI {
     }
     
     /**
+     * 停止任务（运行中的计划任务）
+     */
+    static async stopTask(taskId) {
+        try {
+            const result = await fetchJSON(`/api/scheduler/tasks/${taskId}/stop`, { method: 'POST' });
+            if (result && result.success === false) {
+                const errorMsg = result.message || result.detail || '停止任务失败';
+                alert('停止任务失败: ' + errorMsg);
+                throw new Error(errorMsg);
+            }
+            alert('任务已停止');
+            return true;
+        } catch (error) {
+            console.error('停止任务失败:', error);
+            const errorMsg = error.message || '未知错误';
+            alert('停止任务失败: ' + errorMsg);
+            throw error;
+        }
+    }
+
+    /**
      * 解锁任务
      */
     static async unlockTask(taskId) {

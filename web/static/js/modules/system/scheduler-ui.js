@@ -56,9 +56,14 @@ export class SchedulerUI {
                             <button class="btn btn-outline-primary btn-action-edit" data-task-id="${task.id}" title="编辑">
                                 <i class="bi bi-pencil"></i>
                             </button>
-                            <button class="btn btn-outline-info btn-action-run" data-task-id="${task.id}" title="立即运行">
-                                <i class="bi bi-play-circle"></i>
-                            </button>
+                            ${task.status === 'running'
+                                ? `<button class="btn btn-outline-danger btn-action-stop" data-task-id="${task.id}" title="停止">
+                                    <i class="bi bi-stop-circle"></i>
+                                </button>`
+                                : `<button class="btn btn-outline-info btn-action-run" data-task-id="${task.id}" title="立即运行">
+                                    <i class="bi bi-play-circle"></i>
+                                </button>`
+                            }
                             <button class="btn btn-outline-secondary btn-action-unlock" data-task-id="${task.id}" title="解锁">
                                 <i class="bi bi-unlock"></i>
                             </button>
