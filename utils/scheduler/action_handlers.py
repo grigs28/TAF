@@ -674,7 +674,7 @@ class BackupActionHandler(ActionHandler):
                        compressed_bytes, backup_set_id, scan_status, scan_completed_at,
                        result_summary
                 FROM backup_tasks
-                WHERE template_id = $1 AND status <> 'completed'
+                WHERE template_id = $1 AND status NOT IN ('completed', 'interrupted', 'cancelled')
                 ORDER BY id DESC
                 LIMIT 1
                 """,

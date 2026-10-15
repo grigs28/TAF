@@ -702,6 +702,41 @@ class TaskScheduler:
             return
 
         self.running = True
+
+        # 启动时重置上次"运行中"状态：服务重启后不再续写，
+        # 运行中的任务统一清除为中断状态，等待调度器重新调度
+        try:
+            async with get_opengauss_connection() as conn:
+                backup_reset = await conn.execute(
+                    """
+                    UPDATE backup_tasks
+                    SET status = 'interrupted',
+                        error_message = COALESCE(error_message, '') || '（服务重启，运行中任务被清除，等待重新调度）'
+                    WHERE status = 'running'
+                    """
+                )
+                scheduled_reset = await conn.execute(
+                    "UPDATE scheduled_tasks SET status = 'active' WHERE status = 'running'"
+                )
+                locks_reset = await conn.execute(
+                    "UPDATE task_locks SET is_active = false WHERE is_active = true"
+                )
+
+            def _affected(result) -> int:
+                try:
+                    return int(str(result).split()[-1])
+                except (ValueError, IndexError):
+                    return 0
+
+            counts = (_affected(backup_reset), _affected(scheduled_reset), _affected(locks_reset))
+            if any(counts):
+                logger.info(
+                    f"[调度器启动] 重置上次运行中状态: 备份任务 {counts[0]} 个（标记为 interrupted）, "
+                    f"计划任务 {counts[1]} 个（恢复 active）, 任务锁 {counts[2]} 个（已释放）"
+                )
+        except Exception as e:
+            logger.warning(f"[调度器启动] 重置运行中状态失败（继续启动）: {e}")
+
         total_tasks = len(self.tasks)
         logger.info(
             f"[调度器启动] 启动计划任务调度器 - "
