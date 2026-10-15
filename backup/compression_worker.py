@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import shutil
+import time
 from typing import List, Dict, Optional, Any
 import tempfile
 
@@ -58,6 +59,7 @@ class CompressionWorker:
         self.total_original_size = 0  # 原始文件的总大小（未压缩）
         self.group_idx = 0  # 文件组索引
         self._disk_throttled = False  # 磁盘限流状态（迟滞状态机）
+        self._last_adjust_time = 0.0  # 上次并行批次调整时间（限流检查节流）
         self._disk_critical = False  # 磁盘空间危急降级状态
 
         # 并行批次设置（基础值，会在异步方法中根据扫描状态动态调整）
@@ -320,10 +322,13 @@ class CompressionWorker:
 
         while self._running:
             try:
-                # 定期检查扫描状态，动态调整并行批次数量（每10次循环检查一次，避免频繁查询）
-                if self.use_prefetcher and self.group_idx % 10 == 0:
+                # 定期（每10秒）检查扫描状态与磁盘使用率，动态调整并行批次数
+                # 注意：不能用 group_idx % N 作条件——重积压时 group_idx 长时间不变，
+                # 会导致限流检查被跳过（磁盘涨到 85% 也未触发限流）
+                if self.use_prefetcher and (time.time() - self._last_adjust_time) >= 10.0:
+                    self._last_adjust_time = time.time()
                     await self._adjust_parallel_batches()
-                
+
                 # 并发控制：如果达到并行限制，等待部分任务完成
                 if len(self.running_compression_futures) >= self.parallel_batches:
                     logger.debug(f"达到并行限制 ({self.parallel_batches})，等待部分任务完成...")
