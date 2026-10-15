@@ -233,11 +233,13 @@ async def _get_storage_trend(days: int = 365) -> List[Dict[str, Any]]:
             rows = await conn.fetch(
                 """
                 SELECT
-                    DATE_TRUNC('month', backup_time)::date as backup_month,
-                    SUM(compressed_bytes) as monthly_bytes
-                FROM backup_sets
-                WHERE backup_time >= $1
-                GROUP BY DATE_TRUNC('month', backup_time)
+                    DATE_TRUNC('month', s.backup_time)::date as backup_month,
+                    SUM(s.compressed_bytes) as monthly_bytes
+                FROM backup_sets s
+                LEFT JOIN backup_tasks t ON s.backup_task_id = t.id
+                WHERE s.backup_time >= $1
+                  AND (t.status IS NULL OR LOWER(t.status::text) NOT IN ('cancelled', 'interrupted'))
+                GROUP BY DATE_TRUNC('month', s.backup_time)
                 ORDER BY backup_month ASC
                 """,
                 start_date
@@ -254,6 +256,7 @@ async def _get_storage_trend(days: int = 365) -> List[Dict[str, Any]]:
                     WHERE is_template = FALSE
                       AND started_at >= $1
                       AND total_bytes > 0
+                      AND LOWER(status::text) NOT IN ('cancelled', 'interrupted')
                     GROUP BY DATE_TRUNC('month', started_at)
                     ORDER BY backup_month ASC
                     """,
@@ -277,8 +280,9 @@ async def _get_success_rate_statistics() -> Dict[str, Any]:
     """获取成功率统计（已完成的任务：completed=成功, failed/cancelled=未成功）"""
     try:
         async with get_opengauss_connection() as conn:
-            # 已结束的任务状态（排除 running/pending 等进行中状态）
-            finished_statuses = "('completed', 'failed', 'cancelled')"
+            # 已结束的任务状态（排除 running/pending 等进行中状态，
+            # 也排除 cancelled/interrupted 等被停止的任务——停止的任务不计入成功率与失败统计）
+            finished_statuses = "('completed', 'failed')"
 
             total = await conn.fetchval(
                 f"SELECT COUNT(*) FROM backup_tasks WHERE is_template = FALSE AND LOWER(status::text) IN {finished_statuses}"
