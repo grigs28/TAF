@@ -54,6 +54,7 @@ class SystemEnvConfig(BaseModel):
     max_file_size: Optional[int] = Field(None, description="最大文件大小（字节）")
     backup_compress_dir: Optional[str] = Field(None, description="压缩文件临时目录")
     scan_update_interval: Optional[int] = Field(None, description="后台扫描进度更新间隔（文件数）")
+    scan_engine: Optional[str] = Field(None, description="扫描引擎：nfs=优化扫描，classic=经典扫描")
     scan_log_interval_seconds: Optional[int] = Field(None, description="扫描批次进度日志的最小间隔（秒），默认60")
     scan_wait_timeout: Optional[int] = Field(None, description="等待后台扫描写入文件记录的超时时间（秒），默认300秒（5分钟）")
     scan_memory_only: Optional[bool] = Field(None, description="纯内存扫描模式，扫描阶段跳过数据库写入")
@@ -143,6 +144,7 @@ async def get_env_config():
             "max_file_size": parse_int(env_vars.get("MAX_FILE_SIZE"), 12 * 1024 * 1024 * 1024),
             "backup_compress_dir": env_vars.get("BACKUP_COMPRESS_DIR", "temp/compress"),
             "scan_update_interval": parse_int(env_vars.get("SCAN_UPDATE_INTERVAL"), 500),
+            "scan_engine": env_vars.get("SCAN_ENGINE", "nfs"),
             "scan_log_interval_seconds": parse_int(env_vars.get("SCAN_LOG_INTERVAL_SECONDS"), 60),
             "scan_wait_timeout": parse_int(env_vars.get("SCAN_WAIT_TIMEOUT"), 300),
             "scan_memory_only": parse_bool(env_vars.get("SCAN_MEMORY_ONLY"), False),
@@ -244,6 +246,10 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             updates["BACKUP_COMPRESS_DIR"] = config.backup_compress_dir
         if config.scan_update_interval is not None:
             updates["SCAN_UPDATE_INTERVAL"] = str(config.scan_update_interval)
+        if config.scan_engine is not None:
+            if config.scan_engine.lower() not in ("nfs", "classic"):
+                raise ValueError("SCAN_ENGINE 仅支持 nfs 或 classic")
+            updates["SCAN_ENGINE"] = config.scan_engine.lower()
         if config.scan_log_interval_seconds is not None:
             if config.scan_log_interval_seconds < 1:
                 raise ValueError("SCAN_LOG_INTERVAL_SECONDS 必须大于等于 1 秒")

@@ -12,13 +12,15 @@ Simple Scanner Module - Scan and write to database using the same method as test
 """
 
 import asyncio
+import fnmatch as _fnmatch_mod
 import logging
 import os
+import re
 import time
 import threading
 import queue as queue_module
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 from datetime import datetime, timezone
 
 from models.backup import BackupTask, BackupSet
@@ -42,6 +44,51 @@ async def _conditional_db_connection(use_memory_mode):
         async with get_opengauss_connection() as conn:
             actual_conn = conn._conn if hasattr(conn, '_conn') else conn
             yield conn, actual_conn
+
+
+def _compile_excludes(exclude_patterns: List[str]) -> Tuple[Optional[re.Pattern], List[str]]:
+    """预编译排除模式（NFS 扫描引擎用）
+
+    纯文件名模式（不含 '/'）合并为单个 alternation 正则，匹配 entry.name 一次即可；
+    含 '/' 的模式保留为全路径 fnmatch 列表（罕见）。
+    与 should_exclude_file 对当前"纯文件名模式集"的语义等价（POSIX 大小写敏感）。
+    """
+    name_parts = []
+    path_patterns = []
+    for p in (exclude_patterns or []):
+        p = (p or '').replace('\\', '/').strip()
+        if not p:
+            continue
+        if '/' in p:
+            path_patterns.append(p)
+        else:
+            name_parts.append(_fnmatch_mod.translate(p))
+    name_re = re.compile('|'.join(name_parts)) if name_parts else None
+    return name_re, path_patterns
+
+
+def _detect_cifs_source(paths: List[str]) -> bool:
+    """检测任一源路径是否挂在 CIFS/SMB 上（NFS 引擎对 CIFS 自动回退经典引擎）"""
+    try:
+        mounts = []
+        with open('/proc/self/mountinfo', 'r') as f:
+            for line in f:
+                parts = line.split()
+                if '-' in parts:
+                    i = parts.index('-')
+                    if i + 1 < len(parts):
+                        mounts.append((parts[4], parts[i + 1]))
+        for src in paths:
+            best, best_type = '', ''
+            for mp, fstype in mounts:
+                if src == mp or src.startswith(mp.rstrip('/') + '/'):
+                    if len(mp) > len(best):
+                        best, best_type = mp, fstype
+            if best and best_type in ('cifs', 'smb', 'smbfs', 'smb3', 'fuse.sshfs'):
+                return True
+    except Exception:
+        pass
+    return False
 
 
 class SimpleScanner:
@@ -183,12 +230,20 @@ class SimpleScanner:
             logger.warning("[简洁扫描] 没有有效的源路径")
             return
 
-        # === 阶段2: 启动同步扫描线程（os.scandir 在线程中运行，不阻塞事件循环） ===
+        # === 阶段2: 启动扫描线程（os.scandir 在线程中运行，不阻塞事件循环） ===
+        # 引擎选择：SCAN_ENGINE=nfs（默认）走优化引擎；源含 CIFS/SMB 挂载时自动回退经典引擎
+        scan_engine = str(getattr(self.settings, 'SCAN_ENGINE', 'nfs') or 'nfs').lower()
+        if scan_engine == 'nfs' and _detect_cifs_source(expanded_paths):
+            logger.info("[简洁扫描] 检测到 CIFS/SMB 源路径，NFS 引擎自动回退经典引擎")
+            scan_engine = 'classic'
+        scan_target = self._nfs_collect_files if scan_engine == 'nfs' else self._sync_collect_files
+        logger.info(f"[简洁扫描] 使用扫描引擎: {scan_engine}")
+
         batch_queue: queue_module.Queue = queue_module.Queue()
         stop_event = threading.Event()
 
         scan_thread = threading.Thread(
-            target=self._sync_collect_files,
+            target=scan_target,
             args=(expanded_paths, exclude_patterns, batch_size, batch_queue, stop_event),
             daemon=True,
             name="simple-scanner",
@@ -396,6 +451,160 @@ class SimpleScanner:
             except Exception as e:
                 logger.warning(f"[简洁扫描] 更新扫描状态为 completed 失败（忽略继续）: {e}")
     
+    def _nfs_collect_files(
+        self,
+        expanded_paths: List[str],
+        exclude_patterns: List[str],
+        batch_size: int,
+        batch_queue: queue_module.Queue,
+        stop_event: threading.Event,
+    ) -> None:
+        """NFS 优化扫描引擎（在线程中运行）
+
+        与 _sync_collect_files 队列协议/统计结构完全一致，可直接替换：
+        - 排除模式预编译为单个正则，只匹配 entry.name（每条目 1 次 regex，
+          经典实现为全路径×路径段×模式约 140 次 fnmatch）
+        - entry.stat(follow_symlinks=False) 利用 READDIRPLUS 内联属性，
+          避免逐文件 LOOKUP RPC
+        - 目录在发现时即按名字剪枝，不再进入队列
+        """
+        thread_stats = {
+            "total_scanned": 0,
+            "total_scanned_bytes": 0,
+            "excluded_count": 0,
+            "excluded_dirs": 0,
+            "excluded_bytes": 0,
+            "error_count": 0,
+            "error_dirs": 0,
+            "dirs_scanned": 0,
+            "dirs_skipped": 0,
+            "symlinks_skipped": 0,
+        }
+        name_re, path_patterns = _compile_excludes(exclude_patterns)
+        current_batch = []
+        start_time = time.time()
+        last_log_time = start_time
+        dirs_to_scan = []
+        scanned_dirs = set()
+        for sp in expanded_paths:
+            dirs_to_scan.append(sp)
+
+        def _excluded_name(name: str) -> bool:
+            return name_re is not None and name_re.match(name) is not None
+
+        def _excluded_path(pathname: str) -> bool:
+            if path_patterns:
+                for p in path_patterns:
+                    if _fnmatch_mod.fnmatch(pathname, p):
+                        return True
+            return False
+
+        def _put_batch():
+            if current_batch:
+                batch_queue.put(('batch', list(current_batch), dict(thread_stats)))
+                current_batch.clear()
+
+        try:
+            while dirs_to_scan:
+                if stop_event.is_set():
+                    break
+                current_dir = dirs_to_scan.pop(0)
+                try:
+                    current_dir_str = str(Path(current_dir).resolve())
+                except Exception:
+                    current_dir_str = str(current_dir)
+                if current_dir_str in scanned_dirs:
+                    thread_stats['dirs_skipped'] += 1
+                    continue
+                scanned_dirs.add(current_dir_str)
+                thread_stats['dirs_scanned'] += 1
+
+                # 目录级剪枝（名字或全路径命中）
+                dir_name = current_dir_str.rsplit('/', 1)[-1]
+                if _excluded_name(dir_name) or _excluded_path(current_dir_str):
+                    thread_stats['excluded_dirs'] += 1
+                    continue
+
+                try:
+                    with os.scandir(current_dir_str) as entries:
+                        for entry in entries:
+                            if stop_event.is_set():
+                                break
+                            ename = entry.name
+                            try:
+                                # 条目级剪枝：纯名字一次 regex（文件与目录同规则）
+                                if _excluded_name(ename) or _excluded_path(entry.path):
+                                    if entry.is_dir(follow_symlinks=False):
+                                        thread_stats['excluded_dirs'] += 1
+                                    else:
+                                        thread_stats['excluded_count'] += 1
+                                    continue
+
+                                if entry.is_symlink():
+                                    thread_stats['symlinks_skipped'] += 1
+                                    continue
+
+                                if entry.is_dir(follow_symlinks=False):
+                                    dirs_to_scan.append(entry.path)
+                                    continue
+
+                                if entry.is_file(follow_symlinks=False):
+                                    try:
+                                        # NOFOLLOW：利用 READDIRPLUS 缓存属性，避免逐文件 LOOKUP
+                                        st = entry.stat(follow_symlinks=False)
+                                    except (PermissionError, OSError, FileNotFoundError):
+                                        thread_stats['error_count'] += 1
+                                        continue
+                                    thread_stats['total_scanned'] += 1
+                                    thread_stats['total_scanned_bytes'] += st.st_size
+                                    current_batch.append({
+                                        'path': entry.path,
+                                        'name': ename,
+                                        'size': st.st_size,
+                                        'modified_time': datetime.fromtimestamp(st.st_mtime),
+                                        'permissions': oct(st.st_mode)[-3:],
+                                        'is_file': True,
+                                        'is_dir': False,
+                                        'is_symlink': False,
+                                    })
+                                    if len(current_batch) >= batch_size:
+                                        _put_batch()
+
+                                    now = time.time()
+                                    if now - last_log_time >= 60.0:
+                                        fps = thread_stats['total_scanned'] / (now - start_time) if now > start_time else 0
+                                        logger.info(
+                                            f"[简洁扫描-NFS] 进度: 已扫描 {thread_stats['total_scanned']:,} 个文件 "
+                                            f"({format_bytes(thread_stats['total_scanned_bytes'])}), "
+                                            f"速度 {fps:.0f} 文件/秒, 待扫描目录: {len(dirs_to_scan)}"
+                                        )
+                                        last_log_time = now
+                                else:
+                                    thread_stats['error_count'] += 1
+                            except (PermissionError, OSError, FileNotFoundError):
+                                thread_stats['error_count'] += 1
+                                continue
+                            except Exception as e:
+                                logger.warning(f"[简洁扫描-NFS] 处理条目失败: {entry.path}, 错误: {str(e)}")
+                                thread_stats['error_count'] += 1
+                                continue
+                except (PermissionError, OSError) as e:
+                    logger.warning(f"[简洁扫描-NFS] 无法访问目录: {current_dir_str}, 错误: {str(e)}")
+                    thread_stats['error_dirs'] += 1
+                    continue
+
+            _put_batch()
+        except Exception as e:
+            logger.error(f"[简洁扫描-NFS] 扫描线程异常: {e}", exc_info=True)
+        finally:
+            logger.info(
+                f"[简洁扫描-NFS] 扫描线程完成: 扫描 {thread_stats['total_scanned']:,} 个文件 "
+                f"({format_bytes(thread_stats['total_scanned_bytes'])}), "
+                f"排除目录 {thread_stats['excluded_dirs']:,}, 排除文件 {thread_stats['excluded_count']:,}, "
+                f"耗时 {time.time() - start_time:.1f}秒"
+            )
+            batch_queue.put(('done', dict(thread_stats)))
+
     def _sync_collect_files(
         self,
         expanded_paths: List[str],

@@ -690,6 +690,10 @@ async function loadAllSystemConfig() {
                 const el = document.getElementById('diskThrottleLowPercent');
                 if (el) el.value = config.disk_throttle_low_percent;
             }
+            if (config.scan_engine !== undefined) {
+                const el = document.getElementById('scanEngine');
+                if (el) el.value = config.scan_engine;
+            }
             if (config.disk_critical_batches !== undefined) {
                 const el = document.getElementById('diskCriticalBatches');
                 if (el) el.value = config.disk_critical_batches;
@@ -805,6 +809,7 @@ async function saveEnvConfigSection() {
                 const parsed = parseInt(input.value);
                 return isNaN(parsed) ? null : parsed;
             })(),
+            scan_engine: document.getElementById('scanEngine')?.value || null,
             disk_check_max_wait_minutes: (() => {
                 const input = document.getElementById('diskCheckMaxWaitMinutes');
                 if (!input || input.value === '') return null;

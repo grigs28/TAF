@@ -42,6 +42,14 @@
                         <input type="number" class="form-control" id="compressionBatchesReduction" value="1" min="0" step="1">
                     </div>
                     <div class="mb-3">
+                        <label class="form-label">扫描引擎</label>
+                        <select class="form-select" id="scanEngine">
+                            <option value="nfs">NFS 优化引擎（预编译排除 + READDIRPLUS 免逐文件查询）</option>
+                            <option value="classic">经典引擎（兼容模式）</option>
+                        </select>
+                        <small class="form-text text-secondary">默认 NFS 优化引擎；检测到 CIFS/SMB 源时自动回退经典引擎</small>
+                    </div>
+                    <div class="mb-3">
                         <label class="form-label">磁盘限流上限（%）</label>
                         <input type="number" class="form-control" id="diskThrottleHighPercent" value="75" min="0" max="100" step="1">
                         <small class="form-text text-secondary">压缩临时目录所在盘使用率超过此值时，压缩并行批次减半（0=禁用）</small>
