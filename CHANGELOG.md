@@ -1,5 +1,15 @@
 # 更新日志
 
+## [0.8.1] - 2026-10-15
+
+### 改进
+
+- zstd 压缩改用 spawn 独立工作进程执行，彻底绕开 GIL：
+  新增 backup/compression_process_pool.py（进程池 + payload 协议），
+  zstd 分发从 loop.run_in_executor 改为提交 payload 到 spawn 池，
+  其他压缩方法及 CIFS 路径保留线程池老路径不变
+- 版本升至 0.8.1
+
 ## [0.8.0] - 2026-10-15
 
 ### 新增

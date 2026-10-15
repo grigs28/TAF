@@ -75,12 +75,6 @@ except ImportError:
 
 
 def _apply_tar_copybufsize(tar) -> None:
-    """按配置设置 tarfile 复制缓冲区（COMPRESSION_TAR_COPYBUF_MB，单位 MB）
-
-    tarfile 默认复制缓冲仅 16KB，纯 Python 打包时循环次数多、GIL 争抢严重。
-    调大缓冲可减少循环与系统调用次数（CPython #27199 基准约 +30%）。
-    配置为 0 时保持库默认值（16KB）。
-    """
     try:
         from config.settings import get_settings
         mb = int(getattr(get_settings(), 'COMPRESSION_TAR_COPYBUF_MB', 4) or 0)
@@ -1822,10 +1816,23 @@ class Compressor:
                     compress_progress['completed'] = True
                     compress_progress['running'] = False
             
-            # 在线程池中异步启动压缩操作，立即返回，不等待完成
+            # 异步启动压缩操作：zstd 走独立工作进程（spawn，彻底绕开 GIL），
+            # 其他压缩方法保留线程池（老路径不可 pickle，行为不变）
             loop = asyncio.get_event_loop()
             logger.warning(f"[压缩] 异步启动压缩任务，立即返回，不等待完成")
-            compression_future = loop.run_in_executor(None, _do_7z_compress)
+            if compression_method == 'zstd':
+                payload = {
+                    'archive_path': temp_archive_path,
+                    'file_group': file_group,
+                    'level': compression_level,
+                    'threads': zstd_threads,
+                    'total_files': total_files,
+                    'base_processed_files': base_processed_files,
+                    'compress_progress': compress_progress,
+                }
+                compression_future = await _submit_compression_payload(payload, loop)
+            else:
+                compression_future = loop.run_in_executor(None, _do_7z_compress)
             
             # 顺序执行：等待压缩完成、标注完成、移动到final
             # 等待压缩完成（不设置超时，让压缩自然完成）
