@@ -39,6 +39,20 @@ MKLTFS_BIN = "/usr/local/bin/mkltfs"
 DEFAULT_LTFS_MOUNT = "/mnt/ltfs"
 
 
+async def _copy_with_buffer(source_file: Path, target_file: Path, buffer_size: int = 4 * 1024 * 1024):
+    """以指定缓冲区复制文件（等价 shutil.copy2，但缓冲更大）
+
+    copy2 默认约 64KB 缓冲，向 LTFS(FUSE) 写入时产生大量用户态/内核往返。
+    改为 4MB 缓冲后往返次数降至 1/64。copystat 保留 copy2 的元数据语义。
+    """
+    def _do_copy():
+        with open(source_file, 'rb') as fsrc, open(target_file, 'wb') as fdst:
+            shutil.copyfileobj(fsrc, fdst, buffer_size)
+        shutil.copystat(source_file, target_file)
+
+    await asyncio.to_thread(_do_copy)
+
+
 class TapeHandler:
     """磁带处理器 - 使用 LTFS 挂载方式写入"""
 
@@ -260,7 +274,9 @@ class TapeHandler:
         # 尝试挂载
         try:
             process = await asyncio.create_subprocess_exec(
-                LTFS_BIN, '-o', f'devname={tape_device}', str(mount_point),
+                # max_write+big_writes：让大缓冲写以完整 FUSE 消息下发，
+                # 避免被默认 128KB 上限拆碎（与 _copy_with_buffer 的 4MB 缓冲配套）
+                LTFS_BIN, '-o', f'devname={tape_device},max_write=1048576,big_writes', str(mount_point),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -927,7 +943,7 @@ class TapeHandler:
             start_time = time.time()
 
             try:
-                await asyncio.to_thread(shutil.copy2, str(source_file), str(target_file))
+                await _copy_with_buffer(source_file, target_file)
             except asyncio.CancelledError:
                 logger.warning("[LTFS] 复制任务被取消")
                 raise
