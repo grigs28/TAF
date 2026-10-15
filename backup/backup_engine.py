@@ -466,6 +466,25 @@ class BackupEngine:
 
                 is_ltfs, msg = await self.tape_handler.check_ltfs_format()
 
+                # 挂载超时等瞬时失败不应直接判定为"非LTFS"（会触发破坏性格式化）：
+                # 磁带已有可读卷标时，清理残留后重试一次 LTFS 检查再下结论
+                if not is_ltfs and label != "Unknown":
+                    logger.warning(
+                        f"[LTFS检查] 首次检查未通过（{msg}），5 秒后重试一次"
+                        f"（避免瞬时挂载慢导致误判为非LTFS而格式化）"
+                    )
+                    try:
+                        await self.tape_handler.unmount_ltfs()
+                    except Exception as cleanup_err:
+                        logger.debug(f"[LTFS检查] 重试前清理挂载失败（忽略）: {cleanup_err}")
+                    await asyncio.sleep(5)
+                    is_ltfs_retry, msg_retry = await self.tape_handler.check_ltfs_format()
+                    if is_ltfs_retry:
+                        is_ltfs, msg = True, msg_retry
+                        logger.info("✓ LTFS格式（重试成功）")
+                    else:
+                        logger.warning(f"[LTFS检查] 重试仍未通过（{msg_retry}）")
+
                 if is_ltfs:
                     logger.info("✓ LTFS格式")
                     is_empty, count = await self.tape_handler.is_tape_empty()

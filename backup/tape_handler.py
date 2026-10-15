@@ -318,6 +318,13 @@ class TapeHandler:
                     try:
                         await asyncio.wait_for(process.wait(), timeout=600)
                         logger.info("[LTFS] 进程已自行退出")
+                        # 采集进程输出便于诊断挂载失败原因
+                        try:
+                            _out, _err = await asyncio.wait_for(process.communicate(), timeout=5)
+                            if _err:
+                                logger.warning(f"[LTFS] 挂载进程错误输出: {_err.decode('utf-8', errors='ignore')[:400]}")
+                        except Exception:
+                            pass
                     except asyncio.TimeoutError:
                         logger.warning("[LTFS] 进程 600s 后仍未退出，不再等待（进程仍在后台运行）")
 
