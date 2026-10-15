@@ -1831,7 +1831,10 @@ class Compressor:
                     'base_processed_files': base_processed_files,
                     'compress_progress': compress_progress,
                 }
-                compression_future = await _submit_compression_payload(payload, loop)
+                payload['progress_queue'] = None
+                pool = CompressionProcessPool.get_instance()
+                pool.set_progress_context(backup_task, compress_progress)
+                compression_future = await pool.submit(payload)
             else:
                 compression_future = loop.run_in_executor(None, _do_7z_compress)
             

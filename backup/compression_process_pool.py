@@ -16,6 +16,18 @@ from typing import Dict, Any
 logger = logging.getLogger(__name__)
 
 
+class _ProgressDict(dict):
+    """progress dict 的代理：把写入事件转成进度消息"""
+    def __init__(self, progress_q, base=None):
+        super().__init__(base or {})
+        self._q = progress_q
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if self._q is not None:
+            self._q.put({'k': key, 'v': value})
+
+
 def _compress_worker_entry(payload: Dict[str, Any]):
     """子进程入口：执行单个文件组压缩（复用现有模块级函数）
 
@@ -26,12 +38,18 @@ def _compress_worker_entry(payload: Dict[str, Any]):
 
     class _ShimTask:
         """backup_task 的轻量替身：进度字段与 BackupTask 兼容"""
-        def __init__(self):
+        def __init__(self, progress_q=None):
+            self._progress_q = progress_q
             self.progress_percent = 0.0
             self.current_compression_progress = {}
 
-    task = _ShimTask()
-    compress_progress = payload.get('compress_progress') or {}
+        def __setattr__(self, name, value):
+            object.__setattr__(self, name, value)
+            if name in ('progress_percent', 'current_compression_progress') and self._progress_q is not None:
+                self._progress_q.put({'a': name, 'v': value})
+
+    task = _ShimTask(payload.get('progress_queue'))
+    compress_progress = payload.get('compress_progress') or _ProgressDict(payload.get('progress_queue'), payload.get('compress_progress'))
     try:
         result = _compress_with_zstd_cli(
             payload['archive_path'],
@@ -78,6 +96,10 @@ class CompressionProcessPool:
         self._executor = None
         self._pump_task = None
         self._shutdown = False
+        self._progress_q = None
+        self._progress_task = None
+        self._current_backup_task = None
+        self._current_compress_progress = None
 
     @classmethod
     def get_instance(cls, max_workers: int = 8) -> "CompressionProcessPool":
@@ -94,8 +116,44 @@ class CompressionProcessPool:
             max_workers=self.max_workers,
             mp_context=self._ctx,
         )
+        self._progress_q = self._ctx.Manager().Queue()
         self._pump_task = None
         logger.info(f"[压缩进程池] spawn 工作进程池已启动（workers={self.max_workers}）")
+
+    def set_progress_context(self, backup_task, compress_progress):
+        """登记当前备份任务的进度接收对象（由父进程泵实时更新）"""
+        self._current_backup_task = backup_task
+        self._current_compress_progress = compress_progress
+        if self._progress_task is None:
+            self._progress_task = asyncio.create_task(self._progress_pump())
+
+    def set_progress_context(self, backup_task, compress_progress):
+        """登记当前备份任务的进度接收对象（由父进程泵实时更新）"""
+        self._current_backup_task = backup_task
+        self._current_compress_progress = compress_progress
+        if self._progress_task is None:
+            self._progress_task = asyncio.create_task(self._progress_pump())
+
+    async def _progress_pump(self):
+        """把子进程的进度事件实时回写到 backup_task / compress_progress"""
+        try:
+            while True:
+                try:
+                    item = await asyncio.to_thread(self._progress_q.get, True, 0.5)
+                except Exception:
+                    if self._shutdown:
+                        break
+                    continue
+                try:
+                    if 'a' in item:
+                        if self._current_backup_task is not None:
+                            setattr(self._current_backup_task, item['a'], item['v'])
+                    elif 'k' in item and self._current_compress_progress is not None:
+                        self._current_compress_progress[item['k']] = item['v']
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            pass
 
     async def submit(self, work_or_payload) -> asyncio.Future:
         """提交可 pickle 的同步可调用对象或 payload，返回 asyncio.Future（与原线程池 future 语义一致）"""
@@ -103,6 +161,8 @@ class CompressionProcessPool:
             await self.start()
         loop = asyncio.get_running_loop()
         if isinstance(work_or_payload, dict):
+            if self._progress_q is not None:
+                work_or_payload['progress_queue'] = self._progress_q
             return loop.run_in_executor(self._executor, _compress_worker_entry, work_or_payload)
         return loop.run_in_executor(self._executor, work_or_payload)
 

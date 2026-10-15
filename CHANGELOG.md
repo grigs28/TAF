@@ -1,5 +1,14 @@
 # 更新日志
 
+## [0.8.3] - 2026-10-15
+
+### 修复
+
+- 修复 spawn 压缩模式下 UI 进度始终为 0：工作进程经 Manager().Queue()
+  把 progress_percent/current_compression_progress 和 compress_progress
+  回传至主进程实时更新，修复 UI 不显示文件数/百分比问题
+- 版本升至 0.8.3
+
 ## [0.8.2] - 2026-10-15
 
 ### 修复
