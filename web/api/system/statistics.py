@@ -128,10 +128,18 @@ async def _get_tape_inventory_statistics() -> Dict[str, Any]:
 
 
 async def _get_storage_statistics() -> Dict[str, Any]:
-    """获取存储统计"""
+    """获取存储统计（仅统计保留月数内、成功完成的备份任务）"""
     try:
+        # 计算保留期截止日（默认保留月数）
+        from config.settings import get_settings
+        retention_months = int(getattr(get_settings(), 'DEFAULT_RETENTION_MONTHS', 6) or 6)
+        now = datetime.now()
+        year = now.year + (now.month - retention_months - 1) // 12
+        month = (now.month - retention_months - 1) % 12 + 1
+        retention_cutoff = now.replace(year=year, month=month, day=1)
+
         async with get_opengauss_connection() as conn:
-            # 从磁带统计总容量
+            # 总容量仍取磁带库实际容量（仅用于计算使用百分比）
             tape_result = await conn.fetchrow(
                 """
                 SELECT
@@ -140,52 +148,42 @@ async def _get_storage_statistics() -> Dict[str, Any]:
                 FROM tape_cartridges
                 """
             )
-
             total_capacity = tape_result['total_capacity'] or 0
-            used_capacity = tape_result['used_capacity'] or 0
+            tape_used_bytes = tape_result['used_capacity'] or 0
 
-            # 从已用存储中剔除被停止任务（cancelled/interrupted）的产物
-            if used_capacity > 0:
-                stopped_result = await conn.fetchrow(
+            # 已用存储：保留期内、成功完成任务的备份集压缩后总量
+            set_result = await conn.fetchrow(
+                """
+                SELECT COALESCE(SUM(s.compressed_bytes), 0) as total_compressed
+                FROM backup_sets s
+                LEFT JOIN backup_tasks t ON s.backup_task_id = t.id
+                WHERE s.backup_time >= $1
+                  AND LOWER(t.status::text) = 'completed'
+                """,
+                retention_cutoff
+            )
+            compressed_from_sets = set_result['total_compressed'] or 0
+
+            if compressed_from_sets > 0:
+                used_capacity = compressed_from_sets
+            else:
+                # 回退：保留期内、成功完成任务的原始总量
+                task_result = await conn.fetchrow(
                     """
-                    SELECT COALESCE(SUM(s.compressed_bytes), 0) as stopped_bytes
-                    FROM backup_sets s
-                    LEFT JOIN backup_tasks t ON s.backup_task_id = t.id
-                    WHERE LOWER(t.status::text) IN ('cancelled', 'interrupted')
-                    """
+                    SELECT COALESCE(SUM(total_bytes), 0) as total_bytes
+                    FROM backup_tasks
+                    WHERE is_template = FALSE
+                      AND started_at >= $1
+                      AND total_bytes > 0
+                      AND LOWER(status::text) = 'completed'
+                    """,
+                    retention_cutoff
                 )
-                stopped_bytes = stopped_result['stopped_bytes'] or 0
-                if stopped_bytes > 0:
-                    used_capacity = max(0, used_capacity - stopped_bytes)
+                used_capacity = task_result['total_bytes'] or 0
 
-            # 如果磁带used_bytes为0，从备份任务和备份集综合计算已用存储
+            # 统计数据不完整时，回退到磁带库实际写入量（物理用量）
             if used_capacity == 0:
-                # 优先从备份集统计（排除被停止的任务）
-                set_result = await conn.fetchrow(
-                    """
-                    SELECT COALESCE(SUM(s.compressed_bytes), 0) as total_compressed
-                    FROM backup_sets s
-                    LEFT JOIN backup_tasks t ON s.backup_task_id = t.id
-                    WHERE LOWER(t.status::text) NOT IN ('cancelled', 'interrupted')
-                    """
-                )
-                compressed_from_sets = set_result['total_compressed'] or 0
-
-                if compressed_from_sets > 0:
-                    used_capacity = compressed_from_sets
-                else:
-                    # 从已执行过的备份任务统计（排除模板、未开始和被停止的任务）
-                    task_result = await conn.fetchrow(
-                        """
-                        SELECT COALESCE(SUM(total_bytes), 0) as total_bytes
-                        FROM backup_tasks
-                        WHERE is_template = FALSE
-                          AND started_at IS NOT NULL
-                          AND total_bytes > 0
-                          AND LOWER(status::text) NOT IN ('cancelled', 'interrupted')
-                        """
-                    )
-                    used_capacity = task_result['total_bytes'] or 0
+                used_capacity = tape_used_bytes
 
             # 如果没有磁带容量数据，使用已用存储估算
             if total_capacity == 0:
@@ -196,7 +194,8 @@ async def _get_storage_statistics() -> Dict[str, Any]:
             return {
                 "total_capacity": total_capacity,
                 "used_capacity": used_capacity,
-                "usage_percent": round(usage_percent, 1)
+                "usage_percent": round(usage_percent, 1),
+                "retention_months": retention_months,
             }
     except Exception as e:
         logger.error(f"获取存储统计失败: {str(e)}")
