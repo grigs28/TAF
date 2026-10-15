@@ -82,152 +82,292 @@ def _compress_with_zstd_cli(
 
     logger.debug(f"[zstd-cli] 执行命令: {' '.join(zstd_cmd)}")
 
-    zstd_process = subprocess.Popen(
-        zstd_cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
-
+    zstd_process = None
     try:
-        # 使用 tarfile 写入 zstd 的 stdin（管道方式）
-        with tarfile.open(fileobj=zstd_process.stdin, mode='w|') as tar:
-            _apply_tar_copybufsize(tar)
-            for file_idx, file_info in enumerate(file_group):
-                file_path = Path(file_info['path'])
-
-                # 进度日志（每100个文件或每10秒）
-                current_time = time.time()
-                if file_idx % 100 == 0 or (current_time - last_log_time) >= log_interval:
-                    current_progress = file_idx + 1
-                    progress_percent = (current_progress / max(total_files_in_group, 1) * 100)
-                    elapsed_time = current_time - last_log_time if file_idx > 0 else 0
-                    files_per_sec = 100 / elapsed_time if elapsed_time > 0 and file_idx % 100 == 0 else 0
-                    logger.debug(
-                        f"[zstd-cli] 压缩进度: {current_progress}/{total_files_in_group} ({progress_percent:.1f}%)"
-                        + (f" - 处理速度: {files_per_sec:.1f} 文件/秒" if files_per_sec > 0 else "")
-                    )
-
-                    # 更新 compress_progress
-                    compress_progress['current_file_index'] = current_progress
-                    compress_progress['total_files_in_group'] = total_files_in_group
-
-                    # 计算当前已处理字节数
-                    processed_bytes = compress_progress.get('processed_bytes', 0)
-                    total_group_size = total_size
-
-                    # 按文件大小计算进度百分比
-                    if total_group_size > 0 and processed_bytes >= 0:
-                        size_based_percent = (processed_bytes / total_group_size * 100)
-                        actual_progress_percent = size_based_percent
-                    else:
-                        actual_progress_percent = progress_percent
-
-                    # 更新 backup_task.current_compression_progress
-                    if hasattr(backup_task, 'current_compression_progress'):
-                        backup_task.current_compression_progress = {
-                            'current': current_progress,
-                            'total': total_files_in_group,
-                            'percent': actual_progress_percent,
-                            'group_size_bytes': total_group_size,
-                            'processed_bytes': processed_bytes
-                        }
-
-                    last_log_time = current_time
-
-                # 获取文件大小
-                file_size = file_info.get('size', 0) or file_info.get('file_size', 0) or 0
-                file_size_display = format_bytes(file_size) if file_size > 0 else "未知"
-
-                if file_size == 0:
+        if shutil.which('tar') and file_group:
+            # ===== 系统 tar（C 实现）打包：tar -cf - | zstd，不占 GIL =====
+            import tempfile
+            _t_start = time.time()
+            name_to_paths = {}
+            groups = []  # [(base_dir, [arcname, ...]), ...]，连续同根分组
+            for file_info in file_group:
+                fp = Path(file_info['path'])
+                fsize = file_info.get('size', 0) or file_info.get('file_size', 0) or 0
+                if fsize == 0:
                     try:
-                        file_stat = file_path.stat()
-                        file_size = file_stat.st_size
+                        fsize = fp.stat().st_size
                     except (OSError, FileNotFoundError) as path_error:
-                        logger.warning(f"[zstd-cli] 文件不存在或无法访问，跳过: {file_path}")
-                        failed_files.append({'path': str(file_path), 'reason': f'文件不存在或无法访问: {str(path_error)}'})
+                        logger.warning(f"[zstd-cli] 文件不存在或无法访问，跳过: {fp}")
+                        failed_files.append({'path': str(fp), 'reason': f'文件不存在或无法访问: {str(path_error)}'})
                         continue
-
-                # 设置 tar 中的文件名
-                arcname = file_path.name
+                arcname = fp.name
+                base_dir = str(fp.parent)
                 for src_path in source_paths:
                     src = Path(src_path)
                     try:
-                        if file_path.is_relative_to(src):
-                            arcname = str(file_path.relative_to(src))
+                        if fp.is_relative_to(src):
+                            arcname = str(fp.relative_to(src))
+                            base_dir = str(src)
                             break
                     except (ValueError, AttributeError):
                         continue
+                if groups and groups[-1][0] == base_dir:
+                    groups[-1][1].append(arcname)
+                else:
+                    groups.append((base_dir, [arcname]))
+                name_to_paths.setdefault(arcname, []).append((str(fp), fsize))
 
-                # 记录文件处理开始时间
-                file_start_time = time.time()
+            if not groups:
+                # 全部文件缺失：生成空 tar（与 Python 路径行为一致）
+                zstd_process = subprocess.Popen(
+                    zstd_cmd, stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                with tarfile.open(fileobj=zstd_process.stdin, mode='w|') as _empty_tar:
+                    pass
+                if zstd_process.stdin and not zstd_process.stdin.closed:
+                    zstd_process.stdin.close()
+                zstd_process.wait()
+                if zstd_process.returncode != 0:
+                    raise RuntimeError(f"zstd 压缩失败 (返回码: {zstd_process.returncode})")
+            else:
+                tmpdir = tempfile.mkdtemp(prefix='taf_zstdcli_')
+                argv = ['tar', '-cf', '-', '-v']
+                list_files = []
+                for gi, (base, names) in enumerate(groups):
+                    lf = os.path.join(tmpdir, f'list{gi}.txt')
+                    with open(lf, 'w') as fh:
+                        fh.write(chr(10).join(names) + chr(10))
+                    list_files.append(lf)
+                    argv += ['-C', base, '-T', lf]
 
-                # 大文件警告
-                if file_size > 100 * 1024 * 1024:
-                    logger.debug(f"[zstd-cli] 开始处理大文件 ({file_size_display}): {file_path.name}")
+                tar_process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                zstd_process = subprocess.Popen(
+                    zstd_cmd, stdin=tar_process.stdout,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                tar_process.stdout.close()  # 父进程释放读端
 
+                done_names = 0
+                done_bytes = 0
+                _last_log = time.time()
+                tar_errors = []
                 try:
-                    tar.add(file_path, arcname=arcname)
-                    successful_files.append(str(file_path))
+                    for raw in iter(tar_process.stderr.readline, b''):
+                        line = raw.decode('utf-8', errors='replace').rstrip(chr(10))
+                        if not line:
+                            continue
+                        if line.startswith('tar: '):
+                            tar_errors.append(line)
+                            continue
+                        target = name_to_paths.get(line)
+                        fsize = 0
+                        if target:
+                            path_str, fsize = target.pop(0)
+                            successful_files.append(path_str)
+                        done_names += 1
+                        done_bytes += fsize
+                        compress_progress['current_file_index'] = done_names
+                        compress_progress['total_files_in_group'] = total_files_in_group
+                        compress_progress['processed_bytes'] = compress_progress.get('processed_bytes', 0) + fsize
+                        if total_files > 0:
+                            backup_task.progress_percent = min(
+                                100.0, 10.0 + ((base_processed_files + done_names) / total_files) * 90.0
+                            )
+                        now = time.time()
+                        if (done_names == 1 or done_names % 100 == 0
+                                or done_names == total_files_in_group
+                                or now - _last_log >= log_interval):
+                            if hasattr(backup_task, 'current_compression_progress'):
+                                backup_task.current_compression_progress = {
+                                    'current': done_names,
+                                    'total': total_files_in_group,
+                                    'percent': (done_bytes / total_size * 100.0) if total_size > 0 else 0.0,
+                                    'group_size_bytes': total_size,
+                                    'processed_bytes': done_bytes,
+                                }
+                            _last_log = now
+                finally:
+                    tar_process.wait()
+                    zstd_process.wait()
+                    try:
+                        for lf in list_files:
+                            os.unlink(lf)
+                        os.rmdir(tmpdir)
+                    except OSError:
+                        pass
 
-                    # 累计已处理字节数
-                    if 'processed_bytes' not in compress_progress:
-                        compress_progress['processed_bytes'] = 0
-                    compress_progress['processed_bytes'] += file_size
+                for line in tar_errors:
+                    body = line[5:]
+                    sep = body.find(': Cannot')
+                    if sep == -1:
+                        logger.warning(f"[zstd-cli] tar: {body}")
+                        continue
+                    name_part = body[:sep]
+                    reason = body[sep + 2:]
+                    err_target = name_to_paths.get(name_part)
+                    full = err_target.pop(0)[0] if err_target else name_part
+                    failed_files.append({'path': full, 'reason': reason})
 
-                    # 慢文件处理警告
-                    file_process_time = time.time() - file_start_time
-                    if file_process_time > 30.0:
+                if zstd_process.returncode != 0:
+                    error_msg = ''
+                    try:
+                        error_msg = (zstd_process.stderr.read() or b'').decode('utf-8', errors='replace')
+                    except Exception:
+                        error_msg = ''
+                    if not error_msg:
+                        error_msg = f"未知错误 (返回码: {zstd_process.returncode})"
+                    logger.error(f"[zstd-cli] 压缩失败: {error_msg}")
+                    raise RuntimeError(f"zstd 压缩失败: {error_msg}")
+                logger.info(
+                    f"[zstd-cli] 系统 tar 打包完成: {len(successful_files)} 个文件 "
+                    f"(耗时 {time.time() - _t_start:.1f}s, tar rc={tar_process.returncode})"
+                )
+        else:
+            zstd_process = subprocess.Popen(
+                zstd_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            # 使用 tarfile 写入 zstd 的 stdin（管道方式）
+            with tarfile.open(fileobj=zstd_process.stdin, mode='w|') as tar:
+                _apply_tar_copybufsize(tar)
+                for file_idx, file_info in enumerate(file_group):
+                    file_path = Path(file_info['path'])
+
+                    # 进度日志（每100个文件或每10秒）
+                    current_time = time.time()
+                    if file_idx % 100 == 0 or (current_time - last_log_time) >= log_interval:
+                        current_progress = file_idx + 1
+                        progress_percent = (current_progress / max(total_files_in_group, 1) * 100)
+                        elapsed_time = current_time - last_log_time if file_idx > 0 else 0
+                        files_per_sec = 100 / elapsed_time if elapsed_time > 0 and file_idx % 100 == 0 else 0
                         logger.debug(
-                            f"[zstd-cli] 文件处理时间较长 ({file_process_time:.1f}秒, 大小: {file_size_display}): {file_path}"
+                            f"[zstd-cli] 压缩进度: {current_progress}/{total_files_in_group} ({progress_percent:.1f}%)"
+                            + (f" - 处理速度: {files_per_sec:.1f} 文件/秒" if files_per_sec > 0 else "")
                         )
 
-                    # 每1000个文件记录速度统计
-                    if (file_idx + 1) % 1000 == 0:
-                        elapsed = time.time() - last_log_time
-                        files_per_sec = 1000.0 / elapsed if elapsed > 0 else 0
-                        logger.debug(f"[zstd-cli] 最近1000个文件耗时: {elapsed:.1f}秒，{files_per_sec:.1f}文件/秒")
-                        last_log_time = time.time()
+                        # 更新 compress_progress
+                        compress_progress['current_file_index'] = current_progress
+                        compress_progress['total_files_in_group'] = total_files_in_group
 
-                    # 更新任务进度百分比
-                    if total_files > 0:
-                        current_processed = base_processed_files + file_idx + 1
-                        compress_progress_value = 10.0 + (current_processed / total_files) * 90.0
-                        backup_task.progress_percent = min(100.0, compress_progress_value)
+                        # 计算当前已处理字节数
+                        processed_bytes = compress_progress.get('processed_bytes', 0)
+                        total_group_size = total_size
 
-                except Exception as add_error:
-                    # Broken pipe 说明 zstd 进程已死（通常是关闭时被 kill），立即停止
-                    if isinstance(add_error, BrokenPipeError) or 'Broken pipe' in str(add_error):
-                        logger.info(f"[zstd-cli] 管道已断开（zstd 进程已终止），停止压缩")
-                        break
-                    logger.warning(f"[zstd-cli] 添加文件失败: {file_path}, 错误: {add_error}")
-                    failed_files.append({'path': str(file_path), 'reason': f'写入失败: {add_error}'})
-                    continue
+                        # 按文件大小计算进度百分比
+                        if total_group_size > 0 and processed_bytes >= 0:
+                            size_based_percent = (processed_bytes / total_group_size * 100)
+                            actual_progress_percent = size_based_percent
+                        else:
+                            actual_progress_percent = progress_percent
 
-        # 关闭 stdin，等待 zstd 完成
-        # 注意：stdin 可能已在 tarfile 退出时关闭，检查后再关闭
-        if zstd_process.stdin and not zstd_process.stdin.closed:
-            zstd_process.stdin.close()
-        # 使用 wait() 而不是 communicate()，因为我们已经通过管道写入数据
-        zstd_process.wait()
-        stdout, stderr = zstd_process.stdout, zstd_process.stderr
+                        # 更新 backup_task.current_compression_progress
+                        if hasattr(backup_task, 'current_compression_progress'):
+                            backup_task.current_compression_progress = {
+                                'current': current_progress,
+                                'total': total_files_in_group,
+                                'percent': actual_progress_percent,
+                                'group_size_bytes': total_group_size,
+                                'processed_bytes': processed_bytes
+                            }
 
-        if zstd_process.returncode != 0:
-            error_msg = ""
-            if stderr:
-                try:
-                    error_msg = stderr.read().decode() if hasattr(stderr, 'read') else str(stderr)
-                except:
-                    error_msg = str(stderr)
-            if not error_msg and stdout:
-                try:
-                    error_msg = stdout.read().decode() if hasattr(stdout, 'read') else str(stdout)
-                except:
-                    pass
-            if not error_msg:
-                error_msg = f"未知错误 (返回码: {zstd_process.returncode})"
-            logger.error(f"[zstd-cli] 压缩失败: {error_msg}")
-            raise RuntimeError(f"zstd 压缩失败: {error_msg}")
+                        last_log_time = current_time
+
+                    # 获取文件大小
+                    file_size = file_info.get('size', 0) or file_info.get('file_size', 0) or 0
+                    file_size_display = format_bytes(file_size) if file_size > 0 else "未知"
+
+                    if file_size == 0:
+                        try:
+                            file_stat = file_path.stat()
+                            file_size = file_stat.st_size
+                        except (OSError, FileNotFoundError) as path_error:
+                            logger.warning(f"[zstd-cli] 文件不存在或无法访问，跳过: {file_path}")
+                            failed_files.append({'path': str(file_path), 'reason': f'文件不存在或无法访问: {str(path_error)}'})
+                            continue
+
+                    # 设置 tar 中的文件名
+                    arcname = file_path.name
+                    for src_path in source_paths:
+                        src = Path(src_path)
+                        try:
+                            if file_path.is_relative_to(src):
+                                arcname = str(file_path.relative_to(src))
+                                break
+                        except (ValueError, AttributeError):
+                            continue
+
+                    # 记录文件处理开始时间
+                    file_start_time = time.time()
+
+                    # 大文件警告
+                    if file_size > 100 * 1024 * 1024:
+                        logger.debug(f"[zstd-cli] 开始处理大文件 ({file_size_display}): {file_path.name}")
+
+                    try:
+                        tar.add(file_path, arcname=arcname)
+                        successful_files.append(str(file_path))
+
+                        # 累计已处理字节数
+                        if 'processed_bytes' not in compress_progress:
+                            compress_progress['processed_bytes'] = 0
+                        compress_progress['processed_bytes'] += file_size
+
+                        # 慢文件处理警告
+                        file_process_time = time.time() - file_start_time
+                        if file_process_time > 30.0:
+                            logger.debug(
+                                f"[zstd-cli] 文件处理时间较长 ({file_process_time:.1f}秒, 大小: {file_size_display}): {file_path}"
+                            )
+
+                        # 每1000个文件记录速度统计
+                        if (file_idx + 1) % 1000 == 0:
+                            elapsed = time.time() - last_log_time
+                            files_per_sec = 1000.0 / elapsed if elapsed > 0 else 0
+                            logger.debug(f"[zstd-cli] 最近1000个文件耗时: {elapsed:.1f}秒，{files_per_sec:.1f}文件/秒")
+                            last_log_time = time.time()
+
+                        # 更新任务进度百分比
+                        if total_files > 0:
+                            current_processed = base_processed_files + file_idx + 1
+                            compress_progress_value = 10.0 + (current_processed / total_files) * 90.0
+                            backup_task.progress_percent = min(100.0, compress_progress_value)
+
+                    except Exception as add_error:
+                        # Broken pipe 说明 zstd 进程已死（通常是关闭时被 kill），立即停止
+                        if isinstance(add_error, BrokenPipeError) or 'Broken pipe' in str(add_error):
+                            logger.info(f"[zstd-cli] 管道已断开（zstd 进程已终止），停止压缩")
+                            break
+                        logger.warning(f"[zstd-cli] 添加文件失败: {file_path}, 错误: {add_error}")
+                        failed_files.append({'path': str(file_path), 'reason': f'写入失败: {add_error}'})
+                        continue
+
+            # 关闭 stdin，等待 zstd 完成
+            # 注意：stdin 可能已在 tarfile 退出时关闭，检查后再关闭
+            if zstd_process.stdin and not zstd_process.stdin.closed:
+                zstd_process.stdin.close()
+            # 使用 wait() 而不是 communicate()，因为我们已经通过管道写入数据
+            zstd_process.wait()
+            stdout, stderr = zstd_process.stdout, zstd_process.stderr
+
+            if zstd_process.returncode != 0:
+                error_msg = ""
+                if stderr:
+                    try:
+                        error_msg = stderr.read().decode() if hasattr(stderr, 'read') else str(stderr)
+                    except:
+                        error_msg = str(stderr)
+                if not error_msg and stdout:
+                    try:
+                        error_msg = stdout.read().decode() if hasattr(stdout, 'read') else str(stdout)
+                    except:
+                        pass
+                if not error_msg:
+                    error_msg = f"未知错误 (返回码: {zstd_process.returncode})"
+                logger.error(f"[zstd-cli] 压缩失败: {error_msg}")
+                raise RuntimeError(f"zstd 压缩失败: {error_msg}")
 
         # 获取压缩后大小
         if archive_path_abs.exists():
