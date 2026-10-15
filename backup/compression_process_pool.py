@@ -103,9 +103,9 @@ class CompressionProcessPool:
         self._current_compress_progress = None
 
     @classmethod
-    def get_instance(cls, max_workers: int = 8) -> "CompressionProcessPool":
+    def get_instance(cls, max_workers: int = 16) -> "CompressionProcessPool":
         if cls._instance is None or cls._instance._shutdown:
-            cls._instance = cls(max_workers=max_workers)
+            cls._instance = cls(max_workers=max(16, int(max_workers)))
         return cls._instance
 
     async def start(self):
