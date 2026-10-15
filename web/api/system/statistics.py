@@ -144,13 +144,29 @@ async def _get_storage_statistics() -> Dict[str, Any]:
             total_capacity = tape_result['total_capacity'] or 0
             used_capacity = tape_result['used_capacity'] or 0
 
+            # 从已用存储中剔除被停止任务（cancelled/interrupted）的产物
+            if used_capacity > 0:
+                stopped_result = await conn.fetchrow(
+                    """
+                    SELECT COALESCE(SUM(s.compressed_bytes), 0) as stopped_bytes
+                    FROM backup_sets s
+                    LEFT JOIN backup_tasks t ON s.backup_task_id = t.id
+                    WHERE LOWER(t.status::text) IN ('cancelled', 'interrupted')
+                    """
+                )
+                stopped_bytes = stopped_result['stopped_bytes'] or 0
+                if stopped_bytes > 0:
+                    used_capacity = max(0, used_capacity - stopped_bytes)
+
             # 如果磁带used_bytes为0，从备份任务和备份集综合计算已用存储
             if used_capacity == 0:
-                # 优先从备份集统计（不限status）
+                # 优先从备份集统计（排除被停止的任务）
                 set_result = await conn.fetchrow(
                     """
-                    SELECT COALESCE(SUM(compressed_bytes), 0) as total_compressed
-                    FROM backup_sets
+                    SELECT COALESCE(SUM(s.compressed_bytes), 0) as total_compressed
+                    FROM backup_sets s
+                    LEFT JOIN backup_tasks t ON s.backup_task_id = t.id
+                    WHERE LOWER(t.status::text) NOT IN ('cancelled', 'interrupted')
                     """
                 )
                 compressed_from_sets = set_result['total_compressed'] or 0
@@ -158,7 +174,7 @@ async def _get_storage_statistics() -> Dict[str, Any]:
                 if compressed_from_sets > 0:
                     used_capacity = compressed_from_sets
                 else:
-                    # 从已执行过的备份任务统计（排除模板和未开始的任务）
+                    # 从已执行过的备份任务统计（排除模板、未开始和被停止的任务）
                     task_result = await conn.fetchrow(
                         """
                         SELECT COALESCE(SUM(total_bytes), 0) as total_bytes
@@ -166,6 +182,7 @@ async def _get_storage_statistics() -> Dict[str, Any]:
                         WHERE is_template = FALSE
                           AND started_at IS NOT NULL
                           AND total_bytes > 0
+                          AND LOWER(status::text) NOT IN ('cancelled', 'interrupted')
                         """
                     )
                     used_capacity = task_result['total_bytes'] or 0
