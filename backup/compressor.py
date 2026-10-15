@@ -24,7 +24,7 @@ from typing import List, Dict, Optional, Callable, Awaitable, Any
 from models.backup import BackupSet, BackupTask
 from utils.datetime_utils import now, format_datetime
 from backup.utils import format_bytes
-from backup.compression_process_pool import _submit_compression_payload
+from backup.compression_process_pool import _submit_compression_payload, CompressionProcessPool
 
 logger = logging.getLogger(__name__)
 
