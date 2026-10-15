@@ -59,6 +59,10 @@ class SystemEnvConfig(BaseModel):
     scan_memory_only: Optional[bool] = Field(None, description="纯内存扫描模式，扫描阶段跳过数据库写入")
     compression_parallel_batches: Optional[int] = Field(None, description="压缩并行批次数量（默认2），预读取程序队列数为该值+1")
     compression_batches_reduction: Optional[int] = Field(None, description="扫描时减少的并行批次数（默认1），0表示不减少")
+    disk_throttle_high_percent: Optional[float] = Field(None, description="磁盘限流上限（%），超过后压缩并行批次减半，0=禁用")
+    disk_throttle_low_percent: Optional[float] = Field(None, description="磁盘限流恢复阈值（%），低于后并行批次直接恢复")
+    disk_critical_batches: Optional[int] = Field(None, description="剩余空间 < N倍最大文件大小时，压缩并行批次强制降至此值，0=禁用")
+    disk_check_max_wait_minutes: Optional[int] = Field(None, description="磁盘空间不足时暂停压缩的最大等待分钟数")
 
     # 日志配置
     log_level: Optional[str] = Field(None, description="日志级别")
@@ -144,6 +148,10 @@ async def get_env_config():
             "scan_memory_only": parse_bool(env_vars.get("SCAN_MEMORY_ONLY"), False),
             "compression_parallel_batches": parse_int(env_vars.get("COMPRESSION_PARALLEL_BATCHES"), 3),
             "compression_batches_reduction": parse_int(env_vars.get("COMPRESSION_BATCHES_REDUCTION"), 1),
+            "disk_throttle_high_percent": float(env_vars.get("DISK_THROTTLE_HIGH_PERCENT", 75) or 0),
+            "disk_throttle_low_percent": float(env_vars.get("DISK_THROTTLE_LOW_PERCENT", 30) or 0),
+            "disk_critical_batches": parse_int(env_vars.get("DISK_CRITICAL_BATCHES"), 1),
+            "disk_check_max_wait_minutes": parse_int(env_vars.get("DISK_CHECK_MAX_WAIT_MINUTES"), 120),
 
             # 日志配置
             "log_level": env_vars.get("LOG_LEVEL", "INFO"),
@@ -254,6 +262,32 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             if config.compression_batches_reduction < 0:
                 raise ValueError("COMPRESSION_BATCHES_REDUCTION 必须大于等于 0")
             updates["COMPRESSION_BATCHES_REDUCTION"] = str(config.compression_batches_reduction)
+
+        if config.disk_throttle_high_percent is not None or config.disk_throttle_low_percent is not None:
+            high = config.disk_throttle_high_percent
+            low = config.disk_throttle_low_percent
+            if high is not None and not (0 <= high <= 100):
+                raise ValueError("DISK_THROTTLE_HIGH_PERCENT 必须在 0-100 之间")
+            if low is not None and not (0 <= low <= 100):
+                raise ValueError("DISK_THROTTLE_LOW_PERCENT 必须在 0-100 之间")
+            # 校验迟滞区间：high 必须大于 low（high=0 为禁用除外）
+            if high is not None and high > 0:
+                current_low = low if low is not None else float(env_manager.read_env_file().get("DISK_THROTTLE_LOW_PERCENT", 30) or 0)
+                if current_low >= high:
+                    raise ValueError(f"恢复阈值（{current_low}%）必须小于限流上限（{high}%），否则会在边界反复切换")
+            if high is not None:
+                updates["DISK_THROTTLE_HIGH_PERCENT"] = str(high)
+            if low is not None:
+                updates["DISK_THROTTLE_LOW_PERCENT"] = str(low)
+
+        if config.disk_critical_batches is not None:
+            if config.disk_critical_batches < 0 or config.disk_critical_batches > 64:
+                raise ValueError("DISK_CRITICAL_BATCHES 必须在 0-64 之间（0=禁用）")
+            updates["DISK_CRITICAL_BATCHES"] = str(config.disk_critical_batches)
+        if config.disk_check_max_wait_minutes is not None:
+            if config.disk_check_max_wait_minutes < 1:
+                raise ValueError("DISK_CHECK_MAX_WAIT_MINUTES 必须大于等于 1 分钟")
+            updates["DISK_CHECK_MAX_WAIT_MINUTES"] = str(config.disk_check_max_wait_minutes)
 
 
         # 日志配置

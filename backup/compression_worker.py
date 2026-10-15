@@ -7,6 +7,7 @@
 import asyncio
 import logging
 import os
+import shutil
 from typing import List, Dict, Optional, Any
 import tempfile
 
@@ -56,6 +57,8 @@ class CompressionWorker:
         self.total_size = 0  # 压缩后的总大小
         self.total_original_size = 0  # 原始文件的总大小（未压缩）
         self.group_idx = 0  # 文件组索引
+        self._disk_throttled = False  # 磁盘限流状态（迟滞状态机）
+        self._disk_critical = False  # 磁盘空间危急降级状态
 
         # 并行批次设置（基础值，会在异步方法中根据扫描状态动态调整）
         if self.use_prefetcher:
@@ -207,15 +210,18 @@ class CompressionWorker:
                 logger.debug("压缩进度更新任务已停止")
     
     async def _adjust_parallel_batches(self):
-        """根据扫描状态调整并行批次数量
+        """根据扫描状态和磁盘使用率调整并行批次数量
 
-        策略：扫描阶段减少同时运行的压缩任务数量，扫描结束后恢复正常
+        策略：
+        1. 扫描阶段减少同时运行的压缩任务数量，扫描结束后恢复正常
+        2. 磁盘使用率超过 DISK_THROTTLE_HIGH_PERCENT 时批次减半，
+           回落到 DISK_THROTTLE_LOW_PERCENT 以下时直接恢复（迟滞区间防抖）
         每次调用时重新读取 settings，以支持运行时动态修改配置
         """
         try:
             # 重新读取 settings，支持运行时动态修改（立即生效）
+            fresh_settings = get_settings()
             if self.use_prefetcher:
-                fresh_settings = get_settings()
                 self.base_parallel_batches = getattr(fresh_settings, 'COMPRESSION_PARALLEL_BATCHES', 3)
                 self.batches_reduction = getattr(fresh_settings, 'COMPRESSION_BATCHES_REDUCTION', 1)
 
@@ -226,29 +232,81 @@ class CompressionWorker:
                     scan_status = await self._get_scan_status()
                 except Exception:
                     pass
-            
-            # 如果扫描未完成，减少并行批次数量（降低同时运行的压缩任务数）
+
+            # 1. 计算扫描态下的正常批次数量
             if scan_status not in (None, "completed"):
-                adjusted_batches = max(0, self.base_parallel_batches - self.batches_reduction)
-                if adjusted_batches != self.parallel_batches:
-                    logger.info(
-                        f"[压缩配置] 扫描阶段（scan_status={scan_status}），"
-                        f"将并行批次数量从 {self.base_parallel_batches} 降为 {adjusted_batches} "
-                        f"(减少 {self.batches_reduction} 批)"
-                    )
-                    self.parallel_batches = adjusted_batches
+                normal_batches = max(0, self.base_parallel_batches - self.batches_reduction)
             else:
-                if self.parallel_batches != self.base_parallel_batches:
-                    logger.info(
-                        f"[压缩配置] 扫描已完成（scan_status=completed），"
-                        f"将并行批次数量从 {self.parallel_batches} 恢复为 {self.base_parallel_batches}"
+                normal_batches = self.base_parallel_batches
+
+            # 2. 磁盘限流状态机（high=0 禁用；恢复为直接恢复）
+            high = float(getattr(fresh_settings, 'DISK_THROTTLE_HIGH_PERCENT', 75) or 0)
+            low = float(getattr(fresh_settings, 'DISK_THROTTLE_LOW_PERCENT', 30) or 0)
+            critical_batches = int(getattr(fresh_settings, 'DISK_CRITICAL_BATCHES', 1) or 0)
+            desired_batches = normal_batches
+            if normal_batches >= 1 and (high > 0 or critical_batches >= 1):
+                compress_dir = getattr(fresh_settings, 'BACKUP_COMPRESS_DIR', 'temp/compress')
+                try:
+                    usage = shutil.disk_usage(compress_dir)
+                    used_percent = usage.used / usage.total * 100 if usage.total > 0 else 0
+                    free_bytes = usage.free
+                except Exception as disk_err:
+                    used_percent = None
+                    free_bytes = None
+                    logger.debug(f"[压缩配置] 获取磁盘使用率失败（跳过本次限流判断）: {disk_err}")
+
+                if used_percent is not None:
+                    if not self._disk_throttled and used_percent >= high and high > 0:
+                        self._disk_throttled = True
+                        logger.warning(
+                            f"[压缩配置] 磁盘使用率 {used_percent:.1f}% 达到限流上限 {high}%，"
+                            f"并行批次将减半"
+                        )
+                    elif self._disk_throttled and used_percent <= low:
+                        self._disk_throttled = False
+                        logger.info(
+                            f"[压缩配置] 磁盘使用率 {used_percent:.1f}% 回落至恢复阈值 {low}%，"
+                            f"并行批次将直接恢复"
+                        )
+
+                    if self._disk_throttled and high > 0:
+                        desired_batches = max(1, normal_batches // 2)
+
+                    # 2b. 空间危急层：剩余空间 < N倍最大文件大小时，批次直接降到指定值
+                    if critical_batches >= 1:
+                        max_file_size = int(getattr(fresh_settings, 'MAX_FILE_SIZE', 0) or 0)
+                        multiplier = int(getattr(fresh_settings, 'DISK_CHECK_MIN_FREE_MULTIPLIER', 3) or 3)
+                        if max_file_size > 0 and free_bytes < max_file_size * multiplier:
+                            if not self._disk_critical:
+                                logger.warning(
+                                    f"[压缩配置] 磁盘剩余空间危急（{format_bytes(free_bytes)} < "
+                                    f"{multiplier}×最大文件大小），并行批次强制降为 {critical_batches}"
+                                )
+                            self._disk_critical = True
+                            desired_batches = min(desired_batches, critical_batches)
+                        else:
+                            if self._disk_critical:
+                                logger.info(f"[压缩配置] 磁盘剩余空间恢复（{format_bytes(free_bytes)}），危急降级解除")
+                            self._disk_critical = False
+                    else:
+                        self._disk_critical = False
+            elif high <= 0:
+                self._disk_throttled = False
+                self._disk_critical = False
+
+            # 3. 应用并记录变化（避免每轮重复刷日志）
+            if desired_batches != self.parallel_batches:
+                if self._disk_throttled:
+                    logger.warning(
+                        f"[压缩配置] 磁盘限流中：并行批次 {self.parallel_batches} -> {desired_batches} "
+                        f"(正常值 {normal_batches}，扫描状态 scan_status={scan_status})"
                     )
-                    self.parallel_batches = self.base_parallel_batches
                 else:
-                    logger.debug(
-                        f"[压缩配置] 扫描已完成（scan_status=completed），"
-                        f"使用正常并行批次数量: {self.parallel_batches}"
+                    logger.info(
+                        f"[压缩配置] 并行批次 {self.parallel_batches} -> {desired_batches} "
+                        f"(扫描状态 scan_status={scan_status}，磁盘限流已解除)"
                     )
+                self.parallel_batches = desired_batches
         except Exception as e:
             # 即使无法获取 scan_status，也不影响压缩主流程
             logger.debug(f"[压缩配置] 获取 scan_status 时出错，使用默认配置: {e}")

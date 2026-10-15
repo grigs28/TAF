@@ -41,6 +41,26 @@
                         <label class="form-label">扫描时减少批次数</label>
                         <input type="number" class="form-control" id="compressionBatchesReduction" value="1" min="0" step="1">
                     </div>
+                    <div class="mb-3">
+                        <label class="form-label">磁盘限流上限（%）</label>
+                        <input type="number" class="form-control" id="diskThrottleHighPercent" value="75" min="0" max="100" step="1">
+                        <small class="form-text text-secondary">压缩临时目录所在盘使用率超过此值时，压缩并行批次减半（0=禁用）</small>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">磁盘限流恢复阈值（%）</label>
+                        <input type="number" class="form-control" id="diskThrottleLowPercent" value="30" min="0" max="100" step="1">
+                        <small class="form-text text-secondary">使用率回落到此值以下时直接恢复并行批次，须小于限流上限形成迟滞区间</small>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">空间危急时压缩批次数</label>
+                        <input type="number" class="form-control" id="diskCriticalBatches" value="1" min="0" max="64" step="1">
+                        <small class="form-text text-secondary">剩余空间 &lt; 3×最大文件大小时，并行批次强制降至此值（0=禁用）</small>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">空间不足最大等待（分钟）</label>
+                        <input type="number" class="form-control" id="diskCheckMaxWaitMinutes" value="120" min="1" step="1">
+                        <small class="form-text text-secondary">剩余空间持续不足时暂停压缩的最长等待时间，超时该组报错</small>
+                    </div>
                 </div>
             </div>
         </div>

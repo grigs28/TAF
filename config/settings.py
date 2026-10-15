@@ -108,7 +108,7 @@ class Settings(BaseSettings):
 
     # 磁盘空间检查配置
     DISK_CHECK_INTERVAL: int = 30  # 磁盘空间检查间隔（秒）
-    DISK_CHECK_MAX_WAIT_MINUTES: int = 60  # 最大等待时间（分钟）
+    DISK_CHECK_MAX_WAIT_MINUTES: int = 120  # 磁盘空间不足时暂停压缩的最大等待分钟数（超时抛错）
     DISK_CHECK_MIN_FREE_MULTIPLIER: int = 3  # 最小剩余空间倍数（3 * MAX_FILE_SIZE）
 
     # 计划任务配置
@@ -173,6 +173,9 @@ class Settings(BaseSettings):
     # 压缩并行批次配置
     COMPRESSION_PARALLEL_BATCHES: int = 3  # 压缩并行批次数量（默认3），预读取程序队列数为该值+1
     COMPRESSION_TAR_COPYBUF_MB: int = 4  # tarfile 复制缓冲区（MB），0=Python 默认16KB；推荐 4MB
+    DISK_THROTTLE_HIGH_PERCENT: float = 75  # 磁盘使用率超过此百分比时压缩并行批次减半（0=禁用）
+    DISK_THROTTLE_LOW_PERCENT: float = 30  # 磁盘使用率回落到此百分比以下时直接恢复批次（迟滞防抖）
+    DISK_CRITICAL_BATCHES: int = 1  # 剩余空间 < N倍最大文件大小时，压缩并行批次强制降至此值（0=禁用）
     COMPRESSION_BATCHES_REDUCTION: int = 1  # 扫描时减少的并行批次数（默认1），0表示不减少
 
     # 扫描方法配置

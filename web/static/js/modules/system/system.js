@@ -682,6 +682,22 @@ async function loadAllSystemConfig() {
                 const compressionBatchesReductionInput = document.getElementById('compressionBatchesReduction');
                 if (compressionBatchesReductionInput) compressionBatchesReductionInput.value = config.compression_batches_reduction;
             }
+            if (config.disk_throttle_high_percent !== undefined) {
+                const el = document.getElementById('diskThrottleHighPercent');
+                if (el) el.value = config.disk_throttle_high_percent;
+            }
+            if (config.disk_throttle_low_percent !== undefined) {
+                const el = document.getElementById('diskThrottleLowPercent');
+                if (el) el.value = config.disk_throttle_low_percent;
+            }
+            if (config.disk_critical_batches !== undefined) {
+                const el = document.getElementById('diskCriticalBatches');
+                if (el) el.value = config.disk_critical_batches;
+            }
+            if (config.disk_check_max_wait_minutes !== undefined) {
+                const el = document.getElementById('diskCheckMaxWaitMinutes');
+                if (el) el.value = config.disk_check_max_wait_minutes;
+            }
 
 
             // SSO 单点登录配置
@@ -769,6 +785,30 @@ async function saveEnvConfigSection() {
                 const value = input.value;
                 if (value === '' || value === null || value === undefined) return null;
                 const parsed = parseInt(value);
+                return isNaN(parsed) ? null : parsed;
+            })(),
+            disk_throttle_high_percent: (() => {
+                const input = document.getElementById('diskThrottleHighPercent');
+                if (!input || input.value === '') return null;
+                const parsed = parseFloat(input.value);
+                return isNaN(parsed) ? null : parsed;
+            })(),
+            disk_throttle_low_percent: (() => {
+                const input = document.getElementById('diskThrottleLowPercent');
+                if (!input || input.value === '') return null;
+                const parsed = parseFloat(input.value);
+                return isNaN(parsed) ? null : parsed;
+            })(),
+            disk_critical_batches: (() => {
+                const input = document.getElementById('diskCriticalBatches');
+                if (!input || input.value === '') return null;
+                const parsed = parseInt(input.value);
+                return isNaN(parsed) ? null : parsed;
+            })(),
+            disk_check_max_wait_minutes: (() => {
+                const input = document.getElementById('diskCheckMaxWaitMinutes');
+                if (!input || input.value === '') return null;
+                const parsed = parseInt(input.value);
                 return isNaN(parsed) ? null : parsed;
             })(),
 
