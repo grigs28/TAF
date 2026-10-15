@@ -671,7 +671,8 @@ class TaskScheduler:
                 except asyncio.CancelledError:
                     pass
 
-                del self._running_executions[task_id]
+                # pop 而非 del：执行器的 finally 可能已先行清理（竞态）
+                self._running_executions.pop(task_id, None)
 
                 # 更新任务状态
                 await storage_update_task(task_id, {'status': ScheduledTaskStatus.PAUSED})
@@ -898,16 +899,25 @@ class TaskScheduler:
                     f"[调度器顺序执行] 开始执行 - "
                     f"任务ID: {task_id}, 任务名称: {task_name}"
                 )
+                # 注册为可停止的执行任务（此前只有手动运行路径注册，
+                # 导致自动触发的任务 stop_task 永远返回"未在运行"）
+                execution_task = asyncio.create_task(task_info['execute_func']())
+                self._running_executions[task_id] = execution_task
                 try:
-                    await task_info['execute_func']()
+                    await execution_task
+                except asyncio.CancelledError:
+                    # stop_task 主动停止属于正常取消，继续执行后续任务
+                    logger.info(
+                        f"[调度器顺序执行] 任务被取消 - "
+                        f"任务ID: {task_id}, 任务名称: {task_name}"
+                    )
                 except Exception as e:
                     logger.error(
                         f"[调度器顺序执行] 任务执行失败 - "
                         f"任务ID: {task_id}, 任务名称: {task_name}: {e}"
                     )
                 finally:
-                    if task_id in self._running_executions:
-                        del self._running_executions[task_id]
+                    self._running_executions.pop(task_id, None)
                 logger.info(
                     f"[调度器顺序执行] 任务完成 - "
                     f"任务ID: {task_id}, 任务名称: {task_name}"
