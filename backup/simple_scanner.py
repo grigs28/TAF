@@ -271,6 +271,17 @@ class SimpleScanner:
                         if backup_task:
                             backup_task.total_files = stats["total_written"]
                             backup_task.total_bytes = stats["total_bytes"]
+                            # 每批次同步进度到数据库（纯内存模式下 UI 才能实时看到扫描计数，
+                            # 此前只在扫描结束时同步一次，导致 UI 全程显示 0）
+                            if hasattr(self.backup_db, "update_scan_progress_only"):
+                                try:
+                                    await self.backup_db.update_scan_progress_only(
+                                        backup_task,
+                                        stats["total_written"],
+                                        stats["total_bytes"],
+                                    )
+                                except Exception as sync_err:
+                                    logger.debug(f"[简洁扫描] 批次同步进度失败（忽略继续）: {sync_err}")
 
                         # 批次进度日志（按 SCAN_LOG_INTERVAL_SECONDS 限流）
                         now_ts = time.time()
