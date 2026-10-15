@@ -27,6 +27,7 @@ class CompressionConfigRequest(BaseModel):
     pgzip_block_size: Optional[str] = Field(None, description="PGZip块大小（如 512M、1G）")
     pgzip_threads: Optional[int] = Field(None, description="PGZip线程数")
     zstd_threads: Optional[int] = Field(None, description="zstd线程数")
+    compression_tar_copybuf_mb: Optional[int] = Field(None, description="tarfile 复制缓冲区（MB），0=Python 默认16KB")
 
 
 @router.get("/compression")
@@ -59,6 +60,9 @@ async def get_compression_config():
             "pgzip_block_size": pgzip_block_size,
             "pgzip_threads": pgzip_threads,
             "zstd_threads": zstd_threads,
+            "compression_tar_copybuf_mb": int(env_values.get(
+                "COMPRESSION_TAR_COPYBUF_MB",
+                getattr(settings, 'COMPRESSION_TAR_COPYBUF_MB', 4))),
             "available_methods": ["pgzip", "zstd", "tar"],
         }
     except Exception as e:
@@ -129,6 +133,14 @@ async def update_compression_config(config: CompressionConfigRequest, request: R
                     detail="zstd_threads 必须在 1-64 之间"
                 )
             updates["ZSTD_THREADS"] = str(config.zstd_threads)
+
+        if config.compression_tar_copybuf_mb is not None:
+            if config.compression_tar_copybuf_mb < 0 or config.compression_tar_copybuf_mb > 256:
+                raise HTTPException(
+                    status_code=400,
+                    detail="compression_tar_copybuf_mb 必须在 0-256 之间（0=Python 默认16KB）"
+                )
+            updates["COMPRESSION_TAR_COPYBUF_MB"] = str(config.compression_tar_copybuf_mb)
 
         # 写入.env文件
         if updates:

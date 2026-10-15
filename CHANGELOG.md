@@ -1,5 +1,13 @@
 # 更新日志
 
+## [0.6.9] - 2026-10-15
+
+### 改进
+
+- 压缩配置页新增"Tar 复制缓冲区（MB）"设置项（COMPRESSION_TAR_COPYBUF_MB，默认 4MB，0=Python 默认16KB）：
+  tarfile 打包默认 16KB 复制缓冲过小、纯 Python 循环开销大，调大至 4MB 可减少循环与系统调用次数
+  （CPython #27199 基准约 +30%），应用于 pgzip/tar/zstd/zstd-cli 全部四条打包路径
+
 ## [0.6.8] - 2026-10-12
 
 ### 修复

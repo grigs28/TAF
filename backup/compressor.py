@@ -74,6 +74,22 @@ except ImportError:
     logger.warning("psutil未安装，无法检查系统内存，将使用默认内存分配策略")
 
 
+def _apply_tar_copybufsize(tar) -> None:
+    """按配置设置 tarfile 复制缓冲区（COMPRESSION_TAR_COPYBUF_MB，单位 MB）
+
+    tarfile 默认复制缓冲仅 16KB，纯 Python 打包时循环次数多、GIL 争抢严重。
+    调大缓冲可减少循环与系统调用次数（CPython #27199 基准约 +30%）。
+    配置为 0 时保持库默认值（16KB）。
+    """
+    try:
+        from config.settings import get_settings
+        mb = int(getattr(get_settings(), 'COMPRESSION_TAR_COPYBUF_MB', 4) or 0)
+        if mb > 0:
+            tar.copybufsize = mb * 1024 * 1024
+    except Exception:
+        pass
+
+
 def _compress_with_7zip_command(
     archive_path: Path,
     file_group: List[Dict],
@@ -490,6 +506,7 @@ def _compress_with_pgzip(
         ) as gz_source:
             logger.debug(f"[PGZip] 压缩文件已打开，开始创建tar文件")
             with tarfile.open(fileobj=gz_source, mode='w') as tar:
+                _apply_tar_copybufsize(tar)
                 total_files_in_group = len(file_group)
                 last_log_time = time.time()
                 log_interval = 10.0  # 每10秒输出一次进度
@@ -666,6 +683,7 @@ def _compress_with_tar(
     logger.debug(f"[tar] 开始创建tar归档文件: {archive_path_abs}")
     try:
         with tarfile.open(archive_path_abs, 'w') as tar:
+            _apply_tar_copybufsize(tar)
             for file_idx, file_info in enumerate(file_group):
                 file_path = Path(file_info['path'])
 
@@ -802,6 +820,7 @@ def _compress_with_zstd_cli(
     try:
         # 使用 tarfile 写入 zstd 的 stdin（管道方式）
         with tarfile.open(fileobj=zstd_process.stdin, mode='w|') as tar:
+            _apply_tar_copybufsize(tar)
             for file_idx, file_info in enumerate(file_group):
                 file_path = Path(file_info['path'])
 
@@ -1068,6 +1087,7 @@ def _compress_with_zstd(
             logger.debug(f"[zstd] 使用写入缓冲区大小: {format_bytes(zstd_write_size)}")
             with compressor.stream_writer(raw_out, closefd=False, write_size=zstd_write_size) as zstd_stream:
                 with tarfile.open(fileobj=zstd_stream, mode='w|') as tar:
+                    _apply_tar_copybufsize(tar)
                     for file_idx, file_info in enumerate(file_group):
                         file_path = Path(file_info['path'])
 

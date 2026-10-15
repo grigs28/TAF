@@ -172,6 +172,7 @@ class Settings(BaseSettings):
     SCAN_WAIT_TIMEOUT: int = 300  # 等待后台扫描写入文件记录的超时时间（秒），默认300秒（5分钟）
     # 压缩并行批次配置
     COMPRESSION_PARALLEL_BATCHES: int = 3  # 压缩并行批次数量（默认3），预读取程序队列数为该值+1
+    COMPRESSION_TAR_COPYBUF_MB: int = 4  # tarfile 复制缓冲区（MB），0=Python 默认16KB；推荐 4MB
     COMPRESSION_BATCHES_REDUCTION: int = 1  # 扫描时减少的并行批次数（默认1），0表示不减少
 
     # 扫描方法配置
