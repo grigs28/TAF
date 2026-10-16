@@ -274,15 +274,15 @@ class CompressionWorker:
                     if self._disk_throttled and high > 0:
                         desired_batches = max(1, normal_batches // 2)
 
-                    # 2b. 空间危急层：剩余空间 < N倍最大文件大小时，批次直接降到指定值
+                    # 2b. 空间危急层：剩余空间 < 并发数×最大文件大小×1.2 时，批次直接降到指定值
                     if critical_batches >= 1:
-                        max_file_size = int(getattr(fresh_settings, 'MAX_FILE_SIZE', 0) or 0)
-                        multiplier = int(getattr(fresh_settings, 'DISK_CHECK_MIN_FREE_MULTIPLIER', 3) or 3)
-                        if max_file_size > 0 and free_bytes < max_file_size * multiplier:
+                        from backup.compressor import _compute_required_free_bytes
+                        required_free = _compute_required_free_bytes(fresh_settings)
+                        if required_free > 0 and free_bytes < required_free:
                             if not self._disk_critical:
                                 logger.warning(
                                     f"[压缩配置] 磁盘剩余空间危急（{format_bytes(free_bytes)} < "
-                                    f"{multiplier}×最大文件大小），并行批次强制降为 {critical_batches}"
+                                    f"{format_bytes(required_free)}[并发×最大文件×1.2]），并行批次强制降为 {critical_batches}"
                                 )
                             self._disk_critical = True
                             desired_batches = min(desired_batches, critical_batches)

@@ -49,6 +49,24 @@ except ImportError:
     logger.warning("psutil未安装，无法检查系统内存，将使用默认内存分配策略")
 
 
+def _compute_required_free_bytes(settings) -> int:
+    """磁盘守卫线 = 并发数 × 最大文件大小 × 1.2
+
+    覆盖全部在途并行组的最大产出（每组压缩后 ≤ MAX_FILE_SIZE）再加 20% 缓冲。
+    随 COMPRESSION_PARALLEL_BATCHES 自动伸缩：并发越高，安全线越高。
+    """
+    try:
+        max_file_size = int(getattr(settings, 'MAX_FILE_SIZE', 0) or 0)
+    except Exception:
+        max_file_size = 0
+    if max_file_size <= 0:
+        return 0
+    try:
+        parallel = max(1, int(getattr(settings, 'COMPRESSION_PARALLEL_BATCHES', 3) or 3))
+    except Exception:
+        parallel = 3
+    return int(max_file_size * parallel * 1.2)
+
 
 class Compressor:
     """压缩处理器"""
@@ -776,7 +794,7 @@ class Compressor:
             return None
 
     async def _ensure_disk_space(self, target_dir: Path):
-        """确保磁盘剩余空间满足 DISK_CHECK_MIN_FREE_MULTIPLIER * MAX_FILE_SIZE 的要求"""
+        """确保磁盘剩余空间满足 并发数 × MAX_FILE_SIZE × 1.2（覆盖在途组最大产出+20%缓冲）"""
         try:
             max_file_size = int(getattr(self.settings, 'MAX_FILE_SIZE', 0))
         except Exception:
@@ -786,14 +804,14 @@ class Compressor:
             return
 
         # 从配置获取参数
-        min_free_multiplier = getattr(self.settings, 'DISK_CHECK_MIN_FREE_MULTIPLIER', 3)
         check_interval = getattr(self.settings, 'DISK_CHECK_INTERVAL', 30)
         max_wait_minutes = getattr(self.settings, 'DISK_CHECK_MAX_WAIT_MINUTES', 60)
 
         # 根据时间和间隔计算最大重试次数
         max_retries = (max_wait_minutes * 60) // check_interval
 
-        required_free = max_file_size * min_free_multiplier
+        # 守卫线：并发数 × 最大文件大小 × 1.2（动态，随并发伸缩）
+        required_free = _compute_required_free_bytes(self.settings) or (max_file_size * 3)
         retry_count = 0
 
         while retry_count < max_retries:
