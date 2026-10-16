@@ -17,15 +17,16 @@ logger = logging.getLogger(__name__)
 
 
 class _ProgressDict(dict):
-    """progress dict 的代理：把写入事件转成进度消息"""
-    def __init__(self, progress_q, base=None):
+    """progress dict 的代理：把写入事件转成进度消息（带组标识路由）"""
+    def __init__(self, progress_q, base=None, progress_key=None):
         super().__init__(base or {})
         self._q = progress_q
+        self._pk = progress_key
 
     def __setitem__(self, key, value):
         super().__setitem__(key, value)
         if self._q is not None:
-            self._q.put({'k': key, 'v': value})
+            self._q.put({'p': self._pk, 'k': key, 'v': value})
 
 
 def _compress_worker_entry(payload: Dict[str, Any]):
@@ -38,8 +39,9 @@ def _compress_worker_entry(payload: Dict[str, Any]):
 
     class _ShimTask:
         """backup_task 的轻量替身：进度字段与 BackupTask 兼容"""
-        def __init__(self, progress_q=None, source_paths=None):
+        def __init__(self, progress_q=None, source_paths=None, progress_key=None):
             self._progress_q = progress_q
+            self._pk = progress_key
             self.source_paths = source_paths or []
             self.progress_percent = 0.0
             self.current_compression_progress = {}
@@ -47,11 +49,12 @@ def _compress_worker_entry(payload: Dict[str, Any]):
         def __setattr__(self, name, value):
             object.__setattr__(self, name, value)
             if name in ('progress_percent', 'current_compression_progress') and self._progress_q is not None:
-                self._progress_q.put({'a': name, 'v': value})
+                self._progress_q.put({'p': self._pk, 'a': name, 'v': value})
 
-    task = _ShimTask(payload.get('progress_queue'), payload.get('source_paths'))
+    progress_key = payload.get('progress_key')
+    task = _ShimTask(payload.get('progress_queue'), payload.get('source_paths'), progress_key)
     # 必须使用代理字典：or 短路时非空原字典会导致泵完全失效（进度始终为 0）
-    compress_progress = _ProgressDict(payload.get('progress_queue'), payload.get('compress_progress'))
+    compress_progress = _ProgressDict(payload.get('progress_queue'), payload.get('compress_progress'), progress_key)
     try:
         result = _compress_with_zstd_cli(
             payload['archive_path'],
@@ -101,7 +104,7 @@ class CompressionProcessPool:
         self._progress_q = None
         self._progress_task = None
         self._current_backup_task = None
-        self._current_compress_progress = None
+        self._group_progress = {}  # {progress_key: compress_progress dict}，按组路由进度事件
 
     @classmethod
     def get_instance(cls, max_workers: int = 16) -> "CompressionProcessPool":
@@ -122,22 +125,24 @@ class CompressionProcessPool:
         self._pump_task = None
         logger.info(f"[压缩进程池] spawn 工作进程池已启动（workers={self.max_workers}）")
 
-    def set_progress_context(self, backup_task, compress_progress):
-        """登记当前备份任务的进度接收对象（由父进程泵实时更新）"""
+    def set_task_context(self, backup_task):
+        """登记当前备份任务的进度接收对象（任务级字段由父进程泵实时更新）"""
         self._current_backup_task = backup_task
-        self._current_compress_progress = compress_progress
         if self._progress_task is None:
             self._progress_task = asyncio.create_task(self._progress_pump())
 
-    def set_progress_context(self, backup_task, compress_progress):
-        """登记当前备份任务的进度接收对象（由父进程泵实时更新）"""
-        self._current_backup_task = backup_task
-        self._current_compress_progress = compress_progress
-        if self._progress_task is None:
-            self._progress_task = asyncio.create_task(self._progress_pump())
+    def register_group_progress(self, progress_key, compress_progress):
+        """登记某个压缩组的进度字典（按组标识路由，避免并发组串写）"""
+        if progress_key is not None:
+            self._group_progress[progress_key] = compress_progress
+
+    def unregister_group_progress(self, progress_key):
+        """压缩组结束后注销其进度字典（停止路由）"""
+        if progress_key is not None:
+            self._group_progress.pop(progress_key, None)
 
     async def _progress_pump(self):
-        """把子进程的进度事件实时回写到 backup_task / compress_progress"""
+        """把子进程的进度事件按组标识实时回写到对应字典 / backup_task"""
         try:
             while True:
                 try:
@@ -150,8 +155,15 @@ class CompressionProcessPool:
                     if 'a' in item:
                         if self._current_backup_task is not None:
                             setattr(self._current_backup_task, item['a'], item['v'])
-                    elif 'k' in item and self._current_compress_progress is not None:
-                        self._current_compress_progress[item['k']] = item['v']
+                    elif 'k' in item:
+                        # 按组标识路由：progress_key 缺失时回退旧行为（写入首个登记组）
+                        target = None
+                        if item.get('p') is not None:
+                            target = self._group_progress.get(item['p'])
+                        if target is None and len(self._group_progress) == 1:
+                            target = next(iter(self._group_progress.values()))
+                        if target is not None:
+                            target[item['k']] = item['v']
                 except Exception:
                     pass
         except asyncio.CancelledError:

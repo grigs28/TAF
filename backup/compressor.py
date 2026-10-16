@@ -607,15 +607,25 @@ class Compressor:
                     'source_paths': getattr(backup_task, 'source_paths', None) or [],
                 }
                 payload['progress_queue'] = None
+                # 组标识：进度事件按此路由到本组字典（并发组间不串写）
+                payload['progress_key'] = str(temp_archive_path)
                 pool = CompressionProcessPool.get_instance()
-                pool.set_progress_context(backup_task, compress_progress)
+                pool.set_task_context(backup_task)
+                pool.register_group_progress(payload['progress_key'], compress_progress)
                 compression_future = await pool.submit(payload)
             else:
                 compression_future = loop.run_in_executor(None, _do_7z_compress)
             
             # 顺序执行：等待压缩完成、标注完成、移动到final
             # 等待压缩完成（不设置超时，让压缩自然完成）
-            await compression_future
+            try:
+                await compression_future
+            finally:
+                # 组结束后注销进度路由（worker 的收尾事件已在返回前送达）
+                try:
+                    CompressionProcessPool.get_instance().unregister_group_progress(payload.get('progress_key'))
+                except Exception:
+                    pass
             logger.warning(f"[压缩] 压缩任务已完成")
             
             # 等待文件完全关闭（Windows上文件句柄释放可能需要时间）

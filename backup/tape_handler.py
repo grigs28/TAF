@@ -686,7 +686,7 @@ class TapeHandler:
             # 尝试挂载
             try:
                 process = await asyncio.create_subprocess_exec(
-                    LTFS_BIN, "-o", f"devname={tape_device}", str(mount_point),
+                    LTFS_BIN, "-o", f"devname={tape_device},max_write=1048576,big_writes", str(mount_point),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
