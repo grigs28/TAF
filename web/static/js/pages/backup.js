@@ -498,6 +498,10 @@
 
                 // 为运行中的任务添加ID属性，便于后续更新
                 speedBadge.setAttribute('data-task-speed', task.task_id || task.id);
+                // 速度徽章之外再补状态徽章：否则运行中卡片只有一个光秃秃的数字，
+                // 看不出任务处于什么状态。先设置状态徽章（会清空容器）再追加速度徽章，
+                // 不走 insertAdjacentHTML（避免把 HTML 字符串二次注入 DOM）
+                badgeWrapper.innerHTML = buildStatusBadge(task);
                 badgeWrapper.appendChild(speedBadge);
             } else {
                 // 如果无法计算速度，显示状态徽章
@@ -799,51 +803,26 @@
             progressSection.className = 'mb-2';
             const isVerifyTask = (task.task_type || '').toLowerCase() === 'verify';
 
-            // 压缩阶段：始终显示"各任务"行（验证任务无压缩阶段）
+            // 压缩阶段：显示"压缩组"聚合条（验证任务无压缩阶段）
             let batchProgressHtml = '';
             if (!isVerifyTask && task.operation_stage === 'compress') {
-                let taskProgressText = '';
-                let hasValidProgress = false;
-                
-                if (task.current_compression_progress) {
-                    const compProg = task.current_compression_progress;
-                    console.log('[各压缩任务进度] compProg:', compProg);
-                    
-                    // 优先显示各压缩任务的进度百分比
-                    if (compProg.task_progress_list && Array.isArray(compProg.task_progress_list) && compProg.task_progress_list.length > 0) {
-                        // 过滤出有效的进度数据（total > 0 或 percent > 0）
-                        const validProgressList = compProg.task_progress_list.filter(taskProg => {
-                            const total = taskProg.total || 0;
-                            const percent = taskProg.percent || 0;
-                            return total > 0 || percent > 0;
-                        });
-                        
-                        if (validProgressList.length > 0) {
-                            // 按文件大小显示各任务的进度：文件总数（百分比%）
-                            taskProgressText = validProgressList.map(taskProg => {
-                                const total = taskProg.total || 0;
-                                const percent = taskProg.percent || 0;
-                                return `${total}（${percent.toFixed(0)}%）`;
-                            }).join('   ');
-                            hasValidProgress = true;
-                            console.log('[各压缩任务进度] 显示任务进度:', taskProgressText);
-                        }
-                    }
-                    
-                    // 如果没有有效的 task_progress_list，但有 running_count，显示任务数量
-                    if (!hasValidProgress && compProg.running_count && compProg.running_count > 0) {
-                        taskProgressText = `${compProg.running_count} 个任务运行中`;
-                        hasValidProgress = true;
-                        console.log('[各压缩任务进度] 没有task_progress_list，显示任务数量:', compProg.running_count);
-                    }
+                // 压缩组：聚合迷你条 + "X/Y" 计数，**取代**原先逐组罗列百分比。
+                // 依据：并行任务逐个显示进度会造成视觉杂乱（通用 UX 结论：并发数一多必须做减法，
+                // 聚合条 + 完成计数比罗列更直观）；但数值必须保留（进度指示器研究结论）。
+                const _compProg = task.current_compression_progress || {};
+                const runningCount = parseInt(_compProg.running_count, 10) || 0;
+                const totalSlots = parseInt(task.parallel_batches, 10) || 8;
+                let slotsHtml = '';
+                for (let i = 0; i < totalSlots; i++) {
+                    const active = i < runningCount;
+                    slotsHtml += '<span style="display:inline-block;width:5px;height:11px;margin-right:2px;'
+                        + 'border-radius:1px;vertical-align:-1px;background:'
+                        + (active ? 'var(--primary)' : 'rgba(255,255,255,.18)') + '"></span>';
                 }
-                
-                // 无论是否有进度信息，都显示"各任务"行
-                // 只有当有有效进度数据时才显示进度，否则显示 "-"
                 batchProgressHtml = `
                     <div class="d-flex justify-content-between align-items-center mb-1">
-                        <small class="text-muted">各任务:</small>
-                        <small class="text-muted fw-semibold">${hasValidProgress ? taskProgressText : '-'}</small>
+                        <small class="text-muted">压缩组:</small>
+                        <small class="text-muted">${slotsHtml}<span class="fw-semibold ms-1">${runningCount}/${totalSlots}</span></small>
                     </div>
                 `;
             }
@@ -901,8 +880,20 @@
                     </div>
                 `;
             } else {
+                // SSD 剩余空间（压缩目录所在盘）：运维最关心的资源水位，放在进度区前部
+                const diskLine = (typeof task.disk_free_bytes === 'number' && task.disk_free_bytes > 0)
+                    ? `<div class="d-flex justify-content-between">
+                        <small class="text-muted">SSD 剩余:</small>
+                        <small class="text-muted">${formatBytes(task.disk_free_bytes)}${(typeof task.disk_total_bytes === 'number' && task.disk_total_bytes > 0)
+                            ? ' / ' + formatBytes(task.disk_total_bytes)
+                              + ' (' + Math.round(task.disk_free_bytes / task.disk_total_bytes * 100) + '%)'
+                            : ''}</small>
+                    </div>`
+                    : '';
+
                 progressSection.innerHTML = `
                     ${batchProgressHtml}
+                    ${diskLine}
                     <div class="d-flex justify-content-between align-items-center">
                         <small class="text-muted">进度:</small>
                         <small class="text-muted">${progressInfo.percent}%</small>

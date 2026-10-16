@@ -150,6 +150,24 @@ async def get_backup_tasks(
                 if rows:
                     logger.debug(f"[任务查询] 第一个任务的状态: {rows[0].get('status')}, is_template: {rows[0].get('is_template')}")
 
+                # 压缩目录所在磁盘的可用/总空间 + 配置的并行批次数：
+                # 整批任务只需读一次（卡片统一显示"SSD 剩余空间"与"压缩组 X/Y"）
+                disk_free_bytes = None
+                disk_total_bytes = None
+                parallel_batches = 8
+                try:
+                    import shutil as _shutil
+                    from config.settings import get_settings as _gs
+                    _live = _gs()
+                    _usage = _shutil.disk_usage(
+                        getattr(_live, 'BACKUP_COMPRESS_DIR', 'temp/compress'))
+                    disk_free_bytes = _usage.free           # 与程序内守卫同口径（f_bavail）
+                    disk_total_bytes = _usage.total
+                    parallel_batches = int(
+                        getattr(_live, 'COMPRESSION_PARALLEL_BATCHES', 8) or 8)
+                except Exception as _disk_err:
+                    logger.debug(f"[任务查询] 读取磁盘/并发配置失败（卡片将不显示 SSD 剩余）: {_disk_err}")
+
                 tasks = []
                 for row in rows:
                     # 解析JSON字段
@@ -394,7 +412,13 @@ async def get_backup_tasks(
                         "operation_stage": stage_info["operation_stage"],
                         "operation_stage_label": stage_info["operation_stage_label"],
                         "stage_steps": stage_info["stage_steps"],
-                        "current_compression_progress": current_compression_progress
+                        "current_compression_progress": current_compression_progress,
+                        # 压缩目录所在磁盘的可用/总空间（与程序内部 shutil.disk_usage 同口径：
+                        # free = f_bavail，用于卡片显示"SSD 剩余空间"）
+                        "disk_free_bytes": disk_free_bytes,
+                        "disk_total_bytes": disk_total_bytes,
+                        # 配置的并行批次数：卡片用它画"压缩组 X/Y"的聚合条分母
+                        "parallel_batches": parallel_batches
                     })
 
                 # 追加计划任务（未运行模板）
