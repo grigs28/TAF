@@ -99,6 +99,12 @@ class Compressor:
         # 由 CompressionWorker 注入：返回"当前在途压缩组数"（含调用者自己）。
         # 用于空间守卫**动态**判定线；未注入时回退到配置的并发上限（保守）。
         self.active_groups_provider: Optional[Callable[[], int]] = None
+        # **真正会产出数据**的组数（等待空间 + tar/zstd 压缩中）。
+        # 不含"压缩已完成、正在标注/移动到 final"的组——那些组同盘移动，
+        # 不再新增磁盘占用，计入会把守卫判定线抬高（实测虚高 6 组 ≈144G），
+        # 导致 SSD 被无谓闲置。计数在本类的 compress_file_group 内维护，
+        # 比 worker 的 futures 数更贴近真实产出。
+        self._active_compressing: int = 0
         # 记录每个备份集的上次压缩文件名和序号，确保文件名不重复
         # 格式: {backup_set_id: {'last_filename': str, 'sequence': int}}
         self._last_archive_info: Dict[str, Dict[str, Any]] = {}
@@ -229,6 +235,10 @@ class Compressor:
         Returns:
             压缩文件信息字典（包含预设路径和压缩任务future），立即返回，不等待压缩完成
         """
+        # 计入"在途产出"：从进入本函数（可能先在此等待空间）到压缩结束为止。
+        # 用标志位保证恰好释放一次（正常路径在压缩完成后释放，异常路径兜底释放）。
+        _active_released = False
+        self._active_compressing += 1
         try:
             # 从备份任务获取压缩设置
             compression_enabled = getattr(backup_task, 'compression_enabled', True)
@@ -666,7 +676,13 @@ class Compressor:
                 except Exception:
                     pass
             logger.warning(f"[压缩] 压缩任务已完成")
-            
+
+            # 压缩已结束 → 本组不再产出数据，立即释放"在途产出"计数。
+            # 后续的标注/移动到 final 是同盘移动，不新增占用，不该继续占用守卫额度。
+            if not _active_released:
+                self._active_compressing = max(0, self._active_compressing - 1)
+                _active_released = True
+
             # 等待文件完全关闭（Windows上文件句柄释放可能需要时间）
             logger.debug("[压缩] 等待文件句柄完全释放...")
             await asyncio.sleep(1.0)
@@ -809,6 +825,10 @@ class Compressor:
             return compressed_info
 
         except Exception as e:
+            # 兜底释放"在途产出"计数（若上面正常路径尚未释放）
+            if not _active_released:
+                self._active_compressing = max(0, self._active_compressing - 1)
+                _active_released = True
             logger.error(f"压缩文件组失败: {str(e)}")
             import traceback
             traceback.print_exc()
@@ -856,14 +876,19 @@ class Compressor:
         # 守卫线同样现取 settings：并发数/系数改动后守卫线要立即随之伸缩。
         # 组数用实时的在途数（含本组自己）而非配置上限——6 组在途想开第 7 组时
         # 只需 7×24G 而非 8×24G，避免组数未满上限时被无谓拦停。
-        active_groups = None
-        provider = getattr(self, 'active_groups_provider', None)
-        if callable(provider):
-            try:
-                active_groups = int(provider())
-            except Exception as provider_err:
-                logger.debug(f"获取在途组数失败，回退配置上限: {provider_err}")
-                active_groups = None
+        # 组数优先取本类自维护的"**真正会产出数据**的组数"——它不含"压缩已完成、
+        # 正在标注/移动到 final"的组。用 worker 的 futures 数会把这类组一并算入，
+        # 实测虚高 6 组（≈144G），使判定线被抬高、SSD 被无谓闲置。
+        # 回退顺序：自维护计数 → worker 注入的 provider → 配置上限（_compute 内部处理）
+        active_groups = self._active_compressing or None
+        if not active_groups:
+            provider = getattr(self, 'active_groups_provider', None)
+            if callable(provider):
+                try:
+                    active_groups = int(provider()) or None
+                except Exception as provider_err:
+                    logger.debug(f"获取在途组数失败，回退配置上限: {provider_err}")
+                    active_groups = None
         required_free = _compute_required_free_bytes(_live_settings, active_groups) or (max_file_size * 3)
         retry_count = 0
 
