@@ -683,7 +683,13 @@ class CompressionWorker:
                 current_file_index = compress_progress.get('current_file_index', 0)
                 total_files_in_group = compress_progress.get('total_files_in_group', 0)
                 group_size_bytes = progress_info.get('group_size_bytes', 0)
-                
+
+                # 仅展示已实际开始压缩的组：等待磁盘守卫放行的组尚无任何进度事件
+                # （current=0 且无 processed_bytes），以 0% 占位会误导 UI
+                _processed = compress_progress.get('processed_bytes')
+                if current_file_index <= 0 and (_processed is None or _processed <= 0):
+                    continue
+
                 logger.debug(
                     f"[压缩进度聚合] 任务#{group_idx}: current_file_index={current_file_index}, "
                     f"total_files_in_group={total_files_in_group}, group_size_bytes={group_size_bytes}"
