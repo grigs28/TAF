@@ -981,6 +981,26 @@ body {
     color: var(--text-primary);
 }
 
+/*
+ * 禁用态（如"启用磁盘限流"关闭时置灰的三项）：
+ * Bootstrap 默认给 :disabled 套浅色底（--bs-secondary-bg），在深色主题下会发白。
+ * 这里保持与启用态相同的底色，仅把文字调暗、光标改 not-allowed 以表达不可编辑。
+ */
+.form-control:disabled,
+.form-control[readonly] {
+    background: rgba(20, 30, 48, 0.6);
+    border-color: rgba(0, 170, 255, 0.15);
+    color: rgba(255, 255, 255, 0.35);
+    cursor: not-allowed;
+}
+
+.form-select:disabled {
+    background-color: rgba(20, 30, 48, 0.6);
+    border-color: rgba(0, 170, 255, 0.15);
+    color: rgba(255, 255, 255, 0.35);
+    cursor: not-allowed;
+}
+
 /* 添加placeholder样式 */
 .form-control::placeholder {
     color: var(--text-secondary);
