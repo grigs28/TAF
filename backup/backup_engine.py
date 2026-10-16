@@ -1650,7 +1650,9 @@ class BackupEngine:
                 logger.info("=" * 80)
                 
                 # 更新数据库和内存中的任务状态为完成
-                from models.backup import BackupTaskStatus
+                # 注意：不可在此处局部导入 BackupTaskStatus——它会把该名字变成函数局部变量，
+                # 使同函数内更早的取消分支（except KeyboardInterrupt / CancelledError）引用时
+                # 抛 UnboundLocalError（模块级已导入，直接用全局即可）
                 backup_task.status = BackupTaskStatus.COMPLETED
                 await self.backup_db.update_task_status(backup_task, BackupTaskStatus.COMPLETED)
 

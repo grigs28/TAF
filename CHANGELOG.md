@@ -1,5 +1,16 @@
 # 更新日志
 
+## [0.9.8] - 2026-10-16
+
+### 修复
+
+- 修复任务取消/中止时状态更新失败：`_perform_backup` 内的局部 `from models.backup import
+  BackupTaskStatus` 使该名字成为**函数局部变量**，导致同函数内更早的键盘中断 / 取消分支
+  引用时抛 `UnboundLocalError: local variable 'BackupTaskStatus' referenced before
+  assignment`（生产实测日志 11:06:07 `更新任务状态失败`），取消路径的状态未能写库；
+  模块级已导入该名字，删除局部导入即可
+- 版本升至 0.9.8
+
 ## [0.9.7] - 2026-10-16
 
 ### 运维
