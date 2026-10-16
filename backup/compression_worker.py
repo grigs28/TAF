@@ -245,6 +245,10 @@ class CompressionWorker:
             high = float(getattr(fresh_settings, 'DISK_THROTTLE_HIGH_PERCENT', 75) or 0)
             low = float(getattr(fresh_settings, 'DISK_THROTTLE_LOW_PERCENT', 30) or 0)
             critical_batches = int(getattr(fresh_settings, 'DISK_CRITICAL_BATCHES', 1) or 0)
+            # 总开关关闭：百分比限流与危急层降级都不生效（配置的数值保留，重开即恢复）
+            if not bool(getattr(fresh_settings, 'DISK_THROTTLE_ENABLED', True)):
+                high = 0
+                critical_batches = 0
             desired_batches = normal_batches
             if normal_batches >= 1 and (high > 0 or critical_batches >= 1):
                 compress_dir = getattr(fresh_settings, 'BACKUP_COMPRESS_DIR', 'temp/compress')

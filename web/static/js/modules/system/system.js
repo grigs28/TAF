@@ -588,6 +588,15 @@ document.addEventListener('DOMContentLoaded', function() {
 
 // ===== 统一系统配置管理 =====
 // 加载所有系统配置
+// 磁盘限流开关联动：关闭时把同组磁盘参数一并置灰（仅不可编辑，数值不变、照常提交）
+// 联动字段：限流上限 / 限流恢复阈值 / 空间危急时压缩批次数
+function applyDiskThrottleEditability(on) {
+    ['diskThrottleHighPercent', 'diskThrottleLowPercent', 'diskCriticalBatches'].forEach(function (id) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = !on;
+    });
+}
+
 async function loadAllSystemConfig() {
     try {
         const response = await fetch('/api/system/env-config');
@@ -686,30 +695,18 @@ async function loadAllSystemConfig() {
                 const el = document.getElementById('diskThrottleHighPercent');
                 const sw = document.getElementById('diskThrottleEnabled');
                 if (el) el.value = config.disk_throttle_high_percent;
-                // 联动：上限 > 0 视为"启用"；关闭时置灰输入框并记住当前值供重开恢复
+                // 开关状态取自 DISK_THROTTLE_ENABLED（老数据回退：上限 > 0 视为启用）
                 if (sw) {
-                    const on = Number(config.disk_throttle_high_percent) > 0;
+                    const on = (config.disk_throttle_enabled !== undefined)
+                        ? !!config.disk_throttle_enabled
+                        : (Number(config.disk_throttle_high_percent) > 0);
                     sw.checked = on;
-                    if (el) {
-                        el.disabled = !on;
-                        if (!on) el.dataset.lastValue = '75';
-                    }
+                    applyDiskThrottleEditability(on);
                     // 事件只注册一次（本函数会被反复调用）
                     if (!sw.dataset.bound) {
                         sw.dataset.bound = '1';
                         sw.addEventListener('change', function () {
-                            const input = document.getElementById('diskThrottleHighPercent');
-                            if (!input) return;
-                            if (this.checked) {
-                                input.disabled = false;
-                                const last = parseFloat(input.dataset.lastValue || '');
-                                if (!(parseFloat(input.value) > 0)) {
-                                    input.value = (last > 0) ? last : 75;
-                                }
-                            } else {
-                                if (parseFloat(input.value) > 0) input.dataset.lastValue = input.value;
-                                input.disabled = true;
-                            }
+                            applyDiskThrottleEditability(this.checked);
                         });
                     }
                 }
@@ -823,13 +820,13 @@ async function saveEnvConfigSection() {
                 const parsed = parseInt(value);
                 return isNaN(parsed) ? null : parsed;
             })(),
-            disk_throttle_high_percent: (() => {
+            disk_throttle_enabled: (() => {
                 const sw = document.getElementById('diskThrottleEnabled');
+                return sw ? !!sw.checked : null;
+            })(),
+            disk_throttle_high_percent: (() => {
                 const input = document.getElementById('diskThrottleHighPercent');
-                if (!input) return null;
-                // 联动：开关关闭 → 写 0（系统约定的禁用方式）
-                if (sw && !sw.checked) return 0;
-                if (input.value === '') return null;
+                if (!input || input.value === '') return null;
                 const parsed = parseFloat(input.value);
                 return isNaN(parsed) ? null : parsed;
             })(),

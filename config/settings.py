@@ -174,6 +174,7 @@ class Settings(BaseSettings):
     # 压缩并行批次配置
     COMPRESSION_PARALLEL_BATCHES: int = 3  # 压缩并行批次数量（默认3），预读取程序队列数为该值+1
     COMPRESSION_TAR_COPYBUF_MB: int = 4  # tarfile 复制缓冲区（MB），0=Python 默认16KB；推荐 4MB
+    DISK_THROTTLE_ENABLED: bool = True  # 磁盘限流总开关：关闭则百分比限流与危急层降级均不生效（数值保留）
     DISK_THROTTLE_HIGH_PERCENT: float = 75  # 磁盘使用率超过此百分比时压缩并行批次减半（0=禁用）
     DISK_THROTTLE_LOW_PERCENT: float = 30  # 磁盘使用率回落到此百分比以下时直接恢复批次（迟滞防抖）
     DISK_CRITICAL_BATCHES: int = 1  # 剩余空间 < N倍最大文件大小时，压缩并行批次强制降至此值（0=禁用）
