@@ -1,5 +1,22 @@
 # 更新日志
 
+## [1.1.7] - 2026-10-17
+
+### 修复
+
+- **取消任务后残留 tar/zstd 孤儿进程**：停止任务时只 `cancel()` 了 asyncio 任务，
+  但真正干活的 tar/zstd 是 `CompressionProcessPool` 里 spawn 出来的**子进程**，
+  且运行在 executor 的**同步函数**中——取消 future 既不会中断它们，
+  也不会让它们走到自身的 `except` 分支（`CancelledError` 在 Python 3.10 属
+  `BaseException`，且根本传不进同步函数）。于是它们成为孤儿：
+  **继续从 NAS 读数据、继续写磁盘**。实测任务取消后仍残留 2~7 个 zstd 进程，
+  本轮任务 111/112 取消后均复现。
+  现把清理逻辑下沉到 `backup.utils.kill_compression_processes()`，
+  由 `CompressionWorker.stop()` 末尾强制执行（正常结束时无残留进程，调用无副作用）；
+  并补上此前漏掉的 **tar**——用 `taf_zstdcli`（本功能为每组创建的临时清单目录名）
+  精确匹配，避免误杀系统上其他 tar 命令。
+- 版本升至 1.1.7
+
 ## [1.1.6] - 2026-10-17
 
 ### 修复

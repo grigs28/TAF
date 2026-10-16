@@ -192,6 +192,17 @@ class CompressionWorker:
             logger.debug("[压缩循环] 停止数据库更新器，处理剩余文件...")
             await self.db_updater.stop()
 
+        # 强制清理残留的 tar/zstd 子进程。
+        # 上面的 cancel() 只作用于 asyncio 任务；真正干活的 tar/zstd 是进程池里
+        # spawn 出来的子进程，取消 future 不会杀掉它们（它们跑在同步函数里，
+        # 既收不到 CancelledError，也走不到自身的 except），于是成为孤儿——
+        # 继续从 NAS 读数据、继续写磁盘。实测任务取消后仍残留 2~7 个。
+        try:
+            from backup.utils import kill_compression_processes
+            kill_compression_processes(reason="压缩停止")
+        except Exception as kill_err:
+            logger.warning(f"清理残留压缩子进程失败（可能有孤儿进程）: {kill_err}")
+
         logger.info("压缩处理任务已停止")
 
     async def _compression_loop(self):

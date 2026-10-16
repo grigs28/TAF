@@ -130,3 +130,45 @@ def calculate_file_checksum(file_path: Path) -> str:
             sha256_hash.update(chunk)
     return sha256_hash.hexdigest()
 
+
+
+def kill_compression_processes(reason: str = "任务停止") -> int:
+    """强制终止残留的压缩子进程（zstd 与配套的 tar）。
+
+    背景：压缩跑在 CompressionProcessPool 的 executor 里（同步函数 + spawn 的子进程）。
+    取消 asyncio future **既不会中断**这些同步函数，**也不会**让它们走到自身的
+    except 分支（CancelledError 在 3.10 是 BaseException，且根本传不进同步函数），
+    于是 tar/zstd 成为孤儿：继续从 NAS 读数据、继续写磁盘。
+    实测：任务取消后仍残留 2~7 个 zstd 进程（其中 tar 还在占 NAS 带宽）。
+
+    匹配策略：
+      - zstd：命令行含 "zstd"（TAF 只在本功能里调用 zstd）
+      - tar ：必须限定 "taf_zstdcli"（TAF 为每组创建的临时清单目录名，
+              用它精确匹配本功能的 tar，避免误杀系统上其他 tar 命令）
+    """
+    import subprocess
+
+    killed = 0
+    for pattern in ('zstd', 'taf_zstdcli'):
+        try:
+            r = subprocess.run(['pkill', '-9', '-f', pattern],
+                               capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                killed += 1
+        except FileNotFoundError:
+            # pkill 不存在，回退 killall（只能按进程名，覆盖不了 tar 的完整命令行）
+            try:
+                subprocess.run(['killall', '-9', 'zstd'],
+                               capture_output=True, text=True, timeout=5)
+                killed += 1
+            except Exception:
+                pass
+            break
+        except Exception:
+            continue
+
+    if killed:
+        logger.warning(f"[{reason}] 已终止残留的压缩子进程（zstd/tar）")
+    else:
+        logger.debug(f"[{reason}] 无残留压缩子进程")
+    return killed

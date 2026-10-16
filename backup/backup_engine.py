@@ -53,28 +53,16 @@ logger = logging.getLogger(__name__)
 
 
 def kill_zstd_processes():
-    """强制终止所有 zstd 压缩进程
+    """强制终止残留的压缩子进程（zstd 与配套 tar）。
 
-    在系统关闭时调用，避免压缩进程继续占用资源。
+    保留本函数名以向后兼容旧调用点；实现已下沉到 backup.utils，
+    并补上了此前漏掉的 tar（它才是持续占用 NAS 带宽的那个）。
     """
     try:
-        import subprocess
-        result = subprocess.run(['pkill', '-9', '-f', 'zstd'], capture_output=True, text=True, timeout=5)
-        if result.returncode == 0:
-            logger.info("[关闭] 已终止所有 zstd 进程")
-        else:
-            logger.debug("[关闭] 没有运行中的 zstd 进程")
-    except FileNotFoundError:
-        # pkill 不存在，尝试 killall
-        try:
-            import subprocess
-            result = subprocess.run(['killall', '-9', 'zstd'], capture_output=True, text=True, timeout=5)
-            if result.returncode == 0:
-                logger.info("[关闭] 已终止所有 zstd 进程 (killall)")
-        except Exception:
-            pass
+        from backup.utils import kill_compression_processes
+        kill_compression_processes(reason="关闭")
     except Exception as e:
-        logger.warning(f"[关闭] 终止 zstd 进程失败: {e}")
+        logger.warning(f"[关闭] 终止压缩进程失败: {e}")
 
 
 # 向后兼容：保留 normalize_volume_label 和 extract_label_year_month 的导出
