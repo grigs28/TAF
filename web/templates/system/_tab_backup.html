@@ -4,7 +4,7 @@
         <div class="col-md-6">
             <div class="setting-card service-card mb-3">
                 <div class="card-body">
-                    <h6 class="card-title"><i class="bi bi-sliders me-2"></i>备份与压缩</h6>
+                    <h6 class="card-title"><i class="bi bi-sliders me-2"></i>备份与设备</h6>
 
                     <!-- ── 扫描设置 ── -->
                     <h6 class="text-secondary border-bottom pb-2 mb-3 mt-4">扫描设置</h6>
@@ -58,6 +58,28 @@
                         <input type="number" class="form-control" id="compressionBatchesReduction" value="1" min="0" step="1">
                         <small class="form-text text-secondary">扫描期减少的并发组数，扫描结束后自动恢复</small>
                     </div>
+
+                    <!-- ── 磁带与设备 ── -->
+                    <h6 class="text-secondary border-bottom pb-2 mb-3 mt-4">磁带与设备</h6>
+                    <div class="form-check form-switch mb-3">
+                        <input class="form-check-input" type="checkbox" id="enableTapeFormatBeforeFull">
+                        <label class="form-check-label" for="enableTapeFormatBeforeFull">
+                            完整备份前自动格式化磁带
+                        </label>
+                        <small class="text-muted d-block">开启后自动调用 <code>mkltfs</code> 格式化并生成新卷标，关闭后仅校验卷标</small>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">磁带设备路径（mt命令）</label>
+                        <input type="text" class="form-control" id="itdtDevicePath" placeholder="/dev/nst0">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">LTFS SCSI 设备路径</label>
+                        <input type="text" class="form-control" id="ltfsDevicePath" placeholder="/dev/sg2">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">LTFS工具目录</label>
+                        <input type="text" class="form-control" id="ltfsToolsDir" placeholder="/usr/local/ltfs">
+                    </div>
                 </div>
             </div>
         </div>
@@ -65,7 +87,7 @@
         <div class="col-md-6">
             <div class="setting-card service-card mb-3">
                 <div class="card-body">
-                    <h6 class="card-title"><i class="bi bi-hdd me-2"></i>磁盘保护与磁带</h6>
+                    <h6 class="card-title"><i class="bi bi-shield-lock me-2"></i>磁盘保护与保留</h6>
 
                     <!-- ── 磁盘限流 ── -->
                     <h6 class="text-secondary border-bottom pb-2 mb-3 mt-4">磁盘限流</h6>
@@ -123,27 +145,6 @@
                         <label class="form-check-label" for="autoEraseExpired">自动擦除过期磁带</label>
                     </div>
 
-                    <!-- ── 磁带与设备 ── -->
-                    <h6 class="text-secondary border-bottom pb-2 mb-3 mt-4">磁带与设备</h6>
-                    <div class="form-check form-switch mb-3">
-                        <input class="form-check-input" type="checkbox" id="enableTapeFormatBeforeFull">
-                        <label class="form-check-label" for="enableTapeFormatBeforeFull">
-                            完整备份前自动格式化磁带
-                        </label>
-                        <small class="text-muted d-block">开启后自动调用 <code>mkltfs</code> 格式化并生成新卷标，关闭后仅校验卷标</small>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">磁带设备路径（mt命令）</label>
-                        <input type="text" class="form-control" id="itdtDevicePath" placeholder="/dev/nst0">
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">LTFS SCSI 设备路径</label>
-                        <input type="text" class="form-control" id="ltfsDevicePath" placeholder="/dev/sg2">
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">LTFS工具目录</label>
-                        <input type="text" class="form-control" id="ltfsToolsDir" placeholder="/usr/local/ltfs">
-                    </div>
                 </div>
             </div>
         </div>
