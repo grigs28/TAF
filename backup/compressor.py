@@ -837,6 +837,13 @@ class Compressor:
             _live_settings = _get_settings()
         except Exception:
             _live_settings = self.settings
+
+        # 空间守卫总开关（DISK_GUARD_ENABLED）：关闭后不再按守卫线暂停发放新组。
+        # 注意"与磁盘限流至少保留一个"由 API 层校验，此处只忠实执行开关。
+        if not bool(getattr(_live_settings, 'DISK_GUARD_ENABLED', True)):
+            logger.debug("空间守卫已关闭（DISK_GUARD_ENABLED=false），跳过磁盘空间检查")
+            return
+
         check_interval = int(getattr(_live_settings, 'DISK_CHECK_INTERVAL', 30) or 30)
         if check_interval < 1:
             check_interval = 30

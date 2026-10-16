@@ -597,6 +597,31 @@ function applyDiskThrottleEditability(on) {
     });
 }
 
+function applyDiskGuardEditability(on) {
+    ['diskGuardSafetyFactor', 'diskCheckInterval', 'diskCheckMaxWaitMinutes'].forEach(function (id) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = !on;
+    });
+}
+
+// 两个磁盘保护至少保留一个：试图关掉最后一个时拦下并提示（后端亦有同样校验）
+function guardAgainstClosingBoth(changedSwitch) {
+    if (changedSwitch && changedSwitch.checked) return true;   // 本次是"打开"，放行
+    const throttle = document.getElementById('diskThrottleEnabled');
+    const guard = document.getElementById('diskGuardEnabled');
+    if (!throttle || !guard) return true;
+    if (!throttle.checked && !guard.checked) {
+        alert('磁盘限流与空间守卫至少要保留一个：请先启用另一项，再关闭本项。');
+        if (changedSwitch) {
+            changedSwitch.checked = true;                       // 回滚本次操作
+            if (changedSwitch.id === 'diskGuardEnabled') applyDiskGuardEditability(true);
+            else applyDiskThrottleEditability(true);
+        }
+        return false;
+    }
+    return true;
+}
+
 async function loadAllSystemConfig() {
     try {
         const response = await fetch('/api/system/env-config');
@@ -706,9 +731,28 @@ async function loadAllSystemConfig() {
                     if (!sw.dataset.bound) {
                         sw.dataset.bound = '1';
                         sw.addEventListener('change', function () {
-                            applyDiskThrottleEditability(this.checked);
+                            if (guardAgainstClosingBoth(this)) {
+                                applyDiskThrottleEditability(this.checked);
+                            }
                         });
                     }
+                }
+            }
+            // 空间守卫开关（默认启用；老数据无该字段时按启用处理）
+            const gsw = document.getElementById('diskGuardEnabled');
+            if (gsw) {
+                const gon = (config.disk_guard_enabled !== undefined)
+                    ? !!config.disk_guard_enabled
+                    : true;
+                gsw.checked = gon;
+                applyDiskGuardEditability(gon);
+                if (!gsw.dataset.bound) {
+                    gsw.dataset.bound = '1';
+                    gsw.addEventListener('change', function () {
+                        if (guardAgainstClosingBoth(this)) {
+                            applyDiskGuardEditability(this.checked);
+                        }
+                    });
                 }
             }
             if (config.disk_throttle_low_percent !== undefined) {
@@ -826,6 +870,10 @@ async function saveEnvConfigSection() {
             })(),
             disk_throttle_enabled: (() => {
                 const sw = document.getElementById('diskThrottleEnabled');
+                return sw ? !!sw.checked : null;
+            })(),
+            disk_guard_enabled: (() => {
+                const sw = document.getElementById('diskGuardEnabled');
                 return sw ? !!sw.checked : null;
             })(),
             disk_throttle_high_percent: (() => {
