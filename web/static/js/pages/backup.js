@@ -848,35 +848,56 @@
                 `;
             }
             
-            // 验证任务：只显示扫描/验证进度，不显示压缩相关字段
+            // 验证任务：显示扫描量/抽样量/通过/失败，不显示压缩相关字段
+            //
+            // 说明：验证任务不存在"压缩后大小/压缩率"，其真实工作量是"扫描 + 按比例抽样校验"，
+            // 后端 progress_percent 按 抽样数/扫描数 计算（≈抽样比例，默认 1%），
+            // 直接当进度显示会恒为 1% 造成误导，故此处不显示百分比，改用状态 + 四个计数表达。
             if (isVerifyTask) {
-                // 从 description 或 operation_status 解析通过/失败数
+                // 从 description / operation_status 解析（后端格式：已扫描 X, 抽样 Y, 通过 P, 失败 F）
                 const descText = (task.description || '') + ' ' + (task.operation_status || '');
-                let verifyFailed = 0;
+                const passMatch = descText.match(/通过\s*(\d+)/);
                 const failMatch = descText.match(/失败\s*(\d+)/);
-                if (failMatch) verifyFailed = parseInt(failMatch[1], 10);
-                const failedClass = verifyFailed > 0 ? 'text-danger fw-semibold' : 'text-muted';
+                const verifyPassed = passMatch ? parseInt(passMatch[1], 10) : null;
+                const verifyFailed = failMatch ? parseInt(failMatch[1], 10) : null;
+                const failedClass = (verifyFailed || 0) > 0 ? 'text-danger fw-semibold' : 'text-muted';
+
+                const scanned = progressInfo.totalFiles || 0;
+                const sampled = progressInfo.processedFiles || 0;
+                // 抽样比例：优先用任务记录里落库的配置值（该次运行实际使用），
+                // 老数据没有该字段时回退到"已抽样/已扫描"推算值
+                const configuredPct = (typeof task.verify_percent === 'number' && task.verify_percent > 0)
+                    ? task.verify_percent : null;
+                const derivedPct = scanned > 0 ? (sampled * 100 / scanned) : null;
+                const sampleRateText = configuredPct !== null
+                    ? `（${configuredPct}%）`
+                    : (derivedPct !== null ? `（${derivedPct.toFixed(2)}%）` : '');
+                const statusText = (task.status || '').toLowerCase() === 'completed'
+                    ? '已完成'
+                    : ((task.status || '').toLowerCase() === 'failed' ? '失败' : '验证中');
 
                 progressSection.innerHTML = `
                     ${batchProgressHtml}
                     <div class="d-flex justify-content-between align-items-center">
-                        <small class="text-muted">进度:</small>
-                        <small class="text-muted">${progressInfo.percent}%</small>
-                    </div>
-                    <div class="progress" style="height:6px;">
-                        <div class="progress-bar bg-primary" role="progressbar" style="width:${progressInfo.percent}%"></div>
+                        <small class="text-muted">状态:</small>
+                        <small class="text-muted">${statusText}</small>
                     </div>
                     <div class="d-flex justify-content-between">
                         <small class="text-muted">已扫描文件:</small>
-                        <small class="text-muted">${progressInfo.totalFiles}</small>
+                        <small class="text-muted">${scanned.toLocaleString()}</small>
                     </div>
                     <div class="d-flex justify-content-between">
                         <small class="text-muted">已抽样验证:</small>
-                        <small class="text-muted">${progressInfo.processedFiles}</small>
+                        <small class="text-muted">${sampled.toLocaleString()}${sampleRateText}</small>
                     </div>
+                    ${verifyPassed !== null ? `
+                    <div class="d-flex justify-content-between">
+                        <small class="text-muted">通过:</small>
+                        <small class="text-success">${verifyPassed.toLocaleString()}</small>
+                    </div>` : ''}
                     <div class="d-flex justify-content-between">
                         <small class="text-muted">失败数:</small>
-                        <small class="${failedClass}">${verifyFailed}</small>
+                        <small class="${failedClass}">${verifyFailed === null ? '-' : verifyFailed.toLocaleString()}</small>
                     </div>
                 `;
             } else {

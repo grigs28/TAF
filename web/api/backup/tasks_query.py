@@ -373,6 +373,12 @@ async def get_backup_tasks(
                         "compressed_bytes": compressed_bytes_value,  # 压缩后大小（优先使用内存中的实时统计）
                         "compression_ratio": compression_ratio,
                         "estimated_archive_count": estimated_archive_count,  # 压缩包数量（从 result_summary.estimated_archive_count 读取）
+                        # 验证任务参数（抽样比/验证类型）——创建任务时随任务落库，
+                        # 供卡片显示"该次运行实际使用的抽样比例"（计划任务配置可能已被编辑）
+                        "verify_type": (result_summary_dict.get('verify_type')
+                                        if isinstance(result_summary_dict, dict) else None),
+                        "verify_percent": (result_summary_dict.get('verify_percent')
+                                           if isinstance(result_summary_dict, dict) else None),
                         "created_at": row["created_at"],
                         "started_at": row["started_at"],
                         "completed_at": row["completed_at"],

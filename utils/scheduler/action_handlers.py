@@ -870,12 +870,31 @@ class RetentionCheckActionHandler(ActionHandler):
 class VerifyActionHandler(ActionHandler):
     """验证动作处理器 - 验证备份数据完整性"""
 
+    @staticmethod
+    def _verify_params_from_config(config: Dict) -> Dict[str, Any]:
+        """提取验证任务的运行参数，供 result_summary 落库。
+
+        为什么落库：计划任务的配置随时可能被编辑（改抽样比例/验证类型），
+        事后查看历史任务时必须以"当时实际使用"的参数为准，不能反查当前配置。
+        """
+        try:
+            percent = float(config.get('verify_percent', 1))
+        except (TypeError, ValueError):
+            percent = 1.0
+        return {
+            'verify_type': config.get('verify_type', 'directory'),
+            'verify_percent': percent,
+            'verify_enabled': bool(config.get('verify_enabled', True)),
+        }
+
     async def _create_verify_task_record(self, config: Dict) -> int:
         """在 backup_tasks 表创建验证任务记录，返回 task_id"""
         verify_type = config.get('verify_type', 'directory')
         source_paths = config.get('source_paths', [])
         task_name = config.get('task_name') or f"验证任务-{format_datetime(now(), '%Y%m%d_%H%M%S')}"
         description = f"[扫描文件中...] 验证类型: {verify_type}"
+        # 运行参数随任务落库（抽样比等），供卡片与历史查询使用
+        verify_params_json = json.dumps(self._verify_params_from_config(config), ensure_ascii=False)
 
         async with get_opengauss_connection() as conn:
             task_id = await conn.fetchval(
@@ -885,20 +904,21 @@ class VerifyActionHandler(ActionHandler):
                     compression_enabled, encryption_enabled, retention_days,
                     description, tape_device, status, is_template,
                     created_by, created_at, updated_at, started_at, scan_status,
-                    operation_stage
+                    operation_stage, result_summary
                 ) VALUES (
                     $1, 'verify'::backuptasktype, $2, $3,
                     FALSE, FALSE, 0,
                     $4, NULL, 'running'::backuptaskstatus, FALSE,
                     'scheduled_task', $5, $6, $7, 'running',
-                    'scan'
+                    'scan', $8::jsonb
                 ) RETURNING id
                 """,
                 task_name,
                 json.dumps(source_paths) if source_paths else None,
                 json.dumps(config.get('exclude_patterns', [])) or None,
                 description,
-                now(), now(), now()
+                now(), now(), now(),
+                verify_params_json
             )
             actual_conn = conn._conn if hasattr(conn, '_conn') else conn
             if hasattr(actual_conn, 'commit'):
@@ -977,6 +997,10 @@ class VerifyActionHandler(ActionHandler):
 
             # 更新为完成状态
             final_status = 'completed' if result.get('status') == 'success' else 'failed'
+            # 参数（抽样比、验证类型…）+ 结果一起落库：参数由创建时写入，
+            # 这里合并而不是覆盖，保证任务结束后仍能查到"当时用的抽样比例"
+            final_summary = self._verify_params_from_config(config)
+            final_summary.update(result)
             await self._update_verify_progress(
                 task_id,
                 status=final_status,
@@ -984,7 +1008,7 @@ class VerifyActionHandler(ActionHandler):
                 operation_stage='verify',
                 scan_status='completed',
                 description=result.get('message', ''),
-                result_summary=json.dumps(result),
+                result_summary=json.dumps(final_summary, ensure_ascii=False),
                 completed_at=now()
             )
 
