@@ -64,6 +64,7 @@ class SystemEnvConfig(BaseModel):
     disk_throttle_low_percent: Optional[float] = Field(None, description="磁盘限流恢复阈值（%），低于后并行批次直接恢复")
     disk_critical_batches: Optional[int] = Field(None, description="剩余空间 < N倍最大文件大小时，压缩并行批次强制降至此值，0=禁用")
     disk_check_max_wait_minutes: Optional[int] = Field(None, description="磁盘空间不足时暂停压缩的最大等待分钟数")
+    disk_check_interval: Optional[int] = Field(None, description="磁盘空间不足时暂停压缩的重试间隔（秒），5-600，默认 30")
 
     # 日志配置
     log_level: Optional[str] = Field(None, description="日志级别")
@@ -154,6 +155,7 @@ async def get_env_config():
             "disk_throttle_low_percent": float(env_vars.get("DISK_THROTTLE_LOW_PERCENT", 30) or 0),
             "disk_critical_batches": parse_int(env_vars.get("DISK_CRITICAL_BATCHES"), 1),
             "disk_check_max_wait_minutes": parse_int(env_vars.get("DISK_CHECK_MAX_WAIT_MINUTES"), 120),
+            "disk_check_interval": parse_int(env_vars.get("DISK_CHECK_INTERVAL"), 30),
 
             # 日志配置
             "log_level": env_vars.get("LOG_LEVEL", "INFO"),
@@ -294,6 +296,11 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             if config.disk_check_max_wait_minutes < 1:
                 raise ValueError("DISK_CHECK_MAX_WAIT_MINUTES 必须大于等于 1 分钟")
             updates["DISK_CHECK_MAX_WAIT_MINUTES"] = str(config.disk_check_max_wait_minutes)
+
+        if config.disk_check_interval is not None:
+            if config.disk_check_interval < 5 or config.disk_check_interval > 600:
+                raise ValueError("DISK_CHECK_INTERVAL 必须在 5-600 秒之间")
+            updates["DISK_CHECK_INTERVAL"] = str(config.disk_check_interval)
 
 
         # 日志配置

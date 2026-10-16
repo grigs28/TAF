@@ -730,6 +730,10 @@ async function loadAllSystemConfig() {
                 const el = document.getElementById('diskCheckMaxWaitMinutes');
                 if (el) el.value = config.disk_check_max_wait_minutes;
             }
+            if (config.disk_check_interval !== undefined) {
+                const el = document.getElementById('diskCheckInterval');
+                if (el) el.value = config.disk_check_interval;
+            }
 
 
             // SSO 单点登录配置
@@ -842,6 +846,12 @@ async function saveEnvConfigSection() {
                 return isNaN(parsed) ? null : parsed;
             })(),
             scan_engine: document.getElementById('scanEngine')?.value || null,
+            disk_check_interval: (() => {
+                const input = document.getElementById('diskCheckInterval');
+                if (!input || input.value === '') return null;
+                const parsed = parseInt(input.value);
+                return isNaN(parsed) ? null : parsed;
+            })(),
             disk_check_max_wait_minutes: (() => {
                 const input = document.getElementById('diskCheckMaxWaitMinutes');
                 if (!input || input.value === '') return null;

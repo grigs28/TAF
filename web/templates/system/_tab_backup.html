@@ -76,6 +76,14 @@
                         <small class="form-text text-secondary">剩余空间 &lt; 3×最大文件大小时，并行批次强制降至此值（0=禁用）</small>
                     </div>
                     <div class="mb-3">
+                        <label class="form-label">空间不足检查间隔（秒）</label>
+                        <input type="number" class="form-control" id="diskCheckInterval" value="30" min="5" max="600" step="1">
+                        <small class="form-text text-secondary">
+                            剩余空间不足暂停压缩后，每隔多少秒重试一次（默认 30，范围 5-600）。
+                            磁带排空快时可调小（如 10 秒）让压缩更快恢复供给；调大则减少检查频率。
+                        </small>
+                    </div>
+                    <div class="mb-3">
                         <label class="form-label">空间不足最大等待（分钟）</label>
                         <input type="number" class="form-control" id="diskCheckMaxWaitMinutes" value="120" min="1" step="1">
                         <small class="form-text text-secondary">剩余空间持续不足时暂停压缩的最长等待时间，超时该组报错</small>
