@@ -49,11 +49,16 @@ except ImportError:
     logger.warning("psutil未安装，无法检查系统内存，将使用默认内存分配策略")
 
 
-def _compute_required_free_bytes(settings) -> int:
-    """磁盘守卫线 = 并发数 × 最大文件大小 × 安全系数（默认 1.2）
+def _compute_required_free_bytes(settings, active_groups: Optional[int] = None) -> int:
+    """磁盘守卫线 = 组数 × 最大文件大小 × 安全系数（默认 1.2）
 
-    覆盖全部在途并行组的最大产出（每组压缩后 ≤ MAX_FILE_SIZE），再乘安全系数留缓冲。
-    随 COMPRESSION_PARALLEL_BATCHES 自动伸缩：并发越高，安全线越高。
+    覆盖"当前在途并行组"的最大产出（每组压缩后 ≤ MAX_FILE_SIZE），再乘安全系数留缓冲。
+
+    组数取值：
+    - active_groups 给定时用**实际在途组数**（含正在做空间检查的这一组）。
+      这样 6 组在途、想开第 7 组时判定线是 7×24G 而非 8×24G，
+      避免组数未达上限时被无谓拦停（拦停过频还会造成守卫线附近反复震荡）。
+    - 未给定（或 ≤0）时回退到配置上限 COMPRESSION_PARALLEL_BATCHES（保守）。
 
     安全系数由 DISK_GUARD_SAFETY_FACTOR 配置（默认 1.2）：
     - 1.2 → 全部在途产出落地后仍剩"在途量 × 20%"空闲
@@ -66,16 +71,19 @@ def _compute_required_free_bytes(settings) -> int:
     if max_file_size <= 0:
         return 0
     try:
-        parallel = max(1, int(getattr(settings, 'COMPRESSION_PARALLEL_BATCHES', 3) or 3))
+        if active_groups is not None and int(active_groups) > 0:
+            groups = int(active_groups)
+        else:
+            groups = max(1, int(getattr(settings, 'COMPRESSION_PARALLEL_BATCHES', 3) or 3))
     except Exception:
-        parallel = 3
+        groups = 3
     try:
         factor = float(getattr(settings, 'DISK_GUARD_SAFETY_FACTOR', 1.2) or 1.2)
     except Exception:
         factor = 1.2
     if factor < 1.0:  # 小于 1 会让在途产出越界，不接受
         factor = 1.0
-    return int(max_file_size * parallel * factor)
+    return int(max_file_size * groups * factor)
 
 
 class Compressor:
@@ -88,6 +96,9 @@ class Compressor:
             settings: 系统设置对象
         """
         self.settings = settings
+        # 由 CompressionWorker 注入：返回"当前在途压缩组数"（含调用者自己）。
+        # 用于空间守卫**动态**判定线；未注入时回退到配置的并发上限（保守）。
+        self.active_groups_provider: Optional[Callable[[], int]] = None
         # 记录每个备份集的上次压缩文件名和序号，确保文件名不重复
         # 格式: {backup_set_id: {'last_filename': str, 'sequence': int}}
         self._last_archive_info: Dict[str, Dict[str, Any]] = {}
@@ -804,7 +815,11 @@ class Compressor:
             return None
 
     async def _ensure_disk_space(self, target_dir: Path):
-        """确保磁盘剩余空间满足 并发数 × MAX_FILE_SIZE × 1.2（覆盖在途组最大产出+20%缓冲）"""
+        """确保磁盘剩余空间满足 **在途组数 × MAX_FILE_SIZE × 安全系数**
+
+        组数取**实际在途压缩组数**（含正在检查的这一组），由 CompressionWorker
+        通过 active_groups_provider 注入；拿不到时回退配置上限（保守）。
+        """
         try:
             max_file_size = int(getattr(self.settings, 'MAX_FILE_SIZE', 0))
         except Exception:
@@ -830,9 +845,19 @@ class Compressor:
         # 根据时间和间隔计算最大重试次数
         max_retries = (max_wait_minutes * 60) // check_interval
 
-        # 守卫线：并发数 × 最大文件大小 × 1.2（动态，随并发伸缩）
-        # 守卫线同样现取 settings：并发数改动后守卫线要立即随之伸缩
-        required_free = _compute_required_free_bytes(_live_settings) or (max_file_size * 3)
+        # 守卫线：**在途组数** × 最大文件大小 × 安全系数（动态）
+        # 守卫线同样现取 settings：并发数/系数改动后守卫线要立即随之伸缩。
+        # 组数用实时的在途数（含本组自己）而非配置上限——6 组在途想开第 7 组时
+        # 只需 7×24G 而非 8×24G，避免组数未满上限时被无谓拦停。
+        active_groups = None
+        provider = getattr(self, 'active_groups_provider', None)
+        if callable(provider):
+            try:
+                active_groups = int(provider())
+            except Exception as provider_err:
+                logger.debug(f"获取在途组数失败，回退配置上限: {provider_err}")
+                active_groups = None
+        required_free = _compute_required_free_bytes(_live_settings, active_groups) or (max_file_size * 3)
         retry_count = 0
 
         while retry_count < max_retries:
@@ -854,7 +879,8 @@ class Compressor:
             max_total_wait = max_retries * check_interval
 
             logger.warning(
-                f"磁盘剩余空间不足：{format_bytes(free_bytes)} < {format_bytes(required_free)}，"
+                f"磁盘剩余空间不足：{format_bytes(free_bytes)} < {format_bytes(required_free)}"
+                f"（在途 {active_groups if active_groups else '并发上限'} 组），"
                 f"暂停压缩，{check_interval} 秒后重试 ({retry_count}/{max_retries}, "
                 f"已等待 {total_wait_time}/{max_total_wait} 秒)"
             )

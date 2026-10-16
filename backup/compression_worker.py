@@ -80,6 +80,20 @@ class CompressionWorker:
         
         # 并发控制：跟踪正在运行的压缩任务
         self.running_compression_futures: List[asyncio.Task] = []
+
+        # 向 Compressor 注入"在途组数"提供者 —— 空间守卫线据此**动态**计算：
+        #   所需空间 = 在途组数 × MAX_FILE_SIZE × 安全系数
+        # future 在 create_task 后立即 append（中间无 await），所以组内执行
+        # 空间检查时"自己"已被计入，语义正好是"含本组"。
+        if self.compressor is not None:
+            try:
+                self.compressor.active_groups_provider = (
+                    lambda: len(self.running_compression_futures)
+                )
+            except Exception as inject_err:
+                logger.warning(
+                    f"注入在途组数提供者失败（守卫线将回退到配置并发上限）: {inject_err}"
+                )
         
         # 压缩进度更新任务（定期从数据库查询聚合进度）
         self.progress_update_task: Optional[asyncio.Task] = None
@@ -278,15 +292,19 @@ class CompressionWorker:
                     if self._disk_throttled and high > 0:
                         desired_batches = max(1, normal_batches // 2)
 
-                    # 2b. 空间危急层：剩余空间 < 并发数×最大文件大小×1.2 时，批次直接降到指定值
+                    # 2b. 空间危急层：剩余空间 < 在途组数×最大文件大小×安全系数 时，批次直接降到指定值
+                    # 组数与空间守卫同口径（实际在途组数），避免两层判定线不一致
                     if critical_batches >= 1:
                         from backup.compressor import _compute_required_free_bytes
-                        required_free = _compute_required_free_bytes(fresh_settings)
+                        required_free = _compute_required_free_bytes(
+                            fresh_settings, len(self.running_compression_futures) or None
+                        )
                         if required_free > 0 and free_bytes < required_free:
                             if not self._disk_critical:
                                 logger.warning(
                                     f"[压缩配置] 磁盘剩余空间危急（{format_bytes(free_bytes)} < "
-                                    f"{format_bytes(required_free)}[并发×最大文件×1.2]），并行批次强制降为 {critical_batches}"
+                                    f"{format_bytes(required_free)}[在途组数×最大文件×安全系数]），"
+                                    f"并行批次强制降为 {critical_batches}"
                                 )
                             self._disk_critical = True
                             desired_batches = min(desired_batches, critical_batches)
