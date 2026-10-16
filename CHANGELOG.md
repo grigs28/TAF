@@ -1,5 +1,19 @@
 # 更新日志
 
+## [1.1.9] - 2026-10-17
+
+### 修复
+
+- **LTFS 检查的 bytes/str 类型错误**：`check_ltfs_format` 在"挂载失败"分支上
+  `error_msg = stderr[:200]` 少了一次 `decode`——`communicate()` 返回的是 **bytes**，
+  紧接着的 `'LTFS11005' in error_msg` 会抛
+  `TypeError: a bytes-like object is required, not 'str'`。
+  该异常被外层 `except` 吞成"检查失败"，使"**磁带不是 LTFS**"这个**正常判定退化为异常路径**
+  （2026-10-17 07:33:13 实测命中；幸好有"5 秒后重试一次"兜底，才没被误判为非 LTFS 而触发格式化）。
+  同一文件 312 行的同类写法本就有 `.decode()`，仅 345 行遗漏。
+  `tape_handler_simplified.py` 的同一处一并修正（虽未被主流程引用）。
+- 版本升至 1.1.9
+
 ## [1.1.8] - 2026-10-17
 
 ### 调整

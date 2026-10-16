@@ -243,8 +243,9 @@ class TapeHandlerSimplified:
             except asyncio.TimeoutError:
                 logger.warning("[LTFS] 进程 600s 后仍未退出，不再等待（进程仍在后台运行）")
             
+            # communicate() 返回 bytes，decode 后再用作消息（与 tape_handler.py 同修）
             _, stderr = await process.communicate()
-            error_msg = stderr[:200] if stderr else "挂载超时"
+            error_msg = stderr.decode('utf-8', errors='ignore')[:200] if stderr else "挂载超时"
             logger.error(f"[LTFS] ❌ 挂载失败: {error_msg}")
             return False, f"挂载失败: {error_msg}"
         

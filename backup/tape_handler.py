@@ -341,8 +341,13 @@ class TapeHandler:
                 return False, f"挂载失败: {error_msg}"
 
             # 挂载失败，读取错误信息
+            # 注意：communicate() 返回的是 **bytes**，必须先 decode 再做字符串匹配，
+            # 否则下面 `'LTFS11005' in error_msg` 会抛
+            # TypeError: a bytes-like object is required, not 'str'
+            # ——该异常会被外层 except 吞成"检查失败"，使"磁带不是 LTFS"这一
+            # 正常判定退化为异常路径（配合重试才没误触发格式化）。
             _, stderr = await process.communicate()
-            error_msg = stderr[:200] if stderr else "未知错误"
+            error_msg = stderr.decode('utf-8', errors='ignore')[:200] if stderr else "未知错误"
 
             if 'LTFS11005' in error_msg or 'not formatted' in error_msg.lower():
                 logger.info("[LTFS] 磁带不是 LTFS 格式")
