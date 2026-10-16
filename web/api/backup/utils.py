@@ -274,8 +274,11 @@ def _build_stage_info(description: Optional[str], scan_status: Optional[str], st
                     label = "压缩完成"
                     step_status = "completed"
                 elif is_running:
+                    # 仅在压缩真正开始后才点亮：已有并行压缩进度（内存聚合）或已有块进入 final。
+                    # 避免任务刚启动（仍在扫描/等待预分组）时"压缩/打包"提前点亮。
+                    compression_started = bool(current_compression_progress) or bool(final_dir_has_files)
                     label = "压缩/打包"
-                    step_status = "active"
+                    step_status = "active" if compression_started else "pending"
                 else:
                     step_status = "pending"
 
