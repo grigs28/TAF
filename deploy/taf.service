@@ -13,8 +13,13 @@ Environment=CONDA_DEFAULT_ENV=taf
 ExecStart=/opt/conda3/envs/taf/bin/python main.py
 ExecStop=/bin/kill -SIGINT $MAINPID
 
-# 优雅关闭：发送SIGINT后等待进程自行清理（最多120秒）
-TimeoutStopSec=120
+# 优雅关闭：发送SIGINT后等待进程自行清理。
+# 300 秒而非 120 秒：关闭流程含「等待磁带写入完成」+「LTFS 安全卸载（sync→unmount→
+# 等 ltfs 进程写索引与CM数据，通常 35~50 秒，磁带数据多时更久）」。生产实测
+# 2026-10-16 14:38：两者叠加超过 120 秒 → systemd 强杀 → 磁带索引写脏，下次挂载
+# 触发 LTFS Recovery（多等 ~2 分钟）。超时宁长勿短：被强杀的代价是索引脏 + 恢复，
+# 而多等几十秒只是停机慢一点。
+TimeoutStopSec=300
 KillMode=mixed
 KillSignal=SIGINT
 
