@@ -804,14 +804,25 @@ class Compressor:
             return
 
         # 从配置获取参数
-        check_interval = getattr(self.settings, 'DISK_CHECK_INTERVAL', 30)
-        max_wait_minutes = getattr(self.settings, 'DISK_CHECK_MAX_WAIT_MINUTES', 60)
+        # 注意：这里现取 settings 而非用构造时捕获的 self.settings——
+        # UI 保存压缩配置会调用 reload_settings() 生成新对象，
+        # 用捕获的旧对象会导致"改了不生效、必须重启"（与 _adjust_parallel_batches 保持一致）
+        try:
+            from config.settings import get_settings as _get_settings
+            _live_settings = _get_settings()
+        except Exception:
+            _live_settings = self.settings
+        check_interval = int(getattr(_live_settings, 'DISK_CHECK_INTERVAL', 30) or 30)
+        if check_interval < 1:
+            check_interval = 30
+        max_wait_minutes = getattr(_live_settings, 'DISK_CHECK_MAX_WAIT_MINUTES', 60)
 
         # 根据时间和间隔计算最大重试次数
         max_retries = (max_wait_minutes * 60) // check_interval
 
         # 守卫线：并发数 × 最大文件大小 × 1.2（动态，随并发伸缩）
-        required_free = _compute_required_free_bytes(self.settings) or (max_file_size * 3)
+        # 守卫线同样现取 settings：并发数改动后守卫线要立即随之伸缩
+        required_free = _compute_required_free_bytes(_live_settings) or (max_file_size * 3)
         retry_count = 0
 
         while retry_count < max_retries:

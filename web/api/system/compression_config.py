@@ -28,6 +28,8 @@ class CompressionConfigRequest(BaseModel):
     pgzip_threads: Optional[int] = Field(None, description="PGZip线程数")
     zstd_threads: Optional[int] = Field(None, description="zstd线程数")
     compression_tar_copybuf_mb: Optional[int] = Field(None, description="tarfile 复制缓冲区（MB），0=Python 默认16KB")
+    disk_check_interval: Optional[int] = Field(
+        None, description="磁盘空间不足时暂停压缩的重试间隔（秒）——越小恢复越快，但检查更频繁")
 
 
 @router.get("/compression")
@@ -63,6 +65,9 @@ async def get_compression_config():
             "compression_tar_copybuf_mb": int(env_values.get(
                 "COMPRESSION_TAR_COPYBUF_MB",
                 getattr(settings, 'COMPRESSION_TAR_COPYBUF_MB', 4))),
+            "disk_check_interval": int(env_values.get(
+                "DISK_CHECK_INTERVAL",
+                getattr(settings, 'DISK_CHECK_INTERVAL', 30))),
             "available_methods": ["pgzip", "zstd", "tar"],
         }
     except Exception as e:
@@ -141,6 +146,14 @@ async def update_compression_config(config: CompressionConfigRequest, request: R
                     detail="compression_tar_copybuf_mb 必须在 0-256 之间（0=Python 默认16KB）"
                 )
             updates["COMPRESSION_TAR_COPYBUF_MB"] = str(config.compression_tar_copybuf_mb)
+
+        if config.disk_check_interval is not None:
+            if config.disk_check_interval < 5 or config.disk_check_interval > 600:
+                raise HTTPException(
+                    status_code=400,
+                    detail="disk_check_interval 必须在 5-600 秒之间"
+                )
+            updates["DISK_CHECK_INTERVAL"] = str(config.disk_check_interval)
 
         # 写入.env文件
         if updates:

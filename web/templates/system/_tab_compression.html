@@ -59,6 +59,20 @@
                         </small>
                     </div>
 
+                    <!-- 磁盘空间检查间隔 -->
+                    <div class="mb-3" id="diskCheckIntervalGroup">
+                        <label for="diskCheckInterval" class="form-label">
+                            磁盘空间检查间隔（秒）
+                        </label>
+                        <input type="number" class="form-control bg-dark text-light" id="diskCheckInterval"
+                               name="disk_check_interval" min="5" max="600" value="30">
+                        <small class="form-text text-muted">
+                            磁盘剩余空间不足时暂停压缩，每隔多少秒重试一次（默认 30，范围 5-600）。
+                            磁带排空快时可调小（如 10 秒）让压缩更快恢复供给；调大则减少检查频率。
+                            注意：最多重试 120 分钟，超时任务会失败。
+                        </small>
+                    </div>
+
                     <!-- PGZip块大小 --><div class="mb-3" id="pgzipBlockSizeGroup" style="display: none;">
                         <label for="pgzipBlockSize" class="form-label">
                             PGZip块大小 <span class="text-danger">*</span>
@@ -262,6 +276,9 @@ async function loadCompressionConfig() {
         if (config.compression_tar_copybuf_mb !== undefined) {
             document.getElementById('compressionTarCopybufMb').value = config.compression_tar_copybuf_mb;
         }
+        if (config.disk_check_interval !== undefined) {
+            document.getElementById('diskCheckInterval').value = config.disk_check_interval;
+        }
     } catch (error) {
         console.error('加载压缩配置失败:', error);
         showMessage('加载压缩配置失败: ' + error.message, 'error');
@@ -284,6 +301,7 @@ async function saveCompressionConfig(options) {
         pgzip_threads: parseInt(formData.get('compression_threads')) || undefined,
         zstd_threads: parseInt(formData.get('zstd_threads')) || undefined,
         compression_tar_copybuf_mb: formData.get('compression_tar_copybuf_mb') !== null && formData.get('compression_tar_copybuf_mb') !== '' ? parseInt(formData.get('compression_tar_copybuf_mb')) : undefined,
+        disk_check_interval: formData.get('disk_check_interval') !== null && formData.get('disk_check_interval') !== '' ? parseInt(formData.get('disk_check_interval')) : undefined,
     };
 
     try {
