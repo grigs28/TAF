@@ -51,12 +51,12 @@
                     <div class="mb-3">
                         <label class="form-label">压缩并行批次数量</label>
                         <input type="number" class="form-control" id="compressionParallelBatches" value="3" min="1" step="1">
-                        <small class="form-text text-secondary">同时进行的压缩组数；扫描期按下方"扫描时减少批次数"扣减</small>
+                        <small class="form-text text-secondary">同时进行的压缩组数，扫描期按下项扣减</small>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">扫描时减少批次数</label>
                         <input type="number" class="form-control" id="compressionBatchesReduction" value="1" min="0" step="1">
-                        <small class="form-text text-secondary">扫描期间减少的并发组数（扫描与压缩争抢 NAS 读取），扫描结束后自动恢复</small>
+                        <small class="form-text text-secondary">扫描期减少的并发组数，扫描结束后自动恢复</small>
                     </div>
                 </div>
             </div>
@@ -75,8 +75,8 @@
                             <label class="form-check-label" for="diskThrottleEnabled">启用磁盘限流</label>
                         </div>
                         <small class="form-text text-secondary">
-                            关闭后<b>百分比限流</b>与<b>危急层降级</b>均不生效，下方三项<b>置灰不可编辑</b>（数值保留）。
-                            注意：<b>空间守卫</b>不受此开关影响，磁盘安全仍有兜底。
+                            关闭后批次不再因磁盘使用率或剩余空间而减少，下方三项随之置灰（数值保留）。
+                            空间守卫不受影响，始终生效。
                         </small>
                     </div>
                     <div class="mb-3">
@@ -98,8 +98,8 @@
                     <!-- ── 空间守卫 ── -->
                     <h6 class="text-secondary border-bottom pb-2 mb-3 mt-4">空间守卫</h6>
                     <small class="text-muted d-block mb-3">
-                        剩余空间低于守卫线（<code>并发数×最大文件大小×1.2</code>）时<b>暂停发放新压缩组</b>，
-                        等磁带排空后自动放行；在途组不受影响。此机制始终生效、不可关闭。
+                        剩余空间低于守卫线（并发数×最大文件大小×1.2）时暂停发放新压缩组，
+                        磁带排空后自动放行。始终生效，不可关闭。
                     </small>
                     <div class="mb-3">
                         <label class="form-label">空间不足检查间隔（秒）</label>
@@ -109,7 +109,7 @@
                     <div class="mb-3">
                         <label class="form-label">空间不足最大等待（分钟）</label>
                         <input type="number" class="form-control" id="diskCheckMaxWaitMinutes" value="120" min="1" step="1">
-                        <small class="form-text text-secondary">单次暂停的最长等待，超时该组报错（每次放行后重新计时）</small>
+                        <small class="form-text text-secondary">单次暂停的最长等待，超时该组报错</small>
                     </div>
 
                     <!-- ── 保留策略 ── -->
