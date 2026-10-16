@@ -38,8 +38,9 @@ def _compress_worker_entry(payload: Dict[str, Any]):
 
     class _ShimTask:
         """backup_task 的轻量替身：进度字段与 BackupTask 兼容"""
-        def __init__(self, progress_q=None):
+        def __init__(self, progress_q=None, source_paths=None):
             self._progress_q = progress_q
+            self.source_paths = source_paths or []
             self.progress_percent = 0.0
             self.current_compression_progress = {}
 
@@ -48,7 +49,7 @@ def _compress_worker_entry(payload: Dict[str, Any]):
             if name in ('progress_percent', 'current_compression_progress') and self._progress_q is not None:
                 self._progress_q.put({'a': name, 'v': value})
 
-    task = _ShimTask(payload.get('progress_queue'))
+    task = _ShimTask(payload.get('progress_queue'), payload.get('source_paths'))
     # 必须使用代理字典：or 短路时非空原字典会导致泵完全失效（进度始终为 0）
     compress_progress = _ProgressDict(payload.get('progress_queue'), payload.get('compress_progress'))
     try:

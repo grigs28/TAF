@@ -603,6 +603,8 @@ class Compressor:
                     'total_files': total_files,
                     'base_processed_files': base_processed_files,
                     'compress_progress': compress_progress,
+                    # 源根目录列表：worker 内用于计算归档内相对路径（丢失会导致成员名退化为纯文件名）
+                    'source_paths': getattr(backup_task, 'source_paths', None) or [],
                 }
                 payload['progress_queue'] = None
                 pool = CompressionProcessPool.get_instance()
