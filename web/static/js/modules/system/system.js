@@ -684,7 +684,35 @@ async function loadAllSystemConfig() {
             }
             if (config.disk_throttle_high_percent !== undefined) {
                 const el = document.getElementById('diskThrottleHighPercent');
+                const sw = document.getElementById('diskThrottleEnabled');
                 if (el) el.value = config.disk_throttle_high_percent;
+                // 联动：上限 > 0 视为"启用"；关闭时置灰输入框并记住当前值供重开恢复
+                if (sw) {
+                    const on = Number(config.disk_throttle_high_percent) > 0;
+                    sw.checked = on;
+                    if (el) {
+                        el.disabled = !on;
+                        if (!on) el.dataset.lastValue = '75';
+                    }
+                    // 事件只注册一次（本函数会被反复调用）
+                    if (!sw.dataset.bound) {
+                        sw.dataset.bound = '1';
+                        sw.addEventListener('change', function () {
+                            const input = document.getElementById('diskThrottleHighPercent');
+                            if (!input) return;
+                            if (this.checked) {
+                                input.disabled = false;
+                                const last = parseFloat(input.dataset.lastValue || '');
+                                if (!(parseFloat(input.value) > 0)) {
+                                    input.value = (last > 0) ? last : 75;
+                                }
+                            } else {
+                                if (parseFloat(input.value) > 0) input.dataset.lastValue = input.value;
+                                input.disabled = true;
+                            }
+                        });
+                    }
+                }
             }
             if (config.disk_throttle_low_percent !== undefined) {
                 const el = document.getElementById('diskThrottleLowPercent');
@@ -792,8 +820,12 @@ async function saveEnvConfigSection() {
                 return isNaN(parsed) ? null : parsed;
             })(),
             disk_throttle_high_percent: (() => {
+                const sw = document.getElementById('diskThrottleEnabled');
                 const input = document.getElementById('diskThrottleHighPercent');
-                if (!input || input.value === '') return null;
+                if (!input) return null;
+                // 联动：开关关闭 → 写 0（系统约定的禁用方式）
+                if (sw && !sw.checked) return 0;
+                if (input.value === '') return null;
                 const parsed = parseFloat(input.value);
                 return isNaN(parsed) ? null : parsed;
             })(),

@@ -50,6 +50,17 @@
                         <small class="form-text text-secondary">默认 NFS 优化引擎；检测到 CIFS/SMB 源时自动回退经典引擎</small>
                     </div>
                     <div class="mb-3">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" role="switch" id="diskThrottleEnabled" checked>
+                            <label class="form-check-label" for="diskThrottleEnabled">启用磁盘限流</label>
+                        </div>
+                        <small class="form-text text-secondary">
+                            与下方「磁盘限流上限（%）」<b>联动</b>：关闭即把该值写为 <code>0</code>（系统约定的禁用方式），
+                            重新打开会恢复你上次填写的数值。关闭后压缩并行批次不再因磁盘使用率减半；
+                            <b>空间守卫与危急层不受影响</b>，磁盘安全仍有兜底。
+                        </small>
+                    </div>
+                    <div class="mb-3">
                         <label class="form-label">磁盘限流上限（%）</label>
                         <input type="number" class="form-control" id="diskThrottleHighPercent" value="75" min="0" max="100" step="1">
                         <small class="form-text text-secondary">压缩临时目录所在盘使用率超过此值时，压缩并行批次减半（0=禁用）</small>
