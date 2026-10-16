@@ -677,25 +677,27 @@
         }
         
         if (stageSteps.length) {
-            // 检查任务是否完成，如果是完成状态，确保最终阶段徽章高亮
-            if (isCompleted) {
-                // 生成完成状态信息
-                const completedLabel = '🎉 备份完成';
-                const currentStageLabel = completedLabel;
-
+            // 终态任务（完成/失败/取消/中断）：**不再展示整排阶段流转**。
+            // 理由：对已结束的任务，那排徽章要么全是"完成"（纯冗余），
+            // 要么停在中断时的阶段（无意义）；只留一个最终结果徽章即可。
+            // 运行中的任务保留阶段流转——那才是它有用的场景。
+            const _st = (task.status || '').toLowerCase();
+            const isTerminal = ['completed', 'failed', 'canceled', 'cancelled', 'interrupted'].indexOf(_st) >= 0;
+            if (isTerminal) {
+                const finalMap = {
+                    completed:   { label: '🎉 备份完成', cls: 'bg-success' },
+                    failed:      { label: '失败',        cls: 'bg-danger' },
+                    canceled:    { label: '已取消',      cls: 'bg-secondary' },
+                    cancelled:   { label: '已取消',      cls: 'bg-secondary' },
+                    interrupted: { label: '中断',        cls: 'bg-warning text-dark' }
+                };
+                const fin = finalMap[_st] || { label: _st || '未知', cls: 'bg-secondary' };
                 const stageSection = document.createElement('div');
                 stageSection.className = 'mb-2';
                 stageSection.innerHTML = `
                     <div class="d-flex justify-content-between align-items-center">
-                        <small class="text-muted">状态:</small>
-                        <small class="text-success"><strong>${currentStageLabel}</strong></small>
-                    </div>
-                    <div class="d-flex flex-wrap gap-1 mt-1">
-                        ${stageSteps.map(step => {
-                            // copy 步骤状态完全由后端 stage_steps 决定
-                            const badgeClass = getCompletedStageBadgeClass(step.state, step.code, task);
-                            return `<span class="badge ${badgeClass}">${step.label}</span>`;
-                        }).join('')}
+                        <small class="text-muted">结果:</small>
+                        <span class="badge ${fin.cls}">${fin.label}</span>
                     </div>
                 `;
                 body.appendChild(stageSection);
