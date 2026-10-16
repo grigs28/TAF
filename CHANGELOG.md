@@ -1,5 +1,19 @@
 # 更新日志
 
+## [1.0.0] - 2026-10-16
+
+### 修复
+
+- **任务完成后卡片统计丢失**：`update_task_status()` 在 COMPLETED/FAILED/CANCELLED 时
+  只写 status/updated_at/completed_at，不写统计字段；而纯内存扫描模式
+  （`SCAN_MEMORY_ONLY=true`）下压缩工作线程刻意跳过所有 DB 写入
+  （`compression_worker.py`：「纯内存模式：跳过所有数据库操作」），
+  于是 `processed_bytes`/`compressed_bytes` 只存在于内存对象中，
+  **任务一结束卡片上的「文件进度 / 已处理数据 / 压缩后大小 / 压缩率」就变成 0**。
+  修复：完成/失败/取消时一并落库 total_files、processed_files、total_bytes、
+  processed_bytes、compressed_bytes、progress_percent（值为 None 时跳过）
+- 版本升至 1.0.0
+
 ## [0.9.9] - 2026-10-16
 
 ### 修复

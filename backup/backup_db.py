@@ -3834,6 +3834,17 @@ class BackupDB:
                 # 完成/失败/取消状态：更新 completed_at
                 update_fields.append('completed_at')
                 update_values.append(current_time)
+
+                # 持久化最终统计（任务结束后 UI 卡片仍要显示这四项）：
+                # 「文件进度 / 已处理数据 / 压缩后大小 / 压缩率」。
+                # 纯内存扫描模式（SCAN_MEMORY_ONLY=true）下压缩工作线程刻意跳过所有 DB 写入，
+                # 这些值只存在于内存对象中；若不在这里落库，任务一结束卡片就会变成 0。
+                for _stat_field in ('total_files', 'processed_files', 'total_bytes',
+                                    'processed_bytes', 'compressed_bytes', 'progress_percent'):
+                    _stat_value = getattr(backup_task, _stat_field, None)
+                    if _stat_value is not None:
+                        update_fields.append(_stat_field)
+                        update_values.append(_stat_value)
             
             # 使用原生 openGauss SQL
             from utils.scheduler.db_utils import get_opengauss_connection
