@@ -106,6 +106,9 @@ class Compressor:
         # 守卫线据此按**真实产出**计算，而不是按"组数 × MAX_FILE_SIZE"的理论最大值——
         # 后者在小文件区会严重高估（实测组只有 0.2~4GB 却按 24GB 计），白闲置数百 GB。
         self._active_group_bytes: List[int] = []
+        # 记录每个备份集的上次压缩文件名和序号，确保文件名不重复
+        # 格式: {backup_set_id: {'last_filename': str, 'sequence': int}}
+        self._last_archive_info: Dict[str, Dict[str, Any]] = {}
 
     @property
     def _active_compressing(self) -> int:
@@ -118,9 +121,6 @@ class Compressor:
             self._active_group_bytes.remove(group_bytes)
         except ValueError:
             pass
-        # 记录每个备份集的上次压缩文件名和序号，确保文件名不重复
-        # 格式: {backup_set_id: {'last_filename': str, 'sequence': int}}
-        self._last_archive_info: Dict[str, Dict[str, Any]] = {}
     
     async def group_files_for_compression(self, file_list: List[Dict]) -> List[List[Dict]]:
         """将文件分组以进行压缩

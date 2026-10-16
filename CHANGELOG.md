@@ -1,5 +1,19 @@
 # 更新日志
 
+## [1.1.10] - 2026-10-17
+
+### 修复
+
+- **紧急修复 1.1.8 引入的构造函数缩进错误**：`Compressor.__init__` 中
+  `self._last_archive_info = {}` 被误并入紧随其后的 `_release_active_group()` 方法体内
+  （编辑代码块时多圈了两行），导致该属性**只在 `_release_active_group()` 被调用时才赋值**，
+  构造函数里根本没设。后果：**每个压缩组一启动就抛**
+  `AttributeError: 'Compressor' object has no attribute '_last_archive_info'`，
+  压缩全线失败（2026-10-17 07:56 实测）。
+  已把该赋值移回 `__init__`，并验证构造后 `_last_archive_info` / `_active_group_bytes` /
+  `active_groups_provider` 三者齐备。
+- 版本升至 1.1.10
+
 ## [1.1.9] - 2026-10-17
 
 ### 修复
