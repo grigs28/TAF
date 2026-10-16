@@ -2,20 +2,18 @@
 <div class="tab-pane fade" id="backup" role="tabpanel">
     <div class="row">
         <div class="col-md-6">
+
+            <!-- ① 扫描 -->
             <div class="setting-card service-card mb-3">
                 <div class="card-body">
-                    <h6 class="card-title">压缩设置</h6>
+                    <h6 class="card-title"><i class="bi bi-search me-2"></i>扫描设置</h6>
                     <div class="mb-3">
-                        <label class="form-label">最大文件大小 (GB)</label>
-                        <input type="number" class="form-control" id="maxFileSizeGB" value="3" min="1" step="0.1">
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">后台扫描进度更新间隔（文件数）</label>
-                        <input type="number" class="form-control" id="scanUpdateInterval" value="500" min="1" step="1">
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">后台扫描进度统计间隔（秒）</label>
-                        <input type="number" class="form-control" id="scanLogIntervalSeconds" value="60" min="1" step="1">
+                        <label class="form-label">扫描引擎</label>
+                        <select class="form-select" id="scanEngine">
+                            <option value="nfs">NFS 优化引擎（预编译排除 + READDIRPLUS 免逐文件查询）</option>
+                            <option value="classic">经典引擎（兼容模式）</option>
+                        </select>
+                        <small class="form-text text-secondary">默认 NFS 优化引擎；检测到 CIFS/SMB 源时自动回退经典引擎</small>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">扫描等待超时（秒）</label>
@@ -30,25 +28,49 @@
                         <small class="text-muted d-block">启用后扫描器仅写入内存，减少扫描阶段数据库I/O，崩溃时无孤儿记录</small>
                     </div>
                     <div class="mb-3">
+                        <label class="form-label">后台扫描进度更新间隔（文件数）</label>
+                        <input type="number" class="form-control" id="scanUpdateInterval" value="500" min="1" step="1">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">后台扫描进度统计间隔（秒）</label>
+                        <input type="number" class="form-control" id="scanLogIntervalSeconds" value="60" min="1" step="1">
+                    </div>
+                </div>
+            </div>
+
+            <!-- ② 压缩与分组 -->
+            <div class="setting-card service-card mb-3">
+                <div class="card-body">
+                    <h6 class="card-title"><i class="bi bi-file-earmark-zip me-2"></i>压缩与分组</h6>
+                    <div class="mb-3">
+                        <label class="form-label">最大文件大小 (GB)</label>
+                        <input type="number" class="form-control" id="maxFileSizeGB" value="3" min="1" step="0.1">
+                        <small class="form-text text-secondary">单个压缩组（归档）的源数据上限；守卫线按 并发数×该值×1.2 计算</small>
+                    </div>
+                    <div class="mb-3">
                         <label class="form-label">压缩临时目录</label>
                         <input type="text" class="form-control" id="backupCompressDir" value="temp/compress">
                     </div>
                     <div class="mb-3">
                         <label class="form-label">压缩并行批次数量</label>
                         <input type="number" class="form-control" id="compressionParallelBatches" value="3" min="1" step="1">
+                        <small class="form-text text-secondary">同时进行的压缩组数；扫描期按下方"扫描时减少批次数"扣减</small>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">扫描时减少批次数</label>
                         <input type="number" class="form-control" id="compressionBatchesReduction" value="1" min="0" step="1">
+                        <small class="form-text text-secondary">扫描期间减少的并发组数（因扫描与压缩争抢 NAS 读取），扫描结束后自动恢复</small>
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label">扫描引擎</label>
-                        <select class="form-select" id="scanEngine">
-                            <option value="nfs">NFS 优化引擎（预编译排除 + READDIRPLUS 免逐文件查询）</option>
-                            <option value="classic">经典引擎（兼容模式）</option>
-                        </select>
-                        <small class="form-text text-secondary">默认 NFS 优化引擎；检测到 CIFS/SMB 源时自动回退经典引擎</small>
-                    </div>
+                </div>
+            </div>
+
+        </div>
+        <div class="col-md-6">
+
+            <!-- ③ 磁盘限流 -->
+            <div class="setting-card service-card mb-3">
+                <div class="card-body">
+                    <h6 class="card-title"><i class="bi bi-speedometer2 me-2"></i>磁盘限流</h6>
                     <div class="mb-3">
                         <div class="form-check form-switch">
                             <input class="form-check-input" type="checkbox" role="switch" id="diskThrottleEnabled" checked>
@@ -56,16 +78,14 @@
                         </div>
                         <small class="form-text text-secondary">
                             关闭后<b>百分比限流</b>（使用率超上限则批次减半）与<b>危急层降级</b>（剩余空间不足则批次降 1）
-                            均不生效，且下方「限流上限 / 恢复阈值 / 空间危急时压缩批次数」三项<b>置灰不可编辑</b>——
-                            数值保留，重新打开即恢复。
-                            <br>注意：<b>空间守卫</b>（剩余空间低于守卫线 <code>并发数×最大文件大小×1.2</code> 时
-                            暂停发放新压缩组）不受此开关影响，磁盘安全仍有兜底。
+                            均不生效，且下方三项<b>置灰不可编辑</b>——数值保留，重新打开即恢复。
+                            <br>注意：<b>空间守卫</b>不受此开关影响（见右侧「空间守卫」），磁盘安全仍有兜底。
                         </small>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">磁盘限流上限（%）</label>
                         <input type="number" class="form-control" id="diskThrottleHighPercent" value="75" min="0" max="100" step="1">
-                        <small class="form-text text-secondary">压缩临时目录所在盘使用率超过此值时，压缩并行批次减半（0=禁用）</small>
+                        <small class="form-text text-secondary">压缩临时目录所在盘使用率超过此值时，压缩并行批次减半</small>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">磁盘限流恢复阈值（%）</label>
@@ -75,31 +95,38 @@
                     <div class="mb-3">
                         <label class="form-label">空间危急时压缩批次数</label>
                         <input type="number" class="form-control" id="diskCriticalBatches" value="1" min="0" max="64" step="1">
-                        <small class="form-text text-secondary">剩余空间 &lt; 3×最大文件大小时，并行批次强制降至此值（0=禁用）</small>
+                        <small class="form-text text-secondary">剩余空间 &lt; 并发数×最大文件大小×1.2 时，并行批次强制降至此值</small>
                     </div>
+                </div>
+            </div>
+
+            <!-- ④ 空间守卫 -->
+            <div class="setting-card service-card mb-3">
+                <div class="card-body">
+                    <h6 class="card-title"><i class="bi bi-shield-check me-2"></i>空间守卫</h6>
+                    <small class="text-muted d-block mb-3">
+                        剩余空间低于守卫线（<code>并发数×最大文件大小×1.2</code>）时<b>暂停发放新压缩组</b>，
+                        等磁带排空后自动放行。在途组不受影响，此机制始终生效、不可关闭。
+                    </small>
                     <div class="mb-3">
                         <label class="form-label">空间不足检查间隔（秒）</label>
                         <input type="number" class="form-control" id="diskCheckInterval" value="30" min="5" max="600" step="1">
                         <small class="form-text text-secondary">
-                            剩余空间不足暂停压缩后，每隔多少秒重试一次（默认 30，范围 5-600）。
-                            磁带排空快时可调小（如 10 秒）让压缩更快恢复供给；调大则减少检查频率。
+                            暂停后每隔多少秒重试一次（默认 30，范围 5-600）。磁带排空快时可调小（如 10 秒）让压缩更快恢复供给。
                         </small>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">空间不足最大等待（分钟）</label>
                         <input type="number" class="form-control" id="diskCheckMaxWaitMinutes" value="120" min="1" step="1">
-                        <small class="form-text text-secondary">剩余空间持续不足时暂停压缩的最长等待时间，超时该组报错</small>
+                        <small class="form-text text-secondary">单次暂停的最长等待时间，超时该组报错（每次放行后重新计时）</small>
                     </div>
                 </div>
             </div>
-        </div>
-        <div class="col-md-6">
 
+            <!-- ⑤ 保留策略 -->
             <div class="setting-card service-card mb-3">
                 <div class="card-body">
-                    <h6 class="card-title">
-                        <i class="bi bi-hdd me-2"></i>磁带与设备配置
-                    </h6>
+                    <h6 class="card-title"><i class="bi bi-calendar-check me-2"></i>保留策略</h6>
                     <div class="mb-3">
                         <label class="form-label">默认保留月数</label>
                         <input type="number" class="form-control" id="defaultRetentionMonths" value="6" min="1" max="36">
@@ -108,6 +135,13 @@
                         <input class="form-check-input" type="checkbox" id="autoEraseExpired">
                         <label class="form-check-label" for="autoEraseExpired">自动擦除过期磁带</label>
                     </div>
+                </div>
+            </div>
+
+            <!-- ⑥ 磁带与设备 -->
+            <div class="setting-card service-card mb-3">
+                <div class="card-body">
+                    <h6 class="card-title"><i class="bi bi-hdd me-2"></i>磁带与设备</h6>
                     <div class="form-check form-switch mb-3">
                         <input class="form-check-input" type="checkbox" id="enableTapeFormatBeforeFull">
                         <label class="form-check-label" for="enableTapeFormatBeforeFull">
