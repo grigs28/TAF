@@ -731,6 +731,10 @@ async function loadAllSystemConfig() {
                 const el = document.getElementById('diskCheckInterval');
                 if (el) el.value = config.disk_check_interval;
             }
+            if (config.disk_guard_safety_factor !== undefined) {
+                const el = document.getElementById('diskGuardSafetyFactor');
+                if (el) el.value = config.disk_guard_safety_factor;
+            }
 
 
             // SSO 单点登录配置
@@ -843,6 +847,12 @@ async function saveEnvConfigSection() {
                 return isNaN(parsed) ? null : parsed;
             })(),
             scan_engine: document.getElementById('scanEngine')?.value || null,
+            disk_guard_safety_factor: (() => {
+                const input = document.getElementById('diskGuardSafetyFactor');
+                if (!input || input.value === '') return null;
+                const parsed = parseFloat(input.value);
+                return isNaN(parsed) ? null : parsed;
+            })(),
             disk_check_interval: (() => {
                 const input = document.getElementById('diskCheckInterval');
                 if (!input || input.value === '') return null;

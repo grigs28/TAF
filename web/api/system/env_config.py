@@ -66,6 +66,7 @@ class SystemEnvConfig(BaseModel):
     disk_critical_batches: Optional[int] = Field(None, description="剩余空间 < N倍最大文件大小时，压缩并行批次强制降至此值，0=禁用")
     disk_check_max_wait_minutes: Optional[int] = Field(None, description="磁盘空间不足时暂停压缩的最大等待分钟数")
     disk_check_interval: Optional[int] = Field(None, description="磁盘空间不足时暂停压缩的重试间隔（秒），5-600，默认 30")
+    disk_guard_safety_factor: Optional[float] = Field(None, description="空间守卫安全系数（默认 1.2）：守卫线 = 并发数 × 最大文件大小 × 本系数")
 
     # 日志配置
     log_level: Optional[str] = Field(None, description="日志级别")
@@ -158,6 +159,7 @@ async def get_env_config():
             "disk_critical_batches": parse_int(env_vars.get("DISK_CRITICAL_BATCHES"), 1),
             "disk_check_max_wait_minutes": parse_int(env_vars.get("DISK_CHECK_MAX_WAIT_MINUTES"), 120),
             "disk_check_interval": parse_int(env_vars.get("DISK_CHECK_INTERVAL"), 30),
+            "disk_guard_safety_factor": float(env_vars.get("DISK_GUARD_SAFETY_FACTOR", 1.2) or 1.2),
 
             # 日志配置
             "log_level": env_vars.get("LOG_LEVEL", "INFO"),
@@ -306,6 +308,11 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             if config.disk_check_interval < 5 or config.disk_check_interval > 600:
                 raise ValueError("DISK_CHECK_INTERVAL 必须在 5-600 秒之间")
             updates["DISK_CHECK_INTERVAL"] = str(config.disk_check_interval)
+
+        if config.disk_guard_safety_factor is not None:
+            if config.disk_guard_safety_factor < 1.0 or config.disk_guard_safety_factor > 3.0:
+                raise ValueError("DISK_GUARD_SAFETY_FACTOR 必须在 1.0-3.0 之间（小于 1 会让在途产出越界）")
+            updates["DISK_GUARD_SAFETY_FACTOR"] = str(config.disk_guard_safety_factor)
 
 
         # 日志配置

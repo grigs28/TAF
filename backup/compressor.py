@@ -50,10 +50,14 @@ except ImportError:
 
 
 def _compute_required_free_bytes(settings) -> int:
-    """磁盘守卫线 = 并发数 × 最大文件大小 × 1.2
+    """磁盘守卫线 = 并发数 × 最大文件大小 × 安全系数（默认 1.2）
 
-    覆盖全部在途并行组的最大产出（每组压缩后 ≤ MAX_FILE_SIZE）再加 20% 缓冲。
+    覆盖全部在途并行组的最大产出（每组压缩后 ≤ MAX_FILE_SIZE），再乘安全系数留缓冲。
     随 COMPRESSION_PARALLEL_BATCHES 自动伸缩：并发越高，安全线越高。
+
+    安全系数由 DISK_GUARD_SAFETY_FACTOR 配置（默认 1.2）：
+    - 1.2 → 全部在途产出落地后仍剩"在途量 × 20%"空闲
+    - 调大更保守（缓冲更厚），调小更激进（SSD 用得更满）
     """
     try:
         max_file_size = int(getattr(settings, 'MAX_FILE_SIZE', 0) or 0)
@@ -65,7 +69,13 @@ def _compute_required_free_bytes(settings) -> int:
         parallel = max(1, int(getattr(settings, 'COMPRESSION_PARALLEL_BATCHES', 3) or 3))
     except Exception:
         parallel = 3
-    return int(max_file_size * parallel * 1.2)
+    try:
+        factor = float(getattr(settings, 'DISK_GUARD_SAFETY_FACTOR', 1.2) or 1.2)
+    except Exception:
+        factor = 1.2
+    if factor < 1.0:  # 小于 1 会让在途产出越界，不接受
+        factor = 1.0
+    return int(max_file_size * parallel * factor)
 
 
 class Compressor:
