@@ -513,6 +513,19 @@ class BackupEngine:
                     reason = "非LTFS"
                 else:
                     reason = "磁带不为空"
+
+                # 自动格式化关闭时具备绝对语义：任何需要格式化的场景一律中止任务，
+                # 绝不执行破坏性格式化（覆盖"非LTFS/挂载失败"等绕过续写开关的路径）
+                if not self.settings.ENABLE_TAPE_FORMAT_BEFORE_FULL:
+                    error_msg = (
+                        f"磁带需要格式化（{reason}），但自动格式化已关闭，任务中止。"
+                        f"请手动格式化磁带（磁带管理页）或开启\"完整备份前自动格式化\"后重试"
+                    )
+                    logger.error(f"✗ {error_msg}")
+                    backup_task.error_message = error_msg
+                    await self._send_tape_error_notification(error_msg)
+                    return False
+
                 logger.warning(f"⚠️ 需要格式化: {reason}")
                 logger.info("开始格式化...")
 
