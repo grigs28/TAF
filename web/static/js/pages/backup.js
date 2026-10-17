@@ -627,7 +627,7 @@
 
                 const speedBadge = document.createElement('span');
                 speedBadge.className = badgeClass;
-                speedBadge.style.cssText = 'font-size: 1rem; font-weight: 600; padding: 0.35em 0.65em;';
+                speedBadge.style.cssText = 'font-size: 1rem; font-weight: 400; padding: 0.35em 0.65em;';
                 // 数字：≥100 取整，否则保留 1 位小数
                 const displayValue = _mbps >= 100 ? _mbps.toFixed(0) : _mbps.toFixed(1);
                 speedBadge.textContent = displayValue;
@@ -693,7 +693,7 @@
         if (_isRunningTask && task.tape_writing_file && _showMbps > 0) {
             // [final文件数][已写入数][瞬时][平均] 四个方括号徽章；只放大数字，"写带"/"MB/s" 保持小字号
             // 瞬时/平均各自按自己的速度分档着色；final 文件数用中性灰，已写入数用青色
-            const _badgeStyle = 'font-weight: 600; padding: 0.15em 0.5em; font-size:1rem;';
+            const _badgeStyle = 'font-weight: 400; padding: 0.15em 0.5em; font-size:1rem;';
             const _speedClassOf = (v) => v >= 230 ? 'badge bg-success'
                 : (v >= 140 ? 'badge bg-warning text-dark' : 'badge bg-danger');
             let _speedHtml = '';
