@@ -116,9 +116,9 @@ class Compressor:
         # 注意：重置信号必须是"通过守卫"而不是"组进入流程"——刚进流程的组也可能
         # 卡在同一个守卫里，不能作为"系统还活着"的证据。
         self._last_release_time: Optional[float] = None
-        # 守卫日志节流：等待中的组每 20 秒各重试一次，若每条都打 warning，
+        # 守卫日志节流：等待中的组每 20 秒各重试一次，若每条都打日志，
         # 6 组等待时每分钟就是 18 条重复日志。改为：
-        #   · 首次进入拦停 → 立即 WARNING
+        #   · 首次进入拦停 → 立即 INFO
         #   · 其后每 5 分钟 → 一条汇总
         #   · 放行时 → 一条 INFO（含本次拦停持续时长）
         self._guard_active: bool = False
@@ -1065,7 +1065,7 @@ class Compressor:
 
             if _should_log:
                 self._last_guard_log_time = now_ts
-                logger.warning(
+                logger.info(
                     f"磁盘剩余空间不足：{format_bytes(free_bytes)} < {format_bytes(required_free)}"
                     f"（在途 {active_groups if active_groups else '并发上限'} 组"
                     + (f"，源 {format_bytes(active_src_total)}"
