@@ -598,8 +598,11 @@
                     const _totB = Number(progressInfo.totalBytes) || 0;
                     const _procB = Number(progressInfo.processedBytes) || 0;
                     const _pct = _totB > 0 ? ((_procB * 100 / _totB).toFixed(0) + '%') : '-';
+                    // 预计剩余（按开工至今的平均速度估算；扫描期/速度未知时不显示）
+                    const _etaHover = computeEtaText(task, progressInfo);
                     speedBadge.title = `处理速度: ${_mbps.toFixed(1)} MB/s（${_gbh.toFixed(0)} GB/小时）\n`
                         + `参考: 磁带写入约 285 MB/s\n`
+                        + (_etaHover ? `预计剩余: ${_etaHover}（剩余数据 ${formatBytes(Math.max(0, _totB - _procB))}）\n` : '')
                         + `已处理: ${formatBytes(_procB)} / ${_totB > 0 ? formatBytes(_totB) : '未知'}（${_pct}）\n`
                         + `已用时间: ${formatElapsedTime(task.started_at, task.completed_at, task.status)}`;
                 }
@@ -611,22 +614,6 @@
                 // 不走 insertAdjacentHTML（避免把 HTML 字符串二次注入 DOM）
                 badgeWrapper.innerHTML = buildStatusBadge(task);
                 badgeWrapper.appendChild(speedBadge);
-                // 右上角再加一个 ETA 徽章（按开工至今的平均速度估算剩余时间）
-                {
-                    const _eta = computeEtaText(task, progressInfo);
-                    if (_eta) {
-                        const _totalB = Number(progressInfo.totalBytes) || 0;
-                        const _procB = Number(progressInfo.processedBytes) || 0;
-                        const etaBadge = document.createElement('span');
-                        etaBadge.className = 'badge bg-info text-dark';
-                        etaBadge.style.cssText = 'font-size: 0.85rem; font-weight: 600; padding: 0.35em 0.65em;';
-                        etaBadge.textContent = '剩余 ' + _eta;
-                        etaBadge.title = `预计剩余: ${_eta}\n`
-                            + `剩余数据: ${formatBytes(Math.max(0, _totalB - _procB))} / ${formatBytes(_totalB)}\n`
-                            + `说明: 按开工至今的平均速度估算（含扫描期，早期偏保守）`;
-                        badgeWrapper.appendChild(etaBadge);
-                    }
-                }
             } else {
                 // 如果无法计算速度，显示状态徽章
                 badgeWrapper.innerHTML = buildStatusBadge(task);
