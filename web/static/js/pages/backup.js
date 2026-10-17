@@ -1206,6 +1206,10 @@
                     `  压缩率: ${formatCompressionRatio(progressInfo.compressionRatio)}`,
                     `  处理速度: ${_fileRate ? _fileRate + ' 文件/秒' : '-'}`,
                 ].join('\n');
+                // 已处理数据百分比（按字节）
+                const _dataPct = progressInfo.totalBytes > 0
+                    ? ((Number(progressInfo.processedBytes) || 0) / Number(progressInfo.totalBytes) * 100).toFixed(1)
+                    : '0.0';
 
                 progressSection.innerHTML = normalizeCardHtml(`
                     ${batchProgressHtml}
@@ -1222,9 +1226,10 @@
                         <small class="text-muted">文件进度:</small>
                         <small class="text-muted" title="${_fileProgressTitle}">${_fileProgressHtml}</small>
                     </div>
-                    <div class="d-flex justify-content-between">
+                    <div class="d-flex align-items-center">
                         <small class="text-muted">已处理数据:</small>
-                        <small class="text-muted">${formatBytes(progressInfo.processedBytes)} / ${formatBytes(progressInfo.totalBytes || progressInfo.processedBytes)}</small>
+                        <small class="text-muted ms-2">${formatBytes(progressInfo.processedBytes)} / ${formatBytes(progressInfo.totalBytes || progressInfo.processedBytes)}</small>
+                        <span class="badge bg-success ms-auto" style="font-size:1rem; font-weight:400; padding:0.35em 0.65em;">${_dataPct}%</span>
                     </div>
                     <div class="d-flex justify-content-between">
                         <small class="text-muted">压缩后大小:</small>
