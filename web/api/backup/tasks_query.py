@@ -206,14 +206,21 @@ async def get_backup_tasks(
                         _cum_bytes = int(getattr(_th, '_tape_cum_bytes', 0) or 0)
                         tape_write_cum_bytes = _cum_bytes
                         _cum_seconds = float(getattr(_th, '_tape_cum_seconds', 0) or 0)
-                        tape_write_busy_seconds = _cum_seconds
+                        _now = time.time()
+                        # 正在写的文件：把已用时间实时计入 busy，否则 idle 会把
+                        # "当前文件已写了几分钟"也算成空闲（只有写完才累加 cum_seconds）
+                        _inflight = 0.0
+                        _t_start = getattr(_th, '_tape_write_start', None)
+                        if _t_start:
+                            _inflight = max(0.0, _now - float(_t_start))
+                        tape_write_busy_seconds = _cum_seconds + _inflight
                         _first = getattr(_th, '_tape_first_write_start', None)
                         if _first:
-                            _wall = max(0.0, time.time() - float(_first))
-                            # 空闲 = 墙钟总时间 − 实际复制时间（含扫描间隔、等压缩产出、重试等待）
-                            tape_write_idle_seconds = max(0.0, _wall - _cum_seconds)
+                            _wall = max(0.0, _now - float(_first))
+                            # 空闲 = 墙钟 − (已完成文件耗时 + 当前文件已写时间)
+                            tape_write_idle_seconds = max(0.0, _wall - tape_write_busy_seconds)
                         if _first and _cum_bytes > 0:
-                            _wall = max(0.001, time.time() - float(_first))
+                            _wall = max(0.001, _now - float(_first))
                             tape_write_avg_speed_mbps = _cum_bytes / _wall / (1024 * 1024)
                 except Exception as _tape_err:
                     logger.debug(f"[任务查询] 读取磁带写入状态失败（卡片将不显示磁带速度）: {_tape_err}")

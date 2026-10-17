@@ -735,12 +735,21 @@
             }
             if (_curMbps > 0 && _avgMbps > 0) {
                 _speedHtml += `<span class="${_speedClassOf(_curMbps)}" style="${_badgeStyle}; margin-right:2px;">${Math.round(_curMbps)}</span>`
-                    + `<span class="${_speedClassOf(_avgMbps)}" style="${_badgeStyle}">${Math.round(_avgMbps)}</span>`;
+                    + `<span class="${_speedClassOf(_avgMbps)}" style="${_badgeStyle}; margin-right:2px;">${Math.round(_avgMbps)}</span>`;
             } else {
-                _speedHtml += `<span class="${_speedClassOf(_showMbps)}" style="${_badgeStyle}">${Math.round(_showMbps)}</span>`;
+                _speedHtml += `<span class="${_speedClassOf(_showMbps)}" style="${_badgeStyle}; margin-right:2px;">${Math.round(_showMbps)}</span>`;
             }
-            // "写带"与"MB/s"保持 <small> 的原字号
-            _tapeSpeedHtml = `<small>写带 ${_speedHtml} <span class="text-muted">MB/s</span></small>`;
+            // 空闲徽章：从第一次写带起算的空档（已排除当前文件正在写的时间）
+            let _idleHtml = '';
+            {
+                const _idle = Number(task.tape_write_idle_seconds) || 0;
+                const _idleLabel = _idle >= 3600
+                    ? (Math.round(_idle / 360) / 10) + 'h'
+                    : (_idle >= 60 ? Math.round(_idle / 60) + 'm' : Math.round(_idle) + 's');
+                _idleHtml = `<span class="badge bg-secondary bg-opacity-25 text-light" style="${_badgeStyle}; margin-left:2px;">空闲${_idleLabel}</span>`;
+            }
+            // "写带"与"MB/s"保持 <small> 的原字号；空闲徽章放在单位之后
+            _tapeSpeedHtml = `<small>写带 ${_speedHtml} <span class="text-muted">MB/s</span>${_idleHtml}</small>`;
         }
         tape.innerHTML = `<div class="d-flex justify-content-between align-items-center">
                 <small class="text-muted">目标:</small>
