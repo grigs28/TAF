@@ -49,8 +49,19 @@ async def sso_middleware(request: Request, call_next):
     # 检查会话
     session = get_session(request)
     if session:
-        # 只允许管理员访问
-        if session.get("is_admin") != 1:
+        # 权限以**本地角色**为准（可在「系统设置 → 管理员设置」中覆盖）：
+        #   admin  → 放行（即使 yz 侧是普通用户）
+        #   user / denied → 拒绝（即使 yz 侧是管理员）
+        # 同时把本次登录写入 sso_users（含被拒绝的），便于审计。
+        # grigs 在 user_registry 中硬编码为永久管理员，不受本地角色表约束。
+        try:
+            from web.yz_auth.user_registry import resolve_local_role
+            local_role = await resolve_local_role(session)
+        except Exception as role_err:
+            logger.warning(f"[SSO] 解析本地角色失败（按拒绝处理）: {role_err}")
+            local_role = "denied"
+
+        if local_role != "admin":
             return JSONResponse(status_code=403, content={"detail": "需要管理员权限"})
         request.state.user = session
         return await call_next(request)

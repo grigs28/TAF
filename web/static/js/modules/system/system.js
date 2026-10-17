@@ -1091,3 +1091,121 @@ function toggleSyslogSettings(enabled) {
     }
 }
 
+
+/* ============================================================
+ * 管理员设置（SSO 账号本地授权）
+ *   GET  /api/system/sso-users          列出所有登录过的账号
+ *   PUT  /api/system/sso-users/{id}     修改本地角色
+ *   grigs 为永久管理员，不可修改
+ * ============================================================ */
+const SSO_ROLE_LABELS = {
+    admin: { text: '管理员', cls: 'bg-success' },
+    user: { text: '用户（不可登录）', cls: 'bg-secondary' },
+    denied: { text: '禁止登录', cls: 'bg-danger' }
+};
+
+function ssoRoleOptions(current, permanent) {
+    const roles = ['admin', 'user', 'denied'];
+    return roles.map(r => {
+        const sel = r === current ? ' selected' : '';
+        return `<option value="${r}"${sel}>${(SSO_ROLE_LABELS[r] || { text: r }).text}</option>`;
+    }).join('');
+}
+
+function ssoFmtTime(iso) {
+    if (!iso) return '-';
+    try {
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return iso;
+        const p = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    } catch (e) { return iso; }
+}
+
+async function loadSsoUsers() {
+    const body = document.getElementById('ssoUsersBody');
+    const summary = document.getElementById('ssoUsersSummary');
+    if (!body) return;
+    try {
+        const resp = await fetch('/api/system/sso-users');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const users = await resp.json();
+
+        if (!Array.isArray(users) || users.length === 0) {
+            body.innerHTML = '<tr><td colspan="7" class="text-center text-muted">暂无登录记录</td></tr>';
+            if (summary) summary.textContent = '暂无记录';
+            return;
+        }
+
+        // 统计：管理员数 / 被拒绝数
+        const admins = users.filter(u => u.local_role === 'admin' || u.is_permanent_admin).length;
+        const denied = users.filter(u => u.local_role !== 'admin' && !u.is_permanent_admin).length;
+        if (summary) {
+            summary.textContent = `共 ${users.length} 个账号 · 管理员 ${admins} · 不可登录 ${denied}`;
+        }
+
+        body.innerHTML = users.map(u => {
+            const permanent = !!u.is_permanent_admin;
+            const yzAdmin = Number(u.yz_is_admin) === 1;
+            const role = u.local_role || 'denied';
+            const roleBadge = permanent
+                ? '<span class="badge bg-primary">永久管理员</span>'
+                : `<select class="form-select form-select-sm sso-role-select" data-user-id="${u.yz_user_id}" style="min-width:9rem">
+                       ${ssoRoleOptions(role, permanent)}
+                   </select>`;
+            const resultText = u.last_result === 'ok'
+                ? '<span class="text-success">成功</span>'
+                : (u.last_result ? '<span class="text-danger">被拒绝</span>' : '-');
+            return `<tr${permanent ? ' class="table-primary"' : (role !== 'admin' ? ' class="text-muted"' : '')}>
+                <td><span class="fw-semibold">${u.username || '-'}</span></td>
+                <td>${u.display_name || '-'}</td>
+                <td>${yzAdmin ? '<span class="badge bg-info text-dark">管理员</span>' : '<span class="badge bg-secondary">普通用户</span>'}</td>
+                <td>${roleBadge}</td>
+                <td>${ssoFmtTime(u.last_login_at)}</td>
+                <td>${resultText}</td>
+                <td class="text-end">${u.login_count || 0}</td>
+            </tr>`;
+        }).join('');
+
+        // 绑定下拉变更
+        body.querySelectorAll('.sso-role-select').forEach(sel => {
+            sel.addEventListener('change', async function () {
+                const uid = this.dataset.userId;
+                const newRole = this.value;
+                this.disabled = true;
+                try {
+                    const r = await fetch('/api/system/sso-users/' + encodeURIComponent(uid), {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ local_role: newRole })
+                    });
+                    const data = await r.json().catch(() => ({}));
+                    if (!r.ok) throw new Error(data.detail || ('HTTP ' + r.status));
+                    if (typeof showToast === 'function') {
+                        showToast(`账号 ${uid} 已设为「${(SSO_ROLE_LABELS[newRole] || {}).text || newRole}」`, 'success');
+                    }
+                    this.disabled = false;
+                    loadSsoUsers();
+                } catch (e) {
+                    if (typeof showToast === 'function') showToast('修改失败: ' + e.message, 'danger');
+                    this.disabled = false;
+                    loadSsoUsers();   // 回滚到服务端真实状态
+                }
+            });
+        });
+    } catch (e) {
+        body.innerHTML = `<tr><td colspan="7" class="text-center text-danger">加载失败: ${e.message}</td></tr>`;
+        if (summary) summary.textContent = '加载失败';
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    const refreshBtn = document.getElementById('ssoUsersRefresh');
+    if (refreshBtn) refreshBtn.addEventListener('click', loadSsoUsers);
+
+    // 首次进入「管理员设置」标签页时加载（避免每次打开系统设置都查库）
+    const tabBtn = document.getElementById('sso-users-tab');
+    if (tabBtn) {
+        tabBtn.addEventListener('shown.bs.tab', function () { loadSsoUsers(); });
+    }
+});

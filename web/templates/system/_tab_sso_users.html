@@ -1,0 +1,48 @@
+<!-- 管理员设置 -->
+<div class="tab-pane fade" id="sso-users" role="tabpanel">
+    <div class="setting-card service-card mb-3">
+        <div class="card-body">
+            <h6 class="card-title"><i class="bi bi-people me-2"></i>管理员设置</h6>
+
+            <small class="text-muted d-block mb-3">
+                所有通过网管中心（yz-login）登录过 TAF 的账号都会记录在这里，<b>包括被拒绝的</b>。
+                本地角色决定能否进入 TAF：
+                <b>管理员</b> = 可登录并管理系统；
+                <b>用户</b> = 不可登录（TAF 仅供管理员使用）；
+                <b>禁止登录</b> = 明确封禁。
+                <b>grigs 为永久管理员，不可修改。</b>
+            </small>
+
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <small class="text-muted" id="ssoUsersSummary">加载中…</small>
+                <button class="btn btn-sm btn-outline-secondary" id="ssoUsersRefresh" type="button">
+                    <i class="bi bi-arrow-clockwise me-1"></i>刷新
+                </button>
+            </div>
+
+            <div class="table-responsive">
+                <table class="table table-sm table-hover align-middle mb-0">
+                    <thead>
+                        <tr>
+                            <th>账号</th>
+                            <th>显示名</th>
+                            <th>网管中心角色</th>
+                            <th>本地角色</th>
+                            <th>最后登录</th>
+                            <th>结果</th>
+                            <th class="text-end">登录次数</th>
+                        </tr>
+                    </thead>
+                    <tbody id="ssoUsersBody">
+                        <tr><td colspan="7" class="text-center text-muted">加载中…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <small class="text-muted d-block mt-2">
+                提示：首次出现的账号会自动继承网管中心的角色（管理员→本地管理员、普通用户→本地用户）；
+                此后可在本页随时调整。
+            </small>
+        </div>
+    </div>
+</div>

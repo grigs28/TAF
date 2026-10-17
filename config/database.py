@@ -540,6 +540,53 @@ class DatabaseManager:
                 except Exception as cache_err:
                     logger.warning(f"创建磁带归档内容缓存表时出错: {cache_err}", exc_info=True)
 
+                # ===== SSO 账号本地授权表 =====
+                # 记录所有通过 yz-login 登录过 TAF 的账号（含被拒绝的），
+                # 并允许在本地覆盖该账号的角色（yz 管理员可在本地降为 user/denied，
+                # yz 普通用户可在本地提升为 admin）。
+                # local_role 语义：
+                #   admin  → 允许登录并拥有管理权限
+                #   user   → 不允许登录（TAF 是管理工具，普通用户无入口）
+                #   denied → 明确禁止登录
+                # 注意：grigs 账号在代码中硬编码为永久管理员，不受本表约束。
+                try:
+                    cur.execute("""
+                        SELECT EXISTS (SELECT 1 FROM information_schema.tables
+                                       WHERE table_name = 'sso_users')
+                    """)
+                    if not cur.fetchone()[0]:
+                        cur.execute("""
+                            CREATE TABLE sso_users (
+                                id BIGSERIAL PRIMARY KEY,
+                                yz_user_id INTEGER NOT NULL UNIQUE,
+                                username VARCHAR(100),
+                                display_name VARCHAR(200),
+                                yz_is_admin INTEGER DEFAULT 0,
+                                local_role VARCHAR(20) DEFAULT 'admin',
+                                last_result VARCHAR(24),
+                                last_login_at TIMESTAMPTZ,
+                                login_count INTEGER DEFAULT 0,
+                                first_seen_at TIMESTAMPTZ DEFAULT NOW(),
+                                updated_at TIMESTAMPTZ DEFAULT NOW()
+                            )
+                        """)
+                        conn.commit()
+                        logger.info("✅ 创建表 sso_users 成功")
+                    else:
+                        logger.debug("表 sso_users 已存在")
+
+                    cur.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_sso_users_username
+                        ON sso_users(username)
+                    """)
+                    conn.commit()
+                except Exception as sso_err:
+                    logger.warning(f"创建 sso_users 表时出错: {sso_err}", exc_info=True)
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+
                 # 检查并添加缺失的字段（字段迁移）
                 self._migrate_missing_columns(cur)
 
