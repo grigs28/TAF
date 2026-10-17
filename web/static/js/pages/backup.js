@@ -230,6 +230,16 @@
         }
     }
 
+    // 规范化模板字符串再赋给 innerHTML。
+    // 原因：.card-body 是 `display:flex; flex-direction:column`——模板字符串
+    // 首尾的换行+缩进会成为**匿名 flex item**，在卡片里表现成多出一空行
+    // （例如"压缩率"下方、"开始时间"上方那道空隙）。
+    // trim 去掉首尾空白；标签之间的空白一并去掉（这些行都是 flex/block 结构，
+    // 不依赖标签间空格排版，去掉安全）。
+    function normalizeCardHtml(html) {
+        return String(html == null ? '' : html).trim().replace(/>\s+</g, '><');
+    }
+
     function computeProgress(task) {
         // processedFiles: 已经压缩的文件数（由压缩工作线程更新）
         // totalFiles: 同步过来的总文件数（由后台扫描任务更新）
@@ -694,12 +704,12 @@
                 const fin = finalMap[_st] || { label: _st || '未知', cls: 'bg-secondary' };
                 const stageSection = document.createElement('div');
                 stageSection.className = 'mb-2';
-                stageSection.innerHTML = `
+                stageSection.innerHTML = normalizeCardHtml(`
                     <div class="d-flex justify-content-between align-items-center">
                         <small class="text-muted">结果:</small>
                         <span class="badge ${fin.cls}">${fin.label}</span>
                     </div>
-                `;
+                `);
                 body.appendChild(stageSection);
             } else {
                 const isCompressStage = (task.operation_stage || '').toLowerCase() === 'compress';
@@ -782,7 +792,7 @@
                 
                 const stageSection = document.createElement('div');
                 stageSection.className = 'mb-2';
-                stageSection.innerHTML = `
+                stageSection.innerHTML = normalizeCardHtml(`
                     <div class="d-flex justify-content-between align-items-center">
                         <small class="text-muted">当前阶段:</small>
                         <small class="text-muted">${displayLabel}</small>
@@ -795,7 +805,7 @@
                             return `<span class="badge ${badgeClass}">${step.label}</span>`;
                         }).join('')}
                     </div>
-                `;
+                `);
                 body.appendChild(stageSection);
             }
         }
@@ -821,12 +831,12 @@
                         + 'border-radius:1px;vertical-align:-1px;background:'
                         + (active ? 'var(--primary)' : 'rgba(255,255,255,.18)') + '"></span>';
                 }
-                batchProgressHtml = `
+                batchProgressHtml = normalizeCardHtml(`
                     <div class="d-flex justify-content-between align-items-center mb-1">
                         <small class="text-muted">压缩组:</small>
                         <small class="text-muted">${slotsHtml}<span class="fw-semibold ms-1">${runningCount}/${totalSlots}</span></small>
                     </div>
-                `;
+                `);
             }
             
             // 验证任务：显示扫描量/抽样量/通过/失败，不显示压缩相关字段
@@ -857,7 +867,7 @@
                     ? '已完成'
                     : ((task.status || '').toLowerCase() === 'failed' ? '失败' : '验证中');
 
-                progressSection.innerHTML = `
+                progressSection.innerHTML = normalizeCardHtml(`
                     ${batchProgressHtml}
                     <div class="d-flex justify-content-between align-items-center">
                         <small class="text-muted">状态:</small>
@@ -880,7 +890,7 @@
                         <small class="text-muted">失败数:</small>
                         <small class="${failedClass}">${verifyFailed === null ? '-' : verifyFailed.toLocaleString()}</small>
                     </div>
-                `;
+                `);
             } else {
                 // SSD 剩余空间（压缩目录所在盘）：运维最关心的资源水位，放在进度区前部
                 const diskLine = (typeof task.disk_free_bytes === 'number' && task.disk_free_bytes > 0)
@@ -893,7 +903,7 @@
                     </div>`
                     : '';
 
-                progressSection.innerHTML = `
+                progressSection.innerHTML = normalizeCardHtml(`
                     ${batchProgressHtml}
                     ${diskLine}
                     <div class="d-flex justify-content-between align-items-center">
@@ -919,7 +929,7 @@
                         <small class="text-muted">压缩率:</small>
                         <small class="text-muted">${formatCompressionRatio(progressInfo.compressionRatio)}</small>
                     </div>
-                `;
+                `);
             }
             body.appendChild(progressSection);
         }
