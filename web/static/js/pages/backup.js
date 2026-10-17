@@ -293,13 +293,18 @@
             } else if (code === 'prefetch') {
                 const d = parseInt(task.prefetch_queue_depth, 10) || 0;
                 const sizes = Array.isArray(task.prefetch_queue_sizes) ? task.prefetch_queue_sizes : [];
+                const mfs = parseInt(task.max_file_size, 10) || 0;
                 if (d > 0) {
                     lines.push('队列: ' + d + ' 组待压缩');
                     if (sizes.length) {
-                        lines.push('各组大小: ' + sizes.map(function (s) { return formatBytes(s); }).join(' / '));
+                        // 组与组之间用 | 分隔，避免与"分数 X/Y"的 / 混淆
+                        lines.push('各组大小: ' + sizes.map(function (s) { return formatBytes(s); }).join(' | '));
                     }
                 } else {
                     lines.push('队列为空（扫描中或已全部消费）');
+                }
+                if (mfs > 0) {
+                    lines.push('最大文件大小: ' + formatBytes(mfs) + '（设置值）');
                 }
             } else if (code === 'compress') {
                 const list = ((task.current_compression_progress || {}).task_progress_list) || [];

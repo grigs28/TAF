@@ -156,6 +156,7 @@ async def get_backup_tasks(
                 disk_free_bytes = None
                 disk_total_bytes = None
                 parallel_batches = 8
+                max_file_size = 0
                 try:
                     import shutil as _shutil
                     from config.settings import get_settings as _gs
@@ -166,6 +167,8 @@ async def get_backup_tasks(
                     disk_total_bytes = _usage.total
                     parallel_batches = int(
                         getattr(_live, 'COMPRESSION_PARALLEL_BATCHES', 8) or 8)
+                    # 预分组封组阈值（设置值）：hover 显示"最大文件大小"参考
+                    max_file_size = int(getattr(_live, 'MAX_FILE_SIZE', 0) or 0)
                 except Exception as _disk_err:
                     logger.debug(f"[任务查询] 读取磁盘/并发配置失败（卡片将不显示 SSD 剩余）: {_disk_err}")
 
@@ -484,6 +487,8 @@ async def get_backup_tasks(
                         "disk_total_bytes": disk_total_bytes,
                         # 配置的并行批次数：卡片用它画"压缩组 X/Y"的聚合条分母
                         "parallel_batches": parallel_batches,
+                        # 预分组封组阈值（MAX_FILE_SIZE 设置值）：hover 显示参考
+                        "max_file_size": max_file_size,
                         # 磁带实时写入（无写入进行时为 None/0）
                         "tape_writing_file": tape_writing_file,
                         "tape_write_bytes": tape_write_bytes,
