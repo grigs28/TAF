@@ -230,6 +230,27 @@
         }
     }
 
+    // 计算 ETA 文案（剩余字节 / 已用时间推算的平均速度）。
+    // 边界：扫描期 total_bytes 为 0 或仍在增长、已完成、速度为 0 → 返回 ''。
+    // 供右上角徽章与进度行共用。
+    function computeEtaText(task, progressInfo) {
+        try {
+            const st = (task.status || '').toLowerCase();
+            if (st !== 'running' && st !== 'pending') return '';
+            const totalB = Number(progressInfo && progressInfo.totalBytes) || 0;
+            const procB = Number(progressInfo && progressInfo.processedBytes) || 0;
+            if (totalB <= 0 || procB <= 0 || !task.started_at) return '';
+            const elapsedSec = (Date.now() - new Date(task.started_at).getTime()) / 1000;
+            if (elapsedSec <= 1) return '';
+            const speedBps = procB / elapsedSec;
+            const remainB = totalB - procB;
+            if (speedBps <= 0 || remainB <= 0) return '';
+            return formatEta(remainB / speedBps);
+        } catch (e) {
+            return '';
+        }
+    }
+
     // 阶段徽章的 hover 明细（按阶段类型给出该阶段最有用的实时数据）
     function buildStageHover(step, task) {
         const code = String(step.code || '').toLowerCase();
@@ -590,6 +611,22 @@
                 // 不走 insertAdjacentHTML（避免把 HTML 字符串二次注入 DOM）
                 badgeWrapper.innerHTML = buildStatusBadge(task);
                 badgeWrapper.appendChild(speedBadge);
+                // 右上角再加一个 ETA 徽章（按开工至今的平均速度估算剩余时间）
+                {
+                    const _eta = computeEtaText(task, progressInfo);
+                    if (_eta) {
+                        const _totalB = Number(progressInfo.totalBytes) || 0;
+                        const _procB = Number(progressInfo.processedBytes) || 0;
+                        const etaBadge = document.createElement('span');
+                        etaBadge.className = 'badge bg-info text-dark';
+                        etaBadge.style.cssText = 'font-size: 0.85rem; font-weight: 600; padding: 0.35em 0.65em;';
+                        etaBadge.textContent = '剩余 ' + _eta;
+                        etaBadge.title = `预计剩余: ${_eta}\n`
+                            + `剩余数据: ${formatBytes(Math.max(0, _totalB - _procB))} / ${formatBytes(_totalB)}\n`
+                            + `说明: 按开工至今的平均速度估算（含扫描期，早期偏保守）`;
+                        badgeWrapper.appendChild(etaBadge);
+                    }
+                }
             } else {
                 // 如果无法计算速度，显示状态徽章
                 badgeWrapper.innerHTML = buildStatusBadge(task);
@@ -1018,24 +1055,7 @@
                     </div>`
                     : '';
 
-                // ETA：剩余字节 / 已用时间推算的平均速度。
-                // 边界：扫描期 total_bytes 为 0 或还在增长 → 不显示；已完成 → 不显示。
-                let etaText = '';
-                try {
-                    const _isRunningNow = ['running', 'pending'].indexOf((task.status || '').toLowerCase()) >= 0;
-                    const _totalB = Number(progressInfo.totalBytes) || 0;
-                    const _procB = Number(progressInfo.processedBytes) || 0;
-                    if (_isRunningNow && _totalB > 0 && _procB > 0 && task.started_at) {
-                        const _elapsedSec = (Date.now() - new Date(task.started_at).getTime()) / 1000;
-                        if (_elapsedSec > 1) {
-                            const _speedBps = _procB / _elapsedSec;
-                            const _remainB = _totalB - _procB;
-                            if (_speedBps > 0 && _remainB > 0) {
-                                etaText = formatEta(_remainB / _speedBps);
-                            }
-                        }
-                    }
-                } catch (e) { /* ETA 计算失败不影响卡片 */ }
+                const etaText = computeEtaText(task, progressInfo);
 
                 progressSection.innerHTML = normalizeCardHtml(`
                     ${batchProgressHtml}
