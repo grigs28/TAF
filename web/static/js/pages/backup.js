@@ -658,7 +658,16 @@
         const tape = document.createElement('div');
         tape.className = 'mb-2';
         const target = task.tape_device || task.tape_id || '自动选择';
-        tape.innerHTML = `<small class="text-muted">目标:</small><br><span class="${highlightClass}">${target}</span>`;
+        // 正在写带时，把实时磁带写入速度右对齐显示在"目标:"行（无写入时不显示）
+        const _tapeSpeedText = (task.tape_writing_file
+            && typeof task.tape_write_speed_mbps === 'number' && task.tape_write_speed_mbps > 0)
+            ? `写带 ${Math.round(task.tape_write_speed_mbps)} MB/s`
+            : '';
+        tape.innerHTML = `<div class="d-flex justify-content-between align-items-baseline">
+                <small class="text-muted">目标:</small>
+                ${_tapeSpeedText ? `<small class="text-muted">${_tapeSpeedText}</small>` : ''}
+            </div>
+            <span class="${highlightClass}">${target}</span>`;
         // hover 显示磁带实时写入状态（后端暴露的 tape_write_* 字段）
         if (task.tape_writing_file) {
             tape.title = `正在写入磁带: ${task.tape_writing_file}\n`
