@@ -407,6 +407,7 @@ async def get_backup_tasks(
 
                     # 检查 final 目录是否有待写入磁带的文件（用于 copy 步骤状态判断）
                     final_dir_has_files = None
+                    final_pending_files = 0
                     if status_value == 'running':
                         try:
                             if system and system.backup_engine:
@@ -419,6 +420,8 @@ async def get_backup_tasks(
                                             _set_id = getattr(_cw.backup_set, 'set_id', None)
                                     if _set_id:
                                         final_dir_has_files = not system.backup_engine.final_dir_monitor.is_final_dir_empty(_set_id)
+                                        # final 目录待写磁带的压缩文件数（卡片显示）
+                                        final_pending_files = system.backup_engine.final_dir_monitor.count_final_files(_set_id)
                         except Exception:
                             pass
 
@@ -510,6 +513,8 @@ async def get_backup_tasks(
                         "tape_write_total": tape_write_total if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         "tape_write_speed_mbps": round(tape_write_speed_mbps, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         "tape_write_avg_speed_mbps": round(tape_write_avg_speed_mbps, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
+                        # final 目录待写磁带的压缩文件数（卡片写带行显示）
+                        "final_pending_files": final_pending_files,
                         # 阶段徽章 hover 用的实时明细
                         "scan_live_stats": in_memory_scan_stats,          # 扫描中：已扫描文件/字节/目录
                         "prefetch_queue_depth": in_memory_queue_depth,    # 预分组：队列深度

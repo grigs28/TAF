@@ -347,6 +347,31 @@ class FinalDirMonitor:
         """获取已处理文件数量"""
         return len(self._processed_files)
 
+    def count_final_files(self, set_id: str = None) -> int:
+        """统计 final 目录中待写磁带的压缩文件数（含正在写入的那个）。
+
+        与 is_final_dir_empty 相同的文件后缀口径；用于卡片显示"final 文件数"。
+        """
+        try:
+            final_dir = self._get_final_dir()
+            if set_id:
+                final_dir = final_dir / set_id
+            if not final_dir.exists():
+                return 0
+            count = 0
+            for root, dirs, files in os.walk(final_dir):
+                for file_name in files:
+                    file_path = Path(root) / file_name
+                    if file_path.is_file() and (
+                        file_path.suffix in ['.7z', '.gz', '.tar', '.zst']
+                        or file_path.name.endswith('.tar.gz')
+                    ):
+                        count += 1
+            return count
+        except Exception as e:
+            logger.error(f"[Final监控] 统计final目录文件数时发生错误: {str(e)}")
+            return 0
+
     def cleanup_final_dir(self) -> int:
         """清理final目录中所有文件（保留当前正在写入磁带的文件）
 
