@@ -659,13 +659,18 @@
         tape.className = 'mb-2';
         const target = task.tape_device || task.tape_id || '自动选择';
         // 正在写带时，把实时磁带写入速度右对齐显示在"目标:"行（无写入时不显示）
-        const _tapeSpeedText = (task.tape_writing_file
-            && typeof task.tape_write_speed_mbps === 'number' && task.tape_write_speed_mbps > 0)
-            ? `写带 ${Math.round(task.tape_write_speed_mbps)} MB/s`
-            : '';
+        // 颜色按速度分档（参考磁带额定 285 MB/s）：≥230 绿、140~230 黄、<140 红
+        let _tapeSpeedHtml = '';
+        if (task.tape_writing_file
+            && typeof task.tape_write_speed_mbps === 'number' && task.tape_write_speed_mbps > 0) {
+            const _mbps = task.tape_write_speed_mbps;
+            const _speedClass = _mbps >= 230 ? 'text-success'
+                : (_mbps >= 140 ? 'text-warning' : 'text-danger');
+            _tapeSpeedHtml = `<small class="${_speedClass}">写带 ${Math.round(_mbps)} MB/s</small>`;
+        }
         tape.innerHTML = `<div class="d-flex justify-content-between align-items-baseline">
                 <small class="text-muted">目标:</small>
-                ${_tapeSpeedText ? `<small class="text-muted">${_tapeSpeedText}</small>` : ''}
+                ${_tapeSpeedHtml}
             </div>
             <span class="${highlightClass}">${target}</span>`;
         // hover 显示磁带实时写入状态（后端暴露的 tape_write_* 字段）
