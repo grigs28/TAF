@@ -232,7 +232,8 @@
 
     // 计算 ETA 文案（剩余字节 / 已用时间推算的平均速度）。
     // 边界：扫描期 total_bytes 为 0 或仍在增长、已完成、速度为 0 → 返回 ''。
-    // 供右上角徽章与进度行共用。
+    // 返回形如 "10 小时 28 分（预计 20:15 完成）"：既给时长、也给钟点，
+    // 便于直接判断"今晚几点能收工"。
     function computeEtaText(task, progressInfo) {
         try {
             const st = (task.status || '').toLowerCase();
@@ -245,7 +246,20 @@
             const speedBps = procB / elapsedSec;
             const remainB = totalB - procB;
             if (speedBps <= 0 || remainB <= 0) return '';
-            return formatEta(remainB / speedBps);
+
+            const remainSec = remainB / speedBps;
+            const durText = formatEta(remainSec);
+
+            // 预计完成钟点（本地时间 HH:MM；跨天加"次日"）
+            let clockText = '';
+            if (isFinite(remainSec) && remainSec > 0 && remainSec < 7 * 24 * 3600) {
+                const done = new Date(Date.now() + remainSec * 1000);
+                const hh = String(done.getHours()).padStart(2, '0');
+                const mm = String(done.getMinutes()).padStart(2, '0');
+                const nextDay = done.getDate() !== new Date().getDate();
+                clockText = `（预计${nextDay ? '次日 ' : ' '}${hh}:${mm} 完成）`;
+            }
+            return durText + clockText;
         } catch (e) {
             return '';
         }
