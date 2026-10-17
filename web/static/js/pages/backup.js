@@ -33,33 +33,43 @@
         return Math.round(bytes / 1024 ** 2) + 'M';
     }
 
-    // 文件处理速率（文件/秒）
-    // 后端 processed_files 是"压缩组完成"时整组跃增（每组约 1~2 分钟），
-    // 5 秒轮询的瞬时差分大多数时候为 0，直接差分永远不会显示。
-    // 因此采用"最近一次变化"口径：
-    //   · 计数一变化 → 用 增量/间隔 算出速率，并保持显示
-    //   · 计数超过 3 分钟无变化（压缩已结束）→ 隐藏，避免旧速率误导
-    //   · 计数回退（阶段切换/重跑）→ 重置基准
+    // 速率计算（文件/秒），两类数据源共用：
+    //   processed_files —— 压缩组完成时整组跃增（每组约 1~2 分钟），5 秒瞬时差分
+    //                      大多数时候为 0；采用"最近一次变化"口径：计数一变化即
+    //                      计算并保持显示，超过 3 分钟无变化（压缩已结束）则隐藏。
+    //   scan_live_stats.scanned_files —— 扫描实时逐文件增长，差分即得扫描速度。
+    // 计数回退（阶段切换/重跑）→ 重置基准。
     const _FILE_RATE_STALE_MS = 180000;
     const _fileRateCache = new Map();   // taskId -> {files, ts, rate}
+    const _scanRateCache = new Map();   // taskId -> {files, ts, rate}
+    function _rateOf(cache, id, value) {
+        const now = Date.now();
+        const rec = cache.get(id);
+        if (!rec || value < rec.files) {
+            cache.set(id, { files: value, ts: now, rate: 0 });
+            return 0;
+        }
+        if (value > rec.files) {
+            const dt = Math.max(0.001, (now - rec.ts) / 1000);
+            rec.rate = (value - rec.files) / dt;
+            rec.files = value;
+            rec.ts = now;
+        }
+        if (!(rec.rate > 0)) return 0;
+        if (now - rec.ts > _FILE_RATE_STALE_MS) return 0;
+        return rec.rate;
+    }
     function computeFileRate(task, processedFiles) {
         const id = String(task.task_id || task.id || '');
         if (!id || !Number.isFinite(processedFiles) || processedFiles < 0) return '';
-        const now = Date.now();
-        const rec = _fileRateCache.get(id);
-        if (!rec || processedFiles < rec.files) {
-            _fileRateCache.set(id, { files: processedFiles, ts: now, rate: 0 });
-            return '';
-        }
-        if (processedFiles > rec.files) {
-            const dt = Math.max(0.001, (now - rec.ts) / 1000);
-            rec.rate = (processedFiles - rec.files) / dt;
-            rec.files = processedFiles;
-            rec.ts = now;
-        }
-        if (!(rec.rate > 0)) return '';
-        if (now - rec.ts > _FILE_RATE_STALE_MS) return '';
-        return (rec.rate >= 1000 ? (rec.rate / 1000).toFixed(1) + 'K' : Math.round(rec.rate));
+        const rate = _rateOf(_fileRateCache, id, processedFiles);
+        if (rate <= 0) return '';
+        return (rate >= 1000 ? (rate / 1000).toFixed(1) + 'K' : String(Math.round(rate)));
+    }
+    function computeScanRate(task, scannedFiles) {
+        const id = String(task.task_id || task.id || '');
+        if (!id || !Number.isFinite(scannedFiles) || scannedFiles <= 0) return 0;
+        return Math.round(_rateOf(_scanRateCache, id, scannedFiles));
     }
 
     function formatDateTime(value) {
@@ -1166,8 +1176,17 @@
                     : '';
 
                 const etaText = computeEtaText(task, progressInfo);
-                // 文件处理速率（两次轮询差分，文件/秒；首次采样/计数回退时不显示）
+                // 压缩处理速率（组完成跃增口径）
                 const _fileRate = computeFileRate(task, Number(progressInfo.processedFiles) || 0);
+                // 扫描实时统计（扫描与压缩并行）：数字与"扫描文件"阶段 hover 同源
+                const _scanStats = task.scan_live_stats || null;
+                const _scanFiles = _scanStats ? (Number(_scanStats.scanned_files) || 0) : 0;
+                const _scanRate = computeScanRate(task, _scanFiles);
+                // 扫描进行中：同时显示扫描/压缩两个计数与速率；扫描结束后退回原压缩进度格式
+                const _fileProgressHtml = _scanFiles > 0
+                    ? `扫描 ${_scanFiles.toLocaleString()}${_scanRate > 0 ? `（${_scanRate}/s）` : ''}`
+                        + ` · 压缩 ${Number(progressInfo.processedFiles || 0).toLocaleString()}${_fileRate ? `（${_fileRate}/s）` : ''}`
+                    : `${progressInfo.processedFiles}/${progressInfo.totalFiles || progressInfo.processedFiles}${_fileRate ? ` · ${_fileRate}/s` : ''}`;
 
                 progressSection.innerHTML = normalizeCardHtml(`
                     ${batchProgressHtml}
@@ -1181,7 +1200,7 @@
                     </div>
                     <div class="d-flex justify-content-between">
                         <small class="text-muted">文件进度:</small>
-                        <small class="text-muted">${progressInfo.processedFiles}/${progressInfo.totalFiles || progressInfo.processedFiles}${_fileRate ? ` · ${_fileRate}/s` : ''}</small>
+                        <small class="text-muted">${_fileProgressHtml}</small>
                     </div>
                     <div class="d-flex justify-content-between">
                         <small class="text-muted">已处理数据:</small>
