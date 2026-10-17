@@ -673,15 +673,20 @@
         const _showMbps = _avgMbps > 0 ? _avgMbps : _curMbps;
         let _tapeSpeedHtml = '';
         if (_isRunningTask && task.tape_writing_file && _showMbps > 0) {
-            const _mbps = _showMbps;
-            const _speedClass = _mbps >= 230 ? 'badge bg-success'
-                : (_mbps >= 140 ? 'badge bg-warning text-dark' : 'badge bg-danger');
-            // 徽章同时显示「瞬时/平均」；缺少平均值时只显示瞬时值
-            const _speedText = (_curMbps > 0 && _avgMbps > 0)
-                ? `${Math.round(_curMbps)}/${Math.round(_avgMbps)}`
-                : `${Math.round(_showMbps)}`;
+            // 瞬时/平均各自按自己的速度分档着色（两个独立徽章）
+            const _badgeStyle = 'font-weight: 600; padding: 0.15em 0.5em;';
+            const _speedClassOf = (v) => v >= 230 ? 'badge bg-success'
+                : (v >= 140 ? 'badge bg-warning text-dark' : 'badge bg-danger');
+            let _speedHtml;
+            if (_curMbps > 0 && _avgMbps > 0) {
+                _speedHtml = `<span class="${_speedClassOf(_curMbps)}" style="${_badgeStyle}">${Math.round(_curMbps)}</span>`
+                    + `<span class="text-muted mx-1" style="font-size:0.85em;">/</span>`
+                    + `<span class="${_speedClassOf(_avgMbps)}" style="${_badgeStyle}">${Math.round(_avgMbps)}</span>`;
+            } else {
+                _speedHtml = `<span class="${_speedClassOf(_showMbps)}" style="${_badgeStyle}">${Math.round(_showMbps)}</span>`;
+            }
             // 字高与守卫行一致：包在 <small> 里继承字号，缩小内边距
-            _tapeSpeedHtml = `<small><span class="${_speedClass}" style="font-weight: 600; padding: 0.15em 0.5em;">写带 ${_speedText} MB/s</span></small>`;
+            _tapeSpeedHtml = `<small>写带 ${_speedHtml} <span class="text-muted">MB/s</span></small>`;
         }
         tape.innerHTML = `<div class="d-flex justify-content-between align-items-center">
                 <small class="text-muted">目标:</small>
