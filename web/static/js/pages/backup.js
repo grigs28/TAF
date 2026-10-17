@@ -667,7 +667,8 @@
             const _mbps = task.tape_write_speed_mbps;
             const _speedClass = _mbps >= 230 ? 'badge bg-success'
                 : (_mbps >= 140 ? 'badge bg-warning text-dark' : 'badge bg-danger');
-            _tapeSpeedHtml = `<span class="${_speedClass}" style="font-size: 0.85rem; font-weight: 600; padding: 0.35em 0.65em;">写带 ${Math.round(_mbps)} MB/s</span>`;
+            // 字高与守卫行一致：包在 <small> 里继承字号，缩小内边距
+            _tapeSpeedHtml = `<small><span class="${_speedClass}" style="font-weight: 600; padding: 0.15em 0.5em;">写带 ${Math.round(_mbps)} MB/s</span></small>`;
         }
         tape.innerHTML = `<div class="d-flex justify-content-between align-items-center">
                 <small class="text-muted">目标:</small>
