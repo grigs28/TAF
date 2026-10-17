@@ -106,6 +106,13 @@ class Compressor:
         # 守卫线据此按**真实产出**计算，而不是按"组数 × MAX_FILE_SIZE"的理论最大值——
         # 后者在小文件区会严重高估（实测组只有 0.2~4GB 却按 24GB 计），白闲置数百 GB。
         self._active_group_bytes: List[int] = []
+        # **全局活跃度计时**：最后一次有组**真正通过守卫**（空间检查放行）的时刻。
+        # 所有等待中的组共享这一个时间戳——用于区分两种"等很久"：
+        #   · 系统健康、只是轮不到我  → 只要有别的组被放行，本组继续等（不误杀）
+        #   · 系统卡死（全场无人能过守卫）→ 超过阈值即报错，快速暴露
+        # 注意：重置信号必须是"通过守卫"而不是"组进入流程"——刚进流程的组也可能
+        # 卡在同一个守卫里，不能作为"系统还活着"的证据。
+        self._last_release_time: Optional[float] = None
         # 记录每个备份集的上次压缩文件名和序号，确保文件名不重复
         # 格式: {backup_set_id: {'last_filename': str, 'sequence': int}}
         self._last_archive_info: Dict[str, Dict[str, Any]] = {}
@@ -248,10 +255,7 @@ class Compressor:
         Returns:
             压缩文件信息字典（包含预设路径和压缩任务future），立即返回，不等待压缩完成
         """
-        # 计入"在途产出"：从进入本函数（可能先在此等待空间）到压缩结束为止。
-        # 记账值是本组**源文件总字节数**——压缩后只会更小，所以它是产出量的保守上界，
-        # 守卫据此算出的空间需求不会低于真实落地量。
-        # 用标志位保证恰好释放一次（正常路径在压缩完成后释放，异常路径兜底释放）。
+        # 本组的产出量上界（源文件总字节数；压缩后只会更小，属保守估计）
         try:
             _group_bytes = sum(
                 int(f.get('size', 0) or f.get('file_size', 0) or 0) for f in file_group
@@ -259,7 +263,11 @@ class Compressor:
         except Exception:
             _group_bytes = 0
         _active_released = False
-        self._active_group_bytes.append(_group_bytes)
+        _active_counted = False   # 是否已计入"在途产出"（通过守卫后才计入）
+        # 注意：**不在这里 append**。此刻本组可能立刻阻塞在 _ensure_disk_space 里
+        # 长时间等待而不产出任何字节；若提前计入，会把判定线抬高（实测 16 组里
+        # 有 13 组在排队，线被撑到 351G，SSD 168G 永远不够 → 自我强化地卡住）。
+        # 正确做法：通过守卫（真正开始压缩）后才计入。
         try:
             # 从备份任务获取压缩设置
             compression_enabled = getattr(backup_task, 'compression_enabled', True)
@@ -374,7 +382,12 @@ class Compressor:
             temp_dir.mkdir(parents=True, exist_ok=True)
             backup_dir = temp_dir  # 统一使用temp目录作为压缩目标
 
-            await self._ensure_disk_space(temp_dir)
+            # 空间检查时把本组也计入需求（等价于"(在途+1) × 组大小"的语义），
+            # 但本组此刻还不在 _active_group_bytes 里，所以通过 pending 参数传入。
+            await self._ensure_disk_space(temp_dir, pending_group_bytes=_group_bytes)
+            # ★ 通过守卫 = 真正开始压缩 = 从现在起会落地产出，此刻才计入
+            self._active_group_bytes.append(_group_bytes)
+            _active_counted = True
             
             # 如果不直接压缩到磁带，需要final目录用于移动队列
             if compress_directly_to_tape:
@@ -707,7 +720,7 @@ class Compressor:
 
             # 压缩已结束 → 本组不再产出数据，立即释放"在途产出"记账。
             # 后续的标注/移动到 final 是同盘移动，不新增占用，不该继续占用守卫额度。
-            if not _active_released:
+            if _active_counted and not _active_released:
                 self._release_active_group(_group_bytes)
                 _active_released = True
 
@@ -854,7 +867,7 @@ class Compressor:
 
         except Exception as e:
             # 兜底释放"在途产出"记账（若上面正常路径尚未释放）
-            if not _active_released:
+            if _active_counted and not _active_released:
                 self._release_active_group(_group_bytes)
                 _active_released = True
             logger.error(f"压缩文件组失败: {str(e)}")
@@ -862,11 +875,13 @@ class Compressor:
             traceback.print_exc()
             return None
 
-    async def _ensure_disk_space(self, target_dir: Path):
-        """确保磁盘剩余空间满足 **在途组数 × MAX_FILE_SIZE × 安全系数**
+    async def _ensure_disk_space(self, target_dir: Path, pending_group_bytes: int = 0):
+        """确保磁盘剩余空间满足"**在途真实产出** + **本组待产出**"
 
-        组数取**实际在途压缩组数**（含正在检查的这一组），由 CompressionWorker
-        通过 active_groups_provider 注入；拿不到时回退配置上限（保守）。
+        `_active_group_bytes` 只记录**已通过守卫、真正在压缩**的组（它们在落地产出）。
+        本组此刻还在检查、尚未计入，因此通过 `pending_group_bytes` 显式传入，
+        等价于"(在途 + 1) × 组大小"的语义 —— 保证本组落地有空间，同时不让
+        "排队等待中的组"虚抬判定线。
         """
         try:
             max_file_size = int(getattr(self.settings, 'MAX_FILE_SIZE', 0))
@@ -923,6 +938,10 @@ class Compressor:
         except Exception:
             active_bytes = 0
         active_groups = len(self._active_group_bytes)
+        # 把本组（即将通过守卫、随后落地产出）计入需求
+        if pending_group_bytes and pending_group_bytes > 0:
+            active_bytes += int(pending_group_bytes)
+            active_groups += 1
 
         if active_bytes > 0:
             # 有在途组：按真实产出算（含正在检查的这一组，它已计入记账）
@@ -943,9 +962,9 @@ class Compressor:
                     _ag = None
             required_free = _compute_required_free_bytes(_live_settings, _ag) or (max_file_size * 3)
 
-        retry_count = 0
-
-        while retry_count < max_retries:
+        # 循环由"全局无放行超时"控制退出（不再用本组的重试次数——
+        # 否则本组重试次数用尽会静默跳出循环、等于无条件放行，与守卫语义冲突）
+        while True:
             try:
                 usage = shutil.disk_usage(str(target_dir))
                 free_bytes = usage.free
@@ -954,28 +973,39 @@ class Compressor:
                 return
 
             if free_bytes >= required_free:
+                # ★ 放行：更新**全局**活跃时间戳（所有等待组共享）。
+                # 它证明"磁盘确实在放行"，是系统健康的最强信号。
+                self._last_release_time = time.time()
                 logger.debug(
                     f"磁盘剩余空间充足：{format_bytes(free_bytes)} >= {format_bytes(required_free)}"
                 )
                 return
 
-            retry_count += 1
-            total_wait_time = retry_count * check_interval
             max_total_wait = max_retries * check_interval
+
+            # ===== 全局卡死检测 =====
+            # 判据：距离"上一次有组通过守卫"已经过去多久。
+            #  · 只要不断有组被放行（即使本组一直排队），计时就会被刷新 → 不误杀
+            #  · 全场连续无人能过守卫超过阈值 → 视为卡死，本组报错退出
+            now_ts = time.time()
+            if self._last_release_time is None:
+                # 首次进入守卫（还没有任何组放行过）：以本次等待为起点，避免误判
+                self._last_release_time = now_ts
+            idle_seconds = max(0.0, now_ts - self._last_release_time)
 
             logger.warning(
                 f"磁盘剩余空间不足：{format_bytes(free_bytes)} < {format_bytes(required_free)}"
                 f"（在途 {active_groups if active_groups else '并发上限'} 组"
                 + (f"，实际产出上界 {format_bytes(active_bytes)}" if active_bytes > 0 else "")
-                + f"），暂停压缩，{check_interval} 秒后重试 ({retry_count}/{max_retries}, "
-                f"已等待 {total_wait_time}/{max_total_wait} 秒)"
+                + f"），暂停压缩，{check_interval} 秒后重试"
+                f"（全场已 {idle_seconds:.0f}/{max_total_wait} 秒无任何组放行）"
             )
 
-            if retry_count >= max_retries:
-                # 达到最大重试次数，抛出异常
+            if idle_seconds >= max_total_wait:
+                # 全场长时间没有任何组能通过守卫 → 判定为卡死
                 error_msg = (
-                    f"磁盘空间持续不足超过 {max_total_wait} 秒。"
-                    f"需要空间: {format_bytes(required_free)}, "
+                    f"全场已 {idle_seconds:.0f} 秒没有任何压缩组能通过空间守卫（阈值 {max_total_wait} 秒），"
+                    f"疑似磁盘/磁带卡死。需要空间: {format_bytes(required_free)}, "
                     f"当前可用: {format_bytes(free_bytes)}"
                 )
                 logger.error(error_msg)
