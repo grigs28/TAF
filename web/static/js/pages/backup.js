@@ -1062,28 +1062,25 @@
                 const _groupList = Array.isArray(_compProg.task_progress_list)
                     ? _compProg.task_progress_list : [];
 
-                // 每个槽位一格（共 totalSlots 格，横排一行）；**格内按 4 档填充**该组进度：
-                //   0-25% 填 1/4、25-50% 填 2/4、50-75% 填 3/4、75-100% 填满
-                // 用 linear-gradient 做硬边分段（从底往上），无需额外 DOM 层级。
-                // 空格位（无对应组）保持全暗。
+                // 每个槽位一格（共 totalSlots 格，横排一行）；**格内按组内真实进度连续填充**：
+                // 直接使用 percent（不再按 25% 四档取整），渐变高度随进度平滑变化。
+                // 用 linear-gradient 做硬边填充（从底往上），无需额外 DOM 层级。
+                // 空格位（无对应组）保持全暗；悬停显示精确百分比与组内文件数。
                 let _cells = '';
                 for (let i = 0; i < totalSlots; i++) {
                     const _g = _groupList[i];
-                    let _seg = 0;                       // 0~4 档
-                    if (_g) {
-                        const _p = Number(_g.percent) || 0;
-                        if (_p > 75) _seg = 4;
-                        else if (_p > 50) _seg = 3;
-                        else if (_p > 25) _seg = 2;
-                        else if (_p > 0) _seg = 1;
-                    }
-                    const _fill = _seg * 25;            // 填充百分比（0/25/50/75/100）
-                    const _bg = _fill <= 0
+                    const _pct = _g ? Math.max(0, Math.min(100, Number(_g.percent) || 0)) : 0;
+                    const _bg = _pct <= 0
                         ? 'rgba(255,255,255,.18)'
-                        : (_fill >= 100
+                        : (_pct >= 100
                             ? 'var(--primary)'
-                            : `linear-gradient(to top, var(--primary) 0 ${_fill}%, rgba(255,255,255,.18) ${_fill}% 100%)`);
-                    _cells += '<span title="' + (_g ? ('组' + (i + 1) + ': ' + ((Number(_g.percent) || 0)).toFixed(0) + '%') : '空闲')
+                            : `linear-gradient(to top, var(--primary) 0 ${_pct}%, rgba(255,255,255,.18) ${_pct}% 100%)`);
+                    const _title = _g
+                        ? ('组' + (i + 1) + ': ' + _pct.toFixed(1) + '%'
+                            + (typeof _g.current === 'number' && typeof _g.total === 'number'
+                                ? `（${_g.current}/${_g.total} 文件）` : ''))
+                        : '空闲';
+                    _cells += '<span title="' + _title
                         + '" style="display:inline-block;width:7px;height:16px;margin-right:2px;'
                         + 'border-radius:1px;vertical-align:-3px;background:' + _bg + '"></span>';
                 }
