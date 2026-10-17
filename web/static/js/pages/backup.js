@@ -702,7 +702,7 @@
         // 显示口径优先用"本任务累计平均速度"（tape_write_avg_speed_mbps，更稳定），
         // 无累计值时回退当前文件瞬时速度
         // 徽章样式与右上角速度徽章一致（badge bg-*），颜色按速度分档
-        // （参考磁带额定 285 MB/s）：≥230 绿、140~230 黄、<140 红
+        // （参考磁带额定 285 MB/s）：≥200 绿、140~200 黄、<140 红
         // 注意：磁带只有一台，写带状态是全局值；只有运行中的任务卡片才显示
         const _isRunningTask = (task.status || '').toLowerCase() === 'running';
         const _avgMbps = (typeof task.tape_write_avg_speed_mbps === 'number')
@@ -715,7 +715,7 @@
             // 四个徽章：文件数/已写入数/瞬时/平均，不带方括号；只放大数字，"写带"/"MB/s" 保持小字号
             // 瞬时/平均各自按自己的速度分档着色；final 文件数用中性灰，已写入数用青色
             const _badgeStyle = 'font-weight: 400; padding: 0.15em 0.5em; font-size:1rem;';
-            const _speedClassOf = (v) => v >= 230 ? 'badge bg-success'
+            const _speedClassOf = (v) => v >= 200 ? 'badge bg-success'
                 : (v >= 140 ? 'badge bg-warning text-dark' : 'badge bg-danger');
             let _speedHtml = '';
             if (typeof task.final_pending_files === 'number') {
