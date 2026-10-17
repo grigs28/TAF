@@ -33,22 +33,33 @@
         return Math.round(bytes / 1024 ** 2) + 'M';
     }
 
-    // 文件处理速率（前端两次轮询差分，单位 文件/秒）
-    // 缓存每个任务上次的已处理文件数与采样时刻；计数回退（阶段切换/重跑）时
-    // 只重置基准、不显示负值；首次采样（无基准）不显示。
-    const _fileRateCache = new Map();   // taskId -> {files, ts}
+    // 文件处理速率（文件/秒）
+    // 后端 processed_files 是"压缩组完成"时整组跃增（每组约 1~2 分钟），
+    // 5 秒轮询的瞬时差分大多数时候为 0，直接差分永远不会显示。
+    // 因此采用"最近一次变化"口径：
+    //   · 计数一变化 → 用 增量/间隔 算出速率，并保持显示
+    //   · 计数超过 3 分钟无变化（压缩已结束）→ 隐藏，避免旧速率误导
+    //   · 计数回退（阶段切换/重跑）→ 重置基准
+    const _FILE_RATE_STALE_MS = 180000;
+    const _fileRateCache = new Map();   // taskId -> {files, ts, rate}
     function computeFileRate(task, processedFiles) {
         const id = String(task.task_id || task.id || '');
         if (!id || !Number.isFinite(processedFiles) || processedFiles < 0) return '';
         const now = Date.now();
-        const prev = _fileRateCache.get(id);
-        _fileRateCache.set(id, { files: processedFiles, ts: now });
-        if (!prev || now <= prev.ts || processedFiles < prev.files) return '';
-        const dt = (now - prev.ts) / 1000;
-        if (dt < 1) return '';
-        const rate = (processedFiles - prev.files) / dt;
-        if (!Number.isFinite(rate) || rate <= 0) return '';
-        return (rate >= 1000 ? (rate / 1000).toFixed(1) + 'K' : Math.round(rate));
+        const rec = _fileRateCache.get(id);
+        if (!rec || processedFiles < rec.files) {
+            _fileRateCache.set(id, { files: processedFiles, ts: now, rate: 0 });
+            return '';
+        }
+        if (processedFiles > rec.files) {
+            const dt = Math.max(0.001, (now - rec.ts) / 1000);
+            rec.rate = (processedFiles - rec.files) / dt;
+            rec.files = processedFiles;
+            rec.ts = now;
+        }
+        if (!(rec.rate > 0)) return '';
+        if (now - rec.ts > _FILE_RATE_STALE_MS) return '';
+        return (rec.rate >= 1000 ? (rec.rate / 1000).toFixed(1) + 'K' : Math.round(rec.rate));
     }
 
     function formatDateTime(value) {
