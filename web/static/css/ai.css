@@ -567,7 +567,9 @@ body {
 }
 
 .service-card:hover {
-    transform: translateY(-10px);
+    /* 去掉 translateY(-10px) 上移：位移会让卡片底缘的 hover 命中/丢失无限振荡
+       （抖动），并使顶部蓝条被滚动容器上边界裁剪而看似消失。
+       仅保留阴影/边框色这类不影响布局的悬停反馈。 */
     box-shadow: 0 15px 30px rgba(0, 170, 255, 0.3);
     border-color: var(--primary);
 }
