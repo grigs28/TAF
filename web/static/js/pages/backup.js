@@ -1212,7 +1212,7 @@
                     ${diskLine}
                     <div class="d-flex justify-content-between align-items-center">
                         <small class="text-muted">进度:</small>
-                        <small class="text-muted">${progressInfo.percent}%${etaText ? (' · 剩余约 ' + etaText) : ''}</small>
+                        <small class="text-muted"><span class="text-success">${progressInfo.percent}%</span>${etaText ? (' · 剩余约 ' + etaText) : ''}</small>
                     </div>
                     <div class="progress" style="height:6px;">
                         <div class="progress-bar bg-primary" role="progressbar" style="width:${progressInfo.percent}%"></div>
