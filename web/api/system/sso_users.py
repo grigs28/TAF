@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from web.yz_auth.user_registry import (
     VALID_ROLES,
+    delete_user as delete_sso_user,
     is_permanent_admin,
     list_users,
     set_role,
@@ -66,3 +67,21 @@ async def update_sso_user_role(yz_user_id: int, payload: RoleUpdateRequest):
     except Exception as e:
         logger.error(f"修改 SSO 账号角色失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"修改角色失败: {e}")
+
+
+@router.delete("/sso-users/{yz_user_id}")
+async def delete_sso_user_record(yz_user_id: int):
+    """删除某账号的记录（grigs 永久管理员不可删除）。
+
+    删除后该账号下次登录会被视作首次出现，重新继承 yz 侧角色。
+    """
+    try:
+        ok = await delete_sso_user(yz_user_id)
+        return {"success": bool(ok), "yz_user_id": yz_user_id}
+    except PermissionError as pe:
+        raise HTTPException(status_code=403, detail=str(pe))
+    except ValueError as ve:
+        raise HTTPException(status_code=404, detail=str(ve))
+    except Exception as e:
+        logger.error(f"删除 SSO 账号失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"删除失败: {e}")

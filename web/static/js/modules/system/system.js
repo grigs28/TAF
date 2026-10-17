@@ -1132,7 +1132,7 @@ async function loadSsoUsers() {
         const users = await resp.json();
 
         if (!Array.isArray(users) || users.length === 0) {
-            body.innerHTML = '<tr><td colspan="7" class="text-center text-muted">暂无登录记录</td></tr>';
+            body.innerHTML = '<tr><td colspan="8" class="text-center text-muted">暂无登录记录</td></tr>';
             if (summary) summary.textContent = '暂无记录';
             return;
         }
@@ -1164,8 +1164,37 @@ async function loadSsoUsers() {
                 <td>${ssoFmtTime(u.last_login_at)}</td>
                 <td>${resultText}</td>
                 <td class="text-end">${u.login_count || 0}</td>
+                <td class="text-end">
+                    ${permanent ? '<span class="text-muted">—</span>'
+                        : `<button class="btn btn-sm btn-outline-danger sso-del-btn"
+                                  data-user-id="${u.yz_user_id}"
+                                  data-username="${(u.username || u.yz_user_id)}"
+                                  title="删除该账号记录">
+                               <i class="bi bi-trash"></i>
+                           </button>`}
+                </td>
             </tr>`;
         }).join('');
+
+        // 绑定删除按钮（grigs 不会渲染此按钮）
+        body.querySelectorAll('.sso-del-btn').forEach(btn => {
+            btn.addEventListener('click', async function () {
+                const uid = this.dataset.userId;
+                const uname = this.dataset.username;
+                if (!window.confirm(`确定删除账号「${uname}」的记录？\n\n删除后该账号下次登录会被视作首次出现，重新继承网管中心角色。`)) return;
+                this.disabled = true;
+                try {
+                    const r = await fetch('/api/system/sso-users/' + encodeURIComponent(uid), { method: 'DELETE' });
+                    const data = await r.json().catch(() => ({}));
+                    if (!r.ok) throw new Error(data.detail || ('HTTP ' + r.status));
+                    if (typeof showToast === 'function') showToast(`已删除账号「${uname}」`, 'success');
+                    loadSsoUsers();
+                } catch (e) {
+                    if (typeof showToast === 'function') showToast('删除失败: ' + e.message, 'danger');
+                    this.disabled = false;
+                }
+            });
+        });
 
         // 绑定下拉变更
         body.querySelectorAll('.sso-role-select').forEach(sel => {
@@ -1194,7 +1223,7 @@ async function loadSsoUsers() {
             });
         });
     } catch (e) {
-        body.innerHTML = `<tr><td colspan="7" class="text-center text-danger">加载失败: ${e.message}</td></tr>`;
+        body.innerHTML = `<tr><td colspan="8" class="text-center text-danger">加载失败: ${e.message}</td></tr>`;
         if (summary) summary.textContent = '加载失败';
     }
 }
