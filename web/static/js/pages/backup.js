@@ -600,22 +600,18 @@
             // 使用已处理数据/已用时间来计算速度
             const speedGBPerSec = calculateProcessingSpeedGBPerSec(task);
             if (speedGBPerSec !== null && parseFloat(speedGBPerSec) > 0) {
-                // 计算每小时处理GB数（G/秒 * 3600秒）
-                const speedGBPerHour = parseFloat(speedGBPerSec) * 3600;
-                
-                // 根据80G基准判断颜色
-                // >= 80G: 绿色（bg-success）- 良好
-                // < 80G: 黄色（bg-warning）- 较慢
-                const badgeClass = speedGBPerHour >= 80 ? 'badge bg-success' : 'badge bg-warning text-dark';
-                
-                // 在右上角徽章中显示每小时处理GB数（只显示数字，不带单位）
+                // 右上角徽章显示**每秒**速度（MB/s），只显示数字、不带单位
+                const _mbps = parseFloat(speedGBPerSec) * 1024;
+                // 颜色阈值沿用原"80 GB/小时"的语义（80*1024/3600 ≈ 22.8 MB/s）
+                // >= 阈值: 绿色（bg-success）- 良好；< 阈值: 黄色（bg-warning）- 较慢
+                const badgeClass = _mbps >= (80 * 1024 / 3600)
+                    ? 'badge bg-success' : 'badge bg-warning text-dark';
+
                 const speedBadge = document.createElement('span');
                 speedBadge.className = badgeClass;
                 speedBadge.style.cssText = 'font-size: 0.85rem; font-weight: 600; padding: 0.35em 0.65em;';
-                // 格式化数字：如果 >= 1，显示2位小数；如果 < 1，显示更多小数位
-                const displayValue = speedGBPerHour >= 1 
-                    ? speedGBPerHour.toFixed(2) 
-                    : speedGBPerHour.toFixed(4);
+                // 数字：≥100 取整，否则保留 1 位小数
+                const displayValue = _mbps >= 100 ? _mbps.toFixed(0) : _mbps.toFixed(1);
                 speedBadge.textContent = displayValue;
                 // hover 详情：速度（两种单位，不含 GB/s）+ 已处理/总量 + 已用时间
                 {
