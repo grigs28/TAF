@@ -1016,6 +1016,20 @@ class BackupEngine:
                 logger.info(f"处理字节数: {format_bytes(processed_bytes)}")
                 logger.info(f"执行耗时: {duration_seconds:.2f} 秒")
                 logger.info(f"完成时间: {format_datetime(task_end_time)}")
+                # 写带忙闲统计（记录到日志，便于事后核对写带效率）
+                try:
+                    _th_stats = self.tape_handler
+                    _busy = float(getattr(_th_stats, '_tape_cum_seconds', 0) or 0)
+                    _first = getattr(_th_stats, '_tape_first_write_start', None)
+                    if _first and _busy > 0:
+                        _wall = max(0.001, time.time() - float(_first))
+                        _idle = max(0.0, _wall - _busy)
+                        logger.info(
+                            f"写带统计: 实际写入 {_busy:.0f} 秒，空闲等待 {_idle:.0f} 秒，"
+                            f"写入效率 {_busy / _wall * 100:.1f}%"
+                        )
+                except Exception:
+                    pass
                 
                 # 注意：不再在这里标记任务状态为 COMPLETED
                 # 只有文件压缩任务可以标记任务集状态为完成并发钉钉

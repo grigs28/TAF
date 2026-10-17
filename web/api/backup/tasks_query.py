@@ -182,6 +182,8 @@ async def get_backup_tasks(
                 tape_write_speed_mbps = 0.0
                 tape_write_avg_speed_mbps = 0.0
                 tape_write_cum_bytes = 0
+                tape_write_busy_seconds = 0.0   # 实际复制耗时（成功文件累计）
+                tape_write_idle_seconds = 0.0   # 从第一次写带起算的空档时间
                 try:
                     _sys = getattr(getattr(http_request, 'app', None), 'state', None)
                     _sys = getattr(_sys, 'system', None) if _sys else None
@@ -203,7 +205,13 @@ async def get_backup_tasks(
                     if _th is not None:
                         _cum_bytes = int(getattr(_th, '_tape_cum_bytes', 0) or 0)
                         tape_write_cum_bytes = _cum_bytes
+                        _cum_seconds = float(getattr(_th, '_tape_cum_seconds', 0) or 0)
+                        tape_write_busy_seconds = _cum_seconds
                         _first = getattr(_th, '_tape_first_write_start', None)
+                        if _first:
+                            _wall = max(0.0, time.time() - float(_first))
+                            # 空闲 = 墙钟总时间 − 实际复制时间（含扫描间隔、等压缩产出、重试等待）
+                            tape_write_idle_seconds = max(0.0, _wall - _cum_seconds)
                         if _first and _cum_bytes > 0:
                             _wall = max(0.001, time.time() - float(_first))
                             tape_write_avg_speed_mbps = _cum_bytes / _wall / (1024 * 1024)
@@ -517,6 +525,9 @@ async def get_backup_tasks(
                         "tape_write_avg_speed_mbps": round(tape_write_avg_speed_mbps, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         # 本任务累计已完成写带的字节数（hover 显示"本任务累计已完成"）
                         "tape_write_cum_bytes": tape_write_cum_bytes if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
+                        # 写带忙闲统计：busy=实际复制累计秒数，idle=从首次写带起算的空档秒数
+                        "tape_write_busy_seconds": round(tape_write_busy_seconds, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
+                        "tape_write_idle_seconds": round(tape_write_idle_seconds, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         # final 目录待写磁带的压缩文件数（卡片写带行显示）
                         "final_pending_files": final_pending_files,
                         # 阶段徽章 hover 用的实时明细

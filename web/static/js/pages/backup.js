@@ -755,11 +755,16 @@
                 ? Math.min(100, (_writeBytes / _writeTotal) * 100).toFixed(1) : '0.0';
             const _cumBytes = (typeof task.tape_write_cum_bytes === 'number') ? task.tape_write_cum_bytes : 0;
             const _pending = (typeof task.final_pending_files === 'number') ? task.final_pending_files : null;
+            const _busy = Number(task.tape_write_busy_seconds) || 0;
+            const _idle = Number(task.tape_write_idle_seconds) || 0;
+            const _eff = (_busy + _idle) > 0 ? (_busy / (_busy + _idle) * 100).toFixed(1) : null;
             tape.title = `正在写入磁带: ${task.tape_writing_file}\n`
                 + `当前文件进度: ${formatBytes(_writeBytes)} / ${formatBytes(_writeTotal)}（${_writePct}%）\n`
                 + `瞬时速度: ${(Number(task.tape_write_speed_mbps) || 0).toFixed(1)} MB/s\n`
                 + `平均速度: ${_avgMbps.toFixed(1)} MB/s（从第一次写带起算，含文件间空档）\n`
                 + `本任务累计已完成: ${formatBytes(_cumBytes)}\n`
+                + `实际写入: ${formatEta(_busy) || '0 秒'}　·　空闲等待: ${formatEta(_idle) || '0 秒'}`
+                + (_eff !== null ? `（写入效率 ${_eff}%）` : '') + `\n`
                 + `待写文件(final): ${_pending === null ? '-' : _pending} 个`;
         } else if (_isRunningTask) {
             tape.title = '当前没有正在进行的磁带写入（压缩中或等待中）';
