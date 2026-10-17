@@ -674,7 +674,8 @@
         let _tapeSpeedHtml = '';
         if (_isRunningTask && task.tape_writing_file && _showMbps > 0) {
             // 瞬时/平均各自按自己的速度分档着色（两个独立徽章）
-            const _badgeStyle = 'font-weight: 600; padding: 0.15em 0.5em;';
+            // 只放大方括号数字；"写带"/"MB/s" 恢复原小字号
+            const _badgeStyle = 'font-weight: 600; padding: 0.15em 0.5em; font-size:1rem;';
             const _speedClassOf = (v) => v >= 230 ? 'badge bg-success'
                 : (v >= 140 ? 'badge bg-warning text-dark' : 'badge bg-danger');
             let _speedHtml;
@@ -684,8 +685,8 @@
             } else {
                 _speedHtml = `<span class="${_speedClassOf(_showMbps)}" style="${_badgeStyle}">[${Math.round(_showMbps)}]</span>`;
             }
-            // 字高适当放大（原 <small> 继承字号偏小，看不清）
-            _tapeSpeedHtml = `<small style="font-size:1rem;">写带 ${_speedHtml} <span class="text-muted">MB/s</span></small>`;
+            // "写带"与"MB/s"保持 <small> 的原字号
+            _tapeSpeedHtml = `<small>写带 ${_speedHtml} <span class="text-muted">MB/s</span></small>`;
         }
         tape.innerHTML = `<div class="d-flex justify-content-between align-items-center">
                 <small class="text-muted">目标:</small>
