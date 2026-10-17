@@ -684,8 +684,8 @@
             } else {
                 _speedHtml = `<span class="${_speedClassOf(_showMbps)}" style="${_badgeStyle}">[${Math.round(_showMbps)}]</span>`;
             }
-            // 字高与守卫行一致：包在 <small> 里继承字号，缩小内边距
-            _tapeSpeedHtml = `<small>写带 ${_speedHtml} <span class="text-muted">MB/s</span></small>`;
+            // 字高适当放大（原 <small> 继承字号偏小，看不清）
+            _tapeSpeedHtml = `<small style="font-size:0.9rem;">写带 ${_speedHtml} <span class="text-muted">MB/s</span></small>`;
         }
         tape.innerHTML = `<div class="d-flex justify-content-between align-items-center">
                 <small class="text-muted">目标:</small>
