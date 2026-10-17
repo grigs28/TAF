@@ -113,6 +113,13 @@ class Compressor:
         # 注意：重置信号必须是"通过守卫"而不是"组进入流程"——刚进流程的组也可能
         # 卡在同一个守卫里，不能作为"系统还活着"的证据。
         self._last_release_time: Optional[float] = None
+        # 守卫日志节流：等待中的组每 20 秒各重试一次，若每条都打 warning，
+        # 6 组等待时每分钟就是 18 条重复日志。改为：
+        #   · 首次进入拦停 → 立即 WARNING
+        #   · 其后每 5 分钟 → 一条汇总
+        #   · 放行时 → 一条 INFO（含本次拦停持续时长）
+        self._guard_active: bool = False
+        self._last_guard_log_time: float = 0.0
         # 记录每个备份集的上次压缩文件名和序号，确保文件名不重复
         # 格式: {backup_set_id: {'last_filename': str, 'sequence': int}}
         self._last_archive_info: Dict[str, Dict[str, Any]] = {}
@@ -976,6 +983,14 @@ class Compressor:
                 # ★ 放行：更新**全局**活跃时间戳（所有等待组共享）。
                 # 它证明"磁盘确实在放行"，是系统健康的最强信号。
                 self._last_release_time = time.time()
+                if self._guard_active:
+                    # 结束一轮拦停，打一条 INFO 便于事后对齐
+                    logger.info(
+                        f"[空间守卫] 放行：{format_bytes(free_bytes)} >= {format_bytes(required_free)}，"
+                        f"本轮拦停结束（在途 {active_groups} 组）"
+                    )
+                    self._guard_active = False
+                    self._last_guard_log_time = 0.0
                 logger.debug(
                     f"磁盘剩余空间充足：{format_bytes(free_bytes)} >= {format_bytes(required_free)}"
                 )
@@ -993,13 +1008,24 @@ class Compressor:
                 self._last_release_time = now_ts
             idle_seconds = max(0.0, now_ts - self._last_release_time)
 
-            logger.warning(
-                f"磁盘剩余空间不足：{format_bytes(free_bytes)} < {format_bytes(required_free)}"
-                f"（在途 {active_groups if active_groups else '并发上限'} 组"
-                + (f"，实际产出上界 {format_bytes(active_bytes)}" if active_bytes > 0 else "")
-                + f"），暂停压缩，{check_interval} 秒后重试"
-                f"（全场已 {idle_seconds:.0f}/{max_total_wait} 秒无任何组放行）"
-            )
+            # 日志节流：首次拦停立即报；其后每 5 分钟一条汇总；避免多组重试刷屏
+            _GUARD_LOG_INTERVAL = 300.0
+            _should_log = False
+            if not self._guard_active:
+                self._guard_active = True
+                _should_log = True
+            elif (now_ts - self._last_guard_log_time) >= _GUARD_LOG_INTERVAL:
+                _should_log = True
+
+            if _should_log:
+                self._last_guard_log_time = now_ts
+                logger.warning(
+                    f"磁盘剩余空间不足：{format_bytes(free_bytes)} < {format_bytes(required_free)}"
+                    f"（在途 {active_groups if active_groups else '并发上限'} 组"
+                    + (f"，实际产出上界 {format_bytes(active_bytes)}" if active_bytes > 0 else "")
+                    + f"），暂停压缩，{check_interval} 秒后重试"
+                    f"（全场已 {idle_seconds:.0f}/{max_total_wait} 秒无任何组放行）"
+                )
 
             if idle_seconds >= max_total_wait:
                 # 全场长时间没有任何组能通过守卫 → 判定为卡死

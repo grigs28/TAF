@@ -1045,14 +1045,21 @@
                     </div>
                 `);
             } else {
-                // SSD 剩余空间（压缩目录所在盘）：运维最关心的资源水位，放在进度区前部
+                // SSD 剩余空间（压缩目录所在盘）：运维最关心的资源水位，放在进度区前部。
+                // 守卫拦停时在同一行追加「· 守卫拦停 X分Y秒（需 ZG）」，不额外占一行。
+                let _guardSuffix = '';
+                if (task.guard_active) {
+                    const _idle = parseInt(task.guard_idle_seconds, 10) || 0;
+                    const _need = formatBytes(task.guard_required_bytes || 0);
+                    _guardSuffix = ` · <span class="text-warning">守卫拦停 ${formatEta(_idle) || (_idle + ' 秒')}（在途 ${task.guard_waiting_groups || 0} 组需 ${_need}）</span>`;
+                }
                 const diskLine = (typeof task.disk_free_bytes === 'number' && task.disk_free_bytes > 0)
                     ? `<div class="d-flex justify-content-between">
                         <small class="text-muted">SSD 剩余:</small>
                         <small class="text-muted">${formatBytes(task.disk_free_bytes)}${(typeof task.disk_total_bytes === 'number' && task.disk_total_bytes > 0)
                             ? ' / ' + formatBytes(task.disk_total_bytes)
                               + ' (' + Math.round(task.disk_free_bytes / task.disk_total_bytes * 100) + '%)'
-                            : ''}</small>
+                            : ''}${_guardSuffix}</small>
                     </div>`
                     : '';
 
