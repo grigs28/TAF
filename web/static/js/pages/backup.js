@@ -812,7 +812,10 @@
 
         if (isRunning && progressInfo) {
             const progressSection = document.createElement('div');
-            progressSection.className = 'mb-2';
+            // 注意：这里刻意不加 mb-* —— 紧随其后的"开始时间"(meta) 本身无 margin，
+            // 若给进度区加 mb-2(margin-bottom:.5rem) 就会在"压缩率"与"开始时间"之间
+            // 留出一道 8px 空隙，视觉上即一空行（用户反馈的现象）。
+            progressSection.className = '';
             const isVerifyTask = (task.task_type || '').toLowerCase() === 'verify';
 
             // 压缩阶段：显示"压缩组"聚合条（验证任务无压缩阶段）
@@ -821,14 +824,22 @@
                 // 压缩组：聚合迷你条 + "X/Y" 计数，**取代**原先逐组罗列百分比。
                 // 依据：并行任务逐个显示进度会造成视觉杂乱（通用 UX 结论：并发数一多必须做减法，
                 // 聚合条 + 完成计数比罗列更直观）；但数值必须保留（进度指示器研究结论）。
+                // 压缩组：**4 格百分比条**（每格 25%），取代逐槽位的 16 细格。
+                // 4 格更宽、更易辨识占用档位；数值仍同时给出（进度指示器需带数字）。
                 const _compProg = task.current_compression_progress || {};
                 const runningCount = parseInt(_compProg.running_count, 10) || 0;
                 const totalSlots = parseInt(task.parallel_batches, 10) || 8;
+                const _pct = totalSlots > 0 ? Math.min(100, runningCount * 100 / totalSlots) : 0;
+                let _filled = 0;                       // 0~4 格
+                if (_pct > 75) _filled = 4;
+                else if (_pct > 50) _filled = 3;
+                else if (_pct > 25) _filled = 2;
+                else if (_pct > 0) _filled = 1;
                 let slotsHtml = '';
-                for (let i = 0; i < totalSlots; i++) {
-                    const active = i < runningCount;
-                    slotsHtml += '<span style="display:inline-block;width:5px;height:11px;margin-right:2px;'
-                        + 'border-radius:1px;vertical-align:-1px;background:'
+                for (let i = 0; i < 4; i++) {
+                    const active = i < _filled;
+                    slotsHtml += '<span style="display:inline-block;width:16px;height:11px;margin-right:3px;'
+                        + 'border-radius:2px;vertical-align:-1px;background:'
                         + (active ? 'var(--primary)' : 'rgba(255,255,255,.18)') + '"></span>';
                 }
                 batchProgressHtml = normalizeCardHtml(`
