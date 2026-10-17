@@ -824,29 +824,56 @@
                 // 压缩组：聚合迷你条 + "X/Y" 计数，**取代**原先逐组罗列百分比。
                 // 依据：并行任务逐个显示进度会造成视觉杂乱（通用 UX 结论：并发数一多必须做减法，
                 // 聚合条 + 完成计数比罗列更直观）；但数值必须保留（进度指示器研究结论）。
-                // 压缩组：**4 格百分比条**（每格 25%），取代逐槽位的 16 细格。
-                // 4 格更宽、更易辨识占用档位；数值仍同时给出（进度指示器需带数字）。
+                // 压缩组：**每个在途组各一行**，各自显示 4 格进度条（每格 25%）：
+                //   0-25% 一格 / 25-50% 两格 / 50-75% 三格 / 75-100% 四格
+                // 数据来自后端 current_compression_progress.task_progress_list（逐组进度），
+                // 比"合并成一个占用率条"信息量大得多——能直接看出哪个组快、哪个组拖后腿。
                 const _compProg = task.current_compression_progress || {};
                 const runningCount = parseInt(_compProg.running_count, 10) || 0;
                 const totalSlots = parseInt(task.parallel_batches, 10) || 8;
-                const _pct = totalSlots > 0 ? Math.min(100, runningCount * 100 / totalSlots) : 0;
-                let _filled = 0;                       // 0~4 格
-                if (_pct > 75) _filled = 4;
-                else if (_pct > 50) _filled = 3;
-                else if (_pct > 25) _filled = 2;
-                else if (_pct > 0) _filled = 1;
-                let slotsHtml = '';
-                for (let i = 0; i < 4; i++) {
-                    const active = i < _filled;
-                    slotsHtml += '<span style="display:inline-block;width:16px;height:11px;margin-right:3px;'
-                        + 'border-radius:2px;vertical-align:-1px;background:'
-                        + (active ? 'var(--primary)' : 'rgba(255,255,255,.18)') + '"></span>';
+                const _groupList = Array.isArray(_compProg.task_progress_list)
+                    ? _compProg.task_progress_list : [];
+
+                // 单组的 4 格条
+                const _bar4 = (percent) => {
+                    let filled = 0;
+                    if (percent > 75) filled = 4;
+                    else if (percent > 50) filled = 3;
+                    else if (percent > 25) filled = 2;
+                    else if (percent > 0) filled = 1;
+                    let bar = '';
+                    for (let i = 0; i < 4; i++) {
+                        const active = i < filled;
+                        bar += '<span style="display:inline-block;width:16px;height:11px;margin-right:3px;'
+                            + 'border-radius:2px;vertical-align:-1px;background:'
+                            + (active ? 'var(--primary)' : 'rgba(255,255,255,.18)') + '"></span>';
+                    }
+                    return bar;
+                };
+
+                let _groupRows = '';
+                if (_groupList.length > 0) {
+                    _groupRows = _groupList.map((g, idx) => {
+                        const _p = Number(g && g.percent) || 0;
+                        return `<div class="d-flex justify-content-between align-items-center">
+                            <small class="text-muted">组${idx + 1}:</small>
+                            <small class="text-muted">${_bar4(_p)}<span class="fw-semibold ms-1">${_p.toFixed(0)}%</span></small>
+                        </div>`;
+                    }).join('');
+                } else {
+                    // 尚无逐组进度（如刚开始压缩）：退化为总数显示
+                    _groupRows = `<div class="d-flex justify-content-between align-items-center">
+                        <small class="text-muted">压缩组:</small>
+                        <small class="text-muted fw-semibold">${runningCount}/${totalSlots} 运行中</small>
+                    </div>`;
                 }
+
                 batchProgressHtml = normalizeCardHtml(`
                     <div class="d-flex justify-content-between align-items-center mb-1">
                         <small class="text-muted">压缩组:</small>
-                        <small class="text-muted">${slotsHtml}<span class="fw-semibold ms-1">${runningCount}/${totalSlots}</span></small>
+                        <small class="text-muted fw-semibold">${runningCount}/${totalSlots} 运行中</small>
                     </div>
+                    ${_groupRows}
                 `);
             }
             
