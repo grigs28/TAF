@@ -268,9 +268,22 @@ class FinalDirMonitor:
                                 if file_key not in self._processed_files:
                                     found_files.append(file_path)
                     
+                    # 每批内按文件大小降序（最大文件优先）：
+                    #   · 大文件连续写保持磁带流式，减少文件间 sync/backhitch；
+                    #   · 小文件最后填充剩余空间，降低"带尾大文件写不下"的跨带风险；
+                    #   · 按批排序（而非全局队列），新到的大文件不会无限推迟小文件。
+                    def _size_key(p: Path) -> int:
+                        try:
+                            return p.stat().st_size
+                        except OSError:
+                            return 0
+
+                    found_files.sort(key=_size_key, reverse=True)
+
                     # 顺序处理找到的文件（移动完一个再移动下一个）
                     if found_files:
-                        logger.info(f"[Final监控] 扫描到 {len(found_files)} 个新文件待移动到磁带")
+                        logger.info(f"[Final监控] 扫描到 {len(found_files)} 个新文件待移动到磁带"
+                                    f"（最大优先，首个 {format_bytes(_size_key(found_files[0]))}）")
                         
                         for file_path in found_files:
                             if not self._running:
