@@ -26,6 +26,13 @@
         return (bytes / Math.pow(1024, index)).toFixed(2) + ' ' + units[index];
     }
 
+    // 紧凑字节格式（卡片窄行用）：45.61 GB → 45.6G，不足 1G 用 M
+    function formatCompactBytes(bytes) {
+        if (!bytes || bytes <= 0) return '0G';
+        if (bytes >= 1024 ** 3) return (bytes / 1024 ** 3).toFixed(1) + 'G';
+        return Math.round(bytes / 1024 ** 2) + 'M';
+    }
+
     function formatDateTime(value) {
         if (!value) return '-';
         const date = new Date(value);
@@ -1046,19 +1053,32 @@
                 `);
             } else {
                 // SSD 剩余空间（压缩目录所在盘）：运维最关心的资源水位，放在进度区前部。
-                // 守卫拦停时在同一行追加「· 守卫拦停 X分Y秒（需 ZG）」，不额外占一行。
+                // 守卫拦停时在同一行追加紧凑摘要「· 守卫：N组/XG/Ys」，明细放 title 悬停。
                 let _guardSuffix = '';
+                let _diskTitle = '';
+                const _free = task.disk_free_bytes;
+                const _total = task.disk_total_bytes;
+                if (typeof _free === 'number' && _free > 0) {
+                    _diskTitle = `SSD 剩余 ${formatBytes(_free)}` +
+                        (typeof _total === 'number' && _total > 0
+                            ? ` / ${formatBytes(_total)}（${Math.round(_free / _total * 100)}%）`
+                            : '');
+                }
                 if (task.guard_active) {
                     const _idle = parseInt(task.guard_idle_seconds, 10) || 0;
-                    const _need = formatBytes(task.guard_required_bytes || 0);
-                    _guardSuffix = ` · <span class="text-warning">守卫拦停 ${formatEta(_idle) || (_idle + ' 秒')}（在途 ${task.guard_waiting_groups || 0} 组需 ${_need}）</span>`;
+                    const _groups = parseInt(task.guard_waiting_groups, 10) || 0;
+                    const _need = task.guard_required_bytes || 0;
+                    // 卡片窄行只留紧凑摘要，明细放 title 悬停
+                    _guardSuffix = ` · <span class="text-warning">守卫：${_groups}组/${formatCompactBytes(_need)}/${_idle}s</span>`;
+                    _diskTitle += (_diskTitle ? '\n' : '') +
+                        `守卫线 ${formatBytes(_need)}（在途 ${_groups} 组）\n` +
+                        `全场已 ${_idle} 秒无任何组放行`;
                 }
-                const diskLine = (typeof task.disk_free_bytes === 'number' && task.disk_free_bytes > 0)
+                const diskLine = (typeof _free === 'number' && _free > 0)
                     ? `<div class="d-flex justify-content-between">
                         <small class="text-muted">SSD 剩余:</small>
-                        <small class="text-muted">${formatBytes(task.disk_free_bytes)}${(typeof task.disk_total_bytes === 'number' && task.disk_total_bytes > 0)
-                            ? ' / ' + formatBytes(task.disk_total_bytes)
-                              + ' (' + Math.round(task.disk_free_bytes / task.disk_total_bytes * 100) + '%)'
+                        <small class="text-muted" title="${_diskTitle}">${formatBytes(_free)}${(typeof _total === 'number' && _total > 0)
+                            ? ' (' + Math.round(_free / _total * 100) + '%)'
                             : ''}${_guardSuffix}</small>
                     </div>`
                     : '';
