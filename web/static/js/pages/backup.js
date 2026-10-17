@@ -676,8 +676,12 @@
             const _mbps = _showMbps;
             const _speedClass = _mbps >= 230 ? 'badge bg-success'
                 : (_mbps >= 140 ? 'badge bg-warning text-dark' : 'badge bg-danger');
+            // 徽章同时显示「瞬时/平均」；缺少平均值时只显示瞬时值
+            const _speedText = (_curMbps > 0 && _avgMbps > 0)
+                ? `${Math.round(_curMbps)}/${Math.round(_avgMbps)}`
+                : `${Math.round(_showMbps)}`;
             // 字高与守卫行一致：包在 <small> 里继承字号，缩小内边距
-            _tapeSpeedHtml = `<small><span class="${_speedClass}" style="font-weight: 600; padding: 0.15em 0.5em;">写带 ${Math.round(_mbps)} MB/s</span></small>`;
+            _tapeSpeedHtml = `<small><span class="${_speedClass}" style="font-weight: 600; padding: 0.15em 0.5em;">写带 ${_speedText} MB/s</span></small>`;
         }
         tape.innerHTML = `<div class="d-flex justify-content-between align-items-center">
                 <small class="text-muted">目标:</small>
