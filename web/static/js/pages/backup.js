@@ -702,26 +702,27 @@
         const _showMbps = _avgMbps > 0 ? _avgMbps : _curMbps;
         let _tapeSpeedHtml = '';
         if (_isRunningTask && task.tape_writing_file && _showMbps > 0) {
-            // [final文件数][已写入数][瞬时][平均] 四个方括号徽章；只放大数字，"写带"/"MB/s" 保持小字号
+            // 四个徽章：文件数/已写入数/瞬时/平均，不带方括号；只放大数字，"写带"/"MB/s" 保持小字号
             // 瞬时/平均各自按自己的速度分档着色；final 文件数用中性灰，已写入数用青色
             const _badgeStyle = 'font-weight: 400; padding: 0.15em 0.5em; font-size:1rem;';
             const _speedClassOf = (v) => v >= 230 ? 'badge bg-success'
                 : (v >= 140 ? 'badge bg-warning text-dark' : 'badge bg-danger');
             let _speedHtml = '';
             if (typeof task.final_pending_files === 'number') {
-                _speedHtml += `<span class="badge bg-secondary" style="${_badgeStyle}; margin-right:2px;">[${task.final_pending_files}]</span>`;
+                // 文件数徽章：浅灰底（bg-opacity-50），不加方括号
+                _speedHtml += `<span class="badge bg-secondary bg-opacity-50 text-dark" style="${_badgeStyle}; margin-right:2px;">${task.final_pending_files}</span>`;
             }
             // 已写入数：当前正在写磁带的这个文件已写字节（切换文件瞬间为 0）
             {
                 const _written = Number(task.tape_write_bytes) || 0;
                 const _writtenLabel = _written > 0 ? formatCompactBytes(_written) : '0M';
-                _speedHtml += `<span class="badge bg-info text-dark" style="${_badgeStyle}; margin-right:2px;">[${_writtenLabel}]</span>`;
+                _speedHtml += `<span class="badge bg-info text-dark" style="${_badgeStyle}; margin-right:2px;">${_writtenLabel}</span>`;
             }
             if (_curMbps > 0 && _avgMbps > 0) {
-                _speedHtml += `<span class="${_speedClassOf(_curMbps)}" style="${_badgeStyle}; margin-right:2px;">[${Math.round(_curMbps)}]</span>`
-                    + `<span class="${_speedClassOf(_avgMbps)}" style="${_badgeStyle}">[${Math.round(_avgMbps)}]</span>`;
+                _speedHtml += `<span class="${_speedClassOf(_curMbps)}" style="${_badgeStyle}; margin-right:2px;">${Math.round(_curMbps)}</span>`
+                    + `<span class="${_speedClassOf(_avgMbps)}" style="${_badgeStyle}">${Math.round(_avgMbps)}</span>`;
             } else {
-                _speedHtml += `<span class="${_speedClassOf(_showMbps)}" style="${_badgeStyle}">[${Math.round(_showMbps)}]</span>`;
+                _speedHtml += `<span class="${_speedClassOf(_showMbps)}" style="${_badgeStyle}">${Math.round(_showMbps)}</span>`;
             }
             // "写带"与"MB/s"保持 <small> 的原字号
             _tapeSpeedHtml = `<small>写带 ${_speedHtml} <span class="text-muted">MB/s</span></small>`;
