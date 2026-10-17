@@ -709,8 +709,8 @@
                 : (v >= 140 ? 'badge bg-warning text-dark' : 'badge bg-danger');
             let _speedHtml = '';
             if (typeof task.final_pending_files === 'number') {
-                // 文件数徽章：浅灰底（bg-opacity-50），不加方括号
-                _speedHtml += `<span class="badge bg-secondary bg-opacity-50 text-dark" style="${_badgeStyle}; margin-right:2px;">${task.final_pending_files}</span>`;
+                // 文件数徽章：很淡的灰底（25% 透明度，深色卡片上不抢眼），浅色文字
+                _speedHtml += `<span class="badge bg-secondary bg-opacity-25 text-light" style="${_badgeStyle}; margin-right:2px;">${task.final_pending_files}</span>`;
             }
             // 已写入数：当前正在写磁带的这个文件已写字节（切换文件瞬间为 0）
             {
