@@ -33,6 +33,24 @@
         return Math.round(bytes / 1024 ** 2) + 'M';
     }
 
+    // 文件处理速率（前端两次轮询差分，单位 文件/秒）
+    // 缓存每个任务上次的已处理文件数与采样时刻；计数回退（阶段切换/重跑）时
+    // 只重置基准、不显示负值；首次采样（无基准）不显示。
+    const _fileRateCache = new Map();   // taskId -> {files, ts}
+    function computeFileRate(task, processedFiles) {
+        const id = String(task.task_id || task.id || '');
+        if (!id || !Number.isFinite(processedFiles) || processedFiles < 0) return '';
+        const now = Date.now();
+        const prev = _fileRateCache.get(id);
+        _fileRateCache.set(id, { files: processedFiles, ts: now });
+        if (!prev || now <= prev.ts || processedFiles < prev.files) return '';
+        const dt = (now - prev.ts) / 1000;
+        if (dt < 1) return '';
+        const rate = (processedFiles - prev.files) / dt;
+        if (!Number.isFinite(rate) || rate <= 0) return '';
+        return (rate >= 1000 ? (rate / 1000).toFixed(1) + 'K' : Math.round(rate));
+    }
+
     function formatDateTime(value) {
         if (!value) return '-';
         const date = new Date(value);
@@ -1136,6 +1154,8 @@
                     : '';
 
                 const etaText = computeEtaText(task, progressInfo);
+                // 文件处理速率（两次轮询差分，文件/秒；首次采样/计数回退时不显示）
+                const _fileRate = computeFileRate(task, Number(progressInfo.processedFiles) || 0);
 
                 progressSection.innerHTML = normalizeCardHtml(`
                     ${batchProgressHtml}
@@ -1149,7 +1169,7 @@
                     </div>
                     <div class="d-flex justify-content-between">
                         <small class="text-muted">文件进度:</small>
-                        <small class="text-muted">${progressInfo.processedFiles}/${progressInfo.totalFiles || progressInfo.processedFiles}</small>
+                        <small class="text-muted">${progressInfo.processedFiles}/${progressInfo.totalFiles || progressInfo.processedFiles}${_fileRate ? ` · ${_fileRate}/s` : ''}</small>
                     </div>
                     <div class="d-flex justify-content-between">
                         <small class="text-muted">已处理数据:</small>
