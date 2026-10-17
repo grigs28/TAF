@@ -99,11 +99,13 @@ class TapeHandler:
         # 本次任务的累计写带统计（用于卡片显示"平均写带速度"）
         self._tape_cum_bytes: int = 0                   # 累计写入字节
         self._tape_cum_seconds: float = 0.0             # 累计实际写带耗时（不含文件间空档）
+        self._tape_first_write_start: Optional[float] = None  # 本任务第一次写带的起始时间
 
     def reset_tape_write_stats(self) -> None:
         """新任务开始时清零累计写带统计（平均写带速度的分母/分子）。"""
         self._tape_cum_bytes = 0
         self._tape_cum_seconds = 0.0
+        self._tape_first_write_start = None
 
     def _get_tape_device(self) -> str:
         """获取磁带设备路径（用于 mt 命令）"""
@@ -994,6 +996,9 @@ class TapeHandler:
             self._tape_write_total = source_size
             self._tape_write_bytes = 0
             self._tape_write_start = start_time
+            # 本任务第一次写带的起始时间（平均速度 = 累计字节 / 从此刻到现在的墙钟时间）
+            if self._tape_first_write_start is None:
+                self._tape_first_write_start = start_time
 
             def _on_copy_progress(written: int) -> None:
                 self._tape_write_bytes = written

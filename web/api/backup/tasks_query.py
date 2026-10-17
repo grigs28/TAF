@@ -197,12 +197,14 @@ async def get_backup_tasks(
                         if _t_start and tape_write_bytes > 0:
                             _elapsed = max(0.001, time.time() - _t_start)
                             tape_write_speed_mbps = tape_write_bytes / _elapsed / (1024 * 1024)
-                    # 本任务累计写带统计 → 平均写带速度（不含文件间空档）
+                    # 本任务累计写带统计 → 平均写带速度
+                    # 起始时间取"第一次写带"的时刻（含文件间空档，反映整体推进速度）
                     if _th is not None:
                         _cum_bytes = int(getattr(_th, '_tape_cum_bytes', 0) or 0)
-                        _cum_sec = float(getattr(_th, '_tape_cum_seconds', 0.0) or 0.0)
-                        if _cum_sec > 0 and _cum_bytes > 0:
-                            tape_write_avg_speed_mbps = _cum_bytes / _cum_sec / (1024 * 1024)
+                        _first = getattr(_th, '_tape_first_write_start', None)
+                        if _first and _cum_bytes > 0:
+                            _wall = max(0.001, time.time() - float(_first))
+                            tape_write_avg_speed_mbps = _cum_bytes / _wall / (1024 * 1024)
                 except Exception as _tape_err:
                     logger.debug(f"[任务查询] 读取磁带写入状态失败（卡片将不显示磁带速度）: {_tape_err}")
 
