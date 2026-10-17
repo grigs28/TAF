@@ -39,15 +39,35 @@ MKLTFS_BIN = "/usr/local/bin/mkltfs"
 DEFAULT_LTFS_MOUNT = "/mnt/ltfs"
 
 
-async def _copy_with_buffer(source_file: Path, target_file: Path, buffer_size: int = 4 * 1024 * 1024):
+async def _copy_with_buffer(source_file: Path, target_file: Path,
+                            buffer_size: int = 4 * 1024 * 1024,
+                            on_progress=None):
     """以指定缓冲区复制文件（等价 shutil.copy2，但缓冲更大）
 
     copy2 默认约 64KB 缓冲，向 LTFS(FUSE) 写入时产生大量用户态/内核往返。
     改为 4MB 缓冲后往返次数降至 1/64。copystat 保留 copy2 的元数据语义。
+
+    on_progress: 可选回调，每写完一块调用一次 `on_progress(已写字节数)`，
+                 用于对外暴露实时写入进度（卡片显示磁带速度）。
+                 注意：它在复制线程里被调用，回调实现须轻量且线程安全。
     """
     def _do_copy():
         with open(source_file, 'rb') as fsrc, open(target_file, 'wb') as fdst:
-            shutil.copyfileobj(fsrc, fdst, buffer_size)
+            if on_progress is None:
+                # 快路径：无需进度时不额外开销
+                shutil.copyfileobj(fsrc, fdst, buffer_size)
+            else:
+                written = 0
+                while True:
+                    chunk = fsrc.read(buffer_size)
+                    if not chunk:
+                        break
+                    fdst.write(chunk)
+                    written += len(chunk)
+                    try:
+                        on_progress(written)
+                    except Exception:
+                        pass       # 进度回调失败不得影响复制
         shutil.copystat(source_file, target_file)
 
     await asyncio.to_thread(_do_copy)
@@ -70,6 +90,12 @@ class TapeHandler:
         self._ltfs_mounted = False
         self._ltfs_mount_point = None
         self._ltfs_process = None
+        # 磁带写入实时状态（供任务卡片显示"正在写哪个文件、目前多快"）：
+        # 由 write_to_tape_drive 维护，_copy_with_buffer 的分块回调持续更新已写字节。
+        self._tape_write_file: Optional[str] = None     # 当前正在写的文件名
+        self._tape_write_bytes: int = 0                 # 当前文件已写字节
+        self._tape_write_total: int = 0                 # 当前文件总字节
+        self._tape_write_start: Optional[float] = None  # 当前文件开始时间（time.time()）
 
     def _get_tape_device(self) -> str:
         """获取磁带设备路径（用于 mt 命令）"""
@@ -954,14 +980,31 @@ class TapeHandler:
             logger.info(f"[LTFS] 开始复制: {source_file} -> {target_file}")
             start_time = time.time()
 
+            # 对外暴露实时写入状态（供任务卡片读取）。回调在复制线程中执行，
+            # 只做一次整数赋值，足够轻量。
+            self._tape_write_file = source_file.name
+            self._tape_write_total = source_size
+            self._tape_write_bytes = 0
+            self._tape_write_start = start_time
+
+            def _on_copy_progress(written: int) -> None:
+                self._tape_write_bytes = written
+
             try:
-                await _copy_with_buffer(source_file, target_file)
+                await _copy_with_buffer(source_file, target_file,
+                                        on_progress=_on_copy_progress)
             except asyncio.CancelledError:
                 logger.warning("[LTFS] 复制任务被取消")
                 raise
             except Exception as e:
                 logger.error(f"[LTFS] 复制失败: {e}")
                 return None
+            finally:
+                # 不论成功/失败/取消，都清空实时状态，避免卡片显示过期进度
+                self._tape_write_file = None
+                self._tape_write_bytes = 0
+                self._tape_write_total = 0
+                self._tape_write_start = None
 
             elapsed = time.time() - start_time
             speed_mb = source_size_mb / elapsed if elapsed > 0 else 0

@@ -7,6 +7,7 @@ Backup Management API - Task Query
 
 import logging
 import json
+import time
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Request
 from models.backup import BackupTaskType, BackupTaskStatus
@@ -167,6 +168,27 @@ async def get_backup_tasks(
                         getattr(_live, 'COMPRESSION_PARALLEL_BATCHES', 8) or 8)
                 except Exception as _disk_err:
                     logger.debug(f"[任务查询] 读取磁盘/并发配置失败（卡片将不显示 SSD 剩余）: {_disk_err}")
+
+                # 磁带实时写入状态（来自 TapeHandler，供卡片 hover 显示"正在写哪个文件、多快"）
+                tape_writing_file = None
+                tape_write_bytes = 0
+                tape_write_total = 0
+                tape_write_speed_mbps = 0.0
+                try:
+                    _sys = getattr(getattr(http_request, 'app', None), 'state', None)
+                    _sys = getattr(_sys, 'system', None) if _sys else None
+                    _engine = getattr(_sys, 'backup_engine', None) if _sys else None
+                    _th = getattr(_engine, 'tape_handler', None) if _engine else None
+                    if _th is not None and getattr(_th, '_tape_write_file', None):
+                        tape_writing_file = _th._tape_write_file
+                        tape_write_bytes = int(getattr(_th, '_tape_write_bytes', 0) or 0)
+                        tape_write_total = int(getattr(_th, '_tape_write_total', 0) or 0)
+                        _t_start = getattr(_th, '_tape_write_start', None)
+                        if _t_start and tape_write_bytes > 0:
+                            _elapsed = max(0.001, time.time() - _t_start)
+                            tape_write_speed_mbps = tape_write_bytes / _elapsed / (1024 * 1024)
+                except Exception as _tape_err:
+                    logger.debug(f"[任务查询] 读取磁带写入状态失败（卡片将不显示磁带速度）: {_tape_err}")
 
                 tasks = []
                 for row in rows:
@@ -418,7 +440,12 @@ async def get_backup_tasks(
                         "disk_free_bytes": disk_free_bytes,
                         "disk_total_bytes": disk_total_bytes,
                         # 配置的并行批次数：卡片用它画"压缩组 X/Y"的聚合条分母
-                        "parallel_batches": parallel_batches
+                        "parallel_batches": parallel_batches,
+                        # 磁带实时写入（无写入进行时为 None/0）
+                        "tape_writing_file": tape_writing_file,
+                        "tape_write_bytes": tape_write_bytes,
+                        "tape_write_total": tape_write_total,
+                        "tape_write_speed_mbps": round(tape_write_speed_mbps, 1)
                     })
 
                 # 追加计划任务（未运行模板）

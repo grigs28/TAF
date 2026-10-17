@@ -230,6 +230,16 @@
         }
     }
 
+    // ETA 人类可读格式（秒 → "1 小时 23 分"）
+    function formatEta(seconds) {
+        if (!isFinite(seconds) || seconds <= 0) return '';
+        if (seconds < 60) return Math.ceil(seconds) + ' 秒';
+        if (seconds < 3600) return Math.ceil(seconds / 60) + ' 分钟';
+        const h = Math.floor(seconds / 3600);
+        const m = Math.round((seconds % 3600) / 60);
+        return h + ' 小时' + (m > 0 ? ' ' + m + ' 分' : '');
+    }
+
     // 规范化模板字符串再赋给 innerHTML。
     // 原因：.card-body 是 `display:flex; flex-direction:column`——模板字符串
     // 首尾的换行+缩进会成为**匿名 flex item**，在卡片里表现成多出一空行
@@ -504,7 +514,18 @@
                     ? speedGBPerHour.toFixed(2) 
                     : speedGBPerHour.toFixed(4);
                 speedBadge.textContent = displayValue;
-                speedBadge.title = `每小时处理: ${displayValue} GB\n已处理数据: ${formatBytes(progressInfo.processedBytes)}\n已用时间: ${formatElapsedTime(task.started_at, task.completed_at, task.status)}`;
+                // hover 详情：速度（两种单位，不含 GB/s）+ 已处理/总量 + 已用时间
+                {
+                    const _mbps = (parseFloat(speedGBPerSec) * 1024);
+                    const _gbh = (parseFloat(speedGBPerSec) * 3600);
+                    const _totB = Number(progressInfo.totalBytes) || 0;
+                    const _procB = Number(progressInfo.processedBytes) || 0;
+                    const _pct = _totB > 0 ? ((_procB * 100 / _totB).toFixed(0) + '%') : '-';
+                    speedBadge.title = `处理速度: ${_mbps.toFixed(1)} MB/s（${_gbh.toFixed(0)} GB/小时）\n`
+                        + `参考: 磁带写入约 285 MB/s\n`
+                        + `已处理: ${formatBytes(_procB)} / ${_totB > 0 ? formatBytes(_totB) : '未知'}（${_pct}）\n`
+                        + `已用时间: ${formatElapsedTime(task.started_at, task.completed_at, task.status)}`;
+                }
 
                 // 为运行中的任务添加ID属性，便于后续更新
                 speedBadge.setAttribute('data-task-speed', task.task_id || task.id);
@@ -537,6 +558,14 @@
         tape.className = 'mb-2';
         const target = task.tape_device || task.tape_id || '自动选择';
         tape.innerHTML = `<small class="text-muted">目标:</small><br><span class="${highlightClass}">${target}</span>`;
+        // hover 显示磁带实时写入状态（后端暴露的 tape_write_* 字段）
+        if (task.tape_writing_file) {
+            tape.title = `正在写入磁带: ${task.tape_writing_file}\n`
+                + `已写: ${formatBytes(task.tape_write_bytes)} / ${formatBytes(task.tape_write_total)}\n`
+                + `速度: ${task.tape_write_speed_mbps} MB/s`;
+        } else if ((task.status || '').toLowerCase() === 'running') {
+            tape.title = '当前没有正在进行的磁带写入（压缩中或等待中）';
+        }
         body.appendChild(tape);
 
         // 优先使用后端返回的 operation_stage 和 stage_steps（这些已经是基于内存变量构建的）
@@ -932,12 +961,31 @@
                     </div>`
                     : '';
 
+                // ETA：剩余字节 / 已用时间推算的平均速度。
+                // 边界：扫描期 total_bytes 为 0 或还在增长 → 不显示；已完成 → 不显示。
+                let etaText = '';
+                try {
+                    const _isRunningNow = ['running', 'pending'].indexOf((task.status || '').toLowerCase()) >= 0;
+                    const _totalB = Number(progressInfo.totalBytes) || 0;
+                    const _procB = Number(progressInfo.processedBytes) || 0;
+                    if (_isRunningNow && _totalB > 0 && _procB > 0 && task.started_at) {
+                        const _elapsedSec = (Date.now() - new Date(task.started_at).getTime()) / 1000;
+                        if (_elapsedSec > 1) {
+                            const _speedBps = _procB / _elapsedSec;
+                            const _remainB = _totalB - _procB;
+                            if (_speedBps > 0 && _remainB > 0) {
+                                etaText = formatEta(_remainB / _speedBps);
+                            }
+                        }
+                    }
+                } catch (e) { /* ETA 计算失败不影响卡片 */ }
+
                 progressSection.innerHTML = normalizeCardHtml(`
                     ${batchProgressHtml}
                     ${diskLine}
                     <div class="d-flex justify-content-between align-items-center">
                         <small class="text-muted">进度:</small>
-                        <small class="text-muted">${progressInfo.percent}%</small>
+                        <small class="text-muted">${progressInfo.percent}%${etaText ? (' · 剩余约 ' + etaText) : ''}</small>
                     </div>
                     <div class="progress" style="height:6px;">
                         <div class="progress-bar bg-primary" role="progressbar" style="width:${progressInfo.percent}%"></div>
