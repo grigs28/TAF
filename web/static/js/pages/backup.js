@@ -303,7 +303,7 @@
                 const hh = String(done.getHours()).padStart(2, '0');
                 const mm = String(done.getMinutes()).padStart(2, '0');
                 const nextDay = done.getDate() !== new Date().getDate();
-                clockText = `（预计${nextDay ? '次日 ' : ' '}${hh}:${mm} 完成）`;
+                clockText = nextDay ? `（次日 ${hh}:${mm} 完成）` : `（${hh}:${mm} 完成）`;
             }
             return durText + clockText;
         } catch (e) {
@@ -1212,7 +1212,7 @@
                     ${diskLine}
                     <div class="d-flex justify-content-between align-items-center">
                         <small class="text-muted">进度:</small>
-                        <small class="text-muted"><span class="text-success">${progressInfo.percent}%</span>${etaText ? (' · 剩余约 ' + etaText) : ''}</small>
+                        <small class="text-muted"><span class="badge bg-success" style="font-size:1rem; font-weight:400; padding:0.35em 0.65em;">${progressInfo.percent}%</span>${etaText ? (' · 剩 ' + etaText) : ''}</small>
                     </div>
                     <div class="progress" style="height:6px;">
                         <div class="progress-bar bg-primary" role="progressbar" style="width:${progressInfo.percent}%"></div>
