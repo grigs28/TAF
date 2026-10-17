@@ -719,7 +719,7 @@
         if (_isRunningTask && task.tape_writing_file && _showMbps > 0) {
             // 四个徽章：文件数/已写入数/瞬时/平均，不带方括号；只放大数字，"写带"/"MB/s" 保持小字号
             // 瞬时/平均各自按自己的速度分档着色；final 文件数用中性灰，已写入数用青色
-            const _badgeStyle = 'font-weight: 400; padding: 0.15em 0.5em; font-size:1rem;';
+            const _badgeStyle = 'font-weight: 400; padding: 0.2em 0.45em; font-size:0.85rem;';
             const _speedClassOf = (v) => v >= 200 ? 'badge bg-success'
                 : (v >= 140 ? 'badge bg-warning text-dark' : 'badge bg-danger');
             let _speedHtml = '';
