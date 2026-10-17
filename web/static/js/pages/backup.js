@@ -1210,9 +1210,10 @@
                 progressSection.innerHTML = normalizeCardHtml(`
                     ${batchProgressHtml}
                     ${diskLine}
-                    <div class="d-flex justify-content-between align-items-center">
+                    <div class="d-flex align-items-center">
                         <small class="text-muted">进度:</small>
-                        <small class="text-muted"><span class="badge bg-success" style="font-size:1rem; font-weight:400; padding:0.35em 0.65em;">${progressInfo.percent}%</span>${etaText ? (' · 剩 ' + etaText) : ''}</small>
+                        <small class="text-muted ms-2">${etaText ? ('剩 ' + etaText) : ''}</small>
+                        <span class="badge bg-success ms-auto" style="font-size:1rem; font-weight:400; padding:0.35em 0.65em;">${progressInfo.percent}%</span>
                     </div>
                     <div class="progress" style="height:6px;">
                         <div class="progress-bar bg-primary" role="progressbar" style="width:${progressInfo.percent}%"></div>
