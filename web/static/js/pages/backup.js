@@ -666,8 +666,10 @@
         // 正在写带时，把实时磁带写入速度右对齐显示在"目标:"行（无写入时不显示）
         // 徽章样式与右上角速度徽章一致（badge bg-*），颜色按速度分档
         // （参考磁带额定 285 MB/s）：≥230 绿、140~230 黄、<140 红
+        // 注意：磁带只有一台，写带状态是全局值；只有运行中的任务卡片才显示
+        const _isRunningTask = (task.status || '').toLowerCase() === 'running';
         let _tapeSpeedHtml = '';
-        if (task.tape_writing_file
+        if (_isRunningTask && task.tape_writing_file
             && typeof task.tape_write_speed_mbps === 'number' && task.tape_write_speed_mbps > 0) {
             const _mbps = task.tape_write_speed_mbps;
             const _speedClass = _mbps >= 230 ? 'badge bg-success'
@@ -681,11 +683,11 @@
             </div>
             <span class="${highlightClass}">${target}</span>`;
         // hover 显示磁带实时写入状态（后端暴露的 tape_write_* 字段）
-        if (task.tape_writing_file) {
+        if (_isRunningTask && task.tape_writing_file) {
             tape.title = `正在写入磁带: ${task.tape_writing_file}\n`
                 + `已写: ${formatBytes(task.tape_write_bytes)} / ${formatBytes(task.tape_write_total)}\n`
                 + `速度: ${task.tape_write_speed_mbps} MB/s`;
-        } else if ((task.status || '').toLowerCase() === 'running') {
+        } else if (_isRunningTask) {
             tape.title = '当前没有正在进行的磁带写入（压缩中或等待中）';
         }
         body.appendChild(tape);
