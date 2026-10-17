@@ -181,6 +181,7 @@ async def get_backup_tasks(
                 tape_write_total = 0
                 tape_write_speed_mbps = 0.0
                 tape_write_avg_speed_mbps = 0.0
+                tape_write_cum_bytes = 0
                 try:
                     _sys = getattr(getattr(http_request, 'app', None), 'state', None)
                     _sys = getattr(_sys, 'system', None) if _sys else None
@@ -201,6 +202,7 @@ async def get_backup_tasks(
                     # 起始时间取"第一次写带"的时刻（含文件间空档，反映整体推进速度）
                     if _th is not None:
                         _cum_bytes = int(getattr(_th, '_tape_cum_bytes', 0) or 0)
+                        tape_write_cum_bytes = _cum_bytes
                         _first = getattr(_th, '_tape_first_write_start', None)
                         if _first and _cum_bytes > 0:
                             _wall = max(0.001, time.time() - float(_first))
@@ -513,6 +515,8 @@ async def get_backup_tasks(
                         "tape_write_total": tape_write_total if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         "tape_write_speed_mbps": round(tape_write_speed_mbps, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         "tape_write_avg_speed_mbps": round(tape_write_avg_speed_mbps, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
+                        # 本任务累计已完成写带的字节数（hover 显示"本任务累计已完成"）
+                        "tape_write_cum_bytes": tape_write_cum_bytes if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         # final 目录待写磁带的压缩文件数（卡片写带行显示）
                         "final_pending_files": final_pending_files,
                         # 阶段徽章 hover 用的实时明细
