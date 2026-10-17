@@ -679,11 +679,10 @@
                 : (v >= 140 ? 'badge bg-warning text-dark' : 'badge bg-danger');
             let _speedHtml;
             if (_curMbps > 0 && _avgMbps > 0) {
-                _speedHtml = `<span class="${_speedClassOf(_curMbps)}" style="${_badgeStyle}">${Math.round(_curMbps)}</span>`
-                    + `<span class="text-muted mx-1" style="font-size:0.85em;">/</span>`
-                    + `<span class="${_speedClassOf(_avgMbps)}" style="${_badgeStyle}">${Math.round(_avgMbps)}</span>`;
+                _speedHtml = `<span class="${_speedClassOf(_curMbps)}" style="${_badgeStyle}; margin-right:2px;">[${Math.round(_curMbps)}]</span>`
+                    + `<span class="${_speedClassOf(_avgMbps)}" style="${_badgeStyle}">[${Math.round(_avgMbps)}]</span>`;
             } else {
-                _speedHtml = `<span class="${_speedClassOf(_showMbps)}" style="${_badgeStyle}">${Math.round(_showMbps)}</span>`;
+                _speedHtml = `<span class="${_speedClassOf(_showMbps)}" style="${_badgeStyle}">[${Math.round(_showMbps)}]</span>`;
             }
             // 字高与守卫行一致：包在 <small> 里继承字号，缩小内边距
             _tapeSpeedHtml = `<small>写带 ${_speedHtml} <span class="text-muted">MB/s</span></small>`;
