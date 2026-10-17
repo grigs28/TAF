@@ -834,46 +834,37 @@
                 const _groupList = Array.isArray(_compProg.task_progress_list)
                     ? _compProg.task_progress_list : [];
 
-                // 单组的 4 格条
-                const _bar4 = (percent) => {
-                    let filled = 0;
-                    if (percent > 75) filled = 4;
-                    else if (percent > 50) filled = 3;
-                    else if (percent > 25) filled = 2;
-                    else if (percent > 0) filled = 1;
-                    let bar = '';
-                    for (let i = 0; i < 4; i++) {
-                        const active = i < filled;
-                        bar += '<span style="display:inline-block;width:16px;height:11px;margin-right:3px;'
-                            + 'border-radius:2px;vertical-align:-1px;background:'
-                            + (active ? 'var(--primary)' : 'rgba(255,255,255,.18)') + '"></span>';
+                // 每个槽位一格（共 totalSlots 格，横排一行）；**格内按 4 档填充**该组进度：
+                //   0-25% 填 1/4、25-50% 填 2/4、50-75% 填 3/4、75-100% 填满
+                // 用 linear-gradient 做硬边分段（从底往上），无需额外 DOM 层级。
+                // 空格位（无对应组）保持全暗。
+                let _cells = '';
+                for (let i = 0; i < totalSlots; i++) {
+                    const _g = _groupList[i];
+                    let _seg = 0;                       // 0~4 档
+                    if (_g) {
+                        const _p = Number(_g.percent) || 0;
+                        if (_p > 75) _seg = 4;
+                        else if (_p > 50) _seg = 3;
+                        else if (_p > 25) _seg = 2;
+                        else if (_p > 0) _seg = 1;
                     }
-                    return bar;
-                };
-
-                let _groupRows = '';
-                if (_groupList.length > 0) {
-                    _groupRows = _groupList.map((g, idx) => {
-                        const _p = Number(g && g.percent) || 0;
-                        return `<div class="d-flex justify-content-between align-items-center">
-                            <small class="text-muted">组${idx + 1}:</small>
-                            <small class="text-muted">${_bar4(_p)}<span class="fw-semibold ms-1">${_p.toFixed(0)}%</span></small>
-                        </div>`;
-                    }).join('');
-                } else {
-                    // 尚无逐组进度（如刚开始压缩）：退化为总数显示
-                    _groupRows = `<div class="d-flex justify-content-between align-items-center">
-                        <small class="text-muted">压缩组:</small>
-                        <small class="text-muted fw-semibold">${runningCount}/${totalSlots} 运行中</small>
-                    </div>`;
+                    const _fill = _seg * 25;            // 填充百分比（0/25/50/75/100）
+                    const _bg = _fill <= 0
+                        ? 'rgba(255,255,255,.18)'
+                        : (_fill >= 100
+                            ? 'var(--primary)'
+                            : `linear-gradient(to top, var(--primary) 0 ${_fill}%, rgba(255,255,255,.18) ${_fill}% 100%)`);
+                    _cells += '<span title="' + (_g ? ('组' + (i + 1) + ': ' + ((Number(_g.percent) || 0)).toFixed(0) + '%') : '空闲')
+                        + '" style="display:inline-block;width:7px;height:16px;margin-right:2px;'
+                        + 'border-radius:1px;vertical-align:-3px;background:' + _bg + '"></span>';
                 }
 
                 batchProgressHtml = normalizeCardHtml(`
                     <div class="d-flex justify-content-between align-items-center mb-1">
                         <small class="text-muted">压缩组:</small>
-                        <small class="text-muted fw-semibold">${runningCount}/${totalSlots} 运行中</small>
+                        <small class="text-muted">${_cells}<span class="fw-semibold ms-1">${runningCount}/${totalSlots}</span></small>
                     </div>
-                    ${_groupRows}
                 `);
             }
             
