@@ -1224,7 +1224,7 @@
                     <div class="d-flex align-items-center">
                         <small class="text-muted">进度:</small>
                         <small class="text-muted ms-2">${etaText ? ('剩 ' + etaText) : ''}</small>
-                        <span class="badge bg-success ms-auto" style="font-size:1rem; font-weight:400; padding:0.35em 0.65em;">${progressInfo.percent}%</span>
+                        <span class="badge bg-success ms-auto" style="font-size:0.85rem; font-weight:400; padding:0.2em 0.45em;">${progressInfo.percent}%</span>
                     </div>
                     <div class="progress" style="height:6px;">
                         <div class="progress-bar bg-primary" role="progressbar" style="width:${progressInfo.percent}%"></div>
@@ -1236,7 +1236,7 @@
                     <div class="d-flex align-items-center">
                         <small class="text-muted">已处理数据:</small>
                         <small class="text-muted ms-2">${formatBytes(progressInfo.processedBytes)} / ${formatBytes(progressInfo.totalBytes || progressInfo.processedBytes)}</small>
-                        <span class="badge bg-success ms-auto" style="font-size:1rem; font-weight:400; padding:0.35em 0.65em;">${_dataPct}%</span>
+                        <span class="badge bg-success ms-auto" style="font-size:0.85rem; font-weight:400; padding:0.2em 0.45em;">${_dataPct}%</span>
                     </div>
                     <div class="d-flex justify-content-between">
                         <small class="text-muted">压缩后大小:</small>
