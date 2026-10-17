@@ -609,7 +609,7 @@
 
                 const speedBadge = document.createElement('span');
                 speedBadge.className = badgeClass;
-                speedBadge.style.cssText = 'font-size: 0.85rem; font-weight: 600; padding: 0.35em 0.65em;';
+                speedBadge.style.cssText = 'font-size: 1rem; font-weight: 600; padding: 0.35em 0.65em;';
                 // 数字：≥100 取整，否则保留 1 位小数
                 const displayValue = _mbps >= 100 ? _mbps.toFixed(0) : _mbps.toFixed(1);
                 speedBadge.textContent = displayValue;
