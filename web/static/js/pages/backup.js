@@ -1187,6 +1187,25 @@
                     ? `扫描 ${_scanFiles.toLocaleString()}${_scanRate > 0 ? `（${_scanRate}/s）` : ''}`
                         + ` · 压缩 ${Number(progressInfo.processedFiles || 0).toLocaleString()}${_fileRate ? `（${_fileRate}/s）` : ''}`
                     : `${progressInfo.processedFiles}/${progressInfo.totalFiles || progressInfo.processedFiles}${_fileRate ? ` · ${_fileRate}/s` : ''}`;
+                // hover 明细：扫描与压缩各自的计数、字节、速率、压缩率
+                const _fileProgressTitle = [
+                    '扫描进度',
+                    `  已扫描文件: ${_scanFiles > 0 ? _scanFiles.toLocaleString() : '-'}`,
+                    `  已扫描数据: ${_scanStats && _scanStats.scanned_bytes ? formatBytes(Number(_scanStats.scanned_bytes)) : '-'}`,
+                    `  已扫描目录: ${_scanStats && _scanStats.dirs_scanned ? Number(_scanStats.dirs_scanned).toLocaleString() : '-'}`,
+                    `  扫描速度: ${_scanRate > 0 ? _scanRate + ' 文件/秒' : '-'}`,
+                    '',
+                    '压缩进度',
+                    `  已压缩文件: ${Number(progressInfo.processedFiles || 0).toLocaleString()}`
+                        + ` / ${Number(progressInfo.totalFiles || 0).toLocaleString()}`
+                        + (progressInfo.totalFiles > 0
+                            ? `（${(Number(progressInfo.processedFiles || 0) / Number(progressInfo.totalFiles) * 100).toFixed(1)}%）`
+                            : ''),
+                    `  已处理数据: ${formatBytes(progressInfo.processedBytes)} / ${formatBytes(progressInfo.totalBytes || progressInfo.processedBytes)}`,
+                    `  压缩后大小: ${formatBytes(progressInfo.compressedBytes)}`,
+                    `  压缩率: ${formatCompressionRatio(progressInfo.compressionRatio)}`,
+                    `  处理速度: ${_fileRate ? _fileRate + ' 文件/秒' : '-'}`,
+                ].join('\n');
 
                 progressSection.innerHTML = normalizeCardHtml(`
                     ${batchProgressHtml}
@@ -1200,7 +1219,7 @@
                     </div>
                     <div class="d-flex justify-content-between">
                         <small class="text-muted">文件进度:</small>
-                        <small class="text-muted">${_fileProgressHtml}</small>
+                        <small class="text-muted" title="${_fileProgressTitle}">${_fileProgressHtml}</small>
                     </div>
                     <div class="d-flex justify-content-between">
                         <small class="text-muted">已处理数据:</small>
