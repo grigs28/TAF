@@ -1,5 +1,28 @@
 # 更新日志
 
+## [1.1.16] - 2026-10-17
+
+### 新增
+
+- **阶段徽章 hover 显示各阶段实时明细**（四个阶段各不相同）：
+  | 阶段 | hover 内容 | 数据来源 |
+  |---|---|---|
+  | **扫描** | 已扫描文件数 / 累计大小 / 已扫描目录数 | 扫描器 `stats` 挂到任务对象，API 实时读取 |
+  | **预分组** | 队列深度 + 各组字节大小 | 预取器入队时记录组大小（与队列同序 deque） |
+  | **压缩打包** | **正在打包的归档文件名**（如 `backup_2026-10_000113_20261017_083125.tar.zst`） | 归档名在 `compress_file_group` 生成时即写入进度字典 |
+  | **写入磁带** | 正在写的文件 / 已写 / 总量 / 速度 | 1.1.15 已具备 |
+  所有 hover 均**优雅降级**：后端字段未就绪（如未重启）时显示阶段说明而非空白。
+
+### 后端改动（均为小改，未触及压缩/扫描热路径）
+
+- `simple_scanner.py`：`stats` 字典挂到 `backup_task._scan_stats`（原地更新的引用）
+- `file_group_prefetcher.py`：入队时 `append(total_size)`、出队 `popleft()`，与队列严格 FIFO 同序
+- `compressor.py`：生成归档文件名时写入共享进度字典 `archive_name`
+- `compression_worker.py`：进度映射与 `task_progress_list` 带出 `archive_name`
+- `backup_engine.py`：暴露 `_current_prefetcher`
+- `tasks_query.py`：返回 `scan_live_stats`、`prefetch_queue_depth`、`prefetch_queue_sizes`
+- 版本升至 1.1.16
+
 ## [1.1.15] - 2026-10-17
 
 ### 新增

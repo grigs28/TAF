@@ -174,6 +174,15 @@ class SimpleScanner:
             "symlinks_skipped": 0,       # 跳过的符号链接数
             "start_time": time.time(),
         }
+
+        # 暴露给任务对象：任务查询 API 可实时读取扫描进度
+        # （已扫描文件数/字节、目录数），供卡片阶段徽章 hover 显示。
+        # stats 是原地更新的字典，这里挂引用即可，无需反复赋值。
+        if backup_task is not None:
+            try:
+                backup_task._scan_stats = stats
+            except Exception:
+                pass
         
         # 从内存获取分表名（backup_task.backup_files_table）
         # 内存模式不需要表名（压缩后才写入数据库）

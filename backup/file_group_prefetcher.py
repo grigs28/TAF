@@ -68,6 +68,12 @@ class FileGroupPrefetcher:
         # 队列中的文件总数（用于进度显示）- 使用计数器维护
         self.queued_files_count = 0  # 当前队列中所有文件组的总文件数
         self.total_queued_files_count = 0  # 累计放入队列的总文件数（用于进度显示）
+
+        # 队列中每个组的**字节大小**（与 file_group_queue 严格同序增删，FIFO 一致）。
+        # 任务查询 API 读取它，供卡片"预分组"徽章 hover 显示：
+        #   "预取队列: 3 组（21.4G / 19.8G / 22.1G）"
+        from collections import deque as _deque
+        self._queued_group_sizes = _deque()
         self.total_queued_size = 0  # 累计放入队列的总文件大小（字节）
         
     def start(self):
@@ -124,6 +130,11 @@ class FileGroupPrefetcher:
                 if file_groups:
                     files_in_removed_groups = sum(len(group) for group in file_groups)
                     self.queued_files_count = max(0, self.queued_files_count - files_in_removed_groups)
+                    # 组大小记录同步出队（FIFO 一致；数量不足时静默忽略）
+                    try:
+                        self._queued_group_sizes.popleft()
+                    except IndexError:
+                        pass
                     logger.debug(
                         f"[文件组预取器] 从队列取出文件组，减少 {files_in_removed_groups} 个文件，"
                         f"队列中剩余文件数: {self.queued_files_count}"
@@ -258,6 +269,8 @@ class FileGroupPrefetcher:
                         await asyncio.sleep(2.0)
 
                     await self.file_group_queue.put(([group], 0))
+                    # 与队列同序记录该组字节大小（出队时 popleft，FIFO 严格对应）
+                    self._queued_group_sizes.append(total_size)
                     self.prefetched_groups += 1
                     self.total_queued_files_count += len(group)
                     self.total_queued_size += total_size

@@ -471,6 +471,13 @@ class Compressor:
                     'total_files_in_group': len(file_group)
                 }
             total_original_size = sum(f['size'] for f in file_group)
+            # 把本次生成的归档文件名写进共享进度字典——卡片 hover 需要显示
+            # "当前打包的是哪个归档"（如 backup_2026-10_000113_20261017_083125.tar.zst）。
+            # 归档名在这里就已确定（组级），无需解析 tar 输出。
+            try:
+                compress_progress['archive_name'] = temp_archive_path.name
+            except Exception:
+                pass
             # 用于存储成功和失败的文件信息（在线程间共享）
             compress_result = {'successful_files': [], 'failed_files': [], 'successful_original_size': 0, 'archive_path': str(temp_archive_path)}
             

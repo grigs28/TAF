@@ -258,6 +258,9 @@ async def get_backup_tasks(
                     in_memory_compressed_bytes = None
                     in_memory_scan_status = None
                     in_memory_compression_completed = None
+                    in_memory_queue_depth = 0
+                    in_memory_queue_sizes = []
+                    in_memory_scan_stats = None
                     task_status = None
 
                     if status_value == 'running':
@@ -293,6 +296,28 @@ async def get_backup_tasks(
                                             fp = compression_worker.file_group_prefetcher
                                             in_memory_prefetch_loop_count = getattr(fp, 'prefetch_loop_count', 0) or 0
                                             in_memory_prefetcher_running = getattr(fp, '_running', True)
+                                            # 预分组队列：深度 + 各组字节大小（供卡片"预分组"徽章 hover）
+                                            try:
+                                                in_memory_queue_depth = fp.file_group_queue.qsize()
+                                                in_memory_queue_sizes = [
+                                                    int(x) for x in list(getattr(fp, '_queued_group_sizes', []))
+                                                ]
+                                            except Exception:
+                                                pass
+
+                                        # 扫描实时统计：扫描器把 stats 字典挂在任务对象上（原地更新），
+                                        # 引擎的 _current_task 全程持有该对象，扫描期同样可读。
+                                        try:
+                                            _live_task = getattr(backup_engine, '_current_task', None)
+                                            _st = getattr(_live_task, '_scan_stats', None)
+                                            if _st:
+                                                in_memory_scan_stats = {
+                                                    'scanned_files': int(_st.get('total_scanned', 0) or 0),
+                                                    'scanned_bytes': int(_st.get('total_scanned_bytes', 0) or 0),
+                                                    'dirs_scanned': int(_st.get('dirs_scanned', 0) or 0)
+                                                }
+                                        except Exception:
+                                            pass
 
                                         # 获取 compression_completed 状态
                                         if in_memory_compression_completed is None:
@@ -445,7 +470,11 @@ async def get_backup_tasks(
                         "tape_writing_file": tape_writing_file,
                         "tape_write_bytes": tape_write_bytes,
                         "tape_write_total": tape_write_total,
-                        "tape_write_speed_mbps": round(tape_write_speed_mbps, 1)
+                        "tape_write_speed_mbps": round(tape_write_speed_mbps, 1),
+                        # 阶段徽章 hover 用的实时明细
+                        "scan_live_stats": in_memory_scan_stats,          # 扫描中：已扫描文件/字节/目录
+                        "prefetch_queue_depth": in_memory_queue_depth,    # 预分组：队列深度
+                        "prefetch_queue_sizes": in_memory_queue_sizes     # 预分组：各组字节大小
                     })
 
                 # 追加计划任务（未运行模板）

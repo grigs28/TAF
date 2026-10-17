@@ -230,6 +230,62 @@
         }
     }
 
+    // 阶段徽章的 hover 明细（按阶段类型给出该阶段最有用的实时数据）
+    function buildStageHover(step, task) {
+        const code = String(step.code || '').toLowerCase();
+        const stateMap = { done: '已完成', current: '进行中', pending: '等待中', failed: '失败' };
+        const lines = [];
+        lines.push('阶段: ' + (step.label || code));
+        lines.push('状态: ' + (stateMap[step.state] || step.state || '未知'));
+
+        try {
+            if (code === 'scan') {
+                const ss = task.scan_live_stats;
+                if (ss && ss.scanned_files > 0) {
+                    lines.push('已扫描: ' + ss.scanned_files.toLocaleString() + ' 个文件');
+                    lines.push('累计大小: ' + formatBytes(ss.scanned_bytes));
+                    lines.push('已扫描目录: ' + (ss.dirs_scanned || 0).toLocaleString());
+                } else {
+                    lines.push('说明: 扫描源目录，记录文件清单与大小');
+                }
+            } else if (code === 'prefetch') {
+                const d = parseInt(task.prefetch_queue_depth, 10) || 0;
+                const sizes = Array.isArray(task.prefetch_queue_sizes) ? task.prefetch_queue_sizes : [];
+                if (d > 0) {
+                    lines.push('队列: ' + d + ' 组待压缩');
+                    if (sizes.length) {
+                        lines.push('各组大小: ' + sizes.map(function (s) { return formatBytes(s); }).join(' / '));
+                    }
+                } else {
+                    lines.push('队列为空（扫描中或已全部消费）');
+                }
+            } else if (code === 'compress') {
+                const list = ((task.current_compression_progress || {}).task_progress_list) || [];
+                const names = list.map(function (g) { return g && g.archive_name; }).filter(Boolean);
+                if (names.length) {
+                    lines.push('正在打包:');
+                    names.slice(0, 4).forEach(function (n) { lines.push('  ' + n); });
+                    if (names.length > 4) lines.push('  …共 ' + names.length + ' 个');
+                } else {
+                    lines.push('说明: tar|zstd 压缩文件组，产出写入 SSD');
+                }
+            } else if (code === 'copy') {
+                if (task.tape_writing_file) {
+                    lines.push('正在写入: ' + task.tape_writing_file);
+                    lines.push('已写: ' + formatBytes(task.tape_write_bytes) + ' / ' + formatBytes(task.tape_write_total));
+                    lines.push('速度: ' + (task.tape_write_speed_mbps || 0) + ' MB/s');
+                } else {
+                    lines.push('当前无磁带写入');
+                }
+            } else if (code === 'finalize') {
+                lines.push('说明: 写入索引并收尾');
+            }
+        } catch (e) { /* hover 明细构建失败不影响卡片 */ }
+
+        // title 属性内需转义双引号，避免破坏 HTML
+        return lines.join('\n').replace(/"/g, '&quot;');
+    }
+
     // ETA 人类可读格式（秒 → "1 小时 23 分"）
     function formatEta(seconds) {
         if (!isFinite(seconds) || seconds <= 0) return '';
@@ -831,7 +887,8 @@
                             // copy 步骤状态完全由后端 stage_steps 决定
                             const progress = (step.state === 'current' && progressPercent !== null) ? progressPercent : null;
                             const badgeClass = getStageBadgeClass(step.state, step.code, progress, task);
-                            return `<span class="badge ${badgeClass}">${step.label}</span>`;
+                            // hover 显示该阶段的实时明细（已扫描数 / 队列各组大小 / 正在打包的归档名 / 正在写的磁带文件）
+                            return `<span class="badge ${badgeClass}" title="${buildStageHover(step, task)}">${step.label}</span>`;
                         }).join('')}
                     </div>
                 `);

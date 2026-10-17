@@ -1508,6 +1508,9 @@ class BackupEngine:
                 )
                 # 在压缩任务开始前启动预取器
                 file_group_prefetcher.start()
+                # 暴露实例引用：任务查询 API 需要读取"预取队列深度 + 各组大小"，
+                # 供卡片"预分组"阶段徽章的 hover 显示
+                self._current_prefetcher = file_group_prefetcher
                 logger.info("[备份引擎] 文件组预取器已启动，开始预取文件组...")
             
             # ========== 创建压缩循环后台任务（独立线程，顺序执行） ==========

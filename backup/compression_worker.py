@@ -768,7 +768,10 @@ class CompressionWorker:
                         'current': current_file_index,
                         'total': total_files_in_group,
                         'group_size_bytes': group_size_bytes,
-                        'processed_bytes': processed_bytes  # 已处理文件的实际大小
+                        'processed_bytes': processed_bytes,  # 已处理文件的实际大小
+                        # 当前打包的归档文件名（如 backup_2026-10_000113_20261017_083125.tar.zst）
+                        'archive_name': progress_info.get('archive_name')
+                                        or compress_progress.get('archive_name')
                     })
                     
                     logger.debug(
@@ -1091,6 +1094,9 @@ class CompressionWorker:
                 self.compression_progress_map[group_idx]['compress_progress'] = compress_progress
                 self.compression_progress_map[group_idx]['total_files'] = total_files
                 self.compression_progress_map[group_idx]['group_size_bytes'] = total_size
+                # 归档文件名（compressor 在生成文件名时写入共享进度字典），
+                # 供卡片 hover 显示"当前打包的是哪个归档"
+                self.compression_progress_map[group_idx]['archive_name'] = compress_progress.get('archive_name')
 
             # 更新进度
             await self.backup_db.update_task_stage_with_description(
