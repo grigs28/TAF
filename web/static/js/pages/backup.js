@@ -739,14 +739,14 @@
             } else {
                 _speedHtml += `<span class="${_speedClassOf(_showMbps)}" style="${_badgeStyle}; margin-right:2px;">${Math.round(_showMbps)}</span>`;
             }
-            // 空闲徽章：从第一次写带起算的空档（已排除当前文件正在写的时间）
+            // 等待徽章：压缩喂不饱写带的累计时间（final 空等压缩产出）
             let _idleHtml = '';
             {
-                const _idle = Number(task.tape_write_idle_seconds) || 0;
-                const _idleLabel = _idle >= 3600
-                    ? (Math.round(_idle / 360) / 10) + 'h'
-                    : (_idle >= 60 ? Math.round(_idle / 60) + 'm' : Math.round(_idle) + 's');
-                _idleHtml = `<span class="badge bg-secondary bg-opacity-25 text-light" style="${_badgeStyle}; margin-left:2px;">空闲${_idleLabel}</span>`;
+                const _starve = Number(task.tape_starvation_seconds) || 0;
+                const _starveLabel = _starve >= 3600
+                    ? (Math.round(_starve / 360) / 10) + 'h'
+                    : (_starve >= 60 ? Math.round(_starve / 60) + 'm' : Math.round(_starve) + 's');
+                _idleHtml = `<span class="badge bg-secondary bg-opacity-25 text-light" style="${_badgeStyle}; margin-left:2px;">等待${_starveLabel}</span>`;
             }
             // "写带"与"MB/s"保持 <small> 的原字号；空闲徽章放在单位之后
             _tapeSpeedHtml = `<small>写带 ${_speedHtml} <span class="text-muted">MB/s</span>${_idleHtml}</small>`;
@@ -766,12 +766,14 @@
             const _pending = (typeof task.final_pending_files === 'number') ? task.final_pending_files : null;
             const _busy = Number(task.tape_write_busy_seconds) || 0;
             const _idle = Number(task.tape_write_idle_seconds) || 0;
+            const _starve = Number(task.tape_starvation_seconds) || 0;
             const _eff = (_busy + _idle) > 0 ? (_busy / (_busy + _idle) * 100).toFixed(1) : null;
             tape.title = `正在写入磁带: ${task.tape_writing_file}\n`
                 + `当前文件进度: ${formatBytes(_writeBytes)} / ${formatBytes(_writeTotal)}（${_writePct}%）\n`
                 + `瞬时速度: ${(Number(task.tape_write_speed_mbps) || 0).toFixed(1)} MB/s\n`
                 + `平均速度: ${_avgMbps.toFixed(1)} MB/s（从第一次写带起算，含文件间空档）\n`
                 + `本任务累计已完成: ${formatBytes(_cumBytes)}\n`
+                + `等待压缩: ${formatEta(_starve) || '0 秒'}（final 无待写文件、等压缩产出）\n`
                 + `实际写入: ${formatEta(_busy) || '0 秒'}　·　空闲等待: ${formatEta(_idle) || '0 秒'}`
                 + (_eff !== null ? `（写入效率 ${_eff}%）` : '') + `\n`
                 + `待写文件(final): ${_pending === null ? '-' : _pending} 个`;

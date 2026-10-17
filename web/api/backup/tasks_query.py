@@ -184,6 +184,7 @@ async def get_backup_tasks(
                 tape_write_cum_bytes = 0
                 tape_write_busy_seconds = 0.0   # 实际复制耗时（成功文件累计）
                 tape_write_idle_seconds = 0.0   # 从第一次写带起算的空档时间
+                tape_starvation_seconds = 0.0   # 压缩喂不饱写带的累计等待
                 try:
                     _sys = getattr(getattr(http_request, 'app', None), 'state', None)
                     _sys = getattr(_sys, 'system', None) if _sys else None
@@ -192,6 +193,17 @@ async def get_backup_tasks(
                     _ct = getattr(_engine, '_current_task', None) if _engine else None
                     if _ct is not None:
                         tape_writing_task_id = getattr(_ct, 'id', None)
+                    # 压缩喂不饱写带：FinalDirMonitor 累计的 final 空等时间
+                    try:
+                        _fdm = getattr(_engine, 'final_dir_monitor', None) if _engine else None
+                        if _fdm is not None:
+                            tape_starvation_seconds = float(
+                                getattr(_fdm, '_starvation_seconds', 0.0) or 0.0)
+                            _ss = getattr(_fdm, '_starve_start', None)
+                            if _ss:
+                                tape_starvation_seconds += max(0.0, time.time() - float(_ss))
+                    except Exception as _starve_err:
+                        logger.debug(f"[任务查询] 读取等待统计失败: {_starve_err}")
                     if _th is not None and getattr(_th, '_tape_write_file', None):
                         tape_writing_file = _th._tape_write_file
                         tape_write_bytes = int(getattr(_th, '_tape_write_bytes', 0) or 0)
@@ -535,6 +547,8 @@ async def get_backup_tasks(
                         # 写带忙闲统计：busy=实际复制累计秒数，idle=从首次写带起算的空档秒数
                         "tape_write_busy_seconds": round(tape_write_busy_seconds, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         "tape_write_idle_seconds": round(tape_write_idle_seconds, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
+                        # 压缩喂不饱写带的累计等待（final 空等压缩产出）
+                        "tape_starvation_seconds": round(tape_starvation_seconds, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         # final 目录待写磁带的压缩文件数（卡片写带行显示）
                         "final_pending_files": final_pending_files,
                         # 阶段徽章 hover 用的实时明细

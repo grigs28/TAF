@@ -1606,6 +1606,11 @@ class BackupEngine:
                     if self.final_dir_monitor.is_final_dir_empty(current_set_id):
                         logger.info("[备份引擎] ✅ final目录已为空，所有文件已写入磁带")
                         final_move_completed = True
+                        # 结算“压缩喂不饱”统计：丢弃最后一段收尾空转
+                        try:
+                            self.final_dir_monitor.finalize_starvation()
+                        except Exception:
+                            pass
 
                         # 清理当前任务的 set_id 空目录
                         if backup_set and backup_set.set_id:

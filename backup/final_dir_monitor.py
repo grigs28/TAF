@@ -51,6 +51,10 @@ class FinalDirMonitor:
         self._scan_interval = 10  # 扫描间隔（秒）
         self._processed_files: Set[str] = set()  # 已处理文件的集合（完整路径）
         self._current_tape_file: Optional[str] = None  # 当前正在写入磁带的文件路径
+        # "压缩喂不饱写带"的累计等待时间：final 目录无文件可写、等压缩产出的时长。
+        # 由任务收尾时调用 finalize_starvation() 丢弃最后一段（压缩已完成，不算饿死）。
+        self._starvation_seconds: float = 0.0
+        self._starve_start: Optional[float] = None
         
     def start(self):
         """启动监控线程"""
@@ -58,7 +62,10 @@ class FinalDirMonitor:
             if self._running:
                 logger.warning("[Final监控] 监控线程已经在运行")
                 return
-            
+
+            # 新任务开始：重置"压缩喂不饱"统计
+            self._starvation_seconds = 0.0
+            self._starve_start = None
             self._running = True
             self._worker_thread = threading.Thread(
                 target=self._monitor_loop,
@@ -83,6 +90,16 @@ class FinalDirMonitor:
                 else:
                     logger.info("[Final监控] Final目录监控线程已停止")
     
+    def finalize_starvation(self) -> float:
+        """任务收尾调用：丢弃未结算的最后一段等待。
+
+        压缩已完成、final 已空后的空转属于任务收尾，不是“压缩喂不饱”，
+        因此把当前未结算的等待段直接丢弃，返回累计饿死时间。
+        """
+        if self._starve_start is not None:
+            self._starve_start = None
+        return self._starvation_seconds
+
     def _get_final_dir(self) -> Path:
         """获取final目录路径"""
         compress_dir = Path(self.settings.BACKUP_COMPRESS_DIR)
@@ -282,6 +299,10 @@ class FinalDirMonitor:
 
                     # 顺序处理找到的文件（移动完一个再移动下一个）
                     if found_files:
+                        # 有文件可写了：结算"压缩喂不饱"的等待时间
+                        if self._starve_start is not None:
+                            self._starvation_seconds += max(0.0, time.time() - self._starve_start)
+                            self._starve_start = None
                         logger.info(f"[Final监控] 扫描到 {len(found_files)} 个新文件待移动到磁带"
                                     f"（最大优先，首个 {format_bytes(_size_key(found_files[0]))}）")
                         
@@ -311,7 +332,10 @@ class FinalDirMonitor:
                             else:
                                 logger.error(f"[Final监控] 文件处理失败: {file_path.name}")
                     else:
-                        # 没有找到新文件，等待后继续扫描
+                        # 没有找到新文件：记录"压缩喂不饱"等待起点
+                        if self._starve_start is None:
+                            self._starve_start = time.time()
+                        # 等待后继续扫描
                         time.sleep(self._scan_interval)
                         
                 except Exception as scan_error:
