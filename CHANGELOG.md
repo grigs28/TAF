@@ -1,5 +1,15 @@
 # 更新日志
 
+## [1.1.25] - 2026-10-17
+
+### 修复
+
+- **卡片"压缩组 X/Y"显示 16/16 而实际只有 3~7 组在压**：`get_aggregated_compression_progress`
+  里的 `running_count` 用的是 `len(running_compression_futures)`——包含"排队等守卫"和
+  "已通过守卫但尚未开写"的组。现改为**在途口径**（`compressor._active_compressing`，
+  与守卫日志同口径）；仍以 futures 非空作为"有任务"判据，避免全部组排队时卡片什么都不显示。
+- 版本升至 1.1.25
+
 ## [1.1.24] - 2026-10-17
 
 ### 优化

@@ -675,10 +675,19 @@ class CompressionWorker:
             # 非并行模式或未运行，返回None
             return None
         
-        running_count = len(self.running_compression_futures)
-        if running_count == 0:
+        # **在途口径**：只算真正在压缩（会落地产出）的组，与守卫日志一致。
+        # 不能再用 len(running_compression_futures) —— 它包含"排队等守卫"和
+        # "已通过守卫但尚未开写"的组，会让卡片显示 16/16 而实际只 3~7 个在压。
+        # 注意：仍以 futures 非空作为"有任务"的判据，否则全部组在排队时
+        # 会 return None，卡片反而不显示"0/16"。
+        _futures_count = len(self.running_compression_futures)
+        if _futures_count == 0:
             # 没有正在运行的压缩任务
             return None
+        try:
+            running_count = int(getattr(self.compressor, '_active_compressing', 0) or 0)
+        except Exception:
+            running_count = _futures_count
         
         # 从compression_progress_map中读取每个运行中任务的实际进度
         total_current = 0
