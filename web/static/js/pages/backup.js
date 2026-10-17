@@ -691,8 +691,13 @@
         const highlightClass = 'fw-semibold text-body-emphasis text-break';
         const sourcePathsLabel = (task.source_paths || []).join(', ') || 'N/A';
         const source = document.createElement('div');
-        source.className = 'mb-2';
-        source.innerHTML = `<small class="text-muted">源路径:</small><br><span class="${highlightClass}">${sourcePathsLabel}</span>`;
+        source.className = 'mb-2 d-flex align-items-baseline';
+        // 一行显示：标签不压缩，路径超出用省略号截断，悬停 title 显示完整路径
+        const _srcTitle = String(sourcePathsLabel)
+            .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        source.innerHTML = `<small class="text-muted flex-shrink-0 me-1">源路径:</small>`
+            + `<span class="${highlightClass} text-truncate" style="min-width:0;" title="${_srcTitle}">${sourcePathsLabel}</span>`;
         body.appendChild(source);
 
         const tape = document.createElement('div');
