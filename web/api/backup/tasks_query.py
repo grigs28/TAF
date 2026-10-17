@@ -180,6 +180,7 @@ async def get_backup_tasks(
                 tape_write_bytes = 0
                 tape_write_total = 0
                 tape_write_speed_mbps = 0.0
+                tape_write_avg_speed_mbps = 0.0
                 try:
                     _sys = getattr(getattr(http_request, 'app', None), 'state', None)
                     _sys = getattr(_sys, 'system', None) if _sys else None
@@ -196,6 +197,12 @@ async def get_backup_tasks(
                         if _t_start and tape_write_bytes > 0:
                             _elapsed = max(0.001, time.time() - _t_start)
                             tape_write_speed_mbps = tape_write_bytes / _elapsed / (1024 * 1024)
+                    # 本任务累计写带统计 → 平均写带速度（不含文件间空档）
+                    if _th is not None:
+                        _cum_bytes = int(getattr(_th, '_tape_cum_bytes', 0) or 0)
+                        _cum_sec = float(getattr(_th, '_tape_cum_seconds', 0.0) or 0.0)
+                        if _cum_sec > 0 and _cum_bytes > 0:
+                            tape_write_avg_speed_mbps = _cum_bytes / _cum_sec / (1024 * 1024)
                 except Exception as _tape_err:
                     logger.debug(f"[任务查询] 读取磁带写入状态失败（卡片将不显示磁带速度）: {_tape_err}")
 
@@ -500,6 +507,7 @@ async def get_backup_tasks(
                         "tape_write_bytes": tape_write_bytes if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         "tape_write_total": tape_write_total if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         "tape_write_speed_mbps": round(tape_write_speed_mbps, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
+                        "tape_write_avg_speed_mbps": round(tape_write_avg_speed_mbps, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         # 阶段徽章 hover 用的实时明细
                         "scan_live_stats": in_memory_scan_stats,          # 扫描中：已扫描文件/字节/目录
                         "prefetch_queue_depth": in_memory_queue_depth,    # 预分组：队列深度

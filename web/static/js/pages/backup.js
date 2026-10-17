@@ -660,14 +660,20 @@
         tape.className = 'mb-2';
         const target = task.tape_device || task.tape_id || '自动选择';
         // 正在写带时，把实时磁带写入速度右对齐显示在"目标:"行（无写入时不显示）
+        // 显示口径优先用"本任务累计平均速度"（tape_write_avg_speed_mbps，更稳定），
+        // 无累计值时回退当前文件瞬时速度
         // 徽章样式与右上角速度徽章一致（badge bg-*），颜色按速度分档
         // （参考磁带额定 285 MB/s）：≥230 绿、140~230 黄、<140 红
         // 注意：磁带只有一台，写带状态是全局值；只有运行中的任务卡片才显示
         const _isRunningTask = (task.status || '').toLowerCase() === 'running';
+        const _avgMbps = (typeof task.tape_write_avg_speed_mbps === 'number')
+            ? task.tape_write_avg_speed_mbps : 0;
+        const _curMbps = (typeof task.tape_write_speed_mbps === 'number')
+            ? task.tape_write_speed_mbps : 0;
+        const _showMbps = _avgMbps > 0 ? _avgMbps : _curMbps;
         let _tapeSpeedHtml = '';
-        if (_isRunningTask && task.tape_writing_file
-            && typeof task.tape_write_speed_mbps === 'number' && task.tape_write_speed_mbps > 0) {
-            const _mbps = task.tape_write_speed_mbps;
+        if (_isRunningTask && task.tape_writing_file && _showMbps > 0) {
+            const _mbps = _showMbps;
             const _speedClass = _mbps >= 230 ? 'badge bg-success'
                 : (_mbps >= 140 ? 'badge bg-warning text-dark' : 'badge bg-danger');
             // 字高与守卫行一致：包在 <small> 里继承字号，缩小内边距
@@ -682,7 +688,8 @@
         if (_isRunningTask && task.tape_writing_file) {
             tape.title = `正在写入磁带: ${task.tape_writing_file}\n`
                 + `已写: ${formatBytes(task.tape_write_bytes)} / ${formatBytes(task.tape_write_total)}\n`
-                + `速度: ${task.tape_write_speed_mbps} MB/s`;
+                + `瞬时速度: ${task.tape_write_speed_mbps} MB/s`
+                + (_avgMbps > 0 ? `\n平均速度: ${_avgMbps.toFixed(1)} MB/s（本任务累计）` : '');
         } else if (_isRunningTask) {
             tape.title = '当前没有正在进行的磁带写入（压缩中或等待中）';
         }

@@ -96,6 +96,14 @@ class TapeHandler:
         self._tape_write_bytes: int = 0                 # 当前文件已写字节
         self._tape_write_total: int = 0                 # 当前文件总字节
         self._tape_write_start: Optional[float] = None  # 当前文件开始时间（time.time()）
+        # 本次任务的累计写带统计（用于卡片显示"平均写带速度"）
+        self._tape_cum_bytes: int = 0                   # 累计写入字节
+        self._tape_cum_seconds: float = 0.0             # 累计实际写带耗时（不含文件间空档）
+
+    def reset_tape_write_stats(self) -> None:
+        """新任务开始时清零累计写带统计（平均写带速度的分母/分子）。"""
+        self._tape_cum_bytes = 0
+        self._tape_cum_seconds = 0.0
 
     def _get_tape_device(self) -> str:
         """获取磁带设备路径（用于 mt 命令）"""
@@ -1024,6 +1032,10 @@ class TapeHandler:
                 return None
 
             logger.info(f"[LTFS] 复制成功: {source_size_mb:.2f} MB, 耗时 {elapsed:.1f}s, 速度 {speed_mb:.2f} MB/s")
+
+            # 累计写带统计（仅供"平均写带速度"显示；只统计成功完成并通过大小校验的文件）
+            self._tape_cum_bytes += int(source_size)
+            self._tape_cum_seconds += float(elapsed)
 
             # ===== 步骤5: 列出磁带内容（写入后）=====
             contents_after = await self.list_tape_contents()

@@ -378,9 +378,15 @@ class BackupEngine:
             self._current_task = backup_task
             # 同步到 task_manager，确保 get_task_status 能获取到内存统计
             self.task_manager._current_task = backup_task
-            
+
             # 清零压缩进度信息（新任务开始时）
             backup_task.current_compression_progress = None
+
+            # 清零累计写带统计（卡片显示"平均写带速度"）
+            try:
+                self.tape_handler.reset_tape_write_stats()
+            except Exception:
+                pass
 
             # 0. 获取备份策略参数（从tapedrive和system配置）
             logger.info("========== 获取备份策略参数 ==========")
