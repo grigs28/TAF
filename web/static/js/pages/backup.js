@@ -72,6 +72,14 @@
         return Math.round(_rateOf(_scanRateCache, id, scannedFiles));
     }
 
+    // 紧凑计数：5180000 → 5.18M，695194 → 695K，用于卡片窄行
+    function formatCountCompact(n) {
+        const v = Number(n) || 0;
+        if (v >= 1e6) return parseFloat((v / 1e6).toFixed(2)) + 'M';
+        if (v >= 1e4) return Math.round(v / 1e3) + 'K';
+        return String(Math.round(v));
+    }
+
     function formatDateTime(value) {
         if (!value) return '-';
         const date = new Date(value);
@@ -1182,11 +1190,12 @@
                 const _scanStats = task.scan_live_stats || null;
                 const _scanFiles = _scanStats ? (Number(_scanStats.scanned_files) || 0) : 0;
                 const _scanRate = computeScanRate(task, _scanFiles);
-                // 扫描进行中：同时显示扫描/压缩两个计数与速率；扫描结束后退回原压缩进度格式
+                // 扫描进行中：同时显示扫描/压缩两个计数与速率（紧凑格式，一行放下）
+                const _scanRateLabel = _scanRate >= 1000 ? (Math.round(_scanRate / 100) / 10) + 'K' : String(_scanRate);
                 const _fileProgressHtml = _scanFiles > 0
-                    ? `扫描 ${_scanFiles.toLocaleString()}${_scanRate > 0 ? `（${_scanRate}/s）` : ''}`
-                        + ` · 压缩 ${Number(progressInfo.processedFiles || 0).toLocaleString()}${_fileRate ? `（${_fileRate}/s）` : ''}`
-                    : `${progressInfo.processedFiles}/${progressInfo.totalFiles || progressInfo.processedFiles}${_fileRate ? ` · ${_fileRate}/s` : ''}`;
+                    ? `扫描 ${formatCountCompact(_scanFiles)}${_scanRate > 0 ? `(${_scanRateLabel}/s)` : ''}`
+                        + ` · 压缩 ${formatCountCompact(progressInfo.processedFiles)}${_fileRate ? `(${_fileRate}/s)` : ''}`
+                    : `${formatCountCompact(progressInfo.processedFiles)}/${formatCountCompact(progressInfo.totalFiles || progressInfo.processedFiles)}${_fileRate ? ` · ${_fileRate}/s` : ''}`;
                 // hover 明细：扫描与压缩各自的计数、字节、速率、压缩率
                 const _fileProgressTitle = [
                     '扫描进度',
