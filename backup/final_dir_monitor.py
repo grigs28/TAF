@@ -52,9 +52,11 @@ class FinalDirMonitor:
         self._processed_files: Set[str] = set()  # 已处理文件的集合（完整路径）
         self._current_tape_file: Optional[str] = None  # 当前正在写入磁带的文件路径
         # "压缩喂不饱写带"的累计等待时间：final 目录无文件可写、等压缩产出的时长。
-        # 由任务收尾时调用 finalize_starvation() 丢弃最后一段（压缩已完成，不算饿死）。
+        # 统计口径（用户明确）：第一次写带开始之后，final 为空的累计时间。
+        # 从未写过带之前的空目录不计；任务收尾的最后一段由 finalize_starvation() 丢弃。
         self._starvation_seconds: float = 0.0
         self._starve_start: Optional[float] = None
+        self._has_written_once: bool = False   # 是否已完成过至少一次写带
         
     def start(self):
         """启动监控线程"""
@@ -66,6 +68,7 @@ class FinalDirMonitor:
             # 新任务开始：重置"压缩喂不饱"统计
             self._starvation_seconds = 0.0
             self._starve_start = None
+            self._has_written_once = False
             self._running = True
             self._worker_thread = threading.Thread(
                 target=self._monitor_loop,
@@ -327,13 +330,14 @@ class FinalDirMonitor:
                             self._processed_files.add(file_key)
                             
                             if success:
+                                self._has_written_once = True
                                 logger.debug(f"[Final监控] 文件处理完成: {file_path.name}")
 
                             else:
                                 logger.error(f"[Final监控] 文件处理失败: {file_path.name}")
                     else:
-                        # 没有找到新文件：记录"压缩喂不饱"等待起点
-                        if self._starve_start is None:
+                        # 没有找到新文件：只有第一次写带之后才统计 final 空等时间
+                        if self._has_written_once and self._starve_start is None:
                             self._starve_start = time.time()
                         # 等待后继续扫描
                         time.sleep(self._scan_interval)
