@@ -750,6 +750,16 @@
             }
             // "写带"与"MB/s"保持 <small> 的原字号；空闲徽章放在单位之后
             _tapeSpeedHtml = `<small>写带 ${_speedHtml} <span class="text-muted">MB/s</span>${_idleHtml}</small>`;
+        } else if (!_isRunningTask) {
+            // 任务结束：显示本任务累计的“等待压缩”（由任务完成时写入 result_summary）
+            const _starveDone = Number(task.tape_starvation_seconds) || 0;
+            if (_starveDone > 0) {
+                const _starveLabel = _starveDone >= 3600
+                    ? (Math.round(_starveDone / 360) / 10) + 'h'
+                    : (_starveDone >= 60 ? Math.round(_starveDone / 60) + 'm' : Math.round(_starveDone) + 's');
+                _tapeSpeedHtml = `<small>等待压缩 <span class="badge bg-secondary bg-opacity-25 text-light" `
+                    + `style="font-weight:400; padding:0.2em 0.45em; font-size:0.85rem;">${_starveLabel}</span></small>`;
+            }
         }
         tape.innerHTML = `<div class="d-flex justify-content-between align-items-center">
                 <small class="text-muted">目标:</small>

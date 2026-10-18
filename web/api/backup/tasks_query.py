@@ -547,8 +547,12 @@ async def get_backup_tasks(
                         # 写带忙闲统计：busy=实际复制累计秒数，idle=从首次写带起算的空档秒数
                         "tape_write_busy_seconds": round(tape_write_busy_seconds, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         "tape_write_idle_seconds": round(tape_write_idle_seconds, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
-                        # 压缩喂不饱写带的累计等待（final 空等压缩产出）
-                        "tape_starvation_seconds": round(tape_starvation_seconds, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
+                        # 压缩喂不饱写带的累计等待（运行中实时值；完成任务从 result_summary 读取）
+                        "tape_starvation_seconds": (
+                            round(tape_starvation_seconds, 1)
+                            if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id))
+                            else round(float(result_summary_dict.get('tape_starvation_seconds') or 0), 1)
+                        ),
                         # final 目录待写磁带的压缩文件数（卡片写带行显示）
                         "final_pending_files": final_pending_files,
                         # 阶段徽章 hover 用的实时明细

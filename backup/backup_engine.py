@@ -1005,7 +1005,16 @@ class BackupEngine:
             backup_task.completed_at = task_end_time
             duration_seconds = (task_end_time - task_start_time).total_seconds()
             duration_ms = int(duration_seconds * 1000)
-            
+
+            # 写“等待压缩”统计到 result_summary（任务完成后卡片仍可显示）
+            try:
+                _starve_seconds = float(
+                    getattr(self.final_dir_monitor, '_starvation_seconds', 0.0) or 0.0)
+                await self.backup_db.save_task_starvation(
+                    backup_task.id, _starve_seconds)
+            except Exception as _starve_err:
+                logger.debug(f"[备份引擎] 保存等待压缩统计失败: {_starve_err}")
+
             if success:
                 # 安全获取处理统计信息
                 processed_files = getattr(backup_task, 'processed_files', 0)

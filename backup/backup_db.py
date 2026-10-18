@@ -3802,6 +3802,37 @@ class BackupDB:
         except Exception as e:
             logger.info(f"更新扫描进度失败（忽略继续）: {str(e)}")
     
+    async def save_task_starvation(self, task_id: int, seconds: float):
+        """把“等待压缩”累计秒数合并写入 backup_tasks.result_summary。
+
+        任务完成后卡片仍可显示该指标；运行中的实时值由任务查询接口
+        从 FinalDirMonitor 直接读取，不依赖这里。
+        """
+        try:
+            from utils.scheduler.db_utils import get_opengauss_connection
+            async with get_opengauss_connection() as conn:
+                row = await conn.fetchrow(
+                    "SELECT result_summary FROM backup_tasks WHERE id = $1", task_id)
+                summary = {}
+                if row and row["result_summary"]:
+                    raw = row["result_summary"]
+                    if isinstance(raw, str):
+                        try:
+                            summary = json.loads(raw)
+                        except Exception:
+                            summary = {}
+                    elif isinstance(raw, dict):
+                        summary = raw
+                if not isinstance(summary, dict):
+                    summary = {}
+                summary["tape_starvation_seconds"] = round(float(seconds or 0), 1)
+                await conn.execute(
+                    "UPDATE backup_tasks SET result_summary = $2::jsonb, updated_at = now() "
+                    "WHERE id = $1",
+                    task_id, json.dumps(summary, ensure_ascii=False))
+        except Exception as e:
+            logger.warning(f"[备份数据库] 保存等待压缩统计失败 (task_id={task_id}): {e}")
+
     async def update_task_status(self, backup_task: BackupTask, status: BackupTaskStatus):
         """更新任务状态
         
