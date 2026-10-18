@@ -129,6 +129,9 @@ class Compressor:
         # 在途组的类型（'large'/'small'），与 _active_groups 严格同序增删，
         # 供卡片"压缩组: X/Y（L a / S b）"显示。
         self._active_group_types: List[str] = []
+        # 累计已完成的组数（按类型），用于卡片"累计 L x / S y"显示
+        self._completed_large_groups: int = 0
+        self._completed_small_groups: int = 0
         try:
             self._group_large_threshold = int(
                 getattr(settings, 'GROUP_LARGE_FILE_COUNT_THRESHOLD', 20000) or 20000)
@@ -145,22 +148,39 @@ class Compressor:
         """在途（会产出数据的）组数"""
         return len(self._active_groups)
 
+    def reset_group_stats(self) -> None:
+        """任务开始时重置在途/累计组统计（L/S 数量）"""
+        self._active_groups = []
+        self._active_group_types = []
+        self._completed_large_groups = 0
+        self._completed_small_groups = 0
+
     def _release_active_group(self, group_bytes: int = 0, group_path: str = "") -> None:
         """释放一个在途组的记账（优先按 (源字节, 路径) 精确匹配，容忍大小重复）"""
         try:
             idx = self._active_groups.index((int(group_bytes), str(group_path)))
+            _grp_type = self._active_group_types[idx] if idx < len(self._active_group_types) else 'large'
             del self._active_groups[idx]
             if idx < len(self._active_group_types):
                 del self._active_group_types[idx]
+            if _grp_type == 'small':
+                self._completed_small_groups += 1
+            else:
+                self._completed_large_groups += 1
             return
         except ValueError:
             pass
         # 路径不一致（异常路径/旧记录）：按值删除首个匹配项
         for idx, (src, _p) in enumerate(self._active_groups):
             if int(src) == int(group_bytes):
+                _grp_type = self._active_group_types[idx] if idx < len(self._active_group_types) else 'large'
                 del self._active_groups[idx]
                 if idx < len(self._active_group_types):
                     del self._active_group_types[idx]
+                if _grp_type == 'small':
+                    self._completed_small_groups += 1
+                else:
+                    self._completed_large_groups += 1
                 break
     
     async def group_files_for_compression(self, file_list: List[Dict]) -> List[List[Dict]]:

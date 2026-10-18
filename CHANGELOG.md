@@ -1,5 +1,16 @@
 # 更新日志
 
+## [1.1.83] - 2026-10-19
+
+### 新增
+
+- **压缩组行显示累计 L/S 组数**：在 `压缩组: 6/12（L 4 / S 2）` 后追加
+  `· 累计 L x / S y`（任务开始至今已完成的大/小文件组数量）。
+  - `Compressor` 新增 `_completed_large_groups` / `_completed_small_groups`，
+    任务开始时由 `reset_group_stats()` 清零
+  - 任务查询接口新增 `completed_large_groups` / `completed_small_groups`
+- 版本升至 1.1.83
+
 ## [1.1.82] - 2026-10-19
 
 ### 新增

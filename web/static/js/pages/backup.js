@@ -1115,10 +1115,14 @@
                 const _lsText = (typeof task.active_large_groups === 'number'
                                  && typeof task.active_small_groups === 'number')
                     ? `（L ${task.active_large_groups} / S ${task.active_small_groups}）` : '';
+                // 累计已完成的 L/S 组数
+                const _totalLsText = (typeof task.completed_large_groups === 'number'
+                                      && typeof task.completed_small_groups === 'number')
+                    ? ` · 累计 L ${task.completed_large_groups} / S ${task.completed_small_groups}` : '';
                 batchProgressHtml = normalizeCardHtml(`
                     <div class="d-flex justify-content-between align-items-center mb-1">
                         <small class="text-muted">压缩组:</small>
-                        <small class="text-muted">${_cells}<span class="fw-semibold ms-1">${runningCount}/${totalSlots}</span>${_lsText}</small>
+                        <small class="text-muted">${_cells}<span class="fw-semibold ms-1">${runningCount}/${totalSlots}</span>${_lsText}${_totalLsText}</small>
                     </div>
                 `);
             }

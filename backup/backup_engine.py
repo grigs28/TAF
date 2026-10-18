@@ -322,13 +322,13 @@ class BackupEngine:
 
     async def execute_backup_task(self, backup_task: BackupTask, scheduled_task=None, manual_run: bool = False) -> bool:
         """执行备份任务
-        
+
         执行前检查：
         1. 任务是否已执行过（在存活期内）- 仅自动执行时检查，手动运行跳过
         2. 任务是否正在执行
         3. 磁带卷标是否当月（仅当备份目标为磁带时）
         4. 完整备份前自动格式化磁带（受 ENABLE_TAPE_FORMAT_BEFORE_FULL 控制）
-        
+
         Args:
             backup_task: 备份任务对象
             scheduled_task: 计划任务对象（可选）
@@ -337,6 +337,12 @@ class BackupEngine:
         task_start_time = now()
         task_id = backup_task.id
         task_name = backup_task.task_name
+
+        # 任务开始：重置在途/累计组统计（L/S 数量）
+        try:
+            self.compressor.reset_group_stats()
+        except Exception:
+            pass
         
         try:
             # 记录开始日志

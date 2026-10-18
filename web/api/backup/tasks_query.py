@@ -315,6 +315,8 @@ async def get_backup_tasks(
                     guard_required_bytes = 0
                     active_large_groups = 0   # 在途大文件组数（带宽主导）
                     active_small_groups = 0   # 在途小文件组数（IOPS 主导）
+                    completed_large_groups = 0   # 累计已完成大文件组数
+                    completed_small_groups = 0   # 累计已完成小文件组数
                     task_status = None
 
                     if status_value == 'running':
@@ -332,6 +334,10 @@ async def get_backup_tasks(
                                         _types = list(getattr(_comp, '_active_group_types', []) or [])
                                         active_large_groups = _types.count('large')
                                         active_small_groups = _types.count('small')
+                                        completed_large_groups = int(
+                                            getattr(_comp, '_completed_large_groups', 0) or 0)
+                                        completed_small_groups = int(
+                                            getattr(_comp, '_completed_small_groups', 0) or 0)
                                         if getattr(_comp, '_guard_active', False):
                                             guard_active = True
                                             _lr = getattr(_comp, '_last_release_time', None)
@@ -572,7 +578,10 @@ async def get_backup_tasks(
                         "guard_required_bytes": guard_required_bytes,
                         # 在途组类型数量（卡片“压缩组: X/Y（L a / S b）”）
                         "active_large_groups": active_large_groups,
-                        "active_small_groups": active_small_groups
+                        "active_small_groups": active_small_groups,
+                        # 累计已完成组数（卡片“… · 累计 L x / S y”）
+                        "completed_large_groups": completed_large_groups,
+                        "completed_small_groups": completed_small_groups
                     })
 
                 # 追加计划任务（未运行模板）
