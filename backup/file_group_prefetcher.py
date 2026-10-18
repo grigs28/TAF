@@ -94,10 +94,14 @@ class FileGroupPrefetcher:
         # 默认 30 秒；不再使用独立固定值。
         self._sched_debounce = float(
             getattr(_s, 'DISK_CHECK_INTERVAL', 30) or 30)
-        self.large_queue: asyncio.Queue = asyncio.Queue(maxsize=0)  # 无界：分组不必等压缩消费
-        self.small_queue: asyncio.Queue = asyncio.Queue(maxsize=0)  # 无界：分组不必等压缩消费
-        self._large_sizes = _deque()
-        self._small_sizes = _deque()
+        # 按组内文件数排序的优先队列（无界）：
+        #   large 队列：priority = 文件数（升序）→ 优先“最大文件组”（组内文件最少、产出最快）
+        #   small 队列：priority = -文件数（降序）→ 优先“最小文件组”（组内文件最多、产出最慢）
+        # 结束信号 priority = -1e18，保证总是最先被取出。
+        self.large_queue: asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=0)
+        self.small_queue: asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=0)
+        self._queue_seq = 0
+        self._queued_sizes_by_seq: dict = {}
         self._large_done = False
         self._small_done = False
         self._large_take = 0
@@ -128,7 +132,7 @@ class FileGroupPrefetcher:
     def get_queue_sizes(self) -> list:
         """队列中各组字节大小（用于卡片 hover）"""
         if self.group_sched_enabled:
-            return list(self._large_sizes) + list(self._small_sizes)
+            return list(self._queued_sizes_by_seq.values())
         return list(self._queued_group_sizes)
         
     def start(self):
@@ -223,10 +227,14 @@ class FileGroupPrefetcher:
         return self._guard_confirmed
 
     async def _put_done_signal(self):
-        """发送预取结束信号（调度模式双队列各发一份）"""
+        """发送预取结束信号（调度模式双队列各发一份）
+
+        用极小的 priority 保证结束标记优先于普通组被取出。
+        """
         if self.group_sched_enabled:
-            await self.large_queue.put(([], -1))
-            await self.small_queue.put(([], -1))
+            for q in (self.large_queue, self.small_queue):
+                self._queue_seq += 1
+                await q.put((-1e18, self._queue_seq, 0, ([], -1)))
         else:
             await self.file_group_queue.put(([], -1))
 
@@ -277,8 +285,22 @@ class FileGroupPrefetcher:
         elif actual == 'small' and self._small_take < small_n:
             self._small_take += 1
 
+    @staticmethod
+    def _unwrap(raw):
+        """解包优先队列元素：(priority, seq, size, item) → (item, seq)"""
+        try:
+            _prio, seq, _size, item = raw
+            return item, seq
+        except (TypeError, ValueError):
+            return raw, None
+
     async def _get_scheduled(self, timeout: Optional[float]):
-        """调度模式取组：类型/配额选择 + 守卫联动 + 耗尽降级"""
+        """调度模式取组：类型/配额选择 + 守卫联动 + 耗尽降级
+
+        队列按文件数排序：
+          large → 取文件数最小（最大文件组，产出最快）
+          small → 取文件数最大（最小文件组，产出最慢）
+        """
         loop = asyncio.get_running_loop()
         deadline = None if timeout is None else loop.time() + timeout
         while True:
@@ -286,23 +308,24 @@ class FileGroupPrefetcher:
                 return ([], -1)
             choice = self._choose_queue()
             q = self.large_queue if choice == 'large' else self.small_queue
-            sizes = self._large_sizes if choice == 'large' else self._small_sizes
             other_q = self.small_queue if choice == 'large' else self.large_queue
-            other_sizes = self._small_sizes if choice == 'large' else self._large_sizes
+            seq = None
             try:
-                item = q.get_nowait()
+                item, seq = self._unwrap(q.get_nowait())
             except asyncio.QueueEmpty:
                 try:
-                    item = other_q.get_nowait()
-                    sizes = other_sizes
+                    item, seq = self._unwrap(other_q.get_nowait())
                     q = other_q
                 except asyncio.QueueEmpty:
                     if deadline is not None and deadline - loop.time() <= 0:
                         return None
                     try:
-                        item = await asyncio.wait_for(q.get(), timeout=2.0)
+                        item, seq = self._unwrap(
+                            await asyncio.wait_for(q.get(), timeout=2.0))
                     except asyncio.TimeoutError:
                         continue
+            if seq is not None:
+                self._queued_sizes_by_seq.pop(seq, None)
             # 结束标记（预取完成）
             if item and isinstance(item, tuple) and len(item) == 2 and not item[0]:
                 if q is self.large_queue:
@@ -314,11 +337,6 @@ class FileGroupPrefetcher:
                 file_groups, last_processed_id = item
                 if last_processed_id > self.last_processed_file_id:
                     self.last_processed_file_id = last_processed_id
-                try:
-                    if sizes:
-                        sizes.popleft()
-                except IndexError:
-                    pass
                 files_in_removed = sum(len(g) for g in file_groups)
                 self.queued_files_count = max(0, self.queued_files_count - files_in_removed)
                 # 成功取到组后推进配额（降级取组不计数）
@@ -441,7 +459,7 @@ class FileGroupPrefetcher:
                 if grouped_paths:
                     await self.in_memory_store.remove_files(grouped_paths)
 
-                # 将文件组放入队列（大小文件组按类型分队列）
+                # 将文件组放入队列（大小文件组按类型分队列；队列内按文件数排序）
                 for group in groups_to_queue:
                     total_size = sum(f.get('size', 0) for f in group)
                     file_count = len(group)
@@ -449,12 +467,13 @@ class FileGroupPrefetcher:
                     if self.group_sched_enabled:
                         is_large = file_count < self.group_large_threshold
                         q = self.large_queue if is_large else self.small_queue
-                        sizes = self._large_sizes if is_large else self._small_sizes
-                        if q.full():
-                            logger.debug("[文件组预取器-内存模式] 队列已满，等待...")
-                            await asyncio.sleep(2.0)
-                        await q.put(([group], 0))
-                        sizes.append(total_size)
+                        # large：文件数升序（优先最大文件组/最快产出）
+                        # small：文件数降序（优先最小文件组/最慢产出）
+                        priority = file_count if is_large else -file_count
+                        self._queue_seq += 1
+                        seq = self._queue_seq
+                        self._queued_sizes_by_seq[seq] = total_size
+                        await q.put((priority, seq, total_size, ([group], 0)))
                         _qtype = 'large' if is_large else 'small'
                     else:
                         if self.file_group_queue.full():
