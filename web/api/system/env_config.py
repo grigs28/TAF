@@ -57,7 +57,7 @@ class SystemEnvConfig(BaseModel):
     scan_engine: Optional[str] = Field(None, description="扫描引擎：nfs=优化扫描，classic=经典扫描")
     scan_log_interval_seconds: Optional[int] = Field(None, description="扫描批次进度日志的最小间隔（秒），默认60")
     scan_wait_timeout: Optional[int] = Field(None, description="等待后台扫描写入文件记录的超时时间（秒），默认300秒（5分钟）")
-    scan_memory_only: Optional[bool] = Field(None, description="纯内存扫描模式，扫描阶段跳过数据库写入")
+    # 纯内存扫描模式已强制启用（不再提供开关）
     compression_parallel_batches: Optional[int] = Field(None, description="压缩并行批次数量（默认2），预读取程序队列数为该值+1")
     compression_batches_reduction: Optional[int] = Field(None, description="扫描时减少的并行批次数（默认1），0表示不减少")
     disk_throttle_enabled: Optional[bool] = Field(None, description="磁盘限流总开关：关闭后百分比限流与危急层降级均不生效（数值保留）；空间守卫不受影响")
@@ -152,7 +152,6 @@ async def get_env_config():
             "scan_engine": env_vars.get("SCAN_ENGINE", "nfs"),
             "scan_log_interval_seconds": parse_int(env_vars.get("SCAN_LOG_INTERVAL_SECONDS"), 60),
             "scan_wait_timeout": parse_int(env_vars.get("SCAN_WAIT_TIMEOUT"), 300),
-            "scan_memory_only": parse_bool(env_vars.get("SCAN_MEMORY_ONLY"), False),
             "compression_parallel_batches": parse_int(env_vars.get("COMPRESSION_PARALLEL_BATCHES"), 3),
             "compression_batches_reduction": parse_int(env_vars.get("COMPRESSION_BATCHES_REDUCTION"), 1),
             "disk_throttle_enabled": parse_bool(env_vars.get("DISK_THROTTLE_ENABLED"), True),
@@ -266,8 +265,6 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             updates["SCAN_LOG_INTERVAL_SECONDS"] = str(config.scan_log_interval_seconds)
         if config.scan_wait_timeout is not None:
             updates["SCAN_WAIT_TIMEOUT"] = str(config.scan_wait_timeout)
-        if config.scan_memory_only is not None:
-            updates["SCAN_MEMORY_ONLY"] = str(config.scan_memory_only).lower()
         if config.compression_parallel_batches is not None:
             # 验证并行批次数范围（至少为1）
             if config.compression_parallel_batches < 1:

@@ -704,10 +704,6 @@ async function loadAllSystemConfig() {
                 const scanWaitTimeoutInput = document.getElementById('scanWaitTimeout');
                 if (scanWaitTimeoutInput) scanWaitTimeoutInput.value = config.scan_wait_timeout;
             }
-            if (config.scan_memory_only !== undefined) {
-                const scanMemoryOnlyInput = document.getElementById('scanMemoryOnly');
-                if (scanMemoryOnlyInput) scanMemoryOnlyInput.checked = config.scan_memory_only;
-            }
             if (config.compression_parallel_batches) {
                 const compressionParallelBatchesInput = document.getElementById('compressionParallelBatches');
                 if (compressionParallelBatchesInput) compressionParallelBatchesInput.value = config.compression_parallel_batches;
@@ -853,11 +849,6 @@ async function saveEnvConfigSection() {
                 if (value === '' || value === null || value === undefined) return null;
                 const parsed = parseInt(value);
                 return isNaN(parsed) ? null : parsed;
-            })(),
-            scan_memory_only: (() => {
-                const checkbox = document.getElementById('scanMemoryOnly');
-                if (!checkbox) return undefined;
-                return checkbox.checked === true;
             })(),
             compression_parallel_batches: (() => {
                 const input = document.getElementById('compressionParallelBatches');

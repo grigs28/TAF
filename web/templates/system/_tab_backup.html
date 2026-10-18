@@ -23,11 +23,6 @@
                             扫描启动后等待此时间再开始压缩（默认300秒）。若扫描提前完成，则立即开始压缩，不空等剩余时间。
                         </small>
                     </div>
-                    <div class="form-check form-switch mb-3">
-                        <input class="form-check-input" type="checkbox" id="scanMemoryOnly">
-                        <label class="form-check-label" for="scanMemoryOnly">纯内存扫描模式</label>
-                        <small class="text-muted d-block">启用后扫描器仅写入内存，减少扫描阶段数据库I/O，崩溃时无孤儿记录</small>
-                    </div>
                     <div class="mb-3">
                         <label class="form-label">后台扫描进度更新间隔（文件数）</label>
                         <input type="number" class="form-control" id="scanUpdateInterval" value="500" min="1" step="1">

@@ -1410,13 +1410,12 @@ class BackupEngine:
             logger.info("========== 跳过挂载（已在磁带检查阶段完成）==========")
 
             # 5. 流式处理：扫描和压缩循环执行
-            # 初始化内存文件存储（提前声明，避免作用域问题）
-            in_memory_store = None
-            if getattr(self.settings, 'SCAN_MEMORY_ONLY', False):
-                from backup.in_memory_file_store import InMemoryFileStore
-                in_memory_store = InMemoryFileStore(backup_set.id)
-                backup_task.in_memory_file_store = in_memory_store
-                logger.info("[备份引擎] 纯内存扫描模式已启用，扫描阶段将跳过数据库写入")
+            # 纯内存扫描模式强制启用：扫描结果只放内存，压缩阶段跳过文件记录写库
+            # （不再提供 SCAN_MEMORY_ONLY 开关；文件级恢复能力由此停用）
+            from backup.in_memory_file_store import InMemoryFileStore
+            in_memory_store = InMemoryFileStore(backup_set.id)
+            backup_task.in_memory_file_store = in_memory_store
+            logger.info("[备份引擎] 纯内存扫描模式已启用（强制），扫描阶段跳过数据库写入")
 
             logger.info("开始流式处理：扫描和压缩循环执行...")
             logger.info(f"压缩配置：最大文件大小={format_bytes(self.settings.MAX_FILE_SIZE)}")
