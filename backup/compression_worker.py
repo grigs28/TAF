@@ -1043,7 +1043,8 @@ class CompressionWorker:
                 if isinstance(f, dict):
                     # 字典格式 - 直接使用
                     file_dict = f
-                    total_size += file_dict.get('file_size', 0)
+                    total_size += (file_dict.get('size', 0)
+                                   or file_dict.get('file_size', 0))
                 elif isinstance(f, list):
                     # 检查是否是嵌套字典格式（最后一个元素是字典）
                     if f and isinstance(f[-1], dict):

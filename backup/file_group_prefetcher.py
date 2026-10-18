@@ -49,7 +49,7 @@ class FileGroupPrefetcher:
         self.parallel_batches = parallel_batches
         # 文件组队列：容量为 parallel_batches + 1（N个正在压缩的 + 1个待压缩的）
         self.queue_maxsize = parallel_batches + 2
-        self.file_group_queue: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
+        self.file_group_queue: asyncio.Queue = asyncio.Queue(maxsize=0)  # 无界：分组不必等压缩消费
         
         # 预取任务
         self.prefetch_task: Optional[asyncio.Task] = None
@@ -94,8 +94,8 @@ class FileGroupPrefetcher:
         # 默认 30 秒；不再使用独立固定值。
         self._sched_debounce = float(
             getattr(_s, 'DISK_CHECK_INTERVAL', 30) or 30)
-        self.large_queue: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
-        self.small_queue: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
+        self.large_queue: asyncio.Queue = asyncio.Queue(maxsize=0)  # 无界：分组不必等压缩消费
+        self.small_queue: asyncio.Queue = asyncio.Queue(maxsize=0)  # 无界：分组不必等压缩消费
         self._large_sizes = _deque()
         self._small_sizes = _deque()
         self._large_done = False
@@ -370,8 +370,13 @@ class FileGroupPrefetcher:
                 # 收集所有成组文件的路径，用于最后一次性删除
                 grouped_paths = []
 
-                for file_info in files:
-                    file_size = file_info.get('size', 0) or 0
+                for raw_info in files:
+                    # 分组只保留压缩需要的字段（path + size）：
+                    # 原 dict 含 name/modified_time/permissions 等，约 400~500 B/文件；
+                    # 精简后约 200~250 B，且分组后原 dict 即可从内存库释放。
+                    file_path = raw_info.get('path') or raw_info.get('file_path')
+                    file_size = int(raw_info.get('size', 0) or raw_info.get('file_size', 0) or 0)
+                    file_info = {'path': file_path, 'size': file_size}
 
                     # 第一层：超大文件独立成组
                     if file_size > min_group_size:
@@ -381,7 +386,7 @@ class FileGroupPrefetcher:
                             current_group = []
                             current_size = 0
                         groups_to_queue.append([file_info])
-                        grouped_paths.append(file_info.get('path', ''))
+                        grouped_paths.append(file_path or '')
                         continue
 
                     # 第二层：贪心累积
