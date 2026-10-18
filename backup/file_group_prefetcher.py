@@ -237,7 +237,12 @@ class FileGroupPrefetcher:
             return False
 
     def _choose_queue(self) -> str:
-        """选择下一个组队列：'large'（快产出） / 'small'（慢产出）"""
+        """选择下一个组队列：'large'（快产出） / 'small'（慢产出）
+
+        注意：这里只决定"配额优先类型"，不推进配额计数；取组成功后再由
+        _commit_take() 计数。这样某类队列为空时降级取另一类不会消耗配额，
+        下次仍优先配额要求的类型。
+        """
         guard = self._update_guard_state()
         if guard:
             # 守卫拦停：只取小文件组（文件数最多、产出最慢）；
@@ -249,13 +254,28 @@ class FileGroupPrefetcher:
             return 'small'
         if small_n <= 0:
             return 'large'
-        if self._large_take + self._small_take >= large_n + small_n:
+        if self._large_take >= large_n and self._small_take >= small_n:
             self._large_take = self._small_take = 0
         if self._large_take < large_n:
-            self._large_take += 1
             return 'large'
-        self._small_take += 1
         return 'small'
+
+    def _commit_take(self, actual: str, choice: str):
+        """成功取到组后推进配额计数。
+
+        只有实际取到的类型与配额选择一致时才计数；降级取另一类不计数，
+        配额状态保持不变，下次仍优先配额要求的类型。
+        """
+        if actual != choice:
+            return
+        large_n, small_n = (self._scan_ratio
+                            if not self._scan_completed() else self._normal_ratio)
+        if large_n <= 0 or small_n <= 0:
+            return
+        if actual == 'large' and self._large_take < large_n:
+            self._large_take += 1
+        elif actual == 'small' and self._small_take < small_n:
+            self._small_take += 1
 
     async def _get_scheduled(self, timeout: Optional[float]):
         """调度模式取组：类型/配额选择 + 守卫联动 + 耗尽降级"""
@@ -301,6 +321,9 @@ class FileGroupPrefetcher:
                     pass
                 files_in_removed = sum(len(g) for g in file_groups)
                 self.queued_files_count = max(0, self.queued_files_count - files_in_removed)
+                # 成功取到组后推进配额（降级取组不计数）
+                actual = 'large' if q is self.large_queue else 'small'
+                self._commit_take(actual, choice)
             return item
 
     def get_queued_files_count(self) -> int:
