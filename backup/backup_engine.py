@@ -1535,6 +1535,11 @@ class BackupEngine:
                     parallel_batches=parallel_batches,
                     in_memory_store=in_memory_store
                 )
+                # 注入 compressor 引用：大小文件组调度需要读取守卫状态 _guard_active
+                try:
+                    file_group_prefetcher.compressor = self.compressor
+                except Exception:
+                    pass
                 # 在压缩任务开始前启动预取器
                 file_group_prefetcher.start()
                 # 暴露实例引用：任务查询 API 需要读取"预取队列深度 + 各组大小"，

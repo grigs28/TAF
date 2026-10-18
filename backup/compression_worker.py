@@ -389,7 +389,7 @@ class CompressionWorker:
                         await self._adjust_parallel_batches()
                     
                     # 关键修复：先检查队列是否还有文件组，如果有则继续处理
-                    queue_size = self.file_group_prefetcher.file_group_queue.qsize() if self.file_group_prefetcher else 0
+                    queue_size = self.file_group_prefetcher.get_queue_size() if self.file_group_prefetcher else 0
                     if queue_size > 0:
                         logger.debug(
                             f"队列中还有 {queue_size} 个文件组未处理，继续处理..."
@@ -559,7 +559,7 @@ class CompressionWorker:
                 logger.debug(
                     f"[压缩循环] ✅ 启动压缩任务 #{current_group_idx + 1}，"
                     f"当前运行中的任务数: {len(self.running_compression_futures)}/{self.parallel_batches}, "
-                    f"队列大小: {self.file_group_prefetcher.file_group_queue.qsize()}/{self.file_group_prefetcher.queue_maxsize}"
+                    f"队列大小: {self.file_group_prefetcher.get_queue_size()}/{self.file_group_prefetcher.queue_maxsize}"
                 )
 
                 self.group_idx += 1

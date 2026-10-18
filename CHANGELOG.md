@@ -1,5 +1,22 @@
 # 更新日志
 
+## [1.1.77] - 2026-10-19
+
+### 新增
+
+- **大小文件组动态调度（计划04 实施）**：按组内文件数（<2万 / ≥2万）划分
+  大/小文件组，双队列调度：
+  - 扫描期 2大:1小（限速防 SSD 满）；扫描完成 3大:1小（喂饱写带）
+  - 守卫拦停时只取小文件组（产出最慢）；小文件组耗尽才降级取大文件组
+  - 某类队列为空时自动降级取另一类；都空则等待
+  - 守卫状态切换带 45 秒防抖
+- 新增配置：`GROUP_SCHED_ENABLED`（总开关，false 回退原 FIFO）、
+  `GROUP_LARGE_FILE_COUNT_THRESHOLD`、`GROUP_SCHED_SCAN_RATIO`、
+  `GROUP_SCHED_NORMAL_RATIO`、`GROUP_SCHED_DEBOUNCE_SECONDS`。
+- 任务查询/压缩 worker 的队列深度与组大小改走 `get_queue_size()/get_queue_sizes()`
+  （兼容双队列）。
+- 版本升至 1.1.77
+
 ## [1.1.76] - 2026-10-19
 
 ### 文档

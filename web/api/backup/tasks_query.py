@@ -363,9 +363,9 @@ async def get_backup_tasks(
                                             in_memory_prefetcher_running = getattr(fp, '_running', True)
                                             # 预分组队列：深度 + 各组字节大小（供卡片"预分组"徽章 hover）
                                             try:
-                                                in_memory_queue_depth = fp.file_group_queue.qsize()
+                                                in_memory_queue_depth = fp.get_queue_size()
                                                 in_memory_queue_sizes = [
-                                                    int(x) for x in list(getattr(fp, '_queued_group_sizes', []))
+                                                    int(x) for x in fp.get_queue_sizes()
                                                 ]
                                             except Exception:
                                                 pass

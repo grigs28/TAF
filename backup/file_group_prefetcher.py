@@ -7,6 +7,7 @@
 
 import asyncio
 import logging
+import time
 from typing import Optional, Tuple, List, Dict, Any
 
 from models.backup import BackupSet, BackupTask
@@ -75,6 +76,58 @@ class FileGroupPrefetcher:
         from collections import deque as _deque
         self._queued_group_sizes = _deque()
         self.total_queued_size = 0  # 累计放入队列的总文件大小（字节）
+
+        # ===== 大小文件组动态调度（计划04） =====
+        # 按组内文件数分类：< 阈值 = 大文件组（带宽主导），>= 阈值 = 小文件组（IOPS 主导）。
+        # 调度规则：
+        #   · 扫描期 2大:1小（限速防 SSD 满）；扫描完成 3大:1小（喂饱写带）
+        #   · 守卫触发时只取小文件组（文件数最多、产出最慢）
+        #   · 某类耗尽时取另一类；都空则等待
+        # 开关 GROUP_SCHED_ENABLED=false 时完全回退到原来的单队列 FIFO 行为。
+        _s = get_settings()
+        self.group_sched_enabled = bool(getattr(_s, 'GROUP_SCHED_ENABLED', True))
+        self.group_large_threshold = int(
+            getattr(_s, 'GROUP_LARGE_FILE_COUNT_THRESHOLD', 20000) or 20000)
+        self._scan_ratio = self._parse_ratio(getattr(_s, 'GROUP_SCHED_SCAN_RATIO', '2:1'))
+        self._normal_ratio = self._parse_ratio(getattr(_s, 'GROUP_SCHED_NORMAL_RATIO', '3:1'))
+        self._sched_debounce = float(
+            getattr(_s, 'GROUP_SCHED_DEBOUNCE_SECONDS', 45) or 45)
+        self.large_queue: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
+        self.small_queue: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
+        self._large_sizes = _deque()
+        self._small_sizes = _deque()
+        self._large_done = False
+        self._small_done = False
+        self._large_take = 0
+        self._small_take = 0
+        self._guard_confirmed = False     # 防抖后的守卫状态
+        self._guard_pending_since = 0.0
+        self._guard_seen = False
+        self.compressor = None            # 由 BackupEngine 注入（读取 _guard_active）
+
+    @staticmethod
+    def _parse_ratio(value) -> tuple:
+        """解析 '2:1' 为 (2,1)；非法值回退 (2,1)"""
+        try:
+            left, right = str(value).split(':')
+            a, b = int(left), int(right)
+            if a <= 0 and b <= 0:
+                return (2, 1)
+            return (max(0, a), max(0, b))
+        except Exception:
+            return (2, 1)
+
+    def get_queue_size(self) -> int:
+        """当前待压缩组数（兼容调度开关两种模式）"""
+        if self.group_sched_enabled:
+            return self.large_queue.qsize() + self.small_queue.qsize()
+        return self.get_queue_size()
+
+    def get_queue_sizes(self) -> list:
+        """队列中各组字节大小（用于卡片 hover）"""
+        if self.group_sched_enabled:
+            return list(self._large_sizes) + list(self._small_sizes)
+        return list(self._queued_group_sizes)
         
     def start(self):
         """启动预取任务"""
@@ -107,13 +160,15 @@ class FileGroupPrefetcher:
     
     async def get_file_group(self, timeout: Optional[float] = None) -> Optional[Tuple[List[List[Dict]], int]]:
         """从队列获取文件组
-        
+
         Args:
             timeout: 超时时间（秒），None表示无限等待
-        
+
         Returns:
             (file_groups, last_processed_id) 或 None（如果超时或停止）
         """
+        if self.group_sched_enabled:
+            return await self._get_scheduled(timeout)
         try:
             if timeout is None:
                 result = await self.file_group_queue.get()
@@ -149,6 +204,103 @@ class FileGroupPrefetcher:
             logger.debug("[文件组预取器] 获取文件组被取消")
             return None
     
+    def _update_guard_state(self) -> bool:
+        """防抖后的守卫状态：守卫连续 active 超过 debounce 秒才确认切换。"""
+        guard = bool(getattr(self.compressor, '_guard_active', False)) if self.compressor else False
+        now = time.time()
+        if guard == self._guard_seen:
+            self._guard_pending_since = 0.0
+            return self._guard_confirmed
+        if self._guard_pending_since == 0.0:
+            self._guard_pending_since = now
+        if now - self._guard_pending_since >= self._sched_debounce:
+            self._guard_seen = guard
+            self._guard_confirmed = guard
+            self._guard_pending_since = 0.0
+            logger.info(f"[文件组调度] 守卫状态切换 -> {'拦停' if guard else '正常'}")
+        return self._guard_confirmed
+
+    async def _put_done_signal(self):
+        """发送预取结束信号（调度模式双队列各发一份）"""
+        if self.group_sched_enabled:
+            await self.large_queue.put(([], -1))
+            await self.small_queue.put(([], -1))
+        else:
+            await self.file_group_queue.put(([], -1))
+
+    def _scan_completed(self) -> bool:
+        try:
+            return bool(self.in_memory_store and self.in_memory_store.is_scan_done())
+        except Exception:
+            return False
+
+    def _choose_queue(self) -> str:
+        """选择下一个组队列：'large'（快产出） / 'small'（慢产出）"""
+        guard = self._update_guard_state()
+        if guard:
+            # 守卫拦停：只取小文件组（文件数最多、产出最慢）；
+            # 小文件组耗尽才取大文件组（没有更慢的可选）
+            return 'small' if not self.small_queue.empty() else 'large'
+        large_n, small_n = (self._scan_ratio
+                            if not self._scan_completed() else self._normal_ratio)
+        if large_n <= 0:
+            return 'small'
+        if small_n <= 0:
+            return 'large'
+        if self._large_take + self._small_take >= large_n + small_n:
+            self._large_take = self._small_take = 0
+        if self._large_take < large_n:
+            self._large_take += 1
+            return 'large'
+        self._small_take += 1
+        return 'small'
+
+    async def _get_scheduled(self, timeout: Optional[float]):
+        """调度模式取组：类型/配额选择 + 守卫联动 + 耗尽降级"""
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + timeout
+        while True:
+            if self._large_done and self._small_done:
+                return ([], -1)
+            choice = self._choose_queue()
+            q = self.large_queue if choice == 'large' else self.small_queue
+            sizes = self._large_sizes if choice == 'large' else self._small_sizes
+            other_q = self.small_queue if choice == 'large' else self.large_queue
+            other_sizes = self._small_sizes if choice == 'large' else self._large_sizes
+            try:
+                item = q.get_nowait()
+            except asyncio.QueueEmpty:
+                try:
+                    item = other_q.get_nowait()
+                    sizes = other_sizes
+                    q = other_q
+                except asyncio.QueueEmpty:
+                    if deadline is not None and deadline - loop.time() <= 0:
+                        return None
+                    try:
+                        item = await asyncio.wait_for(q.get(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        continue
+            # 结束标记（预取完成）
+            if item and isinstance(item, tuple) and len(item) == 2 and not item[0]:
+                if q is self.large_queue:
+                    self._large_done = True
+                else:
+                    self._small_done = True
+                continue
+            if item and isinstance(item, tuple) and len(item) == 2 and item[0]:
+                file_groups, last_processed_id = item
+                if last_processed_id > self.last_processed_file_id:
+                    self.last_processed_file_id = last_processed_id
+                try:
+                    if sizes:
+                        sizes.popleft()
+                except IndexError:
+                    pass
+                files_in_removed = sum(len(g) for g in file_groups)
+                self.queued_files_count = max(0, self.queued_files_count - files_in_removed)
+            return item
+
     def get_queued_files_count(self) -> int:
         """获取队列中的总文件数（用于进度显示）
         
@@ -259,35 +411,46 @@ class FileGroupPrefetcher:
                 if grouped_paths:
                     await self.in_memory_store.remove_files(grouped_paths)
 
-                # 将文件组放入队列
+                # 将文件组放入队列（大小文件组按类型分队列）
                 for group in groups_to_queue:
                     total_size = sum(f.get('size', 0) for f in group)
+                    file_count = len(group)
 
-                    # 队列满时等待
-                    if self.file_group_queue.full():
-                        logger.debug("[文件组预取器-内存模式] 队列已满，等待...")
-                        await asyncio.sleep(2.0)
+                    if self.group_sched_enabled:
+                        is_large = file_count < self.group_large_threshold
+                        q = self.large_queue if is_large else self.small_queue
+                        sizes = self._large_sizes if is_large else self._small_sizes
+                        if q.full():
+                            logger.debug("[文件组预取器-内存模式] 队列已满，等待...")
+                            await asyncio.sleep(2.0)
+                        await q.put(([group], 0))
+                        sizes.append(total_size)
+                        _qtype = 'large' if is_large else 'small'
+                    else:
+                        if self.file_group_queue.full():
+                            logger.debug("[文件组预取器-内存模式] 队列已满，等待...")
+                            await asyncio.sleep(2.0)
+                        await self.file_group_queue.put(([group], 0))
+                        self._queued_group_sizes.append(total_size)
+                        _qtype = '-'
 
-                    await self.file_group_queue.put(([group], 0))
-                    # 与队列同序记录该组字节大小（出队时 popleft，FIFO 严格对应）
-                    self._queued_group_sizes.append(total_size)
                     self.prefetched_groups += 1
                     self.total_queued_files_count += len(group)
                     self.total_queued_size += total_size
                     self.queued_files_count += len(group)
 
                     logger.debug(
-                        f"[文件组预取器-内存模式] 预取文件组：{len(group)} 个文件，"
-                        f"大小={format_bytes(total_size)}，"
+                        f"[文件组预取器-内存模式] 预取文件组：{len(group)} 个文件"
+                        f"（{_qtype}），大小={format_bytes(total_size)}，"
                         f"累计预取={self.prefetched_groups} 组，"
-                        f"队列={self.file_group_queue.qsize()}/{self.queue_maxsize}"
+                        f"队列={self.get_queue_size()}/{self.queue_maxsize}"
                     )
 
                 # 检查扫描是否完成且无剩余文件，发送终止信号
                 if scan_done:
                     remaining = await self.in_memory_store.get_all_pending_files()
                     if not remaining:
-                        await self.file_group_queue.put(([], -1))
+                        await self._put_done_signal()
                         logger.info("[文件组预取器-内存模式] 所有文件已预取完成，发送终止信号")
                         break
 
@@ -298,7 +461,7 @@ class FileGroupPrefetcher:
         except Exception as e:
             logger.error(f"[文件组预取器-内存模式] 预取循环异常: {e}", exc_info=True)
             try:
-                await self.file_group_queue.put(([], -1))
+                await self._put_done_signal()
             except Exception:
                 pass
         finally:
@@ -342,7 +505,7 @@ class FileGroupPrefetcher:
                 self.prefetch_loop_count += 1
                 try:
                     # 6秒轮询检测队列大小
-                    current_queue_size = self.file_group_queue.qsize()
+                    current_queue_size = self.get_queue_size()
                     
                     # 如果队列未满，尝试填充
                     if current_queue_size < self.queue_maxsize:
@@ -366,7 +529,7 @@ class FileGroupPrefetcher:
                     
                     logger.debug(
                         f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 开始检索文件组："
-                        f"队列大小={self.file_group_queue.qsize()}/{self.queue_maxsize}, "
+                        f"队列大小={self.get_queue_size()}/{self.queue_maxsize}, "
                         f"last_processed_id={self.last_processed_file_id}, "
                         f"max_file_size={settings.MAX_FILE_SIZE}"
                     )
@@ -496,7 +659,7 @@ class FileGroupPrefetcher:
                             dedup_log = f"，去重（{duplicate_count_in_groups}）"
                             logger.info(
                                 f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ✅ 已预取 {len(deduplicated_groups)} 个文件组："
-                                f"✅队列大小 {self.file_group_queue.qsize()}/{self.queue_maxsize} | "
+                                f"✅队列大小 {self.get_queue_size()}/{self.queue_maxsize} | "
                                 f"文件数 {total_files_in_groups:,} 个{dedup_log} | "
                                 f"当前组大小 {format_bytes(total_size_in_groups)} | "
                                 f"累计总大小 {format_bytes(self.total_queued_size)} | "
@@ -740,7 +903,7 @@ class FileGroupPrefetcher:
                                             dedup_log = f"，去重（{duplicate_count_in_groups}）"
                                             logger.info(
                                                 f"[文件组预取器] [循环 #{self.prefetch_loop_count}] ✅ 已预取 {len(deduplicated_groups)} 个文件组："
-                                                f"✅队列大小 {self.file_group_queue.qsize()}/{self.queue_maxsize} | "
+                                                f"✅队列大小 {self.get_queue_size()}/{self.queue_maxsize} | "
                                                 f"文件数 {total_files_in_groups:,} 个{dedup_log} | "
                                                 f"当前组大小 {format_bytes(total_size_in_groups)} | "
                                                 f"累计总大小 {format_bytes(self.total_queued_size)} | "
@@ -766,7 +929,7 @@ class FileGroupPrefetcher:
                                                 logger.warning(f"[文件组预取器] ⚠️ 更新任务状态失败: {str(update_error)}")
                                             # 放入结束信号（-1 表示结束），压缩循环会识别并停止
                                             await self.file_group_queue.put(([], -1))
-                                            queue_size_after = self.file_group_queue.qsize()
+                                            queue_size_after = self.get_queue_size()
                                             actual_groups = queue_size_after - 1  # 减去结束信号
                                             logger.info(
                                                 f"[文件组预取器] [循环 #{self.prefetch_loop_count}] 已放入结束信号到队列 | "
@@ -847,7 +1010,7 @@ class FileGroupPrefetcher:
                 if self.prefetch_loop_count > 0 else 0
             )
             # 计算队列中的实际文件组数（排除结束信号）
-            queue_size = self.file_group_queue.qsize()
+            queue_size = self.get_queue_size()
             # 结束信号是 ([], -1)，如果有结束信号，实际文件组数 = queue_size - 1
             actual_file_groups_in_queue = queue_size - (1 if queue_size > 0 else 0)
             
@@ -866,7 +1029,7 @@ class FileGroupPrefetcher:
         return {
             'prefetched_groups': self.prefetched_groups,
             'total_retrieval_time': self.total_retrieval_time,
-            'queue_size': self.file_group_queue.qsize(),
+            'queue_size': self.get_queue_size(),
             'last_processed_file_id': self.last_processed_file_id
         }
 

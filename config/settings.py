@@ -110,6 +110,13 @@ class Settings(BaseSettings):
     DISK_GUARD_ENABLED: bool = True  # 空间守卫总开关：关闭则不再按守卫线暂停发放新压缩组（与磁盘限流至少保留一个）
     DISK_GUARD_SAFETY_FACTOR: float = 1.2  # 空间守卫安全系数：守卫线 = 在途组剩余待产出 × 本系数（1.0~3.0）
     DISK_GUARD_COUNT_PRODUCED: bool = True  # 守卫需求按"剩余待产出"计算：在途组已落地字节从源大小上界中扣除（关闭=纯源大小口径）
+
+    # 大小文件组动态调度（计划04）
+    GROUP_SCHED_ENABLED: bool = True  # 总开关：false 回退到原来的单队列 FIFO 顺序
+    GROUP_LARGE_FILE_COUNT_THRESHOLD: int = 20000  # 组内文件数 < 阈值 = 大文件组（带宽主导）
+    GROUP_SCHED_SCAN_RATIO: str = "2:1"   # 扫描进行中 大:小 配额
+    GROUP_SCHED_NORMAL_RATIO: str = "3:1"  # 扫描完成后 大:小 配额
+    GROUP_SCHED_DEBOUNCE_SECONDS: int = 45  # 守卫状态切换防抖（秒）
     DISK_CHECK_INTERVAL: int = 30  # 磁盘空间检查间隔（秒）
     DISK_CHECK_MAX_WAIT_MINUTES: int = 120  # 磁盘空间不足时暂停压缩的最大等待分钟数（超时抛错）
     DISK_CHECK_MIN_FREE_MULTIPLIER: int = 3  # 最小剩余空间倍数（3 * MAX_FILE_SIZE）
