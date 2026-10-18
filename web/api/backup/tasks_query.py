@@ -313,6 +313,8 @@ async def get_backup_tasks(
                     guard_idle_seconds = 0
                     guard_waiting_groups = 0
                     guard_required_bytes = 0
+                    active_large_groups = 0   # 在途大文件组数（带宽主导）
+                    active_small_groups = 0   # 在途小文件组数（IOPS 主导）
                     task_status = None
 
                     if status_value == 'running':
@@ -323,19 +325,23 @@ async def get_backup_tasks(
                             if system and system.backup_engine:
                                 # 从BackupEngine的compression_worker获取聚合的压缩进度
                                 backup_engine = system.backup_engine
-                                # 空间守卫状态（全局，供卡片在"SSD 剩余"行追加"守卫拦停 X 分钟"）
+                                # 在途组类型统计（卡片"压缩组: X/Y（L a / S b）"）
                                 try:
                                     _comp = getattr(backup_engine, 'compressor', None)
-                                    if _comp is not None and getattr(_comp, '_guard_active', False):
-                                        guard_active = True
-                                        _lr = getattr(_comp, '_last_release_time', None)
-                                        if _lr:
-                                            guard_idle_seconds = max(0, int(time.time() - float(_lr)))
-                                        _groups = list(getattr(_comp, '_active_group_bytes', []) or [])
-                                        guard_waiting_groups = len(_groups)
-                                        guard_required_bytes = sum(int(b) for b in _groups)
+                                    if _comp is not None:
+                                        _types = list(getattr(_comp, '_active_group_types', []) or [])
+                                        active_large_groups = _types.count('large')
+                                        active_small_groups = _types.count('small')
+                                        if getattr(_comp, '_guard_active', False):
+                                            guard_active = True
+                                            _lr = getattr(_comp, '_last_release_time', None)
+                                            if _lr:
+                                                guard_idle_seconds = max(0, int(time.time() - float(_lr)))
+                                            _groups = list(getattr(_comp, '_active_group_bytes', []) or [])
+                                            guard_waiting_groups = len(_groups)
+                                            guard_required_bytes = sum(int(b) for b in _groups)
                                 except Exception as _guard_err:
-                                    logger.debug(f"[任务查询] 读取守卫状态失败: {_guard_err}")
+                                    logger.debug(f"[任务查询] 读取守卫/组类型状态失败: {_guard_err}")
                                 if hasattr(backup_engine, '_current_compression_worker') and backup_engine._current_compression_worker:
                                     compression_worker = backup_engine._current_compression_worker
                                     if compression_worker.backup_task.id == row["id"]:
@@ -563,7 +569,10 @@ async def get_backup_tasks(
                         "guard_active": guard_active,
                         "guard_idle_seconds": guard_idle_seconds,
                         "guard_waiting_groups": guard_waiting_groups,
-                        "guard_required_bytes": guard_required_bytes
+                        "guard_required_bytes": guard_required_bytes,
+                        # 在途组类型数量（卡片“压缩组: X/Y（L a / S b）”）
+                        "active_large_groups": active_large_groups,
+                        "active_small_groups": active_small_groups
                     })
 
                 # 追加计划任务（未运行模板）

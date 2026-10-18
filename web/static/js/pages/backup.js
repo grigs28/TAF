@@ -1111,10 +1111,14 @@
                         + 'border-radius:1px;vertical-align:-3px;background:' + _bg + '"></span>';
                 }
 
+                // 在途组中的大/小文件组数量（按任务归属过滤；数据来自后端 _active_group_types）
+                const _lsText = (typeof task.active_large_groups === 'number'
+                                 && typeof task.active_small_groups === 'number')
+                    ? `（L ${task.active_large_groups} / S ${task.active_small_groups}）` : '';
                 batchProgressHtml = normalizeCardHtml(`
                     <div class="d-flex justify-content-between align-items-center mb-1">
                         <small class="text-muted">压缩组:</small>
-                        <small class="text-muted">${_cells}<span class="fw-semibold ms-1">${runningCount}/${totalSlots}</span></small>
+                        <small class="text-muted">${_cells}<span class="fw-semibold ms-1">${runningCount}/${totalSlots}</span>${_lsText}</small>
                     </div>
                 `);
             }

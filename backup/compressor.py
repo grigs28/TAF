@@ -126,6 +126,14 @@ class Compressor:
         # 记录每个备份集的上次压缩文件名和序号，确保文件名不重复
         # 格式: {backup_set_id: {'last_filename': str, 'sequence': int}}
         self._last_archive_info: Dict[str, Dict[str, Any]] = {}
+        # 在途组的类型（'large'/'small'），与 _active_groups 严格同序增删，
+        # 供卡片"压缩组: X/Y（L a / S b）"显示。
+        self._active_group_types: List[str] = []
+        try:
+            self._group_large_threshold = int(
+                getattr(settings, 'GROUP_LARGE_FILE_COUNT_THRESHOLD', 20000) or 20000)
+        except Exception:
+            self._group_large_threshold = 20000
 
     @property
     def _active_group_bytes(self) -> List[int]:
@@ -140,7 +148,10 @@ class Compressor:
     def _release_active_group(self, group_bytes: int = 0, group_path: str = "") -> None:
         """释放一个在途组的记账（优先按 (源字节, 路径) 精确匹配，容忍大小重复）"""
         try:
-            self._active_groups.remove((int(group_bytes), str(group_path)))
+            idx = self._active_groups.index((int(group_bytes), str(group_path)))
+            del self._active_groups[idx]
+            if idx < len(self._active_group_types):
+                del self._active_group_types[idx]
             return
         except ValueError:
             pass
@@ -148,6 +159,8 @@ class Compressor:
         for idx, (src, _p) in enumerate(self._active_groups):
             if int(src) == int(group_bytes):
                 del self._active_groups[idx]
+                if idx < len(self._active_group_types):
+                    del self._active_group_types[idx]
                 break
     
     async def group_files_for_compression(self, file_list: List[Dict]) -> List[List[Dict]]:
@@ -482,8 +495,15 @@ class Compressor:
             archive_info['sequence'] = sequence
 
             # ★ 通过守卫 = 真正开始压缩 = 从现在起会落地产出，此刻才计入
-            # （此时产出文件路径已确定，记录路径供守卫按"剩余待产出"计算需求）
+            # （此时产出文件路径已确定，记录路径供守卫按"剩余待产出"计算需求；
+            #  同时记录组类型，供卡片显示 L/S 数量）
             self._active_groups.append((int(_group_bytes), str(temp_archive_path)))
+            try:
+                _grp_type = ('small' if len(file_group) >= self._group_large_threshold
+                             else 'large')
+            except Exception:
+                _grp_type = 'large'
+            self._active_group_types.append(_grp_type)
             _active_counted = True
             
             logger.debug(f"[压缩] 生成压缩文件名: {filename} (序号={sequence}, 上次文件名={archive_info.get('last_filename', '无')})")
