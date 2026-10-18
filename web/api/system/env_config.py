@@ -68,6 +68,7 @@ class SystemEnvConfig(BaseModel):
     disk_check_interval: Optional[int] = Field(None, description="磁盘空间不足时暂停压缩的重试间隔（秒），5-600，默认 30")
     disk_guard_enabled: Optional[bool] = Field(None, description="空间守卫总开关：关闭后不再按守卫线暂停发放新压缩组（与磁盘限流至少保留一个）")
     disk_guard_safety_factor: Optional[float] = Field(None, description="空间守卫安全系数（默认 1.2）：守卫线 = 在途组数 × 最大文件大小 × 本系数")
+    group_sched_enabled: Optional[bool] = Field(None, description="大小文件组调度总开关：按组内文件数分大/小文件组，扫描期 2:1、完成后 3:1、守卫拦停时只取小文件组；关闭=原 FIFO 顺序")
 
     # 日志配置
     log_level: Optional[str] = Field(None, description="日志级别")
@@ -161,6 +162,7 @@ async def get_env_config():
             "disk_check_max_wait_minutes": parse_int(env_vars.get("DISK_CHECK_MAX_WAIT_MINUTES"), 120),
             "disk_check_interval": parse_int(env_vars.get("DISK_CHECK_INTERVAL"), 30),
             "disk_guard_enabled": parse_bool(env_vars.get("DISK_GUARD_ENABLED"), True),
+            "group_sched_enabled": parse_bool(env_vars.get("GROUP_SCHED_ENABLED"), True),
             "disk_guard_safety_factor": float(env_vars.get("DISK_GUARD_SAFETY_FACTOR", 1.2) or 1.2),
 
             # 日志配置
@@ -302,6 +304,8 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             updates["DISK_THROTTLE_ENABLED"] = "true" if config.disk_throttle_enabled else "false"
         if config.disk_guard_enabled is not None:
             updates["DISK_GUARD_ENABLED"] = "true" if config.disk_guard_enabled else "false"
+        if config.group_sched_enabled is not None:
+            updates["GROUP_SCHED_ENABLED"] = "true" if config.group_sched_enabled else "false"
 
         # 互斥校验：磁盘限流与空间守卫**至少保留一个**——两者同时关闭等于放弃全部磁盘保护，
         # SSD 可能被在途压缩产出写满。部分更新时需与 .env 中的现有值合并后再判断。

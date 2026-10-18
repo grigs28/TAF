@@ -121,6 +121,19 @@
                         <small class="form-text text-secondary">单次暂停的最长等待，超时该组报错</small>
                     </div>
 
+                    <!-- ── 大小文件组调度 ── -->
+                    <div class="mb-3">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" role="switch" id="groupSchedEnabled" checked>
+                            <label class="form-check-label" for="groupSchedEnabled">启用大小文件组调度</label>
+                        </div>
+                        <small class="form-text text-secondary">
+                            按组内文件数（&lt;2万 = 大文件组）分成两个队列：扫描期 2 大:1 小限速、扫描完成 3 大:1 小喂饱写带；
+                            空间守卫拦停时只取小文件组（产出最慢）。关闭后恢复原来的顺序压缩。
+                            守卫状态切换防抖跟随“空间不足检查间隔”。
+                        </small>
+                    </div>
+
                     <!-- ── 磁盘限流 ── -->
                     <h6 class="text-secondary border-bottom pb-2 mb-3 mt-4">磁盘限流</h6>
                     <div class="mb-3">

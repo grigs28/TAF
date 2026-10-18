@@ -90,8 +90,10 @@ class FileGroupPrefetcher:
             getattr(_s, 'GROUP_LARGE_FILE_COUNT_THRESHOLD', 20000) or 20000)
         self._scan_ratio = self._parse_ratio(getattr(_s, 'GROUP_SCHED_SCAN_RATIO', '2:1'))
         self._normal_ratio = self._parse_ratio(getattr(_s, 'GROUP_SCHED_NORMAL_RATIO', '3:1'))
+        # 守卫状态切换防抖：跟随“空间不足检查间隔”（守卫每轮检查的节奏），
+        # 默认 30 秒；不再使用独立固定值。
         self._sched_debounce = float(
-            getattr(_s, 'GROUP_SCHED_DEBOUNCE_SECONDS', 45) or 45)
+            getattr(_s, 'DISK_CHECK_INTERVAL', 30) or 30)
         self.large_queue: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
         self.small_queue: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
         self._large_sizes = _deque()

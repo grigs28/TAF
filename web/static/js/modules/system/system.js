@@ -738,6 +738,13 @@ async function loadAllSystemConfig() {
                     }
                 }
             }
+            // 大小文件组调度开关（默认启用）
+            const gsch = document.getElementById('groupSchedEnabled');
+            if (gsch) {
+                gsch.checked = (config.group_sched_enabled !== undefined)
+                    ? !!config.group_sched_enabled
+                    : true;
+            }
             // 空间守卫开关（默认启用；老数据无该字段时按启用处理）
             const gsw = document.getElementById('diskGuardEnabled');
             if (gsw) {
@@ -874,6 +881,10 @@ async function saveEnvConfigSection() {
             })(),
             disk_guard_enabled: (() => {
                 const sw = document.getElementById('diskGuardEnabled');
+                return sw ? !!sw.checked : null;
+            })(),
+            group_sched_enabled: (() => {
+                const sw = document.getElementById('groupSchedEnabled');
                 return sw ? !!sw.checked : null;
             })(),
             disk_throttle_high_percent: (() => {

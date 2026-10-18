@@ -116,7 +116,7 @@ class Settings(BaseSettings):
     GROUP_LARGE_FILE_COUNT_THRESHOLD: int = 20000  # 组内文件数 < 阈值 = 大文件组（带宽主导）
     GROUP_SCHED_SCAN_RATIO: str = "2:1"   # 扫描进行中 大:小 配额
     GROUP_SCHED_NORMAL_RATIO: str = "3:1"  # 扫描完成后 大:小 配额
-    GROUP_SCHED_DEBOUNCE_SECONDS: int = 45  # 守卫状态切换防抖（秒）
+    # 守卫状态切换防抖跟随 DISK_CHECK_INTERVAL（空间不足检查间隔），不再单独配置
     DISK_CHECK_INTERVAL: int = 30  # 磁盘空间检查间隔（秒）
     DISK_CHECK_MAX_WAIT_MINUTES: int = 120  # 磁盘空间不足时暂停压缩的最大等待分钟数（超时抛错）
     DISK_CHECK_MIN_FREE_MULTIPLIER: int = 3  # 最小剩余空间倍数（3 * MAX_FILE_SIZE）
