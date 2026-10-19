@@ -749,6 +749,9 @@ async function loadAllSystemConfig() {
             const gsd = document.getElementById('groupScanDeferBelow');
             if (gsd) gsd.value = (config.group_scan_defer_below !== undefined && config.group_scan_defer_below !== null)
                 ? config.group_scan_defer_below : 5000;
+            const gpl = document.getElementById('groupPrefetchLeadSeconds');
+            if (gpl) gpl.value = (config.group_prefetch_lead_seconds !== undefined && config.group_prefetch_lead_seconds !== null)
+                ? config.group_prefetch_lead_seconds : 30;
             // 空间守卫开关（默认启用；老数据无该字段时按启用处理）
             const gsw = document.getElementById('diskGuardEnabled');
             if (gsw) {
@@ -898,6 +901,12 @@ async function saveEnvConfigSection() {
             })(),
             group_scan_defer_below: (() => {
                 const input = document.getElementById('groupScanDeferBelow');
+                if (!input || input.value === '') return null;
+                const parsed = parseInt(input.value, 10);
+                return isNaN(parsed) ? null : parsed;
+            })(),
+            group_prefetch_lead_seconds: (() => {
+                const input = document.getElementById('groupPrefetchLeadSeconds');
                 if (!input || input.value === '') return null;
                 const parsed = parseInt(input.value, 10);
                 return isNaN(parsed) ? null : parsed;

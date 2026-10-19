@@ -1505,10 +1505,17 @@ class BackupEngine:
                 )
                 logger.info("后台扫描任务已启动")
                 scan_wait_timeout = getattr(self.settings, "SCAN_WAIT_TIMEOUT", 300) or 300
-                # 预分组提前量：让预取器比压缩早 30 秒启动，压缩启动时队列已有组可吃。
-                # 若扫描等待超时本身 ≤ 30 秒，提前量无意义，保持原逻辑（同时启动）。
-                _prefetch_lead = 30
-                _prefetch_early = scan_wait_timeout > _prefetch_lead
+                # 预分组提前量（可配置）：让预取器比压缩早 N 秒启动，压缩启动时队列已有组可吃。
+                # 若提前量 ≥ 扫描等待超时，不设提前量，保持原逻辑（同时启动）。
+                try:
+                    _prefetch_lead = int(
+                        getattr(self.settings, 'GROUP_PREFETCH_LEAD_SECONDS', 30) or 0)
+                except Exception:
+                    _prefetch_lead = 30
+                if _prefetch_lead < 0:
+                    _prefetch_lead = 0
+                _prefetch_early = (_prefetch_lead > 0
+                                   and scan_wait_timeout > _prefetch_lead)
                 _wait_before_prefetch = (scan_wait_timeout - _prefetch_lead
                                          if _prefetch_early else scan_wait_timeout)
                 logger.info(

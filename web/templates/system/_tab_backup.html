@@ -24,6 +24,14 @@
                         </small>
                     </div>
                     <div class="mb-3">
+                        <label class="form-label">预分组提前启动（秒）</label>
+                        <input type="number" class="form-control" id="groupPrefetchLeadSeconds" min="0" max="3600" step="10" value="30">
+                        <small class="form-text text-secondary">
+                            预分组比压缩提前 N 秒启动，压缩启动时队列已有组可吃（默认 30，0=同时启动）。
+                            必须小于扫描等待超时，否则按同时启动处理。
+                        </small>
+                    </div>
+                    <div class="mb-3">
                         <label class="form-label">后台扫描进度更新间隔（文件数）</label>
                         <input type="number" class="form-control" id="scanUpdateInterval" value="500" min="1" step="1">
                     </div>

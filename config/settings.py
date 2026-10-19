@@ -117,6 +117,7 @@ class Settings(BaseSettings):
     GROUP_SCHED_SCAN_RATIO: str = "2:1"   # （已弃用，保留兼容）扫描期配额
     GROUP_SCHED_NORMAL_RATIO: str = "2:1"  # 全程大:小 配额（计划05：不再区分扫描期，默认 2:1）
     GROUP_SCAN_DEFER_BELOW: int = 5000  # 扫描期间不消费"文件数<该值"的大文件组（暂存到扫描完成），0=禁用
+    GROUP_PREFETCH_LEAD_SECONDS: int = 30  # 预分组比压缩提前启动的秒数（0=同时启动；需小于扫描等待超时）
     # 自适应并发（计划05，Vegas 变体，信号=组级聚合读取速率）
     GROUP_VEGAS_ENABLED: bool = True    # 总开关：关闭则并发完全由配置/磁盘水位决定
     GROUP_VEGAS_ALPHA: float = 1.0      # deficit < α → 并发 +1（缓慢上探）
