@@ -161,9 +161,13 @@
         }
         
         // 如果没有实时速度，计算平均速度（G/秒）
-        // 使用已处理数据/已用时间来计算
-        if (task.processed_bytes && task.started_at) {
-            const start = new Date(task.started_at);
+        // 计时起点：优先"压缩开始时间"（后端 compression_started_at，epoch 秒），
+        // 避免把前置扫描/等待时间算进压缩速度分母；旧后端无该字段时回退任务开始时间
+        if (task.processed_bytes && (task.started_at || task.compression_started_at)) {
+            const _csTs = Number(task.compression_started_at);
+            const start = (Number.isFinite(_csTs) && _csTs > 0)
+                ? new Date(_csTs * 1000)
+                : new Date(task.started_at);
             const end = task.completed_at ? new Date(task.completed_at) : new Date();
             const diffMs = end - start;
             if (diffMs > 0) {
@@ -661,11 +665,16 @@
                     const _pct = _totB > 0 ? ((_procB * 100 / _totB).toFixed(0) + '%') : '-';
                     // 预计剩余（按开工至今的平均速度估算；扫描期/速度未知时不显示）
                     const _etaHover = computeEtaText(task, progressInfo);
+                    const _csTsHover = Number(task.compression_started_at);
+                    const _hasCompStart = Number.isFinite(_csTsHover) && _csTsHover > 0;
+                    const _elapsedLabel = _hasCompStart ? '压缩已用' : '已用时间';
+                    const _elapsedFrom = _hasCompStart ? new Date(_csTsHover * 1000) : task.started_at;
                     speedBadge.title = `处理速度: ${_mbps.toFixed(1)} MB/s（${_gbh.toFixed(0)} GB/小时）\n`
+                        + `口径: ${_hasCompStart ? '从开始压缩计时' : '从任务开始计时'}\n`
                         + `参考: 磁带写入约 285 MB/s\n`
                         + (_etaHover ? `预计剩余: ${_etaHover}（剩余数据 ${formatBytes(Math.max(0, _totB - _procB))}）\n` : '')
                         + `已处理: ${formatBytes(_procB)} / ${_totB > 0 ? formatBytes(_totB) : '未知'}（${_pct}）\n`
-                        + `已用时间: ${formatElapsedTime(task.started_at, task.completed_at, task.status)}`;
+                        + `${_elapsedLabel}: ${formatElapsedTime(_elapsedFrom, task.completed_at, task.status)}`;
                 }
 
                 // 为运行中的任务添加ID属性，便于后续更新

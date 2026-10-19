@@ -319,6 +319,7 @@ async def get_backup_tasks(
                     completed_small_groups = 0   # 累计已完成小文件组数
                     total_large_groups = 0       # 已分组总数（大文件组）
                     total_small_groups = 0       # 已分组总数（小文件组）
+                    compression_started_at = None  # 压缩循环启动时间（epoch 秒，卡片平均速度以此为起点）
                     task_status = None
 
                     if status_value == 'running':
@@ -375,6 +376,13 @@ async def get_backup_tasks(
                                             fp = compression_worker.file_group_prefetcher
                                             in_memory_prefetch_loop_count = getattr(fp, 'prefetch_loop_count', 0) or 0
                                             in_memory_prefetcher_running = getattr(fp, '_running', True)
+                                            # 压缩实际开始时间（扫描与压缩并行时早于任务完成很多，
+                                            # 平均压缩速度必须从这一刻起算，不能从任务开始时间算）
+                                            try:
+                                                _cs = getattr(compression_worker, 'compression_started_at', None)
+                                                compression_started_at = float(_cs) if _cs else None
+                                            except Exception:
+                                                compression_started_at = None
                                             # 预分组队列：深度 + 各组字节大小（供卡片"预分组"徽章 hover）
                                             try:
                                                 in_memory_queue_depth = fp.get_queue_size()
@@ -552,6 +560,8 @@ async def get_backup_tasks(
                         "disk_total_bytes": disk_total_bytes,
                         # 配置的并行批次数：卡片用它画"压缩组 X/Y"的聚合条分母
                         "parallel_batches": parallel_batches,
+                        # 压缩开始时间（epoch 秒）：右上角速度徽章的平均速度从此刻起算
+                        "compression_started_at": compression_started_at,
                         # 预分组封组阈值（MAX_FILE_SIZE 设置值）：hover 显示参考
                         "max_file_size": max_file_size,
                         # 磁带实时写入（无写入进行时为 None/0；仅当前写入所属任务可见）

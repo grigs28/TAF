@@ -64,6 +64,9 @@ class CompressionWorker:
         self.compression_group_failed = False
         self.failed_groups = 0
         self.failed_files_total = 0
+        # 压缩实际开始时间（epoch 秒）：卡片平均压缩速度以此为起点，
+        # 不含前置扫描/等待时间
+        self.compression_started_at: Optional[float] = None
         self._disk_throttled = False  # 磁盘限流状态（迟滞状态机）
         self._last_adjust_time = 0.0  # 上次并行批次调整时间（限流检查节流）
         self._disk_critical = False  # 磁盘空间危急降级状态
@@ -362,6 +365,8 @@ class CompressionWorker:
 
     async def _process_prefetched_file_groups(self):
         """处理预取的文件组（openGauss模式）- 并发控制"""
+        # 压缩循环真正启动的时刻（卡片"平均压缩速度"的计时起点）
+        self.compression_started_at = time.time()
         # 根据扫描状态动态调整并行批次数量
         if self.use_prefetcher:
             await self._adjust_parallel_batches()
