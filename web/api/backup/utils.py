@@ -87,7 +87,7 @@ def _normalize_status_value(value: Any) -> str:
     return str(value).lower()
 
 
-def _build_stage_info(description: Optional[str], scan_status: Optional[str], status_value: str, operation_stage: Optional[str] = None, current_compression_progress: Optional[Dict[str, Any]] = None, final_dir_has_files: Optional[bool] = None, prefetch_done: bool = False, compression_completed: Optional[bool] = None, task_type: Optional[str] = None) -> Dict[str, Any]:
+def _build_stage_info(description: Optional[str], scan_status: Optional[str], status_value: str, operation_stage: Optional[str] = None, current_compression_progress: Optional[Dict[str, Any]] = None, final_dir_has_files: Optional[bool] = None, prefetch_done: bool = False, compression_completed: Optional[bool] = None, task_type: Optional[str] = None, prefetch_started: bool = False) -> Dict[str, Any]:
     """构建阶段信息
 
     Args:
@@ -100,6 +100,7 @@ def _build_stage_info(description: Optional[str], scan_status: Optional[str], st
         prefetch_done: 预取器是否已完成（预取器执行过且已停止，表示所有文件已分组）
         compression_completed: 压缩是否已完成（从backup_task.compression_completed获取）
         task_type: 任务类型（verify类型使用两阶段流）
+        prefetch_started: 预取器是否已启动（扫描等待期内未启动时徽章保持"预分组"灰色，不提前点亮）
     """
     # 优先使用数据库中的 operation_stage 字段
     stage_code = operation_stage
@@ -255,8 +256,8 @@ def _build_stage_info(description: Optional[str], scan_status: Optional[str], st
                     step_status = "completed"
                 elif is_failed:
                     step_status = "completed" if prefetch_done_flag else "failed"
-                elif is_running and not prefetch_done:
-                    # 预取器还在循环（等待扫描产出或正在分组）
+                elif is_running and prefetch_started and not prefetch_done:
+                    # 预取器已启动且仍在循环（等待扫描产出或正在分组）
                     label = "预分组中"
                     step_status = "active"
                 else:

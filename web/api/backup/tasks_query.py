@@ -374,7 +374,7 @@ async def get_backup_tasks(
 
                                         # 获取预取器循环次数和运行状态（用于预分组徽章判断）
                                         in_memory_prefetch_loop_count = 0
-                                        in_memory_prefetcher_running = True
+                                        in_memory_prefetcher_running = False   # 预取器未创建=未启动（徽章保持灰色）
                                         if hasattr(compression_worker, 'file_group_prefetcher') and compression_worker.file_group_prefetcher:
                                             fp = compression_worker.file_group_prefetcher
                                             in_memory_prefetch_loop_count = getattr(fp, 'prefetch_loop_count', 0) or 0
@@ -496,8 +496,13 @@ async def get_backup_tasks(
 
                     # 预分组完成：预取器执行过（loop_count > 0）且已停止（_running == False）
                     prefetch_done = False
+                    # 预分组已启动：预取器已创建且（在运行或执行过）——
+                    # 扫描等待期内（SCAN_WAIT_TIMEOUT）预取器未创建，徽章保持灰色
+                    prefetch_started = False
                     try:
                         prefetch_done = in_memory_prefetch_loop_count > 0 and not in_memory_prefetcher_running
+                        prefetch_started = (in_memory_prefetch_loop_count > 0
+                                            or in_memory_prefetcher_running)
                     except NameError:
                         pass
 
@@ -511,7 +516,8 @@ async def get_backup_tasks(
                         final_dir_has_files,  # 传入 final 目录状态
                         prefetch_done,  # 传入预取器是否完成
                         in_memory_compression_completed,  # 传入压缩是否完成
-                        task_type=row.get("task_type")  # 传入任务类型，验证任务使用两阶段流
+                        task_type=row.get("task_type"),  # 传入任务类型，验证任务使用两阶段流
+                        prefetch_started=prefetch_started  # 预取器是否已启动（扫描等待期内未启动时徽章灰色）
                     )
 
                     # 所有统计字段：优先使用内存中的实时统计，其次回退到数据库字段
@@ -846,6 +852,7 @@ async def get_backup_task(task_id: int, http_request: Request):
             # 对于运行中的任务，同时获取 current_compression_progress 和 prefetch_done
             current_compression_progress = None
             prefetch_done = False
+            prefetch_started = False
             single_compression_completed = None
             if status_value and status_value.lower() == 'running':
                 try:
@@ -866,6 +873,7 @@ async def get_backup_task(task_id: int, http_request: Request):
                             prefetch_loop_count = getattr(fp, 'prefetch_loop_count', 0) or 0
                             prefetcher_running = getattr(fp, '_running', True)
                             prefetch_done = prefetch_loop_count > 0 and not prefetcher_running
+                            prefetch_started = prefetch_loop_count > 0 or prefetcher_running
                         # 获取 compression_completed（从 compression_worker.backup_task）
                         if cw and hasattr(cw, 'backup_task') and single_compression_completed is None:
                             single_compression_completed = getattr(cw.backup_task, 'compression_completed', None)
@@ -901,7 +909,8 @@ async def get_backup_task(task_id: int, http_request: Request):
                 final_dir_has_files,  # 传入 final 目录状态
                 prefetch_done,  # 传入预取器是否完成
                 single_compression_completed,  # 传入压缩是否完成
-                task_type=str(row.get("task_type", ""))  # 传入任务类型
+                task_type=str(row.get("task_type", "")),  # 传入任务类型
+                prefetch_started=prefetch_started  # 预取器是否已启动
             )
 
             return {
