@@ -1132,18 +1132,15 @@
                 const _queueSmall = Math.max(0,
                     _numOr0(task.total_small_groups) - _numOr0(task.active_small_groups)
                     - _numOr0(task.completed_small_groups));
-                // 括号内三段：在途 L/S · 队列 L/S · 累计已分组 L/S
+                // 括号内两段：在途 L/S · 队列 L/S（累计已分组只放悬停，避免过长）
                 const _lsText = _hasLs
                     ? `（${task.active_large_groups}/${task.active_small_groups}`
                       + (_hasTotal && _hasCompleted
                           ? `·${_queueLarge}/${_queueSmall}`
                           : '')
-                      + (_hasTotal
-                          ? `·${task.total_large_groups}/${task.total_small_groups}`
-                          : '')
                       + `）` : '';
                 const _lsTitle = `压缩组: 正在压缩 ${runningCount} 组 / 上限 ${totalSlots} 组\n`
-                    + `括号内三段: 在途 L/S · 队列 L/S · 累计已分组 L/S`
+                    + `括号内两段: 在途 L/S · 队列 L/S`
                     + (_hasLs
                         ? `\n在途: 大文件组 ${task.active_large_groups} / 小文件组 ${task.active_small_groups}`
                         : '')
