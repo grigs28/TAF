@@ -1118,9 +1118,9 @@
                 const _hasTotal = (typeof task.total_large_groups === 'number'
                                    && typeof task.total_small_groups === 'number');
                 const _lsText = _hasLs
-                    ? `（${task.active_large_groups} / ${task.active_small_groups}`
+                    ? `（${task.active_large_groups}/${task.active_small_groups}`
                       + (_hasTotal
-                          ? ` · ${task.total_large_groups} / ${task.total_small_groups}`
+                          ? `·${task.total_large_groups}/${task.total_small_groups}`
                           : '')
                       + `）` : '';
                 const _lsTitle = `压缩组: 正在压缩 ${runningCount} 组 / 上限 ${totalSlots} 组\n`
