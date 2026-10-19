@@ -111,11 +111,19 @@ class Settings(BaseSettings):
     DISK_GUARD_SAFETY_FACTOR: float = 1.2  # 空间守卫安全系数：守卫线 = 在途组剩余待产出 × 本系数（1.0~3.0）
     DISK_GUARD_COUNT_PRODUCED: bool = True  # 守卫需求按"剩余待产出"计算：在途组已落地字节从源大小上界中扣除（关闭=纯源大小口径）
 
-    # 大小文件组动态调度（计划04）
+    # 大小文件组动态调度（计划04 / 计划05）
     GROUP_SCHED_ENABLED: bool = True  # 总开关：false 回退到原来的单队列 FIFO 顺序
     GROUP_LARGE_FILE_COUNT_THRESHOLD: int = 20000  # 组内文件数 < 阈值 = 大文件组（带宽主导）
-    GROUP_SCHED_SCAN_RATIO: str = "2:1"   # 扫描进行中 大:小 配额
-    GROUP_SCHED_NORMAL_RATIO: str = "3:1"  # 扫描完成后 大:小 配额
+    GROUP_SCHED_SCAN_RATIO: str = "2:1"   # （已弃用，保留兼容）扫描期配额
+    GROUP_SCHED_NORMAL_RATIO: str = "2:1"  # 全程大:小 配额（计划05：不再区分扫描期，默认 2:1）
+    GROUP_SCAN_DEFER_BELOW: int = 5000  # 扫描期间不消费"文件数<该值"的大文件组（暂存到扫描完成），0=禁用
+    # 自适应并发（计划05，Vegas 变体，信号=组级聚合读取速率）
+    GROUP_VEGAS_ENABLED: bool = True    # 总开关：关闭则并发完全由配置/磁盘水位决定
+    GROUP_VEGAS_ALPHA: float = 1.0      # deficit < α → 并发 +1（缓慢上探）
+    GROUP_VEGAS_BETA: float = 3.0       # deficit > β → 并发 ×DECAY（乘性下降）；> 2β 触发快速闸（暂停发新组一个窗口）
+    GROUP_VEGAS_DECAY: float = 0.7      # 乘性下降因子
+    GROUP_VEGAS_MIN_BATCHES: int = 2    # 自适应并发下限
+    GROUP_VEGAS_BASE_RESET_SEC: int = 600  # 速率基准重置周期（秒）：base = max(base×0.9, ewma)
     # 守卫状态切换防抖跟随 DISK_CHECK_INTERVAL（空间不足检查间隔），不再单独配置
     DISK_CHECK_INTERVAL: int = 30  # 磁盘空间检查间隔（秒）
     DISK_CHECK_MAX_WAIT_MINUTES: int = 120  # 磁盘空间不足时暂停压缩的最大等待分钟数（超时抛错）

@@ -734,13 +734,21 @@ async function loadAllSystemConfig() {
                     }
                 }
             }
-            // 大小文件组调度开关（默认启用）
+            // 大小文件组调度开关（默认启用）+ 计划05 参数
             const gsch = document.getElementById('groupSchedEnabled');
             if (gsch) {
                 gsch.checked = (config.group_sched_enabled !== undefined)
                     ? !!config.group_sched_enabled
                     : true;
             }
+            const gsr = document.getElementById('groupSchedRatio');
+            if (gsr) gsr.value = config.group_sched_ratio || '2:1';
+            const glt = document.getElementById('groupLargeThreshold');
+            if (glt) glt.value = (config.group_large_threshold !== undefined && config.group_large_threshold !== null)
+                ? config.group_large_threshold : 20000;
+            const gsd = document.getElementById('groupScanDeferBelow');
+            if (gsd) gsd.value = (config.group_scan_defer_below !== undefined && config.group_scan_defer_below !== null)
+                ? config.group_scan_defer_below : 5000;
             // 空间守卫开关（默认启用；老数据无该字段时按启用处理）
             const gsw = document.getElementById('diskGuardEnabled');
             if (gsw) {
@@ -877,6 +885,22 @@ async function saveEnvConfigSection() {
             group_sched_enabled: (() => {
                 const sw = document.getElementById('groupSchedEnabled');
                 return sw ? !!sw.checked : null;
+            })(),
+            group_sched_ratio: (() => {
+                const input = document.getElementById('groupSchedRatio');
+                return (input && input.value.trim()) ? input.value.trim() : null;
+            })(),
+            group_large_threshold: (() => {
+                const input = document.getElementById('groupLargeThreshold');
+                if (!input || input.value === '') return null;
+                const parsed = parseInt(input.value, 10);
+                return isNaN(parsed) ? null : parsed;
+            })(),
+            group_scan_defer_below: (() => {
+                const input = document.getElementById('groupScanDeferBelow');
+                if (!input || input.value === '') return null;
+                const parsed = parseInt(input.value, 10);
+                return isNaN(parsed) ? null : parsed;
             })(),
             disk_throttle_high_percent: (() => {
                 const input = document.getElementById('diskThrottleHighPercent');

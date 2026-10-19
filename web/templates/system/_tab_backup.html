@@ -75,6 +75,17 @@
                         <label class="form-label">LTFS工具目录</label>
                         <input type="text" class="form-control" id="ltfsToolsDir" placeholder="/usr/local/ltfs">
                     </div>
+
+                    <!-- ── 保留策略 ── -->
+                    <h6 class="text-secondary border-bottom pb-2 mb-3 mt-4">保留策略</h6>
+                    <div class="mb-3">
+                        <label class="form-label">默认保留月数</label>
+                        <input type="number" class="form-control" id="defaultRetentionMonths" value="6" min="1" max="36">
+                    </div>
+                    <div class="form-check form-switch mb-3">
+                        <input class="form-check-input" type="checkbox" id="autoEraseExpired">
+                        <label class="form-check-label" for="autoEraseExpired">自动擦除过期磁带</label>
+                    </div>
                 </div>
             </div>
         </div>
@@ -123,9 +134,27 @@
                             <label class="form-check-label" for="groupSchedEnabled">启用大小文件组调度</label>
                         </div>
                         <small class="form-text text-secondary">
-                            按组内文件数（&lt;2万 = 大文件组）分成两个队列：扫描期 2 大:1 小限速、扫描完成 3 大:1 小喂饱写带；
+                            按组内文件数分成大/小两个队列，全程按下方配额取组；
                             空间守卫拦停时只取小文件组（产出最慢）。关闭后恢复原来的顺序压缩。
                             守卫状态切换防抖跟随“空间不足检查间隔”。
+                        </small>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">全程配额（大:小）</label>
+                        <input type="text" class="form-control" id="groupSchedRatio" value="2:1" placeholder="2:1">
+                        <small class="form-text text-secondary">每取 N 个大文件组配 1 个小文件组（默认 2:1，如 3:1、1:1）</small>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">大/小文件组分界（组内文件数）</label>
+                        <input type="number" class="form-control" id="groupLargeThreshold" value="20000" min="100" step="1000">
+                        <small class="form-text text-secondary">组内文件数低于此值为大文件组（带宽主导），否则为小文件组（IOPS 主导）</small>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">扫描期保护阈值（组内文件数）</label>
+                        <input type="number" class="form-control" id="groupScanDeferBelow" value="5000" min="0" step="500">
+                        <small class="form-text text-secondary">
+                            扫描期间不消费文件数低于此值的大文件组（产出最快，留给扫描完成后喂饱写带）；
+                            其他队列取空时才降级使用。0 = 禁用保护。
                         </small>
                     </div>
 
@@ -155,17 +184,6 @@
                         <label class="form-label">空间危急时压缩批次数</label>
                         <input type="number" class="form-control" id="diskCriticalBatches" value="1" min="0" max="64" step="1">
                         <small class="form-text text-secondary">剩余空间低于空间守卫线时，并行批次强制降至此值（与守卫同口径）</small>
-                    </div>
-
-                    <!-- ── 保留策略 ── -->
-                    <h6 class="text-secondary border-bottom pb-2 mb-3 mt-4">保留策略</h6>
-                    <div class="mb-3">
-                        <label class="form-label">默认保留月数</label>
-                        <input type="number" class="form-control" id="defaultRetentionMonths" value="6" min="1" max="36">
-                    </div>
-                    <div class="form-check form-switch mb-3">
-                        <input class="form-check-input" type="checkbox" id="autoEraseExpired">
-                        <label class="form-check-label" for="autoEraseExpired">自动擦除过期磁带</label>
                     </div>
 
                 </div>

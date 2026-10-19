@@ -68,7 +68,10 @@ class SystemEnvConfig(BaseModel):
     disk_check_interval: Optional[int] = Field(None, description="磁盘空间不足时暂停压缩的重试间隔（秒），5-600，默认 30")
     disk_guard_enabled: Optional[bool] = Field(None, description="空间守卫总开关：关闭后不再按守卫线暂停发放新压缩组（与磁盘限流至少保留一个）")
     disk_guard_safety_factor: Optional[float] = Field(None, description="空间守卫安全系数（默认 1.2）：守卫线 = 在途组数 × 最大文件大小 × 本系数")
-    group_sched_enabled: Optional[bool] = Field(None, description="大小文件组调度总开关：按组内文件数分大/小文件组，扫描期 2:1、完成后 3:1、守卫拦停时只取小文件组；关闭=原 FIFO 顺序")
+    group_sched_enabled: Optional[bool] = Field(None, description="大小文件组调度总开关：按组内文件数分大/小文件组、全程按配额取组、守卫拦停时只取小文件组；关闭=原 FIFO 顺序")
+    group_sched_ratio: Optional[str] = Field(None, description="全程配额（大:小），如 2:1、3:1、1:1")
+    group_large_threshold: Optional[int] = Field(None, description="大/小文件组分界：组内文件数低于此值为大文件组（默认 20000）")
+    group_scan_defer_below: Optional[int] = Field(None, description="扫描期保护阈值：扫描期间不消费文件数低于此值的大文件组（默认 5000，0=禁用）")
 
     # 日志配置
     log_level: Optional[str] = Field(None, description="日志级别")
@@ -162,6 +165,9 @@ async def get_env_config():
             "disk_check_interval": parse_int(env_vars.get("DISK_CHECK_INTERVAL"), 30),
             "disk_guard_enabled": parse_bool(env_vars.get("DISK_GUARD_ENABLED"), True),
             "group_sched_enabled": parse_bool(env_vars.get("GROUP_SCHED_ENABLED"), True),
+            "group_sched_ratio": env_vars.get("GROUP_SCHED_NORMAL_RATIO", "2:1") or "2:1",
+            "group_large_threshold": parse_int(env_vars.get("GROUP_LARGE_FILE_COUNT_THRESHOLD"), 20000),
+            "group_scan_defer_below": parse_int(env_vars.get("GROUP_SCAN_DEFER_BELOW"), 5000),
             "disk_guard_safety_factor": float(env_vars.get("DISK_GUARD_SAFETY_FACTOR", 1.2) or 1.2),
 
             # 日志配置
@@ -303,6 +309,25 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             updates["DISK_GUARD_ENABLED"] = "true" if config.disk_guard_enabled else "false"
         if config.group_sched_enabled is not None:
             updates["GROUP_SCHED_ENABLED"] = "true" if config.group_sched_enabled else "false"
+        if config.group_sched_ratio is not None:
+            # 格式校验：N:M（正整数），与 _parse_ratio 口径一致
+            _r = str(config.group_sched_ratio).strip()
+            _parts = _r.split(':')
+            if (len(_parts) != 2
+                    or not _parts[0].strip().isdigit()
+                    or not _parts[1].strip().isdigit()
+                    or int(_parts[0]) < 0 or int(_parts[1]) < 0
+                    or int(_parts[0]) + int(_parts[1]) <= 0):
+                raise ValueError(f"全程配额格式必须为 N:M（正整数），当前: {config.group_sched_ratio}")
+            updates["GROUP_SCHED_NORMAL_RATIO"] = _r.replace(' ', '')
+        if config.group_large_threshold is not None:
+            if config.group_large_threshold < 100:
+                raise ValueError("大/小文件组分界必须 ≥ 100")
+            updates["GROUP_LARGE_FILE_COUNT_THRESHOLD"] = str(config.group_large_threshold)
+        if config.group_scan_defer_below is not None:
+            if config.group_scan_defer_below < 0:
+                raise ValueError("扫描期保护阈值必须 ≥ 0（0=禁用）")
+            updates["GROUP_SCAN_DEFER_BELOW"] = str(config.group_scan_defer_below)
 
         # 互斥校验：磁盘限流与空间守卫**至少保留一个**——两者同时关闭等于放弃全部磁盘保护，
         # SSD 可能被在途压缩产出写满。部分更新时需与 .env 中的现有值合并后再判断。

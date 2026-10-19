@@ -67,6 +67,19 @@ class CompressionWorker:
         # 压缩实际开始时间（epoch 秒）：卡片平均压缩速度以此为起点，
         # 不含前置扫描/等待时间
         self.compression_started_at: Optional[float] = None
+        # ===== 自适应并发（计划05，Vegas 变体，信号=组级聚合读取速率） =====
+        self._vegas_enabled = bool(getattr(settings, 'GROUP_VEGAS_ENABLED', True))
+        self._vegas_alpha = float(getattr(settings, 'GROUP_VEGAS_ALPHA', 1.0) or 1.0)
+        self._vegas_beta = float(getattr(settings, 'GROUP_VEGAS_BETA', 3.0) or 3.0)
+        self._vegas_decay = float(getattr(settings, 'GROUP_VEGAS_DECAY', 0.7) or 0.7)
+        self._vegas_min = int(getattr(settings, 'GROUP_VEGAS_MIN_BATCHES', 2) or 2)
+        self._vegas_base_reset = int(getattr(settings, 'GROUP_VEGAS_BASE_RESET_SEC', 600) or 600)
+        self._vegas_limit = 0            # 0 = 未干预（从未降过则不 clamp）
+        self._vegas_rate_ewma = 0.0      # 每组平均读取速率 EWMA（MB/s）
+        self._vegas_base = 0.0           # 空载基准（滑动最高，周期性缓降）
+        self._vegas_base_at = 0.0
+        self._vegas_hold_until = 0.0     # 快速闸：暂停发新组期限（epoch 秒）
+        self._last_progress_bytes: Dict[int, int] = {}  # group_idx -> 上次采样 processed_bytes
         self._disk_throttled = False  # 磁盘限流状态（迟滞状态机）
         self._last_adjust_time = 0.0  # 上次并行批次调整时间（限流检查节流）
         self._disk_critical = False  # 磁盘空间危急降级状态
@@ -346,6 +359,13 @@ class CompressionWorker:
                 self._disk_throttled = False
                 self._disk_critical = False
 
+            # 3b. 自适应并发（计划05 Vegas 变体）：NAS 拥塞感知，
+            #     采样组级聚合读取速率并 clamp 到 desired 之下（SSD 水位优先级更高）
+            if self._vegas_enabled and self.use_prefetcher:
+                self._update_vegas()
+                if self._vegas_limit > 0 and desired_batches > self._vegas_limit:
+                    desired_batches = self._vegas_limit
+
             # 3. 应用并记录变化（避免每轮重复刷日志）
             if desired_batches != self.parallel_batches:
                 if self._disk_throttled:
@@ -362,6 +382,76 @@ class CompressionWorker:
         except Exception as e:
             # 即使无法获取 scan_status，也不影响压缩主流程
             logger.debug(f"[压缩配置] 获取 scan_status 时出错，使用默认配置: {e}")
+
+    def _update_vegas(self) -> None:
+        """自适应并发（Vegas 变体）：组级聚合读取速率 → 积压 → 调整并发上限。
+
+        信号 = 每 10 秒窗口内"有进展在途组"的 processed_bytes 平均增量（MB/s/组），
+        天然按文件大小归一，L/S 组切换不扰动（这是不用文件延迟 P95 的原因：
+        单文件延迟受文件大小支配，切组会误判拥塞）。
+          ewma  = 0.3×当前 + 0.7×历史（首样本直接取值）
+          base  = 滑动最高 ewma；每 BASE_RESET_SEC 允许 base×0.9 缓降（防基准漂移）
+          deficit = 并发 × (1 − ewma/base)   # 等价 Vegas 队列积压
+        deficit > β  → 并发 ×DECAY（乘性降，比线性 -1 到位更快）
+        deficit > 2β → 额外触发快速闸（暂停发新组一个窗口，在途组自然收缩）
+        deficit < α  → 并发 +1 缓慢上探（不超过配置批次）
+        无 delta 的组不计入（大文件单文件分钟级无样本，避免污染 ewma）。
+        """
+        now = time.time()
+        total_delta = 0
+        active = 0
+        for gidx, info in list(self.compression_progress_map.items()):
+            cp = info.get('compress_progress') if isinstance(info, dict) else None
+            if not cp:
+                continue
+            pb = int(cp.get('processed_bytes', 0) or 0)
+            prev = self._last_progress_bytes.get(gidx)
+            self._last_progress_bytes[gidx] = pb
+            if prev is not None and pb > prev:
+                total_delta += pb - prev
+                active += 1
+        # 已完成组清理
+        for g in [g for g in self._last_progress_bytes
+                  if g not in self.compression_progress_map]:
+            self._last_progress_bytes.pop(g, None)
+
+        if active > 0:
+            rate = total_delta / 10.0 / active / (1024 * 1024)  # 10 秒窗口，MB/s/组
+            self._vegas_rate_ewma = (rate if self._vegas_rate_ewma <= 0
+                                     else 0.3 * rate + 0.7 * self._vegas_rate_ewma)
+            if self._vegas_rate_ewma > self._vegas_base:
+                self._vegas_base = self._vegas_rate_ewma
+                self._vegas_base_at = now
+            elif (self._vegas_base > 0
+                  and now - self._vegas_base_at >= self._vegas_base_reset):
+                self._vegas_base = max(self._vegas_base * 0.9, self._vegas_rate_ewma)
+                self._vegas_base_at = now
+
+        if self._vegas_base <= 0 or self._vegas_rate_ewma <= 0:
+            return  # 尚未建立基准，不干预
+
+        cur_limit = self._vegas_limit or max(1, self.base_parallel_batches)
+        deficit = cur_limit * (1.0 - self._vegas_rate_ewma / self._vegas_base)
+        note = ''
+        if deficit > self._vegas_beta:
+            new_limit = max(self._vegas_min, int(cur_limit * self._vegas_decay))
+            if new_limit < cur_limit:
+                self._vegas_limit = new_limit
+                note = (f"速率跌至基准 {self._vegas_rate_ewma / self._vegas_base * 100:.0f}%，"
+                        f"并发×{self._vegas_decay}→{new_limit}")
+            if deficit > 2 * self._vegas_beta:
+                self._vegas_hold_until = now + 10.0
+                note += "，触发快速闸（暂停发新组一个窗口）"
+        elif deficit < self._vegas_alpha and 0 < self._vegas_limit < self.base_parallel_batches:
+            up = min(self.base_parallel_batches, self._vegas_limit + 1)
+            if up > self._vegas_limit:
+                self._vegas_limit = up
+                note = f"速率充分，并发上探→{up}"
+        if note:
+            logger.info(
+                f"[自适应并发] {note}"
+                f"（速率 {self._vegas_rate_ewma:.1f} / 基准 {self._vegas_base:.1f} MB/s/组，"
+                f"deficit {deficit:.1f}）")
 
     async def _process_prefetched_file_groups(self):
         """处理预取的文件组（openGauss模式）- 并发控制"""
@@ -380,6 +470,25 @@ class CompressionWorker:
                 if self.use_prefetcher and (time.time() - self._last_adjust_time) >= 10.0:
                     self._last_adjust_time = time.time()
                     await self._adjust_parallel_batches()
+
+                # Vegas 快速闸：deficit 极端超标时暂停发新组一个窗口——
+                # 在途组自然完成收缩，等效提前一个组周期降压（不中断任何组）
+                if self._vegas_enabled and self._vegas_hold_until > time.time():
+                    if self.running_compression_futures:
+                        done, _ = await asyncio.wait(
+                            self.running_compression_futures,
+                            return_when=asyncio.FIRST_COMPLETED
+                        )
+                        for task in done:
+                            if task in self.running_compression_futures:
+                                self.running_compression_futures.remove(task)
+                            try:
+                                await task
+                            except Exception as e:
+                                logger.error(f"压缩任务异常: {str(e)}", exc_info=True)
+                    else:
+                        await asyncio.sleep(2.0)
+                    continue
 
                 # 并发控制：如果达到并行限制，等待部分任务完成
                 if len(self.running_compression_futures) >= self.parallel_batches:

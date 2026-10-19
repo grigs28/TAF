@@ -79,11 +79,12 @@ class FileGroupPrefetcher:
         self._queued_group_sizes = _deque()
         self.total_queued_size = 0  # 累计放入队列的总文件大小（字节）
 
-        # ===== 大小文件组动态调度（计划04） =====
+        # ===== 大小文件组动态调度（计划04 / 计划05） =====
         # 按组内文件数分类：< 阈值 = 大文件组（带宽主导），>= 阈值 = 小文件组（IOPS 主导）。
-        # 调度规则：
-        #   · 扫描期 2大:1小（限速防 SSD 满）；扫描完成 3大:1小（喂饱写带）
-        #   · 守卫触发时只取小文件组（文件数最多、产出最慢）
+        # 调度规则（计划05：全程统一配额，不再区分扫描期/完成后）：
+        #   · 全程 2大:1小；守卫触发时只取小文件组（文件数最多、产出最慢）
+        #   · 扫描期暂存"文件数 < GROUP_SCAN_DEFER_BELOW"的超大文件组（产出最快，
+        #     留给扫描完成后喂饱写带）；两类队列都空时降级取暂存组（"没合适的可以用"）
         #   · 某类耗尽时取另一类；都空则等待
         # 开关 GROUP_SCHED_ENABLED=false 时完全回退到原来的单队列 FIFO 行为。
         _s = get_settings()
@@ -91,7 +92,10 @@ class FileGroupPrefetcher:
         self.group_large_threshold = int(
             getattr(_s, 'GROUP_LARGE_FILE_COUNT_THRESHOLD', 20000) or 20000)
         self._scan_ratio = self._parse_ratio(getattr(_s, 'GROUP_SCHED_SCAN_RATIO', '2:1'))
-        self._normal_ratio = self._parse_ratio(getattr(_s, 'GROUP_SCHED_NORMAL_RATIO', '3:1'))
+        self._normal_ratio = self._parse_ratio(getattr(_s, 'GROUP_SCHED_NORMAL_RATIO', '2:1'))
+        # 扫描期大组保护阈值（0=禁用）
+        self._defer_below = int(getattr(_s, 'GROUP_SCAN_DEFER_BELOW', 5000) or 0)
+        self._deferred_items: list = []   # 扫描期暂存的超大文件组（原样 tuple，扫描完成放回）
         # 守卫状态切换防抖：跟随“空间不足检查间隔”（守卫每轮检查的节奏），
         # 默认 30 秒；不再使用独立固定值。
         self._sched_debounce = float(
@@ -131,9 +135,10 @@ class FileGroupPrefetcher:
             return (2, 1)
 
     def get_queue_size(self) -> int:
-        """当前待压缩组数（兼容调度开关两种模式）"""
+        """当前待压缩组数（兼容调度开关两种模式；含扫描期保护区暂存组）"""
         if self.group_sched_enabled:
-            return self.large_queue.qsize() + self.small_queue.qsize()
+            return (self.large_queue.qsize() + self.small_queue.qsize()
+                    + len(self._deferred_items))
         return self.file_group_queue.qsize()
 
     def get_queue_sizes(self) -> list:
@@ -247,8 +252,12 @@ class FileGroupPrefetcher:
             await self.file_group_queue.put(([], -1))
 
     def _scan_completed(self) -> bool:
+        # 注意：InMemoryFileStore.is_scan_done() 是 async，此处是同步上下文，
+        # 必须用同步的 get_scan_status()。此前误用 is_scan_done() 未 await，
+        # 返回协程对象恒为 True——扫描期/完成后配额切换从未生效过（一直按完成后配额）。
         try:
-            return bool(self.in_memory_store and self.in_memory_store.is_scan_done())
+            st = self.in_memory_store.get_scan_status()
+            return st == 'completed'
         except Exception:
             return False
 
@@ -269,8 +278,8 @@ class FileGroupPrefetcher:
             # 守卫拦停：只取小文件组（文件数最多、产出最慢）；
             # 小文件组耗尽才取大文件组（没有更慢的可选）
             return 'small' if not self.small_queue.empty() else 'large'
-        large_n, small_n = (self._scan_ratio
-                            if not self._scan_completed() else self._normal_ratio)
+        # 计划05：全程统一配额（不再区分扫描期/完成后）
+        large_n, small_n = self._normal_ratio
         if large_n <= 0:
             return 'small'
         if small_n <= 0:
@@ -289,8 +298,7 @@ class FileGroupPrefetcher:
         """
         if actual != choice:
             return
-        large_n, small_n = (self._scan_ratio
-                            if not self._scan_completed() else self._normal_ratio)
+        large_n, small_n = self._normal_ratio   # 计划05：全程统一配额
         if large_n <= 0 or small_n <= 0:
             return
         if actual == 'large' and self._large_take < large_n:
@@ -307,36 +315,73 @@ class FileGroupPrefetcher:
         except (TypeError, ValueError):
             return raw, None
 
+    @staticmethod
+    def _item_file_count(item) -> Optional[int]:
+        """从 (file_groups, last_id) 取组内文件数；结束信号等返回 None"""
+        try:
+            if item and isinstance(item, tuple) and len(item) == 2 and item[0]:
+                return len(item[0][0])
+        except Exception:
+            pass
+        return None
+
     async def _get_scheduled(self, timeout: Optional[float]):
         """调度模式取组：类型/配额选择 + 守卫联动 + 耗尽降级
 
         队列按文件数排序：
           large → 取文件数最小（最大文件组，产出最快）
           small → 取文件数最大（最小文件组，产出最慢）
+        扫描期大组保护（计划05）：从 L 队列取出的"文件数 < GROUP_SCAN_DEFER_BELOW"
+        的组暂存不消费（留给扫描完成后），两类队列都空时降级取暂存组。
         """
         loop = asyncio.get_running_loop()
         deadline = None if timeout is None else loop.time() + timeout
         while True:
             if self._large_done and self._small_done:
                 return ([], -1)
+            # 扫描已完成：保护区组原样放回 L 队列（tuple 整体 put，priority 保持）
+            if self._deferred_items and self._scan_completed():
+                for raw in self._deferred_items:
+                    await self.large_queue.put(raw)
+                logger.info(
+                    f"[文件组调度] 扫描完成，{len(self._deferred_items)} 个保护区组"
+                    f"放回大文件组队列")
+                self._deferred_items.clear()
             choice = self._choose_queue()
             q = self.large_queue if choice == 'large' else self.small_queue
             other_q = self.small_queue if choice == 'large' else self.large_queue
             seq = None
+            _raw = None
+            _from_deferred = False
             try:
-                item, seq = self._unwrap(q.get_nowait())
+                _raw = q.get_nowait()
             except asyncio.QueueEmpty:
                 try:
-                    item, seq = self._unwrap(other_q.get_nowait())
+                    _raw = other_q.get_nowait()
                     q = other_q
                 except asyncio.QueueEmpty:
-                    if deadline is not None and deadline - loop.time() <= 0:
-                        return None
-                    try:
-                        item, seq = self._unwrap(
-                            await asyncio.wait_for(q.get(), timeout=2.0))
-                    except asyncio.TimeoutError:
-                        continue
+                    # 两类队列都空 → 降级取保护区组（"没合适的可以用"）
+                    if self._deferred_items:
+                        _raw = self._deferred_items.pop(0)
+                        q = self.large_queue
+                        _from_deferred = True
+                    else:
+                        if deadline is not None and deadline - loop.time() <= 0:
+                            return None
+                        try:
+                            _raw = await asyncio.wait_for(q.get(), timeout=2.0)
+                        except asyncio.TimeoutError:
+                            continue
+            item, seq = self._unwrap(_raw)
+
+            # 扫描期大组保护：L 队列取出的保护区组 → 暂存并继续取（不消耗配额）
+            if (not _from_deferred and q is self.large_queue
+                    and self._defer_below > 0 and not self._scan_completed()):
+                _fc = self._item_file_count(item)
+                if _fc is not None and _fc < self._defer_below:
+                    self._deferred_items.append(_raw)
+                    continue
+
             if seq is not None:
                 self._queued_sizes_by_seq.pop(seq, None)
             # 结束标记（预取完成）
