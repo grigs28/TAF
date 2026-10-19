@@ -336,11 +336,17 @@
             } else if (code === 'prefetch') {
                 const d = parseInt(task.prefetch_queue_depth, 10) || 0;
                 const sizes = Array.isArray(task.prefetch_queue_sizes) ? task.prefetch_queue_sizes : [];
+                const counts = Array.isArray(task.prefetch_queue_counts) ? task.prefetch_queue_counts : [];
                 const mfs = parseInt(task.max_file_size, 10) || 0;
                 if (d > 0) {
                     lines.push('队列: ' + d + ' 组待压缩');
-                    if (sizes.length) {
-                        // 组与组之间用 | 分隔，避免与"分数 X/Y"的 / 混淆
+                    if (counts.length) {
+                        // 各组文件数（与组大小同序）；组间用 | 分隔
+                        lines.push('各组文件数: ' + counts.map(function (c) {
+                            return Number(c).toLocaleString();
+                        }).join(' | '));
+                    } else if (sizes.length) {
+                        // 旧后端回退：仍显示组大小
                         lines.push('各组大小: ' + sizes.map(function (s) { return formatBytes(s); }).join(' | '));
                     }
                 } else {

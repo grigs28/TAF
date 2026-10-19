@@ -308,6 +308,7 @@ async def get_backup_tasks(
                     in_memory_compression_completed = None
                     in_memory_queue_depth = 0
                     in_memory_queue_sizes = []
+                    in_memory_queue_counts = []
                     in_memory_scan_stats = None
                     guard_active = False
                     guard_idle_seconds = 0
@@ -403,6 +404,13 @@ async def get_backup_tasks(
                                                 in_memory_queue_sizes = [
                                                     int(x) for x in fp.get_queue_sizes()
                                                 ]
+                                                # 队列各组文件数（hover 显示文件数，与 sizes 同序）
+                                                try:
+                                                    in_memory_queue_counts = [
+                                                        int(x) for x in fp.get_queue_counts()
+                                                    ]
+                                                except Exception:
+                                                    in_memory_queue_counts = []
                                                 total_large_groups = int(
                                                     getattr(fp, '_prefetched_large_groups', 0) or 0)
                                                 total_small_groups = int(
@@ -611,6 +619,7 @@ async def get_backup_tasks(
                         "scan_live_stats": in_memory_scan_stats,          # 扫描中：已扫描文件/字节/目录
                         "prefetch_queue_depth": in_memory_queue_depth,    # 预分组：队列深度
                         "prefetch_queue_sizes": in_memory_queue_sizes,    # 预分组：各组字节大小
+                        "prefetch_queue_counts": in_memory_queue_counts,  # 预分组：各组文件数
                         # 空间守卫状态（拦停时卡片在 SSD 行追加显示）
                         "guard_active": guard_active,
                         "guard_idle_seconds": guard_idle_seconds,

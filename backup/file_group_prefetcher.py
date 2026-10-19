@@ -110,6 +110,7 @@ class FileGroupPrefetcher:
         self.small_queue: asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=0)
         self._queue_seq = 0
         self._queued_sizes_by_seq: dict = {}
+        self._queued_counts_by_seq: dict = {}   # seq -> 组内文件数（hover 显示）
         # 已分组总数（按类型，含在途/队列中/已完成，仅调度模式统计）
         self._prefetched_large_groups = 0
         self._prefetched_small_groups = 0
@@ -146,6 +147,12 @@ class FileGroupPrefetcher:
         if self.group_sched_enabled:
             return list(self._queued_sizes_by_seq.values())
         return list(self._queued_group_sizes)
+
+    def get_queue_counts(self) -> list:
+        """队列中各组文件数（用于卡片 hover，与 get_queue_sizes 同序）"""
+        if self.group_sched_enabled:
+            return list(self._queued_counts_by_seq.values())
+        return []
         
     def start(self):
         """启动预取任务"""
@@ -362,6 +369,7 @@ class FileGroupPrefetcher:
                     item, seq = self._unwrap(_raw)
                     if seq is not None:
                         self._queued_sizes_by_seq.pop(seq, None)
+                        self._queued_counts_by_seq.pop(seq, None)
                     return item
                 return ([], -1)
             # 扫描已完成：保护区组原样放回 L 队列（tuple 整体 put，priority 保持）
@@ -412,6 +420,7 @@ class FileGroupPrefetcher:
 
             if seq is not None:
                 self._queued_sizes_by_seq.pop(seq, None)
+                self._queued_counts_by_seq.pop(seq, None)
             # 结束标记（预取完成）
             if item and isinstance(item, tuple) and len(item) == 2 and not item[0]:
                 if q is self.large_queue:
@@ -581,6 +590,7 @@ class FileGroupPrefetcher:
                         self._queue_seq += 1
                         seq = self._queue_seq
                         self._queued_sizes_by_seq[seq] = total_size
+                        self._queued_counts_by_seq[seq] = file_count
                         await q.put((priority, seq, total_size, ([group], 0)))
                         _qtype = 'large' if is_large else 'small'
                     else:
