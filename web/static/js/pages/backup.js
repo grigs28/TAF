@@ -1122,17 +1122,41 @@
                                 && typeof task.active_small_groups === 'number');
                 const _hasTotal = (typeof task.total_large_groups === 'number'
                                    && typeof task.total_small_groups === 'number');
+                const _hasCompleted = (typeof task.completed_large_groups === 'number'
+                                       && typeof task.completed_small_groups === 'number');
+                const _numOr0 = (v) => (typeof v === 'number' && isFinite(v)) ? v : 0;
+                // 队列中现存组数 = 已分组总数 − 在途 − 已压缩完成
+                const _queueLarge = Math.max(0,
+                    _numOr0(task.total_large_groups) - _numOr0(task.active_large_groups)
+                    - _numOr0(task.completed_large_groups));
+                const _queueSmall = Math.max(0,
+                    _numOr0(task.total_small_groups) - _numOr0(task.active_small_groups)
+                    - _numOr0(task.completed_small_groups));
+                // 括号内三段：在途 L/S · 队列 L/S · 累计已分组 L/S
                 const _lsText = _hasLs
                     ? `（${task.active_large_groups}/${task.active_small_groups}`
+                      + (_hasTotal && _hasCompleted
+                          ? `·${_queueLarge}/${_queueSmall}`
+                          : '')
                       + (_hasTotal
                           ? `·${task.total_large_groups}/${task.total_small_groups}`
                           : '')
                       + `）` : '';
                 const _lsTitle = `压缩组: 正在压缩 ${runningCount} 组 / 上限 ${totalSlots} 组\n`
-                    + `括号内: 在途大文件组 ${_hasLs ? task.active_large_groups : '-'}`
-                    + ` / 在途小文件组 ${_hasLs ? task.active_small_groups : '-'}`
+                    + `括号内三段: 在途 L/S · 队列 L/S · 累计已分组 L/S`
+                    + (_hasLs
+                        ? `\n在途: 大文件组 ${task.active_large_groups} / 小文件组 ${task.active_small_groups}`
+                        : '')
+                    + (_hasTotal && _hasCompleted
+                        ? `\n队列待压缩: 大文件组 ${_queueLarge} / 小文件组 ${_queueSmall}`
+                          + `（合计 ${_queueLarge + _queueSmall} 组）`
+                        : '')
+                    + (_hasCompleted
+                        ? `\n累计完成: 大文件组 ${task.completed_large_groups}`
+                          + ` / 小文件组 ${task.completed_small_groups}`
+                        : '')
                     + (_hasTotal
-                        ? ` · 已分组总数 大文件组 ${task.total_large_groups}`
+                        ? `\n累计已分组: 大文件组 ${task.total_large_groups}`
                           + ` / 小文件组 ${task.total_small_groups}（含队列/在途/已完成）`
                         : '')
                     + `\n颜色: 主蓝=大文件组(L)  浅蓝=小文件组(S)`;
