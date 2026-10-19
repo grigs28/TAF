@@ -982,13 +982,23 @@ class CompressionWorker:
                 return None
         
         percent = (total_current / total_total * 100) if total_total > 0 else 0.0
-        
+
+        # 在途组类型（供前端"当前阶段"百分比区分 L/S）：
+        # 全部大文件组 → 'large'；全部小文件组 → 'small'；混合 → 'mixed'
+        _types = {t.get('group_type') for t in task_progress_list if t.get('group_type')}
+        if len(_types) == 1:
+            _dominant = _types.pop()
+        elif len(_types) > 1:
+            _dominant = 'mixed'
+        else:
+            _dominant = None
+
         logger.debug(
             f"[压缩进度聚合] 并行任务数={running_count}, 活跃任务数={active_count}, "
             f"聚合进度={total_current}/{total_total} ({percent:.1f}%), "
             f"任务进度列表: {[(t.get('percent', 0), t.get('current', 0), t.get('total', 0)) for t in task_progress_list]}"
         )
-        
+
         return {
             # 兼容前端的字段名（用于"当前阶段"显示）
             'current': total_current,  # 所有正在处理任务的文件数总和（3102）
@@ -997,6 +1007,7 @@ class CompressionWorker:
             'current_file_index': total_current,
             'total_files_in_group': total_total,
             'percent': percent,
+            'group_type': _dominant,   # 在途组类型：large/small/mixed/None
             'group_size_bytes': total_group_size_bytes,
             'running_count': running_count,
             'task_progress_list': task_progress_list  # 各个任务的进度列表，用于"各压缩任务进度"显示

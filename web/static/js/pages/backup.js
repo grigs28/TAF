@@ -1011,11 +1011,16 @@
                         percent = 0;
                     }
                     // 如果 current 和 total 都是 0，显示百分比即可
-                    // 紧凑格式示例: "压缩 70522/129504(54.5%)114.01G"
+                    // 紧凑格式示例: "压缩 ●70522/129504(54.5%)114.01G"
+                    // ● 色点 = 在途组类型：主蓝=大文件组(L) 浅蓝=小文件组(S) 灰=混合/未知
+                    const _gt = compProg.group_type;
+                    const _dotColor = _gt === 'large' ? 'var(--primary)'
+                        : _gt === 'small' ? 'var(--primary-light)' : 'rgba(255,255,255,.35)';
+                    const _lsDot = `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${_dotColor};margin-right:2px;vertical-align:0;" title="${_gt === 'large' ? '大文件组(L)' : _gt === 'small' ? '小文件组(S)' : '大小组混合'}"></span>`;
                     if (current === 0 && total === 0) {
-                        currentStageLabel = `压缩 (${percent.toFixed(1)}%)`;
+                        currentStageLabel = `压缩 ${_lsDot}(${percent.toFixed(1)}%)`;
                     } else {
-                        currentStageLabel = `压缩 ${current}/${total}(${percent.toFixed(1)}%)`;
+                        currentStageLabel = `压缩 ${_lsDot}${current}/${total}(${percent.toFixed(1)}%)`;
                     }
                     console.log('[压缩进度] 构造的标签:', currentStageLabel);
                 } else {
