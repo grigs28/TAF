@@ -984,10 +984,11 @@
                         percent = 0;
                     }
                     // 如果 current 和 total 都是 0，显示百分比即可
+                    // 紧凑格式示例: "压缩 70522/129504(54.5%)114.01G"
                     if (current === 0 && total === 0) {
-                        currentStageLabel = `压缩文件中 (${percent.toFixed(1)}%)`;
+                        currentStageLabel = `压缩 (${percent.toFixed(1)}%)`;
                     } else {
-                        currentStageLabel = `压缩文件中 ${current}/${total} 个文件 (${percent.toFixed(1)}%)`;
+                        currentStageLabel = `压缩 ${current}/${total}(${percent.toFixed(1)}%)`;
                     }
                     console.log('[压缩进度] 构造的标签:', currentStageLabel);
                 } else {
@@ -1003,14 +1004,14 @@
 
                     // 如果操作状态包含"初始化压缩引擎"且是压缩阶段，显示默认压缩状态
                     if (isCompressStage && operationStatus.includes('初始化压缩引擎')) {
-                        operationStatus = '压缩文件中...';
+                        operationStatus = '压缩中...';
                     }
 
                     currentStageLabel = operationStatus;
                 }
 
                 // 从 currentStageLabel 中解析进度百分比
-                // 格式示例: "压缩文件中 1201/3395 个文件 (35.4%)"
+                // 格式示例: "压缩 1201/3395(35.4%)114.01G"
                 let progressPercent = null;
                 const progressMatch = currentStageLabel.match(/\(([\d.]+)%\)/);
                 if (progressMatch) {
@@ -1030,8 +1031,8 @@
                     // 优先使用 group_size_bytes（当前文件组的总文件大小）
                     if (compProg.group_size_bytes && compProg.group_size_bytes > 0) {
                         const sizeGB = (compProg.group_size_bytes / (1024 * 1024 * 1024)).toFixed(2);
-                        // 在文件数量和百分比后添加大小信息（当前文件组的总容量）
-                        displayLabel = currentStageLabel.replace(/(\([\d.]+%\))/, `$1 ${sizeGB}G`);
+                        // 在文件数量和百分比后紧凑追加大小信息（当前文件组的总容量）
+                        displayLabel = currentStageLabel.replace(/(\([\d.]+%\))/, `$1.${sizeGB}G`);
                     }
                 } else if (!isCompressStage && progressInfo && (progressInfo.processedBytes > 0 || progressInfo.compressedBytes > 0)) {
                     // 非压缩阶段，使用累计数据
