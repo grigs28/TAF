@@ -75,12 +75,19 @@ class CompressionWorker:
         self._vegas_min = int(getattr(settings, 'GROUP_VEGAS_MIN_BATCHES', 2) or 2)
         self._vegas_base_reset = int(getattr(settings, 'GROUP_VEGAS_BASE_RESET_SEC', 600) or 600)
         self._vegas_limit = 0            # 0 = 未干预（从未降过则不 clamp）
-        self._vegas_rate_ewma = 0.0      # 每组平均读取速率 EWMA（MB/s）
-        self._vegas_base = 0.0           # 空载基准（滑动最高，周期性缓降）
-        self._vegas_base_at = 0.0
+        # 分类型独立基准：L/S 每组速率天然差一个量级，混合平均会把 S 组慢误判为 NAS 拥塞
+        self._vegas_states = {
+            'large': {'ewma': 0.0, 'base': 0.0, 'base_at': 0.0},
+            'small': {'ewma': 0.0, 'base': 0.0, 'base_at': 0.0},
+        }
+        self._vegas_rate_ewma = 0.0      # 展示值：按 active 数加权的综合 ewma（MB/s/组）
+        self._vegas_base = 0.0           # 展示值：综合基准
+        self._vegas_low_windows = 0      # 低并发仍低速率的连续窗口（基准重校准）
         self._vegas_hold_until = 0.0     # 快速闸：暂停发新组期限（epoch 秒）
         self._vegas_last_sample_at = 0.0  # 上次采样时间戳（真实窗口 = now - 此值）
         self._last_progress_bytes: Dict[int, int] = {}  # group_idx -> 上次采样 processed_bytes
+        # 写带饿死护栏：final 长时间无文件可写时不得继续降并发（否则喂不饱写带）
+        self.write_starved_provider = None
         self._disk_throttled = False  # 磁盘限流状态（迟滞状态机）
         self._last_adjust_time = 0.0  # 上次并行批次调整时间（限流检查节流）
         self._disk_critical = False  # 磁盘空间危急降级状态
@@ -384,27 +391,41 @@ class CompressionWorker:
             # 即使无法获取 scan_status，也不影响压缩主流程
             logger.debug(f"[压缩配置] 获取 scan_status 时出错，使用默认配置: {e}")
 
-    def _update_vegas(self) -> None:
-        """自适应并发（Vegas 变体）：组级聚合读取速率 → 积压 → 调整并发上限。
+    def _group_type_of(self, file_count: int) -> str:
+        """按组内文件数判定 L/S（与调度器同口径，热读配置）"""
+        try:
+            from config.settings import get_settings as _gs
+            thr = int(getattr(_gs(), 'GROUP_LARGE_FILE_COUNT_THRESHOLD', 20000) or 20000)
+        except Exception:
+            thr = 20000
+        return 'small' if file_count >= thr else 'large'
 
-        信号 = 每 10 秒窗口内"有进展在途组"的 processed_bytes 平均增量（MB/s/组），
-        天然按文件大小归一，L/S 组切换不扰动（这是不用文件延迟 P95 的原因：
-        单文件延迟受文件大小支配，切组会误判拥塞）。
+    def _update_vegas(self) -> None:
+        """自适应并发（Vegas 变体，分类型基准）：组级聚合读取速率 → 积压 → 调并发。
+
+        信号 = 窗口内"有进展在途组"的 processed_bytes 平均增量（MB/s/组）。
+        按 L/S **分别维护 ewma 与基准**：小文件组每组速率天然只有大文件组的
+        1/5~1/3，混合平均会把"切到 S 组"误判成 NAS 拥塞（实测因此一度降到
+        4 并发并卡住）。决策取两类 deficit 的最大值；某类样本 < 2 组时不更新
+        （单组噪声大）。
+
           ewma  = 0.3×当前 + 0.7×历史（首样本直接取值）
-          base  = 滑动最高 ewma；每 BASE_RESET_SEC 允许 base×0.9 缓降（防基准漂移）
+          base  = 滑动最高 ewma；每 BASE_RESET_SEC 允许 base×0.9 缓降
           deficit = 并发 × (1 − ewma/base)   # 等价 Vegas 队列积压
-        deficit > β  → 并发 ×DECAY（乘性降，比线性 -1 到位更快）
-        deficit > 2β → 额外触发快速闸（暂停发新组一个窗口，在途组自然收缩）
-        deficit < α  → 并发 +1 缓慢上探（不超过配置批次）
-        无 delta 的组不计入（大文件单文件分钟级无样本，避免污染 ewma）。
-        窗口时长用真实时间差（快速闸/守卫等待会把节拍拉长到分钟级，
-        硬编码 10 秒会把速率低估几十倍、误判拥塞）。
+        deficit > β  → 并发 ×DECAY；> 2β 再加快速闸（暂停发新组一个窗口）
+        deficit < α  → 并发 +1 缓慢上探
+        护栏：
+          · 写带饿死（final 长时间无文件可写）时不降并发——速率低可能只是
+            小文件组本身慢，继续降会让写带更饿
+          · 已在低并发（≤min+2）仍低速率且连续 3 窗口 → 基准虚高（一次异常
+            高点/小文件区），把 base 重校准到 ewma×1.1，避免永久卡在低并发
+        窗口时长用真实时间差（快速闸/守卫等待会把节拍拉长到分钟级）。
         """
         now = time.time()
         dt = max(1.0, (now - self._vegas_last_sample_at)) if self._vegas_last_sample_at > 0 else 10.0
         self._vegas_last_sample_at = now
-        total_delta = 0
-        active = 0
+
+        totals = {'large': [0, 0], 'small': [0, 0]}  # typ -> [delta_bytes, active]
         for gidx, info in list(self.compression_progress_map.items()):
             cp = info.get('compress_progress') if isinstance(info, dict) else None
             if not cp:
@@ -413,38 +434,90 @@ class CompressionWorker:
             prev = self._last_progress_bytes.get(gidx)
             self._last_progress_bytes[gidx] = pb
             if prev is not None and pb > prev:
-                total_delta += pb - prev
-                active += 1
+                typ = info.get('group_type') or 'large'
+                if typ not in totals:
+                    typ = 'large'
+                totals[typ][0] += pb - prev
+                totals[typ][1] += 1
         # 已完成组清理
         for g in [g for g in self._last_progress_bytes
                   if g not in self.compression_progress_map]:
             self._last_progress_bytes.pop(g, None)
 
-        if active > 0:
-            rate = total_delta / dt / active / (1024 * 1024)  # 真实窗口，MB/s/组
-            self._vegas_rate_ewma = (rate if self._vegas_rate_ewma <= 0
-                                     else 0.3 * rate + 0.7 * self._vegas_rate_ewma)
-            if self._vegas_rate_ewma > self._vegas_base:
-                self._vegas_base = self._vegas_rate_ewma
-                self._vegas_base_at = now
-            elif (self._vegas_base > 0
-                  and now - self._vegas_base_at >= self._vegas_base_reset):
-                self._vegas_base = max(self._vegas_base * 0.9, self._vegas_rate_ewma)
-                self._vegas_base_at = now
-
-        if self._vegas_base <= 0 or self._vegas_rate_ewma <= 0:
-            return  # 尚未建立基准，不干预
-
         cur_limit = self._vegas_limit or max(1, self.base_parallel_batches)
-        deficit = cur_limit * (1.0 - self._vegas_rate_ewma / self._vegas_base)
+
+        def _tick(typ: str):
+            delta, act = totals[typ]
+            st = self._vegas_states[typ]
+            if act < 2:
+                # 样本不足：大文件组单文件分钟级无 delta，单组平均值噪声大
+                return None
+            rate = delta / dt / act / (1024 * 1024)  # 真实窗口，MB/s/组
+            st['ewma'] = (rate if st['ewma'] <= 0
+                          else 0.3 * rate + 0.7 * st['ewma'])
+            if st['ewma'] > st['base']:
+                st['base'] = st['ewma']
+                st['base_at'] = now
+            elif st['base'] > 0 and now - st['base_at'] >= self._vegas_base_reset:
+                st['base'] = max(st['base'] * 0.9, st['ewma'])
+                st['base_at'] = now
+            if st['base'] <= 0 or st['ewma'] <= 0:
+                return None
+            return cur_limit * (1.0 - st['ewma'] / st['base'])
+
+        dl = _tick('large')
+        ds = _tick('small')
+
+        # 展示值（API 健康度灯）：按 active 数加权；无样本类型不参与
+        den = 0
+        num_r = 0.0
+        num_b = 0.0
+        for typ in ('large', 'small'):
+            act = totals[typ][1]
+            st = self._vegas_states[typ]
+            if act > 0 and st['base'] > 0 and st['ewma'] > 0:
+                den += act
+                num_r += st['ewma'] * act
+                num_b += st['base'] * act
+        if den > 0:
+            self._vegas_rate_ewma = num_r / den
+            self._vegas_base = num_b / den
+
+        ds_all = [d for d in (dl, ds) if d is not None]
+        if not ds_all:
+            return
+        deficit = max(ds_all)
+
+        starved = False
+        try:
+            if callable(self.write_starved_provider):
+                starved = bool(self.write_starved_provider())
+        except Exception:
+            starved = False
+
         note = ''
         if deficit > self._vegas_beta:
             new_limit = max(self._vegas_min, int(cur_limit * self._vegas_decay))
-            if new_limit < cur_limit:
+            if starved and cur_limit < self.base_parallel_batches:
+                note = '写带饿死，暂不降并发'
+            elif (new_limit <= self._vegas_min
+                  and cur_limit <= self._vegas_min + 2):
+                # 已接近下限仍低速率：基准可能虚高，连续 3 窗口后重校准
+                self._vegas_low_windows += 1
+                if self._vegas_low_windows >= 3:
+                    for st in self._vegas_states.values():
+                        if st['base'] > 0 and st['ewma'] > 0:
+                            st['base'] = max(st['ewma'] * 1.1, 1.0)
+                    self._vegas_low_windows = 0
+                    note = '低并发仍低速率，重校准基准'
+                else:
+                    note = (f'低并发仍低速率（{self._vegas_low_windows}/3），'
+                            f'暂不再降')
+            elif new_limit < cur_limit:
                 self._vegas_limit = new_limit
                 note = (f"速率跌至基准 {self._vegas_rate_ewma / self._vegas_base * 100:.0f}%，"
                         f"并发×{self._vegas_decay}→{new_limit}")
-            if deficit > 2 * self._vegas_beta:
+            if deficit > 2 * self._vegas_beta and not starved:
                 self._vegas_hold_until = now + 10.0
                 note += "，触发快速闸（暂停发新组一个窗口）"
         elif deficit < self._vegas_alpha and 0 < self._vegas_limit < self.base_parallel_batches:
@@ -452,11 +525,16 @@ class CompressionWorker:
             if up > self._vegas_limit:
                 self._vegas_limit = up
                 note = f"速率充分，并发上探→{up}"
+
         if note:
+            _sl = self._vegas_states['large']
+            _ss = self._vegas_states['small']
             logger.info(
                 f"[自适应并发] {note}"
-                f"（速率 {self._vegas_rate_ewma:.1f} / 基准 {self._vegas_base:.1f} MB/s/组，"
-                f"deficit {deficit:.1f}）")
+                f"（L {_sl['ewma']:.1f}/{_sl['base']:.1f}，"
+                f"S {_ss['ewma']:.1f}/{_ss['base']:.1f} MB/s/组，"
+                f"deficit {deficit:.1f}"
+                + ("，写带饿死" if starved else "") + "）")
 
     async def _process_prefetched_file_groups(self):
         """处理预取的文件组（openGauss模式）- 并发控制"""
@@ -680,6 +758,7 @@ class CompressionWorker:
                 self.compression_progress_map[current_group_idx] = {
                     'compress_progress': compress_progress,  # 共享的进度字典，压缩函数会实时更新
                     'total_files': len(file_group),  # 文件组总文件数
+                    'group_type': self._group_type_of(len(file_group)),  # L/S（供分类型速率）
                     'group_size_bytes': total_group_size  # 文件组总大小
                 }
                 

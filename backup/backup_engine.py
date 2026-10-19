@@ -1613,6 +1613,12 @@ class BackupEngine:
                 file_group_prefetcher=file_group_prefetcher,  # openGauss模式下的预取器
                 in_memory_store=in_memory_store  # 纯内存扫描模式的文件存储
             )
+            # 注入写带饿死信号：final 长时间无文件可写时不继续降并发（Vegas 护栏）
+            try:
+                compression_worker.write_starved_provider = (
+                    lambda: bool(getattr(self.final_dir_monitor, '_starve_start', None)))
+            except Exception:
+                pass
             compression_worker.start()
             logger.info(f"[备份引擎] 压缩工作线程已启动，使用预取模式: {compression_worker.use_prefetcher}")
             # 存储压缩工作线程引用，以便get_task_status可以访问实时进度
