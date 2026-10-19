@@ -261,6 +261,20 @@ class FileGroupPrefetcher:
         except Exception:
             return False
 
+    @staticmethod
+    def _live_setting(name, default):
+        """现读 live settings（UI 保存后运行中任务立即生效，无需等下个任务）"""
+        try:
+            from config.settings import get_settings as _gs
+            return getattr(_gs(), name, default)
+        except Exception:
+            return default
+
+    def _current_ratio(self) -> tuple:
+        """现读全程配额；解析失败回退启动时读到的值"""
+        r = self._parse_ratio(self._live_setting('GROUP_SCHED_NORMAL_RATIO', '2:1'))
+        return r if r != (0, 0) and r[0] + r[1] > 0 else self._normal_ratio
+
     def _choose_queue(self) -> str:
         """选择下一个组队列：'large'（快产出） / 'small'（慢产出）
 
@@ -278,8 +292,8 @@ class FileGroupPrefetcher:
             # 守卫拦停：只取小文件组（文件数最多、产出最慢）；
             # 小文件组耗尽才取大文件组（没有更慢的可选）
             return 'small' if not self.small_queue.empty() else 'large'
-        # 计划05：全程统一配额（不再区分扫描期/完成后）
-        large_n, small_n = self._normal_ratio
+        # 计划05：全程统一配额（不再区分扫描期/完成后；现读支持 UI 即时生效）
+        large_n, small_n = self._current_ratio()
         if large_n <= 0:
             return 'small'
         if small_n <= 0:
@@ -298,7 +312,7 @@ class FileGroupPrefetcher:
         """
         if actual != choice:
             return
-        large_n, small_n = self._normal_ratio   # 计划05：全程统一配额
+        large_n, small_n = self._current_ratio()   # 计划05：全程统一配额（现读）
         if large_n <= 0 or small_n <= 0:
             return
         if actual == 'large' and self._large_take < large_n:
@@ -386,12 +400,15 @@ class FileGroupPrefetcher:
             item, seq = self._unwrap(_raw)
 
             # 扫描期大组保护：L 队列取出的保护区组 → 暂存并继续取（不消耗配额）
+            # 阈值现读（UI 保存后立即生效）
             if (not _from_deferred and q is self.large_queue
-                    and self._defer_below > 0 and not self._scan_completed()):
-                _fc = self._item_file_count(item)
-                if _fc is not None and _fc < self._defer_below:
-                    self._deferred_items.append(_raw)
-                    continue
+                    and not self._scan_completed()):
+                _defer_below = int(self._live_setting('GROUP_SCAN_DEFER_BELOW', 5000) or 0)
+                if _defer_below > 0:
+                    _fc = self._item_file_count(item)
+                    if _fc is not None and _fc < _defer_below:
+                        self._deferred_items.append(_raw)
+                        continue
 
             if seq is not None:
                 self._queued_sizes_by_seq.pop(seq, None)
@@ -549,7 +566,10 @@ class FileGroupPrefetcher:
                     file_count = len(group)
 
                     if self.group_sched_enabled:
-                        is_large = file_count < self.group_large_threshold
+                        # 分界阈值现读（UI 保存后立即生效）
+                        _threshold = int(self._live_setting(
+                            'GROUP_LARGE_FILE_COUNT_THRESHOLD', 20000) or 20000)
+                        is_large = file_count < _threshold
                         q = self.large_queue if is_large else self.small_queue
                         if is_large:
                             self._prefetched_large_groups += 1

@@ -320,6 +320,9 @@ async def get_backup_tasks(
                     total_large_groups = 0       # 已分组总数（大文件组）
                     total_small_groups = 0       # 已分组总数（小文件组）
                     compression_started_at = None  # 压缩循环启动时间（epoch 秒，卡片平均速度以此为起点）
+                    vegas_health = None          # NAS读取健康度（%，ewma/base；None=无基准/未启用）
+                    vegas_rate_mbps = None       # 当前每组平均读取速率（MB/s/组）
+                    vegas_base_mbps = None       # 历史最好速率基准（MB/s/组）
                     task_status = None
 
                     if status_value == 'running':
@@ -383,6 +386,17 @@ async def get_backup_tasks(
                                                 compression_started_at = float(_cs) if _cs else None
                                             except Exception:
                                                 compression_started_at = None
+                                            # Vegas 自适应并发健康度（仅运行中任务有意义）
+                                            try:
+                                                if getattr(compression_worker, '_vegas_enabled', False):
+                                                    _ewma = float(getattr(compression_worker, '_vegas_rate_ewma', 0.0) or 0.0)
+                                                    _base = float(getattr(compression_worker, '_vegas_base', 0.0) or 0.0)
+                                                    if _base > 0 and _ewma > 0:
+                                                        vegas_health = round(_ewma / _base * 100)
+                                                        vegas_rate_mbps = round(_ewma, 1)
+                                                        vegas_base_mbps = round(_base, 1)
+                                            except Exception:
+                                                pass
                                             # 预分组队列：深度 + 各组字节大小（供卡片"预分组"徽章 hover）
                                             try:
                                                 in_memory_queue_depth = fp.get_queue_size()
@@ -562,6 +576,10 @@ async def get_backup_tasks(
                         "parallel_batches": parallel_batches,
                         # 压缩开始时间（epoch 秒）：右上角速度徽章的平均速度从此刻起算
                         "compression_started_at": compression_started_at,
+                        # Vegas 健康度（%）：压缩/打包徽章红绿黄的依据；null=无基准
+                        "vegas_health": vegas_health,
+                        "vegas_rate_mbps": vegas_rate_mbps,
+                        "vegas_base_mbps": vegas_base_mbps,
                         # 预分组封组阈值（MAX_FILE_SIZE 设置值）：hover 显示参考
                         "max_file_size": max_file_size,
                         # 磁带实时写入（无写入进行时为 None/0；仅当前写入所属任务可见）

@@ -359,6 +359,15 @@
                 } else {
                     lines.push('说明: tar|zstd 压缩文件组，产出写入 SSD');
                 }
+                // 徽章颜色 = NAS 读取健康度（绿≥85 / 黄60~85 / 红<60）
+                const _vh = Number(task.vegas_health);
+                if (Number.isFinite(_vh)) {
+                    lines.push('NAS读取: ' + _vh + '%'
+                        + '（' + (task.vegas_rate_mbps || '-') + ' / '
+                        + (task.vegas_base_mbps || '-') + ' MB/s/组）');
+                } else {
+                    lines.push('NAS读取: 建立基准中…（任务初期 2~3 个采样窗口）');
+                }
             } else if (code === 'copy') {
                 if (task.tape_writing_file) {
                     lines.push('正在写入: ' + task.tape_writing_file);
@@ -482,6 +491,15 @@
                     return 'bg-purple pulse-badge';
                 }
                 if (stageCode === 'compress') {
+                    // 颜色 = NAS读取健康度（组级聚合速率 ewma/base）：
+                    // 绿 ≥85% 正常 / 黄 60~85% 轻度降速 / 红 <60% 拥塞（Vegas 降并发中）
+                    // 无基准（任务初期/Vegas关闭）保持原琥珀色
+                    const _vh = task ? Number(task.vegas_health) : NaN;
+                    if (Number.isFinite(_vh)) {
+                        if (_vh >= 85) return 'bg-success pulse-badge';
+                        if (_vh >= 60) return 'bg-warning text-dark pulse-badge';
+                        return 'bg-danger pulse-badge';
+                    }
                     return 'bg-amber pulse-badge';
                 }
                 if (stageCode === 'finalize') {
