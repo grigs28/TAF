@@ -1,5 +1,18 @@
 # 更新日志
 
+## [1.1.92] - 2026-10-19
+
+### 修复
+
+- **zstd 进程池路径丢弃压缩结果**：`await compression_future` 的返回值未被使用，
+  `compress_result` 始终为空，导致 1.1.91 按真实成功数标注后显示 `0/N 个文件`，
+  且失败文件清单/统计在 zstd 路径下始终为空。现合并子进程返回的
+  `successful_files`/`failed_files`；子进程异常返回 `ok=false` 时按组失败处理
+  （返回 None → 任务 FAILED）。
+- **非 zstd 分支 `payload` 未定义**：`finally` 中无条件访问 `payload.get(...)`
+  会 NameError，现初始化为 None 并判空。
+- 版本升至 1.1.92
+
 ## [1.1.91] - 2026-10-19
 
 ### 修复（备份完整性防线）

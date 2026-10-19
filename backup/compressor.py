@@ -755,6 +755,7 @@ class Compressor:
             # 其他压缩方法保留线程池（老路径不可 pickle，行为不变）
             loop = asyncio.get_event_loop()
             logger.warning(f"[压缩] 异步启动压缩任务，立即返回，不等待完成")
+            payload = None
             if compression_method == 'zstd':
                 payload = {
                     'archive_path': temp_archive_path,
@@ -779,15 +780,34 @@ class Compressor:
             
             # 顺序执行：等待压缩完成、标注完成、移动到final
             # 等待压缩完成（不设置超时，让压缩自然完成）
+            _pool_result = None
             try:
-                await compression_future
+                _pool_result = await compression_future
             finally:
                 # 组结束后注销进度路由（worker 的收尾事件已在返回前送达）
-                try:
-                    CompressionProcessPool.get_instance().unregister_group_progress(payload.get('progress_key'))
-                except Exception:
-                    pass
+                if payload is not None:
+                    try:
+                        CompressionProcessPool.get_instance().unregister_group_progress(payload.get('progress_key'))
+                    except Exception:
+                        pass
             logger.warning(f"[压缩] 压缩任务已完成")
+
+            # 进程池（zstd CLI）路径：子进程在返回值里带回成功/失败清单，
+            # 必须合并进 compress_result，否则成功后文件数恒为 0、失败清单永远为空
+            # （旧代码丢弃了 await 的返回值，1.1.91 用真实成功数标注后暴露为 0/N）
+            if compression_method == 'zstd':
+                if isinstance(_pool_result, dict) and _pool_result.get('ok') is False:
+                    logger.error(f"[压缩] 子进程压缩失败: {_pool_result.get('error')}")
+                    logger.error(_pool_result.get('traceback') or '')
+                    return None
+                if isinstance(_pool_result, dict):
+                    compress_result['successful_files'] = _pool_result.get('successful_files') or []
+                    compress_result['failed_files'] = _pool_result.get('failed_files') or []
+                    compress_result['successful_original_size'] = _pool_result.get('successful_original_size') or 0
+                    logger.info(
+                        f"[压缩] 子进程结果: 成功 {len(compress_result['successful_files'])} 个, "
+                        f"失败 {len(compress_result['failed_files'])} 个"
+                    )
 
             # 压缩已结束 → 本组不再产出数据，立即释放"在途产出"记账。
             # 后续的标注/移动到 final 是同盘移动，不新增占用，不该继续占用守卫额度。
