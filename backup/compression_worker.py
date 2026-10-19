@@ -398,6 +398,10 @@ class CompressionWorker:
                         except Exception as e:
                             logger.error(f"压缩任务异常: {str(e)}", exc_info=True)
                     logger.debug(f"当前运行中的压缩任务数: {len(self.running_compression_futures)}/{self.parallel_batches}")
+                    # 关键：必须回顶部重新判断是否仍达到上限。
+                    # 否则"运行中配置调小并发"时，完成一个组后会立刻补一个新组，
+                    # 运行数永远回到原值，并发只能升不能降（增加立即生效、减少不生效）。
+                    continue
 
                 # 获取文件组（消费队列）
                 result = await self.file_group_prefetcher.get_file_group(timeout=2.0)
