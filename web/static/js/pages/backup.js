@@ -1280,12 +1280,8 @@
                         <span class="badge bg-success ms-auto" style="font-size:0.85rem; font-weight:400; padding:0.2em 0.45em;">${_dataPct}%</span>
                     </div>
                     <div class="d-flex justify-content-between">
-                        <small class="text-muted">压缩后大小:</small>
-                        <small class="text-muted">${formatBytes(progressInfo.compressedBytes)}</small>
-                    </div>
-                    <div class="d-flex justify-content-between">
-                        <small class="text-muted">压缩率:</small>
-                        <small class="text-muted">${formatCompressionRatio(progressInfo.compressionRatio)}</small>
+                        <small class="text-muted">压缩后大小:${formatBytes(progressInfo.compressedBytes)}</small>
+                        <small class="text-muted">压缩率:${formatCompressionRatio(progressInfo.compressionRatio)}</small>
                     </div>
                 `);
             }
