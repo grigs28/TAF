@@ -338,6 +338,17 @@ class FileGroupPrefetcher:
         deadline = None if timeout is None else loop.time() + timeout
         while True:
             if self._large_done and self._small_done:
+                if self._deferred_items:
+                    # 兜底：结束信号已取走但保护区仍有存货（flush 因 get_scan_status
+                    # 异常未执行）——不允许丢组，直接降级取出
+                    logger.warning(
+                        f"[文件组调度] 双队列已结束但保护区仍有 "
+                        f"{len(self._deferred_items)} 组，降级取出")
+                    _raw = self._deferred_items.pop(0)
+                    item, seq = self._unwrap(_raw)
+                    if seq is not None:
+                        self._queued_sizes_by_seq.pop(seq, None)
+                    return item
                 return ([], -1)
             # 扫描已完成：保护区组原样放回 L 队列（tuple 整体 put，priority 保持）
             if self._deferred_items and self._scan_completed():

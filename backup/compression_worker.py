@@ -79,6 +79,7 @@ class CompressionWorker:
         self._vegas_base = 0.0           # 空载基准（滑动最高，周期性缓降）
         self._vegas_base_at = 0.0
         self._vegas_hold_until = 0.0     # 快速闸：暂停发新组期限（epoch 秒）
+        self._vegas_last_sample_at = 0.0  # 上次采样时间戳（真实窗口 = now - 此值）
         self._last_progress_bytes: Dict[int, int] = {}  # group_idx -> 上次采样 processed_bytes
         self._disk_throttled = False  # 磁盘限流状态（迟滞状态机）
         self._last_adjust_time = 0.0  # 上次并行批次调整时间（限流检查节流）
@@ -396,8 +397,12 @@ class CompressionWorker:
         deficit > 2β → 额外触发快速闸（暂停发新组一个窗口，在途组自然收缩）
         deficit < α  → 并发 +1 缓慢上探（不超过配置批次）
         无 delta 的组不计入（大文件单文件分钟级无样本，避免污染 ewma）。
+        窗口时长用真实时间差（快速闸/守卫等待会把节拍拉长到分钟级，
+        硬编码 10 秒会把速率低估几十倍、误判拥塞）。
         """
         now = time.time()
+        dt = max(1.0, (now - self._vegas_last_sample_at)) if self._vegas_last_sample_at > 0 else 10.0
+        self._vegas_last_sample_at = now
         total_delta = 0
         active = 0
         for gidx, info in list(self.compression_progress_map.items()):
@@ -416,7 +421,7 @@ class CompressionWorker:
             self._last_progress_bytes.pop(g, None)
 
         if active > 0:
-            rate = total_delta / 10.0 / active / (1024 * 1024)  # 10 秒窗口，MB/s/组
+            rate = total_delta / dt / active / (1024 * 1024)  # 真实窗口，MB/s/组
             self._vegas_rate_ewma = (rate if self._vegas_rate_ewma <= 0
                                      else 0.3 * rate + 0.7 * self._vegas_rate_ewma)
             if self._vegas_rate_ewma > self._vegas_base:
