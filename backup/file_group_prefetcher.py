@@ -97,7 +97,9 @@ class FileGroupPrefetcher:
         # 按组内文件数排序的优先队列（无界）：
         #   large 队列：priority = 文件数（升序）→ 优先“最大文件组”（组内文件最少、产出最快）
         #   small 队列：priority = -文件数（降序）→ 优先“最小文件组”（组内文件最多、产出最慢）
-        # 结束信号 priority = -1e18，保证总是最先被取出。
+        # 结束信号 priority = +1e18，保证队列中真实文件组全部取完后才被取出。
+        # （曾用 -1e18 导致信号入队即被取走，两个队列被误判为已耗尽，
+        #  压缩循环提前退出，只剩少量在途组继续跑。）
         self.large_queue: asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=0)
         self.small_queue: asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=0)
         self._queue_seq = 0
@@ -232,12 +234,13 @@ class FileGroupPrefetcher:
     async def _put_done_signal(self):
         """发送预取结束信号（调度模式双队列各发一份）
 
-        用极小的 priority 保证结束标记优先于普通组被取出。
+        用极大的 priority 保证结束标记排在该队列所有真实组之后：
+        取到它就意味着该队列确实已取空。
         """
         if self.group_sched_enabled:
             for q in (self.large_queue, self.small_queue):
                 self._queue_seq += 1
-                await q.put((-1e18, self._queue_seq, 0, ([], -1)))
+                await q.put((1e18, self._queue_seq, 0, ([], -1)))
         else:
             await self.file_group_queue.put(([], -1))
 
@@ -254,6 +257,11 @@ class FileGroupPrefetcher:
         _commit_take() 计数。这样某类队列为空时降级取另一类不会消耗配额，
         下次仍优先配额要求的类型。
         """
+        # 某类队列已确认耗尽（结束信号已取出）：强制选另一类
+        if self._large_done and not self._small_done:
+            return 'small'
+        if self._small_done and not self._large_done:
+            return 'large'
         guard = self._update_guard_state()
         if guard:
             # 守卫拦停：只取小文件组（文件数最多、产出最慢）；
