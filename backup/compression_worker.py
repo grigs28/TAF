@@ -725,6 +725,14 @@ class CompressionWorker:
         total_group_size_bytes = 0
         active_count = 0
         task_progress_list = []  # 各个任务的进度列表
+
+        # 组类型判定与调度器同口径：组内文件数 < 阈值 = 大文件组(L)，≥ 阈值 = 小文件组(S)
+        try:
+            from config.settings import get_settings as _gs
+            _large_file_threshold = int(
+                getattr(_gs(), 'GROUP_LARGE_FILE_COUNT_THRESHOLD', 20000) or 20000)
+        except Exception:
+            _large_file_threshold = 20000
         
         # 遍历所有运行中的压缩任务，从它们的compress_progress字典读取实际进度
         logger.debug(
@@ -806,6 +814,8 @@ class CompressionWorker:
                         'percent': size_percent,
                         'current': current_file_index,
                         'total': total_files_in_group,
+                        'group_type': ('small' if total_files_in_group >= _large_file_threshold
+                                       else 'large'),
                         'group_size_bytes': group_size_bytes,
                         'processed_bytes': processed_bytes,  # 已处理文件的实际大小
                         # 当前打包的归档文件名（如 backup_2026-10_000113_20261017_083125.tar.zst）

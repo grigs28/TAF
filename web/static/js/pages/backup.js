@@ -1097,13 +1097,17 @@
                 for (let i = 0; i < totalSlots; i++) {
                     const _g = _groupList[i];
                     const _pct = _g ? Math.max(0, Math.min(100, Number(_g.percent) || 0)) : 0;
+                    // 组类型着色（同色系）：大文件组 L = 主蓝，小文件组 S = 浅蓝
+                    const _isSmall = _g && _g.group_type === 'small';
+                    const _fillColor = _isSmall ? 'var(--primary-light)' : 'var(--primary)';
                     const _bg = _pct <= 0
                         ? 'rgba(255,255,255,.18)'
                         : (_pct >= 100
-                            ? 'var(--primary)'
-                            : `linear-gradient(to top, var(--primary) 0 ${_pct}%, rgba(255,255,255,.18) ${_pct}% 100%)`);
+                            ? _fillColor
+                            : `linear-gradient(to top, ${_fillColor} 0 ${_pct}%, rgba(255,255,255,.18) ${_pct}% 100%)`);
+                    const _typeTag = _g ? (_isSmall ? '小' : '大') : '';
                     const _title = _g
-                        ? ('组' + (i + 1) + ': ' + _pct.toFixed(1) + '%'
+                        ? ('组' + (i + 1) + '[' + _typeTag + ']: ' + _pct.toFixed(1) + '%'
                             + (typeof _g.current === 'number' && typeof _g.total === 'number'
                                 ? `（${_g.current}/${_g.total} 文件）` : ''))
                         : '空闲';
@@ -1130,7 +1134,8 @@
                     + (_hasTotal
                         ? ` · 已分组总数 大文件组 ${task.total_large_groups}`
                           + ` / 小文件组 ${task.total_small_groups}（含队列/在途/已完成）`
-                        : '');
+                        : '')
+                    + `\n颜色: 主蓝=大文件组(L)  浅蓝=小文件组(S)`;
                 batchProgressHtml = normalizeCardHtml(`
                     <div class="d-flex justify-content-between align-items-center mb-1">
                         <small class="text-muted" title="${_lsTitle}">压缩组:</small>
