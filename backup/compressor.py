@@ -19,7 +19,7 @@ try:
 except ImportError:
     zstd = None
 from pathlib import Path
-from typing import List, Dict, Optional, Callable, Awaitable, Any
+from typing import List, Dict, Optional, Callable, Awaitable, Any, Tuple
 
 from models.backup import BackupSet, BackupTask
 from utils.datetime_utils import now, format_datetime
@@ -149,11 +149,17 @@ class Compressor:
         return len(self._active_groups)
 
     def reset_group_stats(self) -> None:
-        """任务开始时重置在途/累计组统计（L/S 数量）"""
+        """任务开始时重置在途/累计组统计（L/S 数量）与守卫状态"""
         self._active_groups = []
         self._active_group_types = []
         self._completed_large_groups = 0
         self._completed_small_groups = 0
+        # 守卫状态一并重置：新任务"全场无放行"的卡死计时从首组重新起算。
+        # compressor 是引擎级实例跨任务复用，不重置的话每日任务首组会拿到
+        # 上一任务（可能 20+ 小时前）的时间戳，空间不足时直接误判"全场卡死"
+        self._guard_active = False
+        self._last_release_time = None
+        self._last_guard_log_time = 0.0
 
     def _release_active_group(self, group_bytes: int = 0, group_path: str = "") -> None:
         """释放一个在途组的记账（优先按 (源字节, 路径) 精确匹配，容忍大小重复）"""
@@ -827,15 +833,21 @@ class Compressor:
             else:
                 logger.debug(f"[压缩] 压缩文件存在，大小: {format_bytes(compressed_size)}, 路径: {temp_archive_path}")
             
-            # 压缩完成后，标注完成
+            # 压缩完成后，标注完成（按真实成功/失败数，不无条件标 100%）
             from backup.backup_db import BackupDB
             backup_db = BackupDB()
+            _ok_count = len(compress_result.get('successful_files', []))
+            _fail_count = len(compress_result.get('failed_files', []))
+            _ok_pct = (_ok_count / total_files * 100.0) if total_files > 0 else 100.0
+            _stage_desc = (f"[压缩完成] {_ok_count}/{total_files} 个文件 ({_ok_pct:.1f}%)"
+                           + (f"，失败 {_fail_count} 个" if _fail_count > 0 else ""))
             await backup_db.update_task_stage_with_description(
                 backup_task,
                 "compress",
-                f"[压缩完成] {total_files}/{total_files} 个文件 (100.0%)"
+                _stage_desc
             )
-            logger.info(f"[压缩] ✅ 已标注压缩完成: {total_files} 个文件")
+            logger.info(f"[压缩] ✅ 已标注压缩完成: {_ok_count}/{total_files} 个文件"
+                        + (f"（失败 {_fail_count} 个）" if _fail_count > 0 else ""))
             
             # 根据配置决定是否需要移动文件
             final_archive_path_for_db = temp_archive_path  # 默认使用temp路径
@@ -944,6 +956,106 @@ class Compressor:
             traceback.print_exc()
             return None
 
+    def compute_required_free(self, pending_group_bytes: int = 0) -> Tuple[int, Dict]:
+        """守卫主口径：磁盘需求（字节）与计算明细。
+
+        守卫需求 = max( 在途组**剩余待产出上界** , MAX_FILE_SIZE ) × 安全系数
+
+          在途剩余 = Σ max(0, 源大小 − 已落地产出)
+            · 源大小 = 产出上界（压缩后只会更小），替代"组数 × MAX_FILE_SIZE"
+              可避免小文件区被严重高估（实测组只有 0.2~4GB 却按 24GB/组计，
+              16 组时守卫线虚高到 384G，白闲置数百 GB）。
+            · 减去已落地产出：这些字节已经占用 SSD，free 里已扣过一次；需求侧
+              再按全量源大小算会让守卫线虚高（在途压得越深，虚高越多）。
+            · 组刚启动（文件未创建/为空）时扣除量为 0 → 与纯源大小口径逐字节
+              一致，最坏情况（全部组同时刚启动）的保护不减弱。
+            · 已产出取 min(stat大小, 源大小)：压缩比>1（已压缩数据）时截断，
+              保证扣除量不超过该组的上界。
+          保底一项 = MAX_FILE_SIZE：避免"在途全是小文件组 → 守卫线过低 →
+                   下一个大组直接撑爆"。无在途组（如首个组）时该项即全部需求。
+        无在途记账时回退保守口径（_compute_required_free_bytes：组数×MAX_FILE_SIZE×系数）。
+
+        空间守卫（_ensure_disk_space）与压缩危急层限流共用本方法，
+        保证两条判定线口径一致。安全系数现取 live settings：改动后立即生效。
+        """
+        # live settings（UI 改配置立即生效，不用构造时捕获的旧对象）
+        try:
+            from config.settings import get_settings as _get_settings
+            _live_settings = _get_settings()
+        except Exception:
+            _live_settings = self.settings
+        try:
+            max_file_size = int(getattr(_live_settings, 'MAX_FILE_SIZE', 0) or 0)
+        except Exception:
+            max_file_size = 0
+        if max_file_size <= 0:
+            return 0, {}
+
+        try:
+            _factor = float(getattr(_live_settings, 'DISK_GUARD_SAFETY_FACTOR', 1.2) or 1.2)
+        except Exception:
+            _factor = 1.2
+        if _factor < 1.0:   # 小于 1 会让在途产出越界
+            _factor = 1.0
+
+        # 扣除已落地产出（DISK_GUARD_COUNT_PRODUCED=false 可一键回退纯源大小口径）
+        try:
+            _count_produced = bool(getattr(_live_settings, 'DISK_GUARD_COUNT_PRODUCED', True))
+        except Exception:
+            _count_produced = True
+
+        try:
+            active_src_total = sum(int(src) for src, _p in self._active_groups)
+        except Exception:
+            active_src_total = 0
+
+        produced_total = 0
+        if _count_produced:
+            for _src, _produced_path in list(self._active_groups):
+                try:
+                    _size = int(os.stat(_produced_path).st_size)
+                except (OSError, TypeError, ValueError):
+                    _size = 0      # 文件尚未创建/已被移走 → 按 0 计（保守）
+                produced_total += max(0, min(_size, int(_src)))
+        remaining_bytes = max(0, active_src_total - produced_total)
+        if not _count_produced:
+            remaining_bytes = active_src_total
+
+        active_groups = len(self._active_groups)
+        # 把本组（即将通过守卫、随后落地产出）按**全量源大小**计入需求：本组尚无产出
+        if pending_group_bytes and pending_group_bytes > 0:
+            remaining_bytes += int(pending_group_bytes)
+            active_groups += 1
+
+        if remaining_bytes > 0:
+            # 有在途组：按剩余待产出算（含正在检查的这一组，它已计入"本组源大小"）
+            required_free = int(max(remaining_bytes, max_file_size) * _factor)
+            logger.debug(
+                f"守卫线（按剩余待产出）: 在途 {active_groups} 组，源 {format_bytes(active_src_total)}，"
+                f"已产出 {format_bytes(produced_total)}，剩余上界 {format_bytes(remaining_bytes)}（含本组），"
+                f"保底 {format_bytes(max_file_size)}，×{_factor} → 需 {format_bytes(required_free)}"
+            )
+        else:
+            # 无在途组（首个组/记账为空）：回退保守口径
+            _ag = None
+            provider = getattr(self, 'active_groups_provider', None)
+            if callable(provider):
+                try:
+                    _ag = int(provider()) or None
+                except Exception as provider_err:
+                    logger.debug(f"获取在途组数失败，回退配置上限: {provider_err}")
+                    _ag = None
+            required_free = _compute_required_free_bytes(_live_settings, _ag) or (max_file_size * 3)
+
+        detail = {
+            'active_groups': active_groups,
+            'active_src_total': active_src_total,
+            'produced_total': produced_total,
+            'remaining_bytes': remaining_bytes,
+            'count_produced': _count_produced,
+        }
+        return required_free, detail
+
     async def _ensure_disk_space(self, target_dir: Path, pending_group_bytes: int = 0):
         """确保磁盘剩余空间满足"**在途真实产出** + **本组待产出**"
 
@@ -984,76 +1096,16 @@ class Compressor:
         # 根据时间和间隔计算最大重试次数
         max_retries = (max_wait_minutes * 60) // check_interval
 
-        # 守卫需求 = max( 在途组**剩余待产出上界** , MAX_FILE_SIZE ) × 安全系数
-        #
-        #   在途剩余 = Σ max(0, 源大小 − 已落地产出)
-        #     · 源大小 = 产出上界（压缩后只会更小），替代"组数 × MAX_FILE_SIZE"
-        #       可避免小文件区被严重高估（实测组只有 0.2~4GB 却按 24GB/组计，
-        #       16 组时守卫线虚高到 384G，白闲置数百 GB）。
-        #     · 减去已落地产出：这些字节已经占用 SSD，free 里已扣过一次；需求侧
-        #       再按全量源大小算会让守卫线虚高（在途压得越深，虚高越多）。
-        #     · 组刚启动（文件未创建/为空）时扣除量为 0 → 与纯源大小口径逐字节
-        #       一致，最坏情况（全部组同时刚启动）的保护不减弱。
-        #     · 已产出取 min(stat大小, 源大小)：压缩比>1（已压缩数据）时截断，
-        #       保证扣除量不超过该组的上界。
-        #   保底一项 = MAX_FILE_SIZE：避免"在途全是小文件组 → 守卫线过低 →
-        #            下一个大组直接撑爆"。无在途组（如首个组）时该项即全部需求。
-        #
-        # 安全系数现取 settings：系数改动后守卫线立即随之伸缩。
-        try:
-            _factor = float(getattr(_live_settings, 'DISK_GUARD_SAFETY_FACTOR', 1.2) or 1.2)
-        except Exception:
-            _factor = 1.2
-        if _factor < 1.0:   # 小于 1 会让在途产出越界
-            _factor = 1.0
-
-        try:
-            active_src_total = sum(int(src) for src, _p in self._active_groups)
-        except Exception:
-            active_src_total = 0
-
-        # 扣除已落地产出（DISK_GUARD_COUNT_PRODUCED=false 可一键回退纯源大小口径）
-        try:
-            _count_produced = bool(getattr(_live_settings, 'DISK_GUARD_COUNT_PRODUCED', True))
-        except Exception:
-            _count_produced = True
-        produced_total = 0
-        if _count_produced:
-            for _src, _produced_path in list(self._active_groups):
-                try:
-                    _size = int(os.stat(_produced_path).st_size)
-                except (OSError, TypeError, ValueError):
-                    _size = 0      # 文件尚未创建/已被移走 → 按 0 计（保守）
-                produced_total += max(0, min(_size, int(_src)))
-        remaining_bytes = max(0, active_src_total - produced_total)
-        if not _count_produced:
-            remaining_bytes = active_src_total
-
-        active_groups = len(self._active_groups)
-        # 把本组（即将通过守卫、随后落地产出）按**全量源大小**计入需求：本组尚无产出
-        if pending_group_bytes and pending_group_bytes > 0:
-            remaining_bytes += int(pending_group_bytes)
-            active_groups += 1
-
-        if remaining_bytes > 0:
-            # 有在途组：按剩余待产出算（含正在检查的这一组，它已计入"本组源大小"）
-            required_free = int(max(remaining_bytes, max_file_size) * _factor)
-            logger.debug(
-                f"守卫线（按剩余待产出）: 在途 {active_groups} 组，源 {format_bytes(active_src_total)}，"
-                f"已产出 {format_bytes(produced_total)}，剩余上界 {format_bytes(remaining_bytes)}（含本组），"
-                f"保底 {format_bytes(max_file_size)}，×{_factor} → 需 {format_bytes(required_free)}"
-            )
-        else:
-            # 无在途组（首个组/记账为空）：回退保守口径
-            _ag = None
-            provider = getattr(self, 'active_groups_provider', None)
-            if callable(provider):
-                try:
-                    _ag = int(provider()) or None
-                except Exception as provider_err:
-                    logger.debug(f"获取在途组数失败，回退配置上限: {provider_err}")
-                    _ag = None
-            required_free = _compute_required_free_bytes(_live_settings, _ag) or (max_file_size * 3)
+        # 守卫需求计算提炼到 compute_required_free()：空间守卫主循环与压缩危急层
+        # 限流共用同一口径（口径说明见该方法 docstring）
+        required_free, _detail = self.compute_required_free(pending_group_bytes)
+        if required_free <= 0:
+            return
+        active_groups = _detail.get('active_groups', 0)
+        active_src_total = _detail.get('active_src_total', 0)
+        produced_total = _detail.get('produced_total', 0)
+        remaining_bytes = _detail.get('remaining_bytes', 0)
+        _count_produced = _detail.get('count_produced', True)
 
         # 循环由"全局无放行超时"控制退出（不再用本组的重试次数——
         # 否则本组重试次数用尽会静默跳出循环、等于无条件放行，与守卫语义冲突）

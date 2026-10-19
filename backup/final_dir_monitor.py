@@ -93,6 +93,17 @@ class FinalDirMonitor:
                 else:
                     logger.info("[Final监控] Final目录监控线程已停止")
     
+    def reset_starvation_stats(self) -> None:
+        """新任务开始时清零"压缩喂不饱"统计。
+
+        监控线程常驻（start() 只在引擎初始化时真正执行一次，其后 early-return
+        跳过重置），必须由引擎在每个任务开始时显式调用，否则等待秒数会跨任务累计。
+        """
+        with self._lock:
+            self._starvation_seconds = 0.0
+            self._starve_start = None
+            self._has_written_once = False
+
     def finalize_starvation(self) -> float:
         """任务收尾调用：丢弃未结算的最后一段等待。
 
@@ -382,7 +393,9 @@ class FinalDirMonitor:
             return True
         except Exception as e:
             logger.error(f"[Final监控] 检查final目录是否为空时发生错误: {str(e)}")
-            return True  # 出错时假设为空，避免阻塞
+            # 异常按"未空"处理（宁失败不冒险）：引擎会继续等待并最终超时判失败，
+            # 而不是误判"全部写带完成"
+            return False
     
     def get_processed_count(self) -> int:
         """获取已处理文件数量"""

@@ -54,6 +54,8 @@ class FileGroupPrefetcher:
         # 预取任务
         self.prefetch_task: Optional[asyncio.Task] = None
         self._running = False
+        # 预取循环异常原因（非 None 表示异常退出，引擎据此不把预取判定为"完成"）
+        self.prefetch_error: Optional[str] = None
         
         # 最后处理的文件ID（用于连续查询）
         self.last_processed_file_id = 0
@@ -132,7 +134,7 @@ class FileGroupPrefetcher:
         """当前待压缩组数（兼容调度开关两种模式）"""
         if self.group_sched_enabled:
             return self.large_queue.qsize() + self.small_queue.qsize()
-        return self.get_queue_size()
+        return self.file_group_queue.qsize()
 
     def get_queue_sizes(self) -> list:
         """队列中各组字节大小（用于卡片 hover）"""
@@ -405,7 +407,8 @@ class FileGroupPrefetcher:
                     scan_done = await self.in_memory_store.is_scan_done()
                     if scan_done:
                         # 扫描完成且无文件，发送终止信号
-                        await self.file_group_queue.put(([], -1))
+                        # （_put_done_signal 兼容两种模式：调度模式发双队列，否则发旧队列）
+                        await self._put_done_signal()
                         logger.info("[文件组预取器-内存模式] 扫描已完成且无更多文件，发送终止信号")
                         break
                     else:
@@ -524,6 +527,8 @@ class FileGroupPrefetcher:
             logger.info("[文件组预取器-内存模式] 预取循环被取消")
         except Exception as e:
             logger.error(f"[文件组预取器-内存模式] 预取循环异常: {e}", exc_info=True)
+            # 记录异常：未分组的内存文件被放弃时，任务不得伪装成功
+            self.prefetch_error = str(e)
             try:
                 await self._put_done_signal()
             except Exception:

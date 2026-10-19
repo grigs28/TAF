@@ -1,5 +1,31 @@
 # 更新日志
 
+## [1.1.91] - 2026-10-19
+
+### 修复（备份完整性防线）
+
+- **压缩主循环异常退出不再伪装成功**：异常+扫描完成时置 `loop_failed_reason`
+  并标记 `compression_failed`，不再无条件 `compression_completed=True`；
+  四合一判定改为 `completed and not failed` → 任务落 FAILED 而非假成功。
+- **组压缩失败不静默丢弃**：`compress_file_group` 返回 None 或抛异常时，
+  计入失败组/失败文件数、写系统日志（含样例路径）、标记任务失败；
+  阶段标注按真实成功/失败数（不再无条件 100%）。
+- **预取器异常退出不算完成**：记录 `prefetch_error`，引擎四合一据此判失败。
+- **四合一不满足时任务落 FAILED 终态**：此前只写 warning 并返回 True，
+  任务永久停留"运行中"、无告警；现在写失败状态与 error_message 并返回 False。
+- **get_queue_size 非调度分支自递归**：改为 `file_group_queue.qsize()`，
+  关闭大小文件组调度后不再 RecursionError→假完成。
+- **预取兜底分支发错队列**：改用 `_put_done_signal()` 兼容双模式。
+- **任务开始重置守卫状态**：`reset_group_stats` 同步清 `_guard_active`/
+  `_last_release_time`/`_last_guard_log_time`，每日任务首组不再沿用上一任务
+  时间戳误判"全场卡死"。
+- **危急层限流与守卫同口径**：提炼 `compute_required_free()`（剩余待产出），
+  空间守卫与压缩危急层共用，小文件组不再误压并行批次。
+- **is_final_dir_empty 异常改返回 False**（按未空处理，宁失败不冒险）。
+- **等待压缩统计按任务清零**：新增 `reset_starvation_stats()`，引擎任务开始
+  调用，修复跨任务累计（监控线程常驻导致 start() 重置失效）。
+- 版本升至 1.1.91
+
 ## [1.1.90] - 2026-10-19
 
 ### 修复

@@ -58,6 +58,12 @@ class CompressionWorker:
         self.total_size = 0  # 压缩后的总大小
         self.total_original_size = 0  # 原始文件的总大小（未压缩）
         self.group_idx = 0  # 文件组索引
+        # 失败记账：主循环异常退出 / 组压缩失败时置位，
+        # 引擎四合一判定据此走 FAILED 而不是假成功
+        self.loop_failed_reason: Optional[str] = None
+        self.compression_group_failed = False
+        self.failed_groups = 0
+        self.failed_files_total = 0
         self._disk_throttled = False  # 磁盘限流状态（迟滞状态机）
         self._last_adjust_time = 0.0  # 上次并行批次调整时间（限流检查节流）
         self._disk_critical = False  # 磁盘空间危急降级状态
@@ -303,18 +309,26 @@ class CompressionWorker:
                     if self._disk_throttled and high > 0:
                         desired_batches = max(1, normal_batches // 2)
 
-                    # 2b. 空间危急层：剩余空间 < 在途组数×最大文件大小×安全系数 时，批次直接降到指定值
-                    # 组数与空间守卫同口径（实际在途组数），避免两层判定线不一致
+                    # 2b. 空间危急层：与空间守卫同口径（剩余待产出，见
+                    # compressor.compute_required_free），两条判定线保持一致
                     if critical_batches >= 1:
-                        from backup.compressor import _compute_required_free_bytes
-                        required_free = _compute_required_free_bytes(
-                            fresh_settings, len(self.running_compression_futures) or None
-                        )
+                        required_free = 0
+                        if self.compressor is not None and hasattr(self.compressor, 'compute_required_free'):
+                            try:
+                                required_free, _crf_detail = self.compressor.compute_required_free()
+                            except Exception:
+                                required_free = 0
+                        if required_free <= 0:
+                            # 无压缩机实例时回退旧保守口径
+                            from backup.compressor import _compute_required_free_bytes
+                            required_free = _compute_required_free_bytes(
+                                fresh_settings, len(self.running_compression_futures) or None
+                            )
                         if required_free > 0 and free_bytes < required_free:
                             if not self._disk_critical:
                                 logger.warning(
                                     f"[压缩配置] 磁盘剩余空间危急（{format_bytes(free_bytes)} < "
-                                    f"{format_bytes(required_free)}[在途组数×最大文件×安全系数]），"
+                                    f"{format_bytes(required_free)}[守卫线·剩余待产出]），"
                                     f"并行批次强制降为 {critical_batches}"
                                 )
                             self._disk_critical = True
@@ -621,7 +635,9 @@ class CompressionWorker:
                         logger.debug(f"扫描已完成，等待 {len(self.running_compression_futures)} 个正在运行的压缩任务完成...")
                         await asyncio.wait(self.running_compression_futures)
                         self.running_compression_futures.clear()
-                    logger.error("处理文件组异常，扫描已完成，退出压缩循环")
+                    # 异常退出不算完成：剩余组被放弃时任务必须失败，不得伪装成功
+                    self.loop_failed_reason = f"处理文件组异常: {str(e)[:200]}"
+                    logger.error("处理文件组异常，扫描已完成，退出压缩循环（标记压缩失败）")
                     break
         
         # 确保所有任务都已完成
@@ -636,12 +652,26 @@ class CompressionWorker:
                     logger.error(f"压缩任务异常: {str(e)}", exc_info=True)
             self.running_compression_futures.clear()
         
-        # 在内存中设置压缩完成状态
-        self.backup_task.compression_completed = True
-        
+        # 在内存中设置压缩完成状态：
+        # 只有"无主循环异常且无失败组"才算完成；否则置失败标志，
+        # 引擎四合一判定（compression_completed and not compression_failed）走 FAILED
+        if not self.loop_failed_reason and not self.compression_group_failed:
+            self.backup_task.compression_completed = True
+        else:
+            self.backup_task.compression_failed = True
+
         # 压缩完成日志：换行输出，与其他日志有明显差异
         logger.info("=" * 80)
-        logger.info("[压缩循环] ========== 压缩完成 ==========")
+        if self.loop_failed_reason or self.compression_group_failed:
+            logger.warning("[压缩循环] ========== 压缩循环结束（存在失败） ==========")
+            if self.loop_failed_reason:
+                logger.warning(f"  主循环异常: {self.loop_failed_reason}")
+            if self.compression_group_failed:
+                logger.warning(
+                    f"  失败组数: {self.failed_groups}，放弃文件数: {self.failed_files_total:,}"
+                )
+        else:
+            logger.info("[压缩循环] ========== 压缩完成 ==========")
         logger.info(f"  处理文件组数: {self.group_idx}")
         logger.info(f"  处理文件数: {self.processed_files:,} 个文件")
         logger.info(f"  原始总大小: {format_bytes(self.total_original_size)}")
@@ -1284,11 +1314,46 @@ class CompressionWorker:
                             f"累计: {new_processed_files}/{total_files_to_process} 个文件 ({new_progress_percent:.1f}%)"
                         )
                 
+                if not compressed_info:
+                    # 组压缩失败（归档不存在/全部文件失败）：文件已从内存库删除，
+                    # 不计数、不留清单就等于静默丢数据 —— 必须记账并让任务失败
+                    self.compression_group_failed = True
+                    self.backup_task.compression_failed = True
+                    self.failed_groups += 1
+                    self.failed_files_total += total_files
+                    _fail_paths = [
+                        (f.get('path') or f.get('file_path') or '?')
+                        for f in processed_file_group[:20]
+                    ]
+                    logger.error(
+                        f"[#{group_idx + 1}] ❌ 压缩返回空（组失败）: {total_files} 个文件未备份，"
+                        f"样例: {_fail_paths[:5]}"
+                    )
+                    try:
+                        from utils.log_utils import log_system
+                        from models.system_log import LogLevel, LogCategory
+                        await log_system(
+                            level=LogLevel.ERROR,
+                            category=LogCategory.BACKUP,
+                            message=f"压缩组失败: {total_files} 个文件未备份（任务将标记失败）",
+                            module='compression_worker',
+                            function='_compress_file_group',
+                            task_id=getattr(self.backup_task, 'id', None),
+                            details={'sample_paths': _fail_paths}
+                        )
+                    except Exception:
+                        pass
+
                 archive_path = compressed_info.get('path') if compressed_info else None
 
                 # 注意：文件移动到磁带由FinalDirMonitor独立线程监控final目录处理
 
         except Exception as e:
             logger.error(f"[#{group_idx + 1}] ❌ 压缩失败: {str(e)}", exc_info=True)
+            # 组内异常同样计入失败记账（不静默：任务必须失败，不得伪装成功）
+            self.compression_group_failed = True
+            self.backup_task.compression_failed = True
+            self.failed_groups += 1
+            self.failed_files_total += len(file_group or [])
             raise
 

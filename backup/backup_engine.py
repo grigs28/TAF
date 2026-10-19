@@ -394,6 +394,14 @@ class BackupEngine:
             except Exception:
                 pass
 
+            # 清零"等待压缩"统计（监控线程常驻，start() 的重置不会再次执行，
+            # 否则等待秒数跨任务累计、写进本任务的 result_summary）
+            try:
+                if self.final_dir_monitor:
+                    self.final_dir_monitor.reset_starvation_stats()
+            except Exception:
+                pass
+
             # 0. 获取备份策略参数（从tapedrive和system配置）
             logger.info("========== 获取备份策略参数 ==========")
             backup_policy = await self._get_backup_policy_parameters()
@@ -1657,17 +1665,25 @@ class BackupEngine:
             scan_status = await self.backup_db.get_scan_status(backup_task.id)
             scan_completed = scan_status == 'completed'
             
-            # 检查预取器是否完成（执行次数 > 0 且已停止）
+            # 检查预取器是否完成（执行次数 > 0 且已停止且无异常退出）
             prefetch_completed = False
             if file_group_prefetcher:
                 prefetch_loop_count = getattr(file_group_prefetcher, 'prefetch_loop_count', 0)
                 prefetch_running = getattr(file_group_prefetcher, '_running', False)
-                prefetch_completed = prefetch_loop_count > 0 and not prefetch_running
+                prefetch_error = getattr(file_group_prefetcher, 'prefetch_error', None)
+                prefetch_completed = (prefetch_loop_count > 0 and not prefetch_running
+                                      and not prefetch_error)
+                if prefetch_error:
+                    logger.error(f"[备份引擎] 预取器异常退出（未分组文件被放弃）: {prefetch_error}")
             else:
                 prefetch_completed = True  # 没有预取器，视为已完成
-            
-            # 检查压缩是否完成（内存状态）
-            compression_completed = getattr(backup_task, 'compression_completed', False)
+
+            # 检查压缩是否完成（内存状态；组失败/循环异常时 compression_failed=True，
+            # 不得按完成处理）
+            compression_completed = (
+                getattr(backup_task, 'compression_completed', False)
+                and not getattr(backup_task, 'compression_failed', False)
+            )
             
             # 所有条件都满足，标记任务完成
             if scan_completed and prefetch_completed and compression_completed and final_move_completed:
@@ -1777,19 +1793,26 @@ class BackupEngine:
                 except Exception as notify_error:
                     logger.error(f"[备份引擎] 发送任务集完成钉钉通知异常: {str(notify_error)}", exc_info=True)
             else:
-                logger.warning(
-                    f"⚠️ 任务未完全完成："
-                    f"扫描完成={scan_completed}，"
-                    f"预取完成={prefetch_completed}，"
+                # 任务未完全完成：必须落到失败终态，不允许任务永久停留在"运行中"
+                # （此前的行为是只写 warning + 返回 True，任务状态悬空、无告警）
+                error_detail = (
+                    f"扫描完成={scan_completed}，预取完成={prefetch_completed}，"
                     f"压缩完成={compression_completed}，"
                     f"文件移动到final目录完成={final_move_completed}"
                 )
-                # 更新操作状态（但不标记为完成）
-                if not final_move_completed:
-                    await self.backup_db.update_scan_progress(backup_task, processed_files, backup_task.total_files, "[等待文件移动到final目录...]")
-                else:
-                    await self.backup_db.update_scan_progress(backup_task, processed_files, backup_task.total_files, "[压缩完成...]")
-            
+                logger.warning(f"⚠️ 任务未完全完成：{error_detail}")
+                backup_task.error_message = f"任务未完全完成: {error_detail}"[:500]
+                try:
+                    await self.backup_db.update_task_stage_with_description(
+                        backup_task,
+                        "failed",
+                        f"[任务失败] {backup_task.error_message}"
+                    )
+                    await self.backup_db.update_task_status(backup_task, BackupTaskStatus.FAILED)
+                except Exception as status_err:
+                    logger.error(f"[备份引擎] 标记任务失败状态时出错: {status_err}")
+                return False
+
             return True
 
         except KeyboardInterrupt:
