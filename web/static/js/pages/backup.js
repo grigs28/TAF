@@ -1111,24 +1111,24 @@
                         + 'border-radius:1px;vertical-align:-3px;background:' + _bg + '"></span>';
                 }
 
-                // 在途/累计组数：卡片只显示精简数字，明细放悬停
-                //   显示：（在途L / 在途S · 累计L / 累计S）
+                // 在途/总组数：卡片只显示精简数字，明细放悬停
+                //   显示：（在途L / 在途S · 总L / 总S）
                 const _hasLs = (typeof task.active_large_groups === 'number'
                                 && typeof task.active_small_groups === 'number');
-                const _hasTotal = (typeof task.completed_large_groups === 'number'
-                                   && typeof task.completed_small_groups === 'number');
+                const _hasTotal = (typeof task.total_large_groups === 'number'
+                                   && typeof task.total_small_groups === 'number');
                 const _lsText = _hasLs
                     ? `（${task.active_large_groups} / ${task.active_small_groups}`
                       + (_hasTotal
-                          ? ` · ${task.completed_large_groups} / ${task.completed_small_groups}`
+                          ? ` · ${task.total_large_groups} / ${task.total_small_groups}`
                           : '')
                       + `）` : '';
                 const _lsTitle = `压缩组: 正在压缩 ${runningCount} 组 / 上限 ${totalSlots} 组\n`
                     + `括号内: 在途大文件组 ${_hasLs ? task.active_large_groups : '-'}`
                     + ` / 在途小文件组 ${_hasLs ? task.active_small_groups : '-'}`
                     + (_hasTotal
-                        ? ` · 累计完成大文件组 ${task.completed_large_groups}`
-                          + ` / 累计完成小文件组 ${task.completed_small_groups}`
+                        ? ` · 已分组总数 大文件组 ${task.total_large_groups}`
+                          + ` / 小文件组 ${task.total_small_groups}（含队列/在途/已完成）`
                         : '');
                 batchProgressHtml = normalizeCardHtml(`
                     <div class="d-flex justify-content-between align-items-center mb-1">

@@ -102,6 +102,9 @@ class FileGroupPrefetcher:
         self.small_queue: asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=0)
         self._queue_seq = 0
         self._queued_sizes_by_seq: dict = {}
+        # 已分组总数（按类型，含在途/队列中/已完成，仅调度模式统计）
+        self._prefetched_large_groups = 0
+        self._prefetched_small_groups = 0
         self._large_done = False
         self._small_done = False
         self._large_take = 0
@@ -467,6 +470,10 @@ class FileGroupPrefetcher:
                     if self.group_sched_enabled:
                         is_large = file_count < self.group_large_threshold
                         q = self.large_queue if is_large else self.small_queue
+                        if is_large:
+                            self._prefetched_large_groups += 1
+                        else:
+                            self._prefetched_small_groups += 1
                         # large：文件数升序（优先最大文件组/最快产出）
                         # small：文件数降序（优先最小文件组/最慢产出）
                         priority = file_count if is_large else -file_count

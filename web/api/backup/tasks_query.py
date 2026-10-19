@@ -317,6 +317,8 @@ async def get_backup_tasks(
                     active_small_groups = 0   # 在途小文件组数（IOPS 主导）
                     completed_large_groups = 0   # 累计已完成大文件组数
                     completed_small_groups = 0   # 累计已完成小文件组数
+                    total_large_groups = 0       # 已分组总数（大文件组）
+                    total_small_groups = 0       # 已分组总数（小文件组）
                     task_status = None
 
                     if status_value == 'running':
@@ -379,6 +381,10 @@ async def get_backup_tasks(
                                                 in_memory_queue_sizes = [
                                                     int(x) for x in fp.get_queue_sizes()
                                                 ]
+                                                total_large_groups = int(
+                                                    getattr(fp, '_prefetched_large_groups', 0) or 0)
+                                                total_small_groups = int(
+                                                    getattr(fp, '_prefetched_small_groups', 0) or 0)
                                             except Exception:
                                                 pass
 
@@ -579,9 +585,12 @@ async def get_backup_tasks(
                         # 在途组类型数量（卡片“压缩组: X/Y（L a / S b）”）
                         "active_large_groups": active_large_groups,
                         "active_small_groups": active_small_groups,
-                        # 累计已完成组数（卡片“… · 累计 L x / S y”）
+                        # 累计已完成组数（卡片“… · 总 L x / S y”）
                         "completed_large_groups": completed_large_groups,
-                        "completed_small_groups": completed_small_groups
+                        "completed_small_groups": completed_small_groups,
+                        # 已分组总数（含队列/在途/已完成）
+                        "total_large_groups": total_large_groups,
+                        "total_small_groups": total_small_groups
                     })
 
                 # 追加计划任务（未运行模板）
