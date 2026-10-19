@@ -1,5 +1,19 @@
 # 更新日志
 
+## [1.1.96] - 2026-10-19
+
+### 修复
+
+- **非 UTF-8 文件名导致整组压缩失败**：`compress_zstd.py` 写 tar 清单时使用默认
+  UTF-8 严格编码，遇到 NAS 上的非法 UTF-8 文件名字节（Python surrogate）抛
+  `UnicodeEncodeError: surrogates not allowed`，子进程返回空、整组（4~5 万文件）
+  未备份。现清单写入改用 `errors='surrogateescape'` 还原原始字节；tar stderr
+  同样用 surrogateescape 解码以匹配清单键。新增 `_safe_text()`，所有含路径的
+  日志/失败清单统一转义，避免日志写入再次触发同名异常。
+- **实测**：含 `bad_\xff\xfe_name.txt` 的组修复前整组失败，修复后归档正常、
+  原始文件名完整保留。
+- 版本升至 1.1.96
+
 ## [1.1.95] - 2026-10-19
 
 ### 样式

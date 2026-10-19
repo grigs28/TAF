@@ -22,6 +22,19 @@ from backup.compress_helpers import (
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_text(value: Any) -> str:
+    """把可能含 surrogate（非 UTF-8 文件名）的文本变成可安全写日志/DB 的字符串。
+
+    Python 用 surrogateescape 表示非法 UTF-8 字节；直接进 logging/file/JSON
+    会抛 UnicodeEncodeError，因此非 ASCII 不可编码字节统一转成 backslash 转义。
+    """
+    try:
+        return str(value).encode('utf-8', 'backslashreplace').decode('utf-8', 'replace')
+    except Exception:
+        return repr(value)
+
+
 try:
     import zstandard as zstd
 except ImportError:
@@ -97,8 +110,8 @@ def _compress_with_zstd_cli(
                     try:
                         fsize = fp.stat().st_size
                     except (OSError, FileNotFoundError) as path_error:
-                        logger.warning(f"[zstd-cli] 文件不存在或无法访问，跳过: {fp}")
-                        failed_files.append({'path': str(fp), 'reason': f'文件不存在或无法访问: {str(path_error)}'})
+                        logger.warning(f"[zstd-cli] 文件不存在或无法访问，跳过: {_safe_text(fp)}")
+                        failed_files.append({'path': _safe_text(fp), 'reason': _safe_text(f'文件不存在或无法访问: {path_error}')})
                         continue
                 arcname = fp.name
                 base_dir = str(fp.parent)
@@ -136,7 +149,10 @@ def _compress_with_zstd_cli(
                 list_files = []
                 for gi, (base, names) in enumerate(groups):
                     lf = os.path.join(tmpdir, f'list{gi}.txt')
-                    with open(lf, 'w') as fh:
+                    # 文件名可能含非 UTF-8 字节（Python 用 surrogateescape 表示）。
+                    # 必须用 surrogateescape 写回原始字节，否则整组压缩抛
+                    # UnicodeEncodeError（surrogates not allowed）→ 该组全部文件漏备。
+                    with open(lf, 'w', encoding='utf-8', errors='surrogateescape') as fh:
                         fh.write(chr(10).join(names) + chr(10))
                     list_files.append(lf)
                     argv += ['-C', base, '-T', lf]
@@ -154,7 +170,9 @@ def _compress_with_zstd_cli(
                 tar_errors = []
                 try:
                     for raw in iter(tar_process.stderr.readline, b''):
-                        line = raw.decode('utf-8', errors='replace').rstrip(chr(10))
+                        # surrogateescape 与 name_to_paths 的 Python str 键保持一致，
+                        # 否则非 UTF-8 文件名的成功计数会永久为 0
+                        line = raw.decode('utf-8', errors='surrogateescape').rstrip(chr(10))
                         if not line:
                             continue
                         if line.startswith('tar: '):
@@ -201,13 +219,13 @@ def _compress_with_zstd_cli(
                     body = line[5:]
                     sep = body.find(': Cannot')
                     if sep == -1:
-                        logger.warning(f"[zstd-cli] tar: {body}")
+                        logger.warning(f"[zstd-cli] tar: {_safe_text(body)}")
                         continue
                     name_part = body[:sep]
                     reason = body[sep + 2:]
                     err_target = name_to_paths.get(name_part)
                     full = err_target.pop(0)[0] if err_target else name_part
-                    failed_files.append({'path': full, 'reason': reason})
+                    failed_files.append({'path': _safe_text(full), 'reason': _safe_text(reason)})
 
                 if zstd_process.returncode != 0:
                     error_msg = ''
@@ -284,8 +302,8 @@ def _compress_with_zstd_cli(
                             file_stat = file_path.stat()
                             file_size = file_stat.st_size
                         except (OSError, FileNotFoundError) as path_error:
-                            logger.warning(f"[zstd-cli] 文件不存在或无法访问，跳过: {file_path}")
-                            failed_files.append({'path': str(file_path), 'reason': f'文件不存在或无法访问: {str(path_error)}'})
+                            logger.warning(f"[zstd-cli] 文件不存在或无法访问，跳过: {_safe_text(file_path)}")
+                            failed_files.append({'path': _safe_text(file_path), 'reason': _safe_text(f'文件不存在或无法访问: {path_error}')})
                             continue
 
                     # 设置 tar 中的文件名
@@ -304,7 +322,7 @@ def _compress_with_zstd_cli(
 
                     # 大文件警告
                     if file_size > 100 * 1024 * 1024:
-                        logger.debug(f"[zstd-cli] 开始处理大文件 ({file_size_display}): {file_path.name}")
+                        logger.debug(f"[zstd-cli] 开始处理大文件 ({file_size_display}): {_safe_text(file_path.name)}")
 
                     try:
                         tar.add(file_path, arcname=arcname)
@@ -340,8 +358,8 @@ def _compress_with_zstd_cli(
                         if isinstance(add_error, BrokenPipeError) or 'Broken pipe' in str(add_error):
                             logger.info(f"[zstd-cli] 管道已断开（zstd 进程已终止），停止压缩")
                             break
-                        logger.warning(f"[zstd-cli] 添加文件失败: {file_path}, 错误: {add_error}")
-                        failed_files.append({'path': str(file_path), 'reason': f'写入失败: {add_error}'})
+                        logger.warning(f"[zstd-cli] 添加文件失败: {_safe_text(file_path)}, 错误: {_safe_text(add_error)}")
+                        failed_files.append({'path': _safe_text(file_path), 'reason': _safe_text(f'写入失败: {add_error}')})
                         continue
 
             # 关闭 stdin，等待 zstd 完成
@@ -554,7 +572,7 @@ def _compress_with_zstd(
                                 file_size = file_stat.st_size
                             except (OSError, FileNotFoundError) as path_error:
                                 logger.warning(f"[zstd] 文件不存在或无法访问，跳过: {file_path} (错误: {str(path_error)})")
-                                failed_files.append({'path': str(file_path), 'reason': f'文件不存在或无法访问: {str(path_error)}'})
+                                failed_files.append({'path': _safe_text(file_path), 'reason': _safe_text(f'文件不存在或无法访问: {path_error}')})
                                 continue
                         
                         file_size_display = format_bytes(file_size) if file_size > 0 else "未知"
@@ -615,7 +633,7 @@ def _compress_with_zstd(
                                 logger.info(f"[zstd] 管道已断开，停止压缩")
                                 break
                             logger.warning(f"[zstd] 添加文件失败: {file_path}, 错误: {add_error}")
-                            failed_files.append({'path': str(file_path), 'reason': f'写入失败: {add_error}'})
+                            failed_files.append({'path': _safe_text(file_path), 'reason': _safe_text(f'写入失败: {add_error}')})
                             continue
 
         # 计算原始文件总大小
