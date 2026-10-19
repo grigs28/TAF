@@ -1073,6 +1073,8 @@ class FileGroupPrefetcher:
                 f"[文件组预取器] 预取循环异常（循环 #{self.prefetch_loop_count}）: {e}",
                 exc_info=True
             )
+            # 与内存模式一致：异常退出不算完成（引擎四合一据此判失败）
+            self.prefetch_error = str(e)
         finally:
             avg_retrieval_time = (
                 self.total_retrieval_time / self.prefetch_loop_count 
