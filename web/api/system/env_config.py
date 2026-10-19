@@ -73,6 +73,7 @@ class SystemEnvConfig(BaseModel):
     group_large_threshold: Optional[int] = Field(None, description="大/小文件组分界：组内文件数低于此值为大文件组（默认 20000）")
     group_scan_defer_below: Optional[int] = Field(None, description="扫描期保护阈值：扫描期间不消费文件数低于此值的大文件组（默认 5000，0=禁用）")
     group_prefetch_lead_seconds: Optional[int] = Field(None, description="预分组比压缩提前启动的秒数（默认 30；0=同时启动；需小于扫描等待超时）")
+    group_vegas_enabled: Optional[bool] = Field(None, description="自适应并发（Vegas）开关：关闭后并发严格按配置/磁盘水位执行，不再按 NAS 读取速率增减")
 
     # 日志配置
     log_level: Optional[str] = Field(None, description="日志级别")
@@ -170,6 +171,7 @@ async def get_env_config():
             "group_large_threshold": parse_int(env_vars.get("GROUP_LARGE_FILE_COUNT_THRESHOLD"), 20000),
             "group_scan_defer_below": parse_int(env_vars.get("GROUP_SCAN_DEFER_BELOW"), 5000),
             "group_prefetch_lead_seconds": parse_int(env_vars.get("GROUP_PREFETCH_LEAD_SECONDS"), 30),
+            "group_vegas_enabled": parse_bool(env_vars.get("GROUP_VEGAS_ENABLED"), True),
             "disk_guard_safety_factor": float(env_vars.get("DISK_GUARD_SAFETY_FACTOR", 1.2) or 1.2),
 
             # 日志配置
@@ -334,6 +336,8 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             if config.group_prefetch_lead_seconds < 0 or config.group_prefetch_lead_seconds > 3600:
                 raise ValueError("预分组提前秒数必须在 0-3600 之间（0=同时启动）")
             updates["GROUP_PREFETCH_LEAD_SECONDS"] = str(config.group_prefetch_lead_seconds)
+        if config.group_vegas_enabled is not None:
+            updates["GROUP_VEGAS_ENABLED"] = "true" if config.group_vegas_enabled else "false"
 
         # 互斥校验：磁盘限流与空间守卫**至少保留一个**——两者同时关闭等于放弃全部磁盘保护，
         # SSD 可能被在途压缩产出写满。部分更新时需与 .env 中的现有值合并后再判断。

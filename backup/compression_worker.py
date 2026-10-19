@@ -281,6 +281,12 @@ class CompressionWorker:
             if self.use_prefetcher:
                 self.base_parallel_batches = getattr(fresh_settings, 'COMPRESSION_PARALLEL_BATCHES', 3)
                 self.batches_reduction = getattr(fresh_settings, 'COMPRESSION_BATCHES_REDUCTION', 1)
+                # Vegas 开关热生效（UI 保存后当前任务也立即遵循）
+                try:
+                    self._vegas_enabled = bool(
+                        getattr(fresh_settings, 'GROUP_VEGAS_ENABLED', self._vegas_enabled))
+                except Exception:
+                    pass
 
             # 优先从内存对象获取，如果没有则从数据库查询
             scan_status = getattr(self.backup_task, "scan_status", None)

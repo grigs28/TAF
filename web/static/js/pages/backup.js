@@ -367,7 +367,9 @@
                 }
                 // 徽章颜色 = NAS 读取健康度（绿≥85 / 黄60~85 / 红<60）
                 const _vh = Number(task.vegas_health);
-                if (Number.isFinite(_vh)) {
+                if (task.vegas_enabled === false) {
+                    lines.push('NAS读取: 自适应并发已关闭（并发按配置/磁盘水位执行）');
+                } else if (Number.isFinite(_vh)) {
                     lines.push('NAS读取: ' + _vh + '%'
                         + '（' + (task.vegas_rate_mbps || '-') + ' / '
                         + (task.vegas_base_mbps || '-') + ' MB/s/组）');

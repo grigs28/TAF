@@ -321,6 +321,7 @@ async def get_backup_tasks(
                     total_large_groups = 0       # 已分组总数（大文件组）
                     total_small_groups = 0       # 已分组总数（小文件组）
                     compression_started_at = None  # 压缩循环启动时间（epoch 秒，卡片平均速度以此为起点）
+                    vegas_enabled = None         # Vegas 是否启用（None=未知/旧任务）
                     vegas_health = None          # NAS读取健康度（%，ewma/base；None=无基准/未启用）
                     vegas_rate_mbps = None       # 当前每组平均读取速率（MB/s/组）
                     vegas_base_mbps = None       # 历史最好速率基准（MB/s/组）
@@ -388,6 +389,11 @@ async def get_backup_tasks(
                                             except Exception:
                                                 compression_started_at = None
                                             # Vegas 自适应并发健康度（仅运行中任务有意义）
+                                            try:
+                                                vegas_enabled = bool(
+                                                    getattr(compression_worker, '_vegas_enabled', False))
+                                            except Exception:
+                                                vegas_enabled = None
                                             try:
                                                 if getattr(compression_worker, '_vegas_enabled', False):
                                                     _ewma = float(getattr(compression_worker, '_vegas_rate_ewma', 0.0) or 0.0)
@@ -591,6 +597,7 @@ async def get_backup_tasks(
                         # 压缩开始时间（epoch 秒）：右上角速度徽章的平均速度从此刻起算
                         "compression_started_at": compression_started_at,
                         # Vegas 健康度（%）：压缩/打包徽章红绿黄的依据；null=无基准
+                        "vegas_enabled": vegas_enabled,
                         "vegas_health": vegas_health,
                         "vegas_rate_mbps": vegas_rate_mbps,
                         "vegas_base_mbps": vegas_base_mbps,

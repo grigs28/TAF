@@ -752,6 +752,12 @@ async function loadAllSystemConfig() {
             const gpl = document.getElementById('groupPrefetchLeadSeconds');
             if (gpl) gpl.value = (config.group_prefetch_lead_seconds !== undefined && config.group_prefetch_lead_seconds !== null)
                 ? config.group_prefetch_lead_seconds : 30;
+            const vg = document.getElementById('vegasEnabled');
+            if (vg) {
+                vg.checked = (config.group_vegas_enabled !== undefined)
+                    ? !!config.group_vegas_enabled
+                    : true;
+            }
             // 空间守卫开关（默认启用；老数据无该字段时按启用处理）
             const gsw = document.getElementById('diskGuardEnabled');
             if (gsw) {
@@ -910,6 +916,10 @@ async function saveEnvConfigSection() {
                 if (!input || input.value === '') return null;
                 const parsed = parseInt(input.value, 10);
                 return isNaN(parsed) ? null : parsed;
+            })(),
+            group_vegas_enabled: (() => {
+                const sw = document.getElementById('vegasEnabled');
+                return sw ? !!sw.checked : null;
             })(),
             disk_throttle_high_percent: (() => {
                 const input = document.getElementById('diskThrottleHighPercent');

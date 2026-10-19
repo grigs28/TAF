@@ -165,6 +165,16 @@
                             其他队列取空时才降级使用。0 = 禁用保护。
                         </small>
                     </div>
+                    <div class="mb-3">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" role="switch" id="vegasEnabled" checked>
+                            <label class="form-check-label" for="vegasEnabled">自适应并发（Vegas）</label>
+                        </div>
+                        <small class="form-text text-secondary">
+                            按 NAS 读取速率自动增减压缩并发（绿/黄/红健康度灯）；
+                            关闭后并发严格按配置/磁盘水位执行，不再因读取速率波动而调整。
+                        </small>
+                    </div>
 
                     <!-- ── 磁盘限流 ── -->
                     <h6 class="text-secondary border-bottom pb-2 mb-3 mt-4">磁盘限流</h6>
