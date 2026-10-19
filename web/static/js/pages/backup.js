@@ -1111,18 +1111,29 @@
                         + 'border-radius:1px;vertical-align:-3px;background:' + _bg + '"></span>';
                 }
 
-                // 在途组中的大/小文件组数量（按任务归属过滤；数据来自后端 _active_group_types）
-                const _lsText = (typeof task.active_large_groups === 'number'
-                                 && typeof task.active_small_groups === 'number')
-                    ? `（L ${task.active_large_groups} / S ${task.active_small_groups}）` : '';
-                // 累计已完成的 L/S 组数
-                const _totalLsText = (typeof task.completed_large_groups === 'number'
-                                      && typeof task.completed_small_groups === 'number')
-                    ? ` · 累计 L ${task.completed_large_groups} / S ${task.completed_small_groups}` : '';
+                // 在途/累计组数：卡片只显示精简数字，明细放悬停
+                //   显示：（在途L / 在途S · 累计L / 累计S）
+                const _hasLs = (typeof task.active_large_groups === 'number'
+                                && typeof task.active_small_groups === 'number');
+                const _hasTotal = (typeof task.completed_large_groups === 'number'
+                                   && typeof task.completed_small_groups === 'number');
+                const _lsText = _hasLs
+                    ? `（${task.active_large_groups} / ${task.active_small_groups}`
+                      + (_hasTotal
+                          ? ` · ${task.completed_large_groups} / ${task.completed_small_groups}`
+                          : '')
+                      + `）` : '';
+                const _lsTitle = `压缩组: 正在压缩 ${runningCount} 组 / 上限 ${totalSlots} 组\n`
+                    + `括号内: 在途大文件组 ${_hasLs ? task.active_large_groups : '-'}`
+                    + ` / 在途小文件组 ${_hasLs ? task.active_small_groups : '-'}`
+                    + (_hasTotal
+                        ? ` · 累计完成大文件组 ${task.completed_large_groups}`
+                          + ` / 累计完成小文件组 ${task.completed_small_groups}`
+                        : '');
                 batchProgressHtml = normalizeCardHtml(`
                     <div class="d-flex justify-content-between align-items-center mb-1">
-                        <small class="text-muted">压缩组:</small>
-                        <small class="text-muted">${_cells}<span class="fw-semibold ms-1">${runningCount}/${totalSlots}</span>${_lsText}${_totalLsText}</small>
+                        <small class="text-muted" title="${_lsTitle}">压缩组:</small>
+                        <small class="text-muted" title="${_lsTitle}">${_cells}<span class="fw-semibold ms-1">${runningCount}/${totalSlots}</span>${_lsText}</small>
                     </div>
                 `);
             }
