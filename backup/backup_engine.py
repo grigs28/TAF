@@ -1297,6 +1297,42 @@ class BackupEngine:
             scheduled_task: 计划任务对象（可选，用于获取排除规则等配置）
         """
         scan_progress_task = None  # 后台扫描任务
+
+        # 文件组预取器（预分组）：可能在压缩启动前 +30 秒提前启动
+        file_group_prefetcher = None
+
+        def _create_and_start_prefetcher():
+            """创建并启动预取器（幂等：已创建则直接返回）"""
+            nonlocal file_group_prefetcher
+            if file_group_prefetcher is not None:
+                return file_group_prefetcher
+            from utils.scheduler.db_utils import is_opengauss
+            if not is_opengauss():
+                return None
+            from backup.file_group_prefetcher import FileGroupPrefetcher
+            parallel_batches = getattr(self.settings, 'COMPRESSION_PARALLEL_BATCHES', 3)
+            logger.info(
+                f"[备份引擎] openGauss模式：创建文件组预取器，实现压缩和搜索并行执行"
+                f"（并行批次数: {parallel_batches}，队列大小: {parallel_batches + 1}）"
+            )
+            fp = FileGroupPrefetcher(
+                backup_db=self.backup_db,
+                backup_set=backup_set,
+                backup_task=backup_task,
+                parallel_batches=parallel_batches,
+                in_memory_store=in_memory_store,
+            )
+            # 注入 compressor 引用：大小文件组调度需要读取守卫状态 _guard_active
+            try:
+                fp.compressor = self.compressor
+            except Exception:
+                pass
+            fp.start()
+            self._current_prefetcher = fp
+            file_group_prefetcher = fp
+            logger.info("[备份引擎] 文件组预取器已启动，开始预取文件组...")
+            return fp
+
         try:
             # 初始化扫描进度
             if backup_task:
@@ -1469,11 +1505,19 @@ class BackupEngine:
                 )
                 logger.info("后台扫描任务已启动")
                 scan_wait_timeout = getattr(self.settings, "SCAN_WAIT_TIMEOUT", 300) or 300
+                # 预分组提前量：让预取器比压缩早 30 秒启动，压缩启动时队列已有组可吃。
+                # 若扫描等待超时本身 ≤ 30 秒，提前量无意义，保持原逻辑（同时启动）。
+                _prefetch_lead = 30
+                _prefetch_early = scan_wait_timeout > _prefetch_lead
+                _wait_before_prefetch = (scan_wait_timeout - _prefetch_lead
+                                         if _prefetch_early else scan_wait_timeout)
                 logger.info(
-                    f"等待后台扫描写入文件记录（最多{scan_wait_timeout}秒，扫描提前完成则立即继续）..."
+                    f"等待后台扫描写入文件记录（最多{_wait_before_prefetch}秒，扫描提前完成则立即继续）..."
+                    + (f"；预分组将在压缩启动前 {_prefetch_lead} 秒提前启动"
+                       if _prefetch_early else "")
                 )
-                # 等待扫描任务完成或超时：扫描提前完成时不再空等剩余时间
-                _done, _pending = await asyncio.wait({scan_progress_task}, timeout=scan_wait_timeout)
+                # 等待扫描任务完成或到达"预分组启动点"
+                _done, _pending = await asyncio.wait({scan_progress_task}, timeout=_wait_before_prefetch)
                 if scan_progress_task in _done:
                     _scan_exc = scan_progress_task.exception()
                     if _scan_exc is not None:
@@ -1482,10 +1526,29 @@ class BackupEngine:
                         raise _scan_exc
                     logger.info("[备份引擎] 扫描已提前完成，立即开始压缩（无需等满超时）")
                 else:
-                    logger.info(
-                        f"等待达 {scan_wait_timeout} 秒上限，扫描仍在进行，"
-                        f"开始压缩（扫描与压缩并发执行）"
-                    )
+                    if _prefetch_early:
+                        # 提前启动预分组，随后再等 30 秒启动压缩
+                        logger.info(
+                            f"等待达 {_wait_before_prefetch} 秒，扫描仍在进行，"
+                            f"提前启动预分组（压缩将在 {_prefetch_lead} 秒后启动）"
+                        )
+                        _create_and_start_prefetcher()
+                        _done2, _ = await asyncio.wait({scan_progress_task}, timeout=_prefetch_lead)
+                        if scan_progress_task in _done2:
+                            _scan_exc = scan_progress_task.exception()
+                            if _scan_exc is not None:
+                                logger.error("后台扫描任务在预分组提前量内异常退出")
+                                raise _scan_exc
+                            logger.info("[备份引擎] 扫描在提前量内完成，立即开始压缩")
+                        else:
+                            logger.info(
+                                f"预分组已运行 {_prefetch_lead} 秒，开始压缩（扫描与压缩并发执行）"
+                            )
+                    else:
+                        logger.info(
+                            f"等待达 {scan_wait_timeout} 秒上限（≤{_prefetch_lead} 秒，不设提前量），"
+                            f"扫描仍在进行，开始压缩（扫描与压缩并发执行）"
+                        )
             else:
                 logger.info("扫描状态为 completed，跳过扫描阶段")
             
@@ -1530,35 +1593,11 @@ class BackupEngine:
             # 不再需要FileMoveWorker
             
             # ========== openGauss模式：创建文件组预取器 ==========
-            file_group_prefetcher = None
+            # 若扫描等待阶段已提前启动，这里幂等跳过
             from utils.scheduler.db_utils import is_opengauss
             logger.info(f"[备份引擎] 检查数据库类型: is_opengauss={is_opengauss()}")
-            if is_opengauss():
-                from backup.file_group_prefetcher import FileGroupPrefetcher
-                # 获取并行批次数量
-                parallel_batches = getattr(self.settings, 'COMPRESSION_PARALLEL_BATCHES', 3)
-                logger.info(
-                    f"[备份引擎] openGauss模式：创建文件组预取器，实现压缩和搜索并行执行"
-                    f"（并行批次数: {parallel_batches}，队列大小: {parallel_batches + 1}）"
-                )
-                file_group_prefetcher = FileGroupPrefetcher(
-                    backup_db=self.backup_db,
-                    backup_set=backup_set,
-                    backup_task=backup_task,
-                    parallel_batches=parallel_batches,
-                    in_memory_store=in_memory_store
-                )
-                # 注入 compressor 引用：大小文件组调度需要读取守卫状态 _guard_active
-                try:
-                    file_group_prefetcher.compressor = self.compressor
-                except Exception:
-                    pass
-                # 在压缩任务开始前启动预取器
-                file_group_prefetcher.start()
-                # 暴露实例引用：任务查询 API 需要读取"预取队列深度 + 各组大小"，
-                # 供卡片"预分组"阶段徽章的 hover 显示
-                self._current_prefetcher = file_group_prefetcher
-                logger.info("[备份引擎] 文件组预取器已启动，开始预取文件组...")
+            if is_opengauss() and file_group_prefetcher is None:
+                _create_and_start_prefetcher()
             
             # ========== 创建压缩循环后台任务（独立线程，顺序执行） ==========
             logger.info(f"[备份引擎] 创建压缩工作线程，预取器: {file_group_prefetcher is not None}")
