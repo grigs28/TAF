@@ -385,7 +385,8 @@ class FileGroupPrefetcher:
         """
         logger.info(
             f"[文件组预取器-内存模式] ========== 内存预取循环已启动 ==========\n"
-            f"backup_set_id={self.backup_set.id}, backup_task_id={self.backup_task.id}, "
+            f"backup_set_id={getattr(self.backup_set, 'id', None)}, "
+            f"backup_task_id={getattr(self.backup_task, 'id', None)}, "
             f"队列容量={self.queue_maxsize}"
         )
 
@@ -396,12 +397,21 @@ class FileGroupPrefetcher:
 
         batch_size = max(3000, min(int(max_file_size / (1024 * 1024) * 0.5 * 1000), 50000))
 
+        # 跨轮累积：上一轮未凑够半组、未能成组的头部文件。
+        # 它们仍留在内存库头部（未删除），下一轮按偏移跳过、只读新文件，
+        # 与新文件一起继续累积 —— 否则每轮重复读同一批 5 万文件、永远不够
+        # 半组，预分组会在小文件区停摆直到扫描完成。
+        carry_group: List[Dict] = []
+        carry_size = 0
+
         try:
             while self._running:
                 self.prefetch_loop_count += 1
 
-                # 始终从头部读取（成组后已删除，无需游标）
-                files = await self.in_memory_store.get_pending_files(batch_size)
+                # 从头部读取：带上 carry 的偏移量，保证读到"新文件"
+                files = await self.in_memory_store.get_pending_files(
+                    batch_size + len(carry_group))
+                new_files = files[len(carry_group):] if carry_group else files
 
                 if not files:
                     scan_done = await self.in_memory_store.is_scan_done()
@@ -418,14 +428,14 @@ class FileGroupPrefetcher:
                             await asyncio.sleep(2.0)
                         continue
 
-                # 应用三级分组规则
-                current_group = []
-                current_size = 0
+                # 应用三级分组规则（从上一轮未成组的 carry 继续累积）
+                current_group = list(carry_group)
+                current_size = carry_size
                 groups_to_queue = []
                 # 收集所有成组文件的路径，用于最后一次性删除
                 grouped_paths = []
 
-                for raw_info in files:
+                for raw_info in new_files:
                     # 分组只保留压缩需要的字段（path + size）：
                     # 原 dict 含 name/modified_time/permissions 等，约 400~500 B/文件；
                     # 精简后约 200~250 B，且分组后原 dict 即可从内存库释放。
@@ -468,6 +478,10 @@ class FileGroupPrefetcher:
                     grouped_paths.extend(f.get('path', '') for f in current_group)
                     current_group = []
                     current_size = 0
+
+                # 未成组：保留到下一轮继续累积（文件仍在内存库头部，按偏移跳过）
+                carry_group = current_group
+                carry_size = current_size
 
                 # 一次性从内存删除所有成组文件
                 if grouped_paths:
