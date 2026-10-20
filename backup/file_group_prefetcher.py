@@ -293,6 +293,19 @@ class FileGroupPrefetcher:
         r = self._parse_ratio(self._live_setting('GROUP_SCHED_NORMAL_RATIO', '2:1'))
         return r if r != (0, 0) and r[0] + r[1] > 0 else self._normal_ratio
 
+    def _active_large_count(self) -> int:
+        """实际在压缩的 L 组数（compressor._active_group_types，口径与守卫一致）。
+
+        返回 -1 表示 compressor 不可用（测试/非调度模式），调用方不启用强制规则。
+        """
+        try:
+            types = getattr(self.compressor, '_active_group_types', None)
+            if types is None:
+                return -1
+            return sum(1 for t in types if t == 'large')
+        except Exception:
+            return -1
+
     def _choose_queue(self) -> str:
         """选择下一个组队列：'large'（快产出） / 'small'（慢产出）
 
@@ -305,6 +318,13 @@ class FileGroupPrefetcher:
             self._force_small_once = False
             if not self.small_queue.empty():
                 return 'small'
+        # 在途必须有至少 1 个 L（大文件组）：实际在压缩的组里没有 L，
+        # 且 L 队列还有货 → 强制取 L。守卫拦停/配额都让位于此保证，
+        # 避免纯 S 并发把写带饿死（L 带宽主导、产出快）。
+        if (not self._large_done and self.compressor is not None
+                and self._active_large_count() == 0
+                and not self.large_queue.empty()):
+            return 'large'
         # 某类队列已确认耗尽（结束信号已取出）：强制选另一类
         if self._large_done and not self._small_done:
             return 'small'
