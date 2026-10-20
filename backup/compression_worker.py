@@ -771,7 +771,10 @@ class CompressionWorker:
                     'compress_progress': compress_progress,  # 共享的进度字典，压缩函数会实时更新
                     'total_files': len(file_group),  # 文件组总文件数
                     'group_type': self._group_type_of(len(file_group)),  # L/S（供分类型速率）
-                    'group_size_bytes': total_group_size  # 文件组总大小
+                    'group_size_bytes': total_group_size,  # 文件组总大小
+                    # 组内文件路径（卡片"当前目录"用：按 current_file_index 取近似当前文件）
+                    'file_paths': [(f.get('path') or f.get('file_path') or '')
+                                   for f in processed_file_group],
                 }
                 
                 # 检查是否应该停止（在启动新任务前）
@@ -1024,6 +1027,19 @@ class CompressionWorker:
                     else:
                         size_percent = 0.0
                     
+                    # 当前（近似）文件所在目录：current_file_index 是 tar 已完成数，
+                    # 取该位置（读完则取最后一个）的路径 dirname，供卡片"当前目录"行
+                    _current_dir = None
+                    try:
+                        _paths = progress_info.get('file_paths') or []
+                        if _paths:
+                            _i = int(current_file_index or 0)
+                            if _i >= len(_paths):
+                                _i = len(_paths) - 1
+                            if _i >= 0:
+                                _current_dir = os.path.dirname(_paths[_i]) or None
+                    except Exception:
+                        _current_dir = None
                     task_progress_list.append({
                         'percent': size_percent,
                         'current': current_file_index,
@@ -1032,6 +1048,7 @@ class CompressionWorker:
                                        else 'large'),
                         'group_size_bytes': group_size_bytes,
                         'processed_bytes': processed_bytes,  # 已处理文件的实际大小
+                        'current_dir': _current_dir,
                         # 当前打包的归档文件名（如 backup_2026-10_000113_20261017_083125.tar.zst）
                         'archive_name': progress_info.get('archive_name')
                                         or compress_progress.get('archive_name')

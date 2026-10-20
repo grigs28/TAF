@@ -1086,7 +1086,22 @@
                 
                 const stageSection = document.createElement('div');
                 stageSection.className = 'mb-2';
+                // 当前目录（压缩阶段）：取第一个在途组的近似当前文件目录，单行截断；
+                // hover 显示全部在途组的目录（多组并发时每组各一个）
+                let _dirHtml = '';
+                {
+                    const _groups = ((task.current_compression_progress || {}).task_progress_list) || [];
+                    const _dirs = _groups.map(function (g) { return g && g.current_dir; }).filter(Boolean);
+                    if (_dirs.length) {
+                        const _dirTitle = _dirs.join('\n');
+                        _dirHtml = `<div class="d-flex align-items-center" style="min-width:0;">
+                            <small class="text-muted flex-shrink-0">当前目录:</small>
+                            <small class="text-muted ms-2" title="${_dirTitle}" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;">${_dirs[0]}</small>
+                        </div>`;
+                    }
+                }
                 stageSection.innerHTML = normalizeCardHtml(`
+                    ${_dirHtml}
                     <div class="d-flex justify-content-between align-items-center">
                         <small class="text-muted">当前阶段:</small>
                         <small class="text-muted">${displayLabel}</small>
