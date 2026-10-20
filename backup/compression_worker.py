@@ -79,6 +79,7 @@ class CompressionWorker:
         self._vegas_states = {
             'large': {'ewma': 0.0, 'base': 0.0, 'base_at': 0.0},
             'small': {'ewma': 0.0, 'base': 0.0, 'base_at': 0.0},
+            'buffer': {'ewma': 0.0, 'base': 0.0, 'base_at': 0.0},
         }
         self._vegas_rate_ewma = 0.0      # 展示值：按 active 数加权的综合 ewma（MB/s/组）
         self._vegas_base = 0.0           # 展示值：综合基准
@@ -443,7 +444,7 @@ class CompressionWorker:
         dt = max(1.0, (now - self._vegas_last_sample_at)) if self._vegas_last_sample_at > 0 else 10.0
         self._vegas_last_sample_at = now
 
-        totals = {'large': [0, 0], 'small': [0, 0]}  # typ -> [delta_bytes, active]
+        totals = {'large': [0, 0], 'small': [0, 0], 'buffer': [0, 0]}  # typ -> [delta, active]
         for gidx, info in list(self.compression_progress_map.items()):
             cp = info.get('compress_progress') if isinstance(info, dict) else None
             if not cp:
@@ -485,12 +486,13 @@ class CompressionWorker:
 
         dl = _tick('large')
         ds = _tick('small')
+        db = _tick('buffer')
 
         # 展示值（API 健康度灯）：按 active 数加权；无样本类型不参与
         den = 0
         num_r = 0.0
         num_b = 0.0
-        for typ in ('large', 'small'):
+        for typ in ('large', 'small', 'buffer'):
             act = totals[typ][1]
             st = self._vegas_states[typ]
             if act > 0 and st['base'] > 0 and st['ewma'] > 0:
@@ -501,7 +503,7 @@ class CompressionWorker:
             self._vegas_rate_ewma = num_r / den
             self._vegas_base = num_b / den
 
-        ds_all = [d for d in (dl, ds) if d is not None]
+        ds_all = [d for d in (dl, ds, db) if d is not None]
         if not ds_all:
             return
         deficit = max(ds_all)
@@ -547,10 +549,12 @@ class CompressionWorker:
         if note:
             _sl = self._vegas_states['large']
             _ss = self._vegas_states['small']
+            _sb = self._vegas_states['buffer']
             logger.info(
                 f"[自适应并发] {note}"
                 f"（L {_sl['ewma']:.1f}/{_sl['base']:.1f}，"
-                f"S {_ss['ewma']:.1f}/{_ss['base']:.1f} MB/s/组，"
+                f"S {_ss['ewma']:.1f}/{_ss['base']:.1f}，"
+                f"B {_sb['ewma']:.1f}/{_sb['base']:.1f} MB/s/组，"
                 f"deficit {deficit:.1f}"
                 + ("，写带饿死" if starved else "") + "）")
 
