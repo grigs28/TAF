@@ -360,14 +360,29 @@ class TaskScheduler:
                     pass
 
             def _affected(cur) -> int:
+                # psycopg3：rowcount 正常为 0/1；wrapper 或未执行时可能为 -1，
+                # 此时回退 statusmessage（形如 'UPDATE 1'）再回退字符串解析；
+                # 负数一律按 0 处理，避免日志出现“-1 个”
                 try:
-                    return int(getattr(cur, 'rowcount', -1))
+                    rc = int(getattr(cur, 'rowcount', -1))
+                    if rc >= 0:
+                        return rc
                 except Exception:
                     pass
                 try:
-                    return int(str(cur).split()[-1])
+                    msg = str(getattr(cur, 'statusmessage', '') or '')
+                    parts = msg.split()
+                    if len(parts) >= 2 and parts[-1].isdigit():
+                        return int(parts[-1])
+                except Exception:
+                    pass
+                try:
+                    parts = str(cur).split()
+                    if parts and parts[-1].lstrip('-').isdigit():
+                        return max(0, int(parts[-1]))
                 except (ValueError, IndexError):
-                    return 0
+                    pass
+                return 0
 
             counts = (_affected(cur1), _affected(cur2), _affected(cur3))
             if any(counts):
