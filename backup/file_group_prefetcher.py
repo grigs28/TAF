@@ -443,12 +443,20 @@ class FileGroupPrefetcher:
             choice = None
             q = None
 
-            if self._deferred_items and self._is_starved():
-                # 写带喂不饱：优先放保护区组（产出最快，先把 final 填上）
+            # 放行保护区组的两个紧急条件（都无防抖、不占配额）：
+            #   ① final 文件数 <= 1（写带喂不饱）
+            #   ② 实际在压缩的组里没有 L（无论何时——避免纯 S 并发饿死写带，
+            #      也避免保护区把 L 变成单向黑洞）
+            _no_active_l = (self.compressor is not None
+                            and not self._large_done
+                            and self._active_large_count() == 0)
+            if self._deferred_items and (self._is_starved() or _no_active_l):
                 _raw = self._deferred_items.pop(0)
                 q = self.large_queue
                 _from_deferred = True
                 choice = 'deferred'   # 不占配额
+            # 保护区空了 + 在途无 L：走正常分支 → _choose_queue 强制 'large'
+            # → 从 L 队列取组 → 暂存豁免（_urgent）直接消费
             else:
                 choice = self._choose_queue()
                 q = self.large_queue if choice == 'large' else self.small_queue
@@ -476,8 +484,11 @@ class FileGroupPrefetcher:
             item, seq = self._unwrap(_raw)
 
             # 大组保护（全程）：L 队列取出的"文件数 < 阈值"的组 → 暂存不消费
-            # 阈值现读（UI 保存后立即生效）；写带饥饿时不会走到这里（上面已优先取保护区）
-            if (not _from_deferred and q is self.large_queue):
+            # 阈值现读（UI 保存后立即生效）。
+            # 紧急豁免：无在途 L 或 final<=1 时不暂存、直接消费——
+            # 否则 1.4.5 的"强制取 L"会取出来又被暂存回去（单向黑洞）。
+            _urgent = _no_active_l or self._is_starved()
+            if (not _from_deferred and q is self.large_queue and not _urgent):
                 _defer_below = int(self._live_setting('GROUP_SCAN_DEFER_BELOW', 5000) or 0)
                 if _defer_below > 0:
                     _fc = self._item_file_count(item)
