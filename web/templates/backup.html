@@ -143,6 +143,20 @@
         box-shadow: 0 0 0 8px rgba(32, 201, 151, 0);
     }
 }
+
+/* ===== 阶段状态徽章：透明底，仅保留脉冲光晕 =====
+   1) 去掉底色（背景色由 .bg-* 提供，这里统一覆盖为透明）
+   2) text-dark 在透明底上不可见 → 黄色状态改用黄字
+   3) 未激活阶段（无脉冲）用灰字，保持“未开始”语义 */
+.stage-badges .badge {
+    background-color: transparent !important;
+}
+.stage-badges .badge.text-dark {
+    color: #ffc107 !important;
+}
+.stage-badges .badge.bg-secondary {
+    color: #9aa4b2 !important;
+}
 </style>
 {% endblock %}
 

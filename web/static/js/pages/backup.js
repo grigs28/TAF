@@ -1121,7 +1121,7 @@
                         <small class="text-muted">当前阶段:</small>
                         <small class="text-muted">${displayLabel}</small>
                     </div>
-                    <div class="d-flex flex-wrap gap-1 mt-1">
+                    <div class="d-flex flex-wrap gap-1 mt-1 stage-badges">
                         ${stageSteps.map(step => {
                             // copy 步骤状态完全由后端 stage_steps 决定
                             const progress = (step.state === 'current' && progressPercent !== null) ? progressPercent : null;
