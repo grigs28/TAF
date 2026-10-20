@@ -608,19 +608,19 @@ class TaskScheduler:
                 logger.error(f"[手动运行] 任务不在内存中，无法运行 - ID: {task_id}")
                 return False
 
-            # 获取执行函数（如果内存中没有，创建新的）
-            task_info = self.tasks.get(task_id)
-            if task_info and 'execute_func' in task_info:
-                # 如果执行函数已存在，但 run_options 可能不同，需要重新创建
-                execute_func = task_info['execute_func']
-            else:
-                # 创建执行函数并执行（手动运行标记为True，因为是从Web界面点击运行的）
-                execute_func = create_task_executor(
-                    task,
-                    self.system_instance,
-                    manual_run=True,
-                    run_options=run_options
-                )
+            # 获取执行函数（手动运行总是重新创建，见下）
+            # 手动运行必须**重新创建**执行函数，确保 manual_run=True 传入。
+            # 不能复用任务加载时缓存的 execute_func——那是按 manual_run=False 创建的闭包，
+            # 复用会让周期检查（"本周期已成功"）继续拦截手动运行。
+            execute_func = create_task_executor(
+                task,
+                self.system_instance,
+                manual_run=True,
+                run_options=run_options
+            )
+            logger.info(
+                f"[手动运行] 执行函数已创建（manual_run=True，忽略周期去重）- "
+                f"任务ID: {task_id}, 任务名称: {task.task_name}")
 
             # 在后台执行（不阻塞）
             logger.info(f"[手动运行] 创建后台执行任务 - 任务ID: {task_id}, 任务名称: {task.task_name}")
