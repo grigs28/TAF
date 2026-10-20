@@ -51,14 +51,20 @@ def _compile_excludes(exclude_patterns):
     return name_re, path_patterns
 
 
-def scan_worker(expanded_paths, exclude_patterns, batch_size, msg_queue, stop_event):
-    """子进程入口：扫描目录树，批次写入 msg_queue（mp.Queue，管道直传）。
+def scan_worker(expanded_paths, exclude_patterns, batch_size, msg_conn, stop_event):
+    """子进程入口：扫描目录树，批次写入 msg_conn（单向 Pipe 写端）。
+
+    注意：必须用 Pipe 而非 mp.Queue。Queue 的写端由父子双方共同持有，
+    子进程被 terminate 时若一条批次消息只写了一半，父进程的阻塞 read
+    永远等不到剩余字节（父进程自己还持着写端，EOF 也不出现）——整个
+    进程会卡死无法退出（2026-10-20 任务 140 实际发生）。
+    单向 Pipe 下父进程启动后即关闭写端，子进程一死读端立即 EOF。
 
     Args:
         expanded_paths: 源路径列表（已展开 UNC）
         exclude_patterns: 排除模式
         batch_size: 每批文件数
-        msg_queue: multiprocessing.Queue
+        msg_conn: multiprocessing.Connection（Pipe 写端）
         stop_event: multiprocessing.Event（主进程置位即停止）
     """
     stats = {
@@ -92,7 +98,9 @@ def scan_worker(expanded_paths, exclude_patterns, batch_size, msg_queue, stop_ev
 
     def _put_batch():
         if current_batch:
-            msg_queue.put(('batch', list(current_batch), dict(stats)))
+            # send 在父进程已关闭读端/退出时会抛 BrokenPipeError/OSError，
+            # 交给外层 except 记录并进入 finally（不要吞掉继续扫描）
+            msg_conn.send(('batch', list(current_batch), dict(stats)))
             current_batch.clear()
 
     try:
@@ -181,4 +189,8 @@ def scan_worker(expanded_paths, exclude_patterns, batch_size, msg_queue, stop_ev
             f"({_mb / 1024:.2f} GB), 排除目录 {stats['excluded_dirs']:,}, "
             f"排除文件 {stats['excluded_count']:,}, 耗时 {elapsed:.1f}秒"
         )
-        msg_queue.put(('done', dict(stats)))
+        try:
+            msg_conn.send(('done', dict(stats)))
+        except (BrokenPipeError, OSError, EOFError):
+            # 主进程已关闭管道（如任务取消），无需再上报
+            pass

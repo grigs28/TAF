@@ -268,19 +268,28 @@ class SimpleScanner:
         _scan_process_mode = (scan_engine == 'nfs'
                               and bool(getattr(self.settings, 'SCAN_USE_PROCESS', True)))
         scan_process = None
+        recv_conn = None
         if _scan_process_mode:
             import multiprocessing as _mp
             from backup.scan_process import scan_worker as _scan_worker
             _ctx = _mp.get_context('spawn')   # 不 fork：避免继承 DB 连接/事件循环
-            batch_queue = _ctx.Queue()
+            # 单向 Pipe（父进程只持读端）：子进程被 terminate 时若批次消息写到
+            # 一半，读端立即 EOF，不会像 mp.Queue 那样永久阻塞（父进程持写端
+            # 会吞掉 EOF，2026-10-20 任务 140 卡死根因）。
+            recv_conn, send_conn = _ctx.Pipe(duplex=False)
             stop_event = _ctx.Event()
             scan_process = _ctx.Process(
                 target=_scan_worker,
-                args=(expanded_paths, exclude_patterns, batch_size, batch_queue, stop_event),
+                args=(expanded_paths, exclude_patterns, batch_size, send_conn, stop_event),
                 daemon=True,
                 name="taf-scan-process",
             )
             scan_process.start()
+            # 关键：父进程不保留写端，子进程退出/被杀后读端才能看到 EOF
+            try:
+                send_conn.close()
+            except Exception:
+                pass
             # 兼容线程模式的存活检查：进程对象包装成 is_alive()
             scan_thread = _ScanAliveWrapper(scan_process)
             logger.info(f"[简洁扫描] 扫描子进程已启动（spawn, pid={scan_process.pid}）")
@@ -296,6 +305,15 @@ class SimpleScanner:
             )
             scan_thread.start()
             logger.info("[简洁扫描] 文件扫描线程已启动（不阻塞事件循环）")
+
+        # 统一读取入口：进程模式读单向 Pipe，线程模式读 queue.Queue。
+        # Pipe.poll 有超时；recv 在子进程被杀时抛 EOFError（不会永久阻塞）。
+        def _read_batch(timeout=1.0):
+            if _scan_process_mode:
+                if not recv_conn.poll(timeout):
+                    raise queue_module.Empty
+                return recv_conn.recv()
+            return batch_queue.get(True, timeout)
 
         # 定义批次写入辅助函数（闭包延迟绑定 conn/actual_conn）
         async def _flush_batch(batch, batch_num):
@@ -319,12 +337,17 @@ class SimpleScanner:
                 while True:
                     # 从队列读取（run_in_executor 不阻塞事件循环）
                     try:
-                        item = await loop.run_in_executor(
-                            None, batch_queue.get, True, 1.0
-                        )
+                        item = await loop.run_in_executor(None, _read_batch, 1.0)
+                    except (EOFError, OSError) as _eof_err:
+                        # 子进程被终止/异常退出：管道已关闭，立即结束消费。
+                        # 消息写到一半时 Python 抛 OSError("got end of file during message")
+                        logger.warning(
+                            f"[简洁扫描] 扫描子进程管道已关闭（{type(_eof_err).__name__}），停止消费批次")
+                        break
                     except queue_module.Empty:
-                        if not scan_thread.is_alive() and batch_queue.empty():
-                            break
+                        if not scan_thread.is_alive():
+                            if _scan_process_mode or batch_queue.empty():
+                                break
                         await asyncio.sleep(0)  # 让出事件循环
                         continue
 
@@ -407,6 +430,8 @@ class SimpleScanner:
 
             finally:
                 # 通知扫描停止（线程 join / 进程 join+兜底 terminate）
+                # 注意：这里保持同步 join——本协程可能已被 cancel，finally 中的
+                # await 会立刻抛 CancelledError，导致子进程来不及终止（泄漏）。
                 stop_event.set()
                 if scan_process is not None:
                     scan_process.join(timeout=10.0)
@@ -417,32 +442,44 @@ class SimpleScanner:
                 else:
                     scan_thread.join(timeout=5.0)
 
-                # 排空队列中剩余的批次
-                while not batch_queue.empty():
+                # 排空队列/管道中剩余的消息（进程模式下子进程被杀 → 半条消息 → EOF）
+                while True:
                     try:
-                        item = batch_queue.get_nowait()
-                        if item[0] == 'batch':
-                            _, file_list, thread_stats = item
-                            if _scan_process_mode and file_list and isinstance(file_list[0], tuple):
-                                file_list = [{'path': t[0], 'size': t[1]} for t in file_list]
-                            written_count = await _flush_batch(file_list, batch_number)
-                            stats['total_written'] += written_count
-                            stats['total_failed'] += (len(file_list) - written_count)
-                            batch_bytes = sum(f.get('size', 0) or 0 for f in file_list[:written_count])
-                            stats['total_bytes'] += batch_bytes
-                            stats['total_written_bytes'] = stats['total_bytes']
-                            batch_number += 1
-                            if backup_task:
-                                backup_task.total_files = stats["total_written"]
-                                backup_task.total_bytes = stats["total_bytes"]
-                        elif item[0] == 'done':
-                            final_thread_stats = item[1]
-                            stats['total_scanned'] = final_thread_stats.get('total_scanned', stats['total_scanned'])
-                            stats['total_scanned_bytes'] = final_thread_stats.get('total_scanned_bytes', stats['total_scanned_bytes'])
-                            stats['excluded_count'] = final_thread_stats.get('excluded_count', stats['excluded_count'])
-                            stats['error_count'] = final_thread_stats.get('error_count', stats['error_count'])
-                    except queue_module.Empty:
+                        if _scan_process_mode:
+                            if not recv_conn.poll(0):
+                                break
+                            item = recv_conn.recv()
+                        else:
+                            item = batch_queue.get_nowait()
+                    except (queue_module.Empty, EOFError, OSError):
                         break
+                    if item[0] == 'batch':
+                        _, file_list, thread_stats = item
+                        if _scan_process_mode and file_list and isinstance(file_list[0], tuple):
+                            file_list = [{'path': t[0], 'size': t[1]} for t in file_list]
+                        written_count = await _flush_batch(file_list, batch_number)
+                        stats['total_written'] += written_count
+                        stats['total_failed'] += (len(file_list) - written_count)
+                        batch_bytes = sum(f.get('size', 0) or 0 for f in file_list[:written_count])
+                        stats['total_bytes'] += batch_bytes
+                        stats['total_written_bytes'] = stats['total_bytes']
+                        batch_number += 1
+                        if backup_task:
+                            backup_task.total_files = stats["total_written"]
+                            backup_task.total_bytes = stats["total_bytes"]
+                    elif item[0] == 'done':
+                        final_thread_stats = item[1]
+                        stats['total_scanned'] = final_thread_stats.get('total_scanned', stats['total_scanned'])
+                        stats['total_scanned_bytes'] = final_thread_stats.get('total_scanned_bytes', stats['total_scanned_bytes'])
+                        stats['excluded_count'] = final_thread_stats.get('excluded_count', stats['excluded_count'])
+                        stats['error_count'] = final_thread_stats.get('error_count', stats['error_count'])
+
+                # 关闭读端，释放管道资源
+                if recv_conn is not None:
+                    try:
+                        recv_conn.close()
+                    except Exception:
+                        pass
         
         # 扫描结束：更新内存状态，并做一次最终数据库同步
         if backup_task:
