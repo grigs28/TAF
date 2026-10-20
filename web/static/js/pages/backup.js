@@ -1196,7 +1196,8 @@
                     _numOr0(task.total_small_groups) - _numOr0(task.active_small_groups)
                     - _numOr0(task.completed_small_groups));
                 const _queueBuffer = Math.max(0,
-                    _numOr0(task.total_buffer_groups) - _numOr0(task.active_buffer_groups));
+                    _numOr0(task.total_buffer_groups) - _numOr0(task.active_buffer_groups)
+                    - _numOr0(task.completed_buffer_groups));
                 const _activeB = _numOr0(task.active_buffer_groups);
                 const _totalB = _numOr0(task.total_buffer_groups);
                 // 括号内两段：在途 L/S/B · 队列 L/S/B
@@ -1224,6 +1225,8 @@
                     + (_hasCompleted
                         ? `\n累计完成: 大文件组 ${task.completed_large_groups}`
                           + ` / 小文件组 ${task.completed_small_groups}`
+                          + (typeof task.completed_buffer_groups === 'number'
+                              ? ` / 保护区 ${task.completed_buffer_groups}` : '')
                         : '')
                     + (_hasTotal
                         ? `\n累计已分组: 大文件组 ${task.total_large_groups}`

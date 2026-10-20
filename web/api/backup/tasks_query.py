@@ -319,6 +319,7 @@ async def get_backup_tasks(
                     active_buffer_groups = 0  # 在途保护区组数（应急储备）
                     completed_large_groups = 0   # 累计已完成大文件组数
                     completed_small_groups = 0   # 累计已完成小文件组数
+                    completed_buffer_groups = 0  # 累计已完成保护区组数
                     total_large_groups = 0       # 已分组总数（大文件组）
                     total_small_groups = 0       # 已分组总数（小文件组）
                     total_buffer_groups = 0      # 已分组总数（保护区）
@@ -349,6 +350,8 @@ async def get_backup_tasks(
                                             getattr(_comp, '_completed_large_groups', 0) or 0)
                                         completed_small_groups = int(
                                             getattr(_comp, '_completed_small_groups', 0) or 0)
+                                        completed_buffer_groups = int(
+                                            getattr(_comp, '_completed_buffer_groups', 0) or 0)
                                         if getattr(_comp, '_guard_active', False):
                                             guard_active = True
                                             _lr = getattr(_comp, '_last_release_time', None)
@@ -651,6 +654,7 @@ async def get_backup_tasks(
                         # 累计已完成组数（卡片“… · 总 L x / S y”）
                         "completed_large_groups": completed_large_groups,
                         "completed_small_groups": completed_small_groups,
+                        "completed_buffer_groups": completed_buffer_groups,
                         # 已分组总数（含队列/在途/已完成）
                         "total_large_groups": total_large_groups,
                         "total_small_groups": total_small_groups,

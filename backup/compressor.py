@@ -132,6 +132,7 @@ class Compressor:
         # 累计已完成的组数（按类型），用于卡片"累计 L x / S y"显示
         self._completed_large_groups: int = 0
         self._completed_small_groups: int = 0
+        self._completed_buffer_groups: int = 0
         try:
             self._group_large_threshold = int(
                 getattr(settings, 'GROUP_LARGE_FILE_COUNT_THRESHOLD', 20000) or 20000)
@@ -154,6 +155,7 @@ class Compressor:
         self._active_group_types = []
         self._completed_large_groups = 0
         self._completed_small_groups = 0
+        self._completed_buffer_groups = 0
         # 守卫状态一并重置：新任务"全场无放行"的卡死计时从首组重新起算。
         # compressor 是引擎级实例跨任务复用，不重置的话每日任务首组会拿到
         # 上一任务（可能 20+ 小时前）的时间戳，空间不足时直接误判"全场卡死"
@@ -171,6 +173,8 @@ class Compressor:
                 del self._active_group_types[idx]
             if _grp_type == 'small':
                 self._completed_small_groups += 1
+            elif _grp_type == 'buffer':
+                self._completed_buffer_groups += 1
             else:
                 self._completed_large_groups += 1
             return
@@ -185,6 +189,8 @@ class Compressor:
                     del self._active_group_types[idx]
                 if _grp_type == 'small':
                     self._completed_small_groups += 1
+                elif _grp_type == 'buffer':
+                    self._completed_buffer_groups += 1
                 else:
                     self._completed_large_groups += 1
                 break

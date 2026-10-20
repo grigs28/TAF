@@ -1,5 +1,16 @@
 # 更新日志
 
+## [1.5.2] - 2026-10-20
+
+### 修复（LSB 审查发现）
+
+- **B 完成组被计入 L**：`_release_active_group` 的二分判断把 `buffer`
+  落入 `else` 分支，`_completed_large_groups` 虚增，导致前端
+  “队列 L = total − active − completed” 偏小/为负。新增
+  `_completed_buffer_groups` 并三分统计；API 返回 `completed_buffer_groups`；
+  前端队列 B 同步减去已完成 B，悬停累计完成增加保护区。
+- 版本升至 1.5.2
+
 ## [1.5.1] - 2026-10-20
 
 ### 功能（LSB 三分区）
