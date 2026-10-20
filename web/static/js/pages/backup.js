@@ -499,14 +499,18 @@
                     return 'bg-purple pulse-badge';
                 }
                 if (stageCode === 'compress') {
-                    // 颜色 = NAS读取健康度（组级聚合速率 ewma/base）：
-                    // 绿 ≥85% 正常 / 黄 60~85% 轻度降速 / 红 <60% 拥塞（Vegas 降并发中）
-                    // Vegas 关闭 → 固定灰色（并发按配置执行，健康度不参与任何决策）；
-                    // 开启但尚无基准 → 琥珀色。
+                    // 颜色语义：
+                    //   · 阶段未激活 → 灰色（由函数末尾的 default 分支给出）
+                    //   · 压缩运行中 + Vegas 关闭 → 蓝色脉冲（并发按配置执行，
+                    //     没有健康度语义：不红、不灰）
+                    //   · 压缩运行中 + Vegas 开启 → 绿 ≥85% / 黄 60~85% / 红 <60%
+                    //   · 开启但尚无基准 → 蓝色脉冲（运行中）
                     // 注意：后端关闭时 vegas_health 为 null，不能用 Number(null)
                     //（结果 0，会被误判成 <60% 的红色）。
+                    // 另：bg-amber/bg-purple/bg-emerald 在 CSS 中并无定义，
+                    // 不要再用（等于无底色）。
                     if (task && task.vegas_enabled === false) {
-                        return 'bg-secondary pulse-badge';
+                        return 'bg-primary pulse-badge';
                     }
                     const _vhRaw = task ? task.vegas_health : null;
                     const _vh = Number(_vhRaw);
@@ -515,7 +519,7 @@
                         if (_vh >= 60) return 'bg-warning text-dark pulse-badge';
                         return 'bg-danger pulse-badge';
                     }
-                    return 'bg-amber pulse-badge';
+                    return 'bg-primary pulse-badge';
                 }
                 if (stageCode === 'finalize') {
                     return 'bg-emerald pulse-badge';
@@ -531,7 +535,7 @@
                             case 'scan':
                                 return 'bg-info pulse-badge';
                             case 'compress':
-                                return 'bg-amber pulse-badge';
+                                return 'bg-primary pulse-badge';
                             case 'prefetch':
                                 return 'bg-purple pulse-badge';
                             default:
@@ -545,7 +549,7 @@
                     case 'prefetch':
                         return 'bg-purple pulse-badge';
                     case 'compress':
-                        return 'bg-amber pulse-badge';
+                        return 'bg-primary pulse-badge';
                     case 'copy':
                         return 'bg-primary pulse-badge';
                     case 'finalize':
