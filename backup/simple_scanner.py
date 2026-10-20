@@ -91,6 +91,19 @@ def _detect_cifs_source(paths: List[str]) -> bool:
     return False
 
 
+class _ScanAliveWrapper:
+    """把 mp.Process 包装成线程式接口（is_alive），消费循环无需区分模式"""
+
+    def __init__(self, process):
+        self._process = process
+
+    def is_alive(self) -> bool:
+        return self._process.is_alive()
+
+    def join(self, timeout=None):
+        return self._process.join(timeout=timeout)
+
+
 class SimpleScanner:
     """简洁扫描器 - 完全按照 test_scan_direct_write.py 的方法"""
     
@@ -248,17 +261,41 @@ class SimpleScanner:
         scan_target = self._nfs_collect_files if scan_engine == 'nfs' else self._sync_collect_files
         logger.info(f"[简洁扫描] 使用扫描引擎: {scan_engine}")
 
-        batch_queue: queue_module.Queue = queue_module.Queue()
-        stop_event = threading.Event()
+        # ===== 扫描执行器：独立进程（默认，绕开 GIL）或线程（回退） =====
+        # 独立进程：扫描是元数据密集型，与压缩/预取器同进程时 GIL 争用把扫描
+        # 速度拖掉 85%+；spawn 子进程彻底隔离。协议与线程版一致
+        # （('batch', files, stats) / ('done', stats)），消费侧无需改动。
+        _scan_process_mode = (scan_engine == 'nfs'
+                              and bool(getattr(self.settings, 'SCAN_USE_PROCESS', True)))
+        scan_process = None
+        if _scan_process_mode:
+            import multiprocessing as _mp
+            from backup.scan_process import scan_worker as _scan_worker
+            _ctx = _mp.get_context('spawn')   # 不 fork：避免继承 DB 连接/事件循环
+            batch_queue = _ctx.Queue()
+            stop_event = _ctx.Event()
+            scan_process = _ctx.Process(
+                target=_scan_worker,
+                args=(expanded_paths, exclude_patterns, batch_size, batch_queue, stop_event),
+                daemon=True,
+                name="taf-scan-process",
+            )
+            scan_process.start()
+            # 兼容线程模式的存活检查：进程对象包装成 is_alive()
+            scan_thread = _ScanAliveWrapper(scan_process)
+            logger.info(f"[简洁扫描] 扫描子进程已启动（spawn, pid={scan_process.pid}）")
+        else:
+            batch_queue: queue_module.Queue = queue_module.Queue()
+            stop_event = threading.Event()
 
-        scan_thread = threading.Thread(
-            target=scan_target,
-            args=(expanded_paths, exclude_patterns, batch_size, batch_queue, stop_event),
-            daemon=True,
-            name="simple-scanner",
-        )
-        scan_thread.start()
-        logger.info("[简洁扫描] 文件扫描线程已启动（不阻塞事件循环）")
+            scan_thread = threading.Thread(
+                target=scan_target,
+                args=(expanded_paths, exclude_patterns, batch_size, batch_queue, stop_event),
+                daemon=True,
+                name="simple-scanner",
+            )
+            scan_thread.start()
+            logger.info("[简洁扫描] 文件扫描线程已启动（不阻塞事件循环）")
 
         # 定义批次写入辅助函数（闭包延迟绑定 conn/actual_conn）
         async def _flush_batch(batch, batch_num):
@@ -308,6 +345,11 @@ class SimpleScanner:
 
                     if item[0] == 'batch':
                         _, file_list, thread_stats = item
+
+                        # 进程模式：批次是 (path, size) 元组（pickle 精简），
+                        # 内存库 add_files 只依赖这两个字段；转回 dict 兼容现有写入
+                        if _scan_process_mode and file_list and isinstance(file_list[0], tuple):
+                            file_list = [{'path': t[0], 'size': t[1]} for t in file_list]
 
                         # 同步线程统计
                         stats['total_scanned'] = thread_stats.get('total_scanned', stats['total_scanned'])
@@ -364,9 +406,16 @@ class SimpleScanner:
                         await asyncio.sleep(0)
 
             finally:
-                # 通知扫描线程停止
+                # 通知扫描停止（线程 join / 进程 join+兜底 terminate）
                 stop_event.set()
-                scan_thread.join(timeout=5.0)
+                if scan_process is not None:
+                    scan_process.join(timeout=10.0)
+                    if scan_process.is_alive():
+                        logger.warning("[简洁扫描] 扫描子进程 10 秒未退出，强制终止")
+                        scan_process.terminate()
+                        scan_process.join(timeout=5.0)
+                else:
+                    scan_thread.join(timeout=5.0)
 
                 # 排空队列中剩余的批次
                 while not batch_queue.empty():
@@ -374,6 +423,8 @@ class SimpleScanner:
                         item = batch_queue.get_nowait()
                         if item[0] == 'batch':
                             _, file_list, thread_stats = item
+                            if _scan_process_mode and file_list and isinstance(file_list[0], tuple):
+                                file_list = [{'path': t[0], 'size': t[1]} for t in file_list]
                             written_count = await _flush_batch(file_list, batch_number)
                             stats['total_written'] += written_count
                             stats['total_failed'] += (len(file_list) - written_count)

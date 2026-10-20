@@ -1,5 +1,23 @@
 # 更新日志
 
+## [1.5.0] - 2026-10-20
+
+### 功能（扫描独立进程）
+
+- **NFS 扫描走独立 spawn 子进程**（`SCAN_USE_PROCESS=true` 默认开启）：
+  彻底绕开主进程 GIL——此前扫描与压缩/预取器同进程，扫描速度从 17k 掉到
+  1.1~2.5k 文件/秒（-85%）。子进程范式与压缩进程池一致（spawn、不继承
+  DB 连接/事件循环、payload 可 pickle）。
+- **文件记录精简为 (path, size)**：下游（预取分组/压缩/内存库）只依赖这两个
+  字段；pickle 传输量每批从 ~3-5MB 降至 ~1MB。
+- 队列协议与线程版完全一致（('batch', files, stats)/('done', stats)），
+  消费侧仅加元组→dict 转换；mp.Queue 抛 queue.Empty 与现有 except 兼容。
+- 收尾清理：join 10 秒 + 超时 terminate（对齐 CompressionProcessPool）；
+  卡片扫描计数变为批次粒度（每 1 万文件约 0.7 秒快照）。
+- 经典引擎（CIFS 回退）保持线程模式；`SCAN_USE_PROCESS=false` 一行回退。
+- 新增 `backup/scan_process.py`（子进程入口，排除规则独立副本）。
+- 版本升至 1.5.0
+
 ## [1.4.7] - 2026-10-20
 
 ### 修复（完整放行链路，按确认规则逐条对齐）

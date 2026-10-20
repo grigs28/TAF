@@ -116,7 +116,9 @@ class Settings(BaseSettings):
     GROUP_LARGE_FILE_COUNT_THRESHOLD: int = 20000  # 组内文件数 < 阈值 = 大文件组（带宽主导）
     GROUP_SCHED_SCAN_RATIO: str = "2:1"   # （已弃用，保留兼容）扫描期配额
     GROUP_SCHED_NORMAL_RATIO: str = "2:1"  # 全程大:小 配额（计划05：不再区分扫描期，默认 2:1）
-    GROUP_SCAN_DEFER_BELOW: int = 5000  # 扫描期间不消费"文件数<该值"的大文件组（暂存到扫描完成），0=禁用
+    GROUP_SCAN_DEFER_BELOW: int = 5000  # 大组保护阈值：全程不消费"文件数<该值"的组（写带喂不饱时除外），0=禁用
+    GROUP_STARVE_RELEASE_SEC: int = 30  # 写带喂不饱（final 为空）持续多少秒后，才放保护区组出来
+    GROUP_GUARD_S_PER_L: int = 4  # 磁盘守卫触发时：每取 N 个 S 组，至少保留/取 1 个 L 组（0=纯 S）
     GROUP_PREFETCH_LEAD_SECONDS: int = 30  # 预分组比压缩提前启动的秒数（0=同时启动；需小于扫描等待超时）
     # 自适应并发（计划05，Vegas 变体，信号=组级聚合读取速率）
     GROUP_VEGAS_ENABLED: bool = True    # 总开关：关闭则并发完全由配置/磁盘水位决定
@@ -188,6 +190,7 @@ class Settings(BaseSettings):
     # 扫描进度更新配置
     SCAN_UPDATE_INTERVAL: int = 2000  # 后台扫描每处理多少个文件更新一次数据库（total_files/total_bytes）
     SCAN_ENGINE: str = "nfs"  # 扫描引擎：nfs=预编译排除+READDIRPLUS优化，CIFS挂载自动回退经典引擎
+    SCAN_USE_PROCESS: bool = True  # NFS 引擎扫描走独立 spawn 子进程（绕开 GIL；false 回退线程模式）
     SCAN_LOG_INTERVAL_SECONDS: int = 60  # 扫描批次进度日志的最小间隔（秒），0或负值视为60
     SCAN_WAIT_TIMEOUT: int = 300  # 等待后台扫描写入文件记录的超时时间（秒），默认300秒（5分钟）
     # 压缩并行批次配置
