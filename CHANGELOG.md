@@ -1,5 +1,20 @@
 # 更新日志
 
+## [1.4.9] - 2026-10-20
+
+### 修复（审查 1.4.8 发现）
+
+- **紧急判定时间源错误（严重）**：prefetcher 读取
+  `compressor.compression_started_at`，但该属性只存在于 CompressionWorker，
+  Compressor 上不存在 → `getattr` 恒为 None → 紧急判定（final≤1 / 在途无 L）
+  **永远不生效**。现由 BackupEngine 注入 `compression_started_provider`
+  （读 worker 时间戳），prefetcher 统一经 `_compression_started_at()` 获取。
+- **紧急取出参与守卫计数**：`choice='deferred'` 时跳过 `_guard_s_take`
+  调整，不打断"每 N 个 S 取 1 个 L"的守卫节奏。
+- **`_guard_now` 残留**：`_choose_queue` 的提前返回分支（在途无 L 强制 L、
+  done 强制切换）显式置 False，避免沿用上一轮守卫状态。
+- 版本升至 1.4.9
+
 ## [1.4.8] - 2026-10-20
 
 ### 修复（保护区整体移除 + 紧急判定启动门槛）

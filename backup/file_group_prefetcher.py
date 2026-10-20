@@ -126,6 +126,9 @@ class FileGroupPrefetcher:
         #   starved_provider() -> bool 旧布尔信号（兼容，无防抖）
         self.final_pending_provider = None
         self.starved_provider = None
+        # 压缩启动时间 provider（由 BackupEngine 注入，读 CompressionWorker 的时间戳；
+        # 注意不在 Compressor 上——直接读 compressor 属性会恒为 None）
+        self.compression_started_provider = None
 
         # 磁盘守卫期间：每取 N 个 S 组，至少取 1 个 L 组（N 现读 GROUP_GUARD_S_PER_L）
         self._guard_s_take = 0
@@ -289,6 +292,18 @@ class FileGroupPrefetcher:
         r = self._parse_ratio(self._live_setting('GROUP_SCHED_NORMAL_RATIO', '2:1'))
         return r if r != (0, 0) and r[0] + r[1] > 0 else self._normal_ratio
 
+    def _compression_started_at(self):
+        """压缩启动时间（epoch 秒）：优先注入的 provider，回退 compressor 属性"""
+        try:
+            if callable(self.compression_started_provider):
+                return self.compression_started_provider()
+        except Exception:
+            pass
+        try:
+            return getattr(self.compressor, 'compression_started_at', None)
+        except Exception:
+            return None
+
     def _active_large_count(self) -> int:
         """实际在压缩的 L 组数（compressor._active_group_types，口径与守卫一致）。
 
@@ -313,16 +328,19 @@ class FileGroupPrefetcher:
         # 且 L 队列还有货 → 强制取 L。守卫拦停/配额都让位于此保证，
         # 避免纯 S 并发把写带饿死（L 带宽主导、产出快）。
         # 同样受"压缩启动 60 秒后生效"约束（启动期在途类型未登记，恒无 L 会误触发）。
-        _cs_q = getattr(self.compressor, 'compression_started_at', None)
+        _cs_q = self._compression_started_at()
         if (not self._large_done and self.compressor is not None
                 and _cs_q and (time.time() - float(_cs_q)) >= 60.0
                 and self._active_large_count() == 0
                 and not self.large_queue.empty()):
+            self._guard_now = False   # 本轮未走守卫分支，避免沿用上一轮状态
             return 'large'
         # 某类队列已确认耗尽（结束信号已取出）：强制选另一类
         if self._large_done and not self._small_done:
+            self._guard_now = False
             return 'small'
         if self._small_done and not self._large_done:
+            self._guard_now = False
             return 'large'
         guard = self._update_guard_state()
         self._guard_now = guard
@@ -428,8 +446,7 @@ class FileGroupPrefetcher:
             # 紧急判定只压缩启动 60 秒后生效：启动初期 final 必空
             # （还没产出文件）、在途类型未登记（组还没过守卫），两个条件
             # 恒真会误触发，把首批组导向紧急通道。
-            _cs = getattr(self.compressor, 'compression_started_at', None) \
-                if self.compressor is not None else None
+            _cs = self._compression_started_at() if self.compressor is not None else None
             _urgent_ok = bool(_cs) and (time.time() - float(_cs)) >= 60.0
             _no_active_l = (_urgent_ok and self.compressor is not None
                             and not self._large_done
@@ -486,7 +503,8 @@ class FileGroupPrefetcher:
                 if choice is not None:
                     self._commit_take(actual, choice)
                     # 守卫期间记录 S 组连续取用数：满 N 个后下一次优先取 1 个 L
-                    if self._guard_now:
+                    # 紧急取出（deferred）不参与守卫计数
+                    if self._guard_now and choice != 'deferred':
                         if actual == 'small':
                             self._guard_s_take += 1
                         elif actual == 'large':

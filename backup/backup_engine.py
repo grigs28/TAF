@@ -1341,6 +1341,15 @@ class BackupEngine:
                 fp.compressor = self.compressor
             except Exception:
                 pass
+            # 注入压缩启动时间 provider：紧急判定（final≤1 / 在途无 L）在压缩
+            # 启动 60 秒后才生效。注意该时间戳在 CompressionWorker 上，
+            # 不在 Compressor 上——prefetcher 必须通过 provider 读取，
+            # 直接 getattr(compressor, ...) 会恒为 None 导致紧急永不触发。
+            try:
+                fp.compression_started_provider = (
+                    lambda: getattr(compression_worker, 'compression_started_at', None))
+            except Exception:
+                pass
             # 注入写带喂不饱信号：final 待写文件数 <=1 → 立即放行保护区组（无防抖）
             try:
                 _final_set_id = backup_set.set_id if backup_set else None
