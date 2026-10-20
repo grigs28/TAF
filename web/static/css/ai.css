@@ -1923,3 +1923,11 @@ body.modal-open {
         transform: rotate(360deg);
     }
 }
+
+/* ===== 表单说明文字提亮 =====
+   Bootstrap 默认 .text-secondary 在深色主题下过暗（近似深灰），
+   说明/提示文字难以辨认。仅提亮 small.form-text 说明行，不影响其他标签。 */
+small.form-text.text-secondary,
+.form-text.text-secondary {
+    color: #b9c6d8 !important;
+}
