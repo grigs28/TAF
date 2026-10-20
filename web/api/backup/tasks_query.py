@@ -340,6 +340,21 @@ async def get_backup_tasks(
                             if system and system.backup_engine:
                                 # 从BackupEngine的compression_worker获取聚合的压缩进度
                                 backup_engine = system.backup_engine
+                                # 扫描实时统计：扫描器把 stats 字典挂在任务对象上（原地更新），
+                                # 引擎的 _current_task 全程持有该对象。
+                                # 注意：必须放在压缩/预取器分支**之外**——扫描期预取器尚未创建，
+                                # 若嵌在 `if fp:` 内会被跳过，导致卡片拿不到扫描数据。
+                                try:
+                                    _live_task = getattr(backup_engine, '_current_task', None)
+                                    _st = getattr(_live_task, '_scan_stats', None)
+                                    if _st:
+                                        in_memory_scan_stats = {
+                                            'scanned_files': int(_st.get('total_scanned', 0) or 0),
+                                            'scanned_bytes': int(_st.get('total_scanned_bytes', 0) or 0),
+                                            'dirs_scanned': int(_st.get('dirs_scanned', 0) or 0)
+                                        }
+                                except Exception:
+                                    pass
                                 # 在途组类型统计（卡片"压缩组: X/Y（L a / S b）"）
                                 try:
                                     _comp = getattr(backup_engine, 'compressor', None)
@@ -434,19 +449,6 @@ async def get_backup_tasks(
                                             except Exception:
                                                 pass
 
-                                        # 扫描实时统计：扫描器把 stats 字典挂在任务对象上（原地更新），
-                                        # 引擎的 _current_task 全程持有该对象，扫描期同样可读。
-                                        try:
-                                            _live_task = getattr(backup_engine, '_current_task', None)
-                                            _st = getattr(_live_task, '_scan_stats', None)
-                                            if _st:
-                                                in_memory_scan_stats = {
-                                                    'scanned_files': int(_st.get('total_scanned', 0) or 0),
-                                                    'scanned_bytes': int(_st.get('total_scanned_bytes', 0) or 0),
-                                                    'dirs_scanned': int(_st.get('dirs_scanned', 0) or 0)
-                                                }
-                                        except Exception:
-                                            pass
 
                                         # 获取 compression_completed 状态
                                         if in_memory_compression_completed is None:
