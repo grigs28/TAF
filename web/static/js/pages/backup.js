@@ -1201,14 +1201,22 @@
                 const _activeB = _numOr0(task.active_buffer_groups);
                 const _totalB = _numOr0(task.total_buffer_groups);
                 // 括号内两段：在途 L/S/B · 队列 L/S/B
+                // 数字按进度条三色着色：L=主蓝、S=浅蓝、B=橙（保护区）
+                const _cL = 'var(--primary)';
+                const _cS = 'var(--primary-light)';
+                const _cB = 'var(--warning)';
+                const _numColored = (v, c) => `<span style="color:${c}">${v}</span>`;
                 const _lsText = _hasLs
-                    ? `（${task.active_large_groups}/${task.active_small_groups}`
-                      + (_hasB ? `/${_activeB}` : '')
+                    ? '（'
+                      + _numColored(task.active_large_groups, _cL) + '/'
+                      + _numColored(task.active_small_groups, _cS)
+                      + (_hasB ? '/' + _numColored(_activeB, _cB) : '')
                       + (_hasTotal && _hasCompleted
-                          ? `·${_queueLarge}/${_queueSmall}`
-                            + (_hasB ? `/${_queueBuffer}` : '')
+                          ? '·' + _numColored(_queueLarge, _cL) + '/'
+                            + _numColored(_queueSmall, _cS)
+                            + (_hasB ? '/' + _numColored(_queueBuffer, _cB) : '')
                           : '')
-                      + `）` : '';
+                      + '）' : '';
                 const _lsTitle = `压缩组: 正在压缩 ${runningCount} 组 / 上限 ${totalSlots} 组\n`
                     + `括号内两段: 在途 L/S/B · 队列 L/S/B（B=保护区）`
                     + (_hasLs
