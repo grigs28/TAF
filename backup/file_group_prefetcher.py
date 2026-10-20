@@ -443,22 +443,29 @@ class FileGroupPrefetcher:
             choice = None
             q = None
 
-            # 放行保护区组的两个紧急条件（都无防抖、不占配额）：
-            #   ① final 文件数 <= 1（写带喂不饱）
-            #   ② 实际在压缩的组里没有 L（无论何时——避免纯 S 并发饿死写带，
-            #      也避免保护区把 L 变成单向黑洞）
+            # ===== 紧急状态（final<=1 或 在途无 L，均无防抖）=====
+            # 规则（完整放行链路，紧急取出一律不占配额）：
+            #   ① 紧急 → 保护区有货：取保护区
+            #   ② 紧急 → 保护区空：取 L 队列的组（不暂存，直接消费）
+            #   ③ 紧急 → L 队列也空：取 S（兜底，有组就取，绝不空转）
+            #   ④ L/S 队列都空（无论紧急与否）：取保护区（唯一来源）
+            #   ⑤ 全空：等待
             _no_active_l = (self.compressor is not None
                             and not self._large_done
                             and self._active_large_count() == 0)
-            if self._deferred_items and (self._is_starved() or _no_active_l):
+            _urgent = self._is_starved() or _no_active_l
+            if self._deferred_items and _urgent:
+                # 紧急 → 保护区优先（产出最快的组先把 final 填上 / 补上在途 L）
                 _raw = self._deferred_items.pop(0)
                 q = self.large_queue
                 _from_deferred = True
                 choice = 'deferred'   # 不占配额
-            # 保护区空了 + 在途无 L：走正常分支 → _choose_queue 强制 'large'
-            # → 从 L 队列取组 → 暂存豁免（_urgent）直接消费
             else:
                 choice = self._choose_queue()
+                # 紧急且 L 队列有货 → 强制取 L（即使配额/守卫轮到 S）：
+                # L 带宽主导产出最快，final≤1 要最快填上；在途无 L 要立即补 L
+                if _urgent and choice != 'large' and not self.large_queue.empty():
+                    choice = 'large'
                 q = self.large_queue if choice == 'large' else self.small_queue
                 other_q = self.small_queue if choice == 'large' else self.large_queue
                 try:
@@ -468,7 +475,7 @@ class FileGroupPrefetcher:
                         _raw = other_q.get_nowait()
                         q = other_q
                     except asyncio.QueueEmpty:
-                        # 两类队列都空 → 降级取保护区组（"没合适的可以用"）
+                        # 两类队列都空 → 降级取保护区组（兜底："没合适的可以用"）
                         if self._deferred_items:
                             _raw = self._deferred_items.pop(0)
                             q = self.large_queue
@@ -481,13 +488,16 @@ class FileGroupPrefetcher:
                                 _raw = await asyncio.wait_for(q.get(), timeout=2.0)
                             except asyncio.TimeoutError:
                                 continue
+                if _urgent:
+                    # 紧急取出不占配额（无论从 L 还是 S 队列直接取）——
+                    # 不推进 L/S 配额计数，不打乱 4:1 节奏
+                    choice = 'deferred'
             item, seq = self._unwrap(_raw)
 
             # 大组保护（全程）：L 队列取出的"文件数 < 阈值"的组 → 暂存不消费
             # 阈值现读（UI 保存后立即生效）。
-            # 紧急豁免：无在途 L 或 final<=1 时不暂存、直接消费——
-            # 否则 1.4.5 的"强制取 L"会取出来又被暂存回去（单向黑洞）。
-            _urgent = _no_active_l or self._is_starved()
+            # 紧急豁免：_urgent（final≤1 或 在途无 L）时不暂存、直接消费——
+            # 否则"强制取 L"会取出来又被暂存回去（单向黑洞）。
             if (not _from_deferred and q is self.large_queue and not _urgent):
                 _defer_below = int(self._live_setting('GROUP_SCAN_DEFER_BELOW', 5000) or 0)
                 if _defer_below > 0:
