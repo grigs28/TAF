@@ -94,6 +94,55 @@
         box-shadow: 0 0 0 8px rgba(0, 123, 255, 0);
     }
 }
+
+/* ===== 自定义阶段颜色 =====
+   Bootstrap 没有 bg-purple / bg-emerald / bg-amber / bg-teal，
+   此前这些徽章实际是透明底（只剩脉冲光晕）。 */
+.bg-purple {
+    background-color: #6f42c1 !important;
+    color: #fff !important;
+}
+.bg-emerald {
+    background-color: #20c997 !important;
+    color: #fff !important;
+}
+.bg-amber {
+    background-color: #ffaa00 !important;
+    color: #1a1a1a !important;
+}
+.bg-teal {
+    background-color: #20c997 !important;
+    color: #fff !important;
+}
+
+/* 对应脉冲光晕（与各阶段颜色一致） */
+.pulse-badge.bg-purple {
+    animation: pulse-prefetch 1.5s ease-in-out infinite;
+}
+@keyframes pulse-prefetch {
+    0%, 100% {
+        opacity: 1;
+        box-shadow: 0 0 0 0 rgba(111, 66, 193, 0.7);
+    }
+    50% {
+        opacity: 0.9;
+        box-shadow: 0 0 0 8px rgba(111, 66, 193, 0);
+    }
+}
+
+.pulse-badge.bg-emerald {
+    animation: pulse-finalize 1.5s ease-in-out infinite;
+}
+@keyframes pulse-finalize {
+    0%, 100% {
+        opacity: 1;
+        box-shadow: 0 0 0 0 rgba(32, 201, 151, 0.7);
+    }
+    50% {
+        opacity: 0.9;
+        box-shadow: 0 0 0 8px rgba(32, 201, 151, 0);
+    }
+}
 </style>
 {% endblock %}
 
