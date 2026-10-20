@@ -319,10 +319,80 @@ class TaskScheduler:
         """初始化调度器"""
         self.system_instance = system_instance
 
+        # 关键顺序：**先重置**上次运行中状态，再加载任务。
+        # 若先加载（内存拿到 running）再重置，加载后的某些写回可能把 running
+        # 又写回数据库，导致服务重启后计划任务仍显示"运行中"。
+        await self._reset_stale_running_states()
+
         # 从数据库加载计划任务
         await self._load_tasks_from_db()
 
         logger.info(f"计划任务调度器初始化完成，加载了 {len(self.tasks)} 个任务")
+
+    async def _reset_stale_running_states(self):
+        """重置上次"运行中"状态（服务重启后调用，加载任务之前）。
+
+        - backup_tasks: running → interrupted
+        - scheduled_tasks: running → active
+        - task_locks: is_active=true → false
+        显式 commit（不依赖连接释放时的隐式提交），并用 rowcount 记录真实影响行数。
+        """
+        try:
+            async with get_opengauss_connection() as conn:
+                cur1 = await conn.execute(
+                    """
+                    UPDATE backup_tasks
+                    SET status = 'interrupted',
+                        error_message = COALESCE(error_message, '') || '（服务重启，运行中任务被清除，等待重新调度）'
+                    WHERE status = 'running'
+                    """
+                )
+                cur2 = await conn.execute(
+                    "UPDATE scheduled_tasks SET status = 'active' WHERE status = 'running'"
+                )
+                cur3 = await conn.execute(
+                    "UPDATE task_locks SET is_active = false WHERE is_active = true"
+                )
+                # 显式提交：不依赖连接释放路径的隐式提交
+                try:
+                    await conn.commit()
+                except Exception:
+                    pass
+
+            def _affected(cur) -> int:
+                try:
+                    return int(getattr(cur, 'rowcount', -1))
+                except Exception:
+                    pass
+                try:
+                    return int(str(cur).split()[-1])
+                except (ValueError, IndexError):
+                    return 0
+
+            counts = (_affected(cur1), _affected(cur2), _affected(cur3))
+            if any(counts):
+                logger.info(
+                    f"[调度器启动] 重置上次运行中状态: 备份任务 {counts[0]} 个（标记为 interrupted）, "
+                    f"计划任务 {counts[1]} 个（恢复 active）, 任务锁 {counts[2]} 个（已释放）"
+                )
+            else:
+                logger.debug("[调度器启动] 无需重置运行中状态")
+
+            # 内存同步（保险）：若任务已加载到内存（异常调用顺序），把内存中的
+            # running 也恢复为 active，避免 API 从内存读到旧状态
+            try:
+                from models.scheduled_task import ScheduledTaskStatus
+                for _info in (getattr(self, 'tasks', {}) or {}).values():
+                    _task = _info.get('task') if isinstance(_info, dict) else None
+                    if _task is None:
+                        continue
+                    _st = str(getattr(_task, 'status', '') or '').lower()
+                    if _st == 'running' or _st.endswith('.running'):
+                        _task.status = ScheduledTaskStatus.ACTIVE
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning(f"[调度器启动] 重置运行中状态失败（继续启动）: {e}")
 
     async def _load_tasks_from_db(self):
         """从数据库加载计划任务"""
@@ -702,40 +772,6 @@ class TaskScheduler:
             return
 
         self.running = True
-
-        # 启动时重置上次"运行中"状态：服务重启后不再续写，
-        # 运行中的任务统一清除为中断状态，等待调度器重新调度
-        try:
-            async with get_opengauss_connection() as conn:
-                backup_reset = await conn.execute(
-                    """
-                    UPDATE backup_tasks
-                    SET status = 'interrupted',
-                        error_message = COALESCE(error_message, '') || '（服务重启，运行中任务被清除，等待重新调度）'
-                    WHERE status = 'running'
-                    """
-                )
-                scheduled_reset = await conn.execute(
-                    "UPDATE scheduled_tasks SET status = 'active' WHERE status = 'running'"
-                )
-                locks_reset = await conn.execute(
-                    "UPDATE task_locks SET is_active = false WHERE is_active = true"
-                )
-
-            def _affected(result) -> int:
-                try:
-                    return int(str(result).split()[-1])
-                except (ValueError, IndexError):
-                    return 0
-
-            counts = (_affected(backup_reset), _affected(scheduled_reset), _affected(locks_reset))
-            if any(counts):
-                logger.info(
-                    f"[调度器启动] 重置上次运行中状态: 备份任务 {counts[0]} 个（标记为 interrupted）, "
-                    f"计划任务 {counts[1]} 个（恢复 active）, 任务锁 {counts[2]} 个（已释放）"
-                )
-        except Exception as e:
-            logger.warning(f"[调度器启动] 重置运行中状态失败（继续启动）: {e}")
 
         total_tasks = len(self.tasks)
         logger.info(
