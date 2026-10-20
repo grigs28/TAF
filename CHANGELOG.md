@@ -1,5 +1,15 @@
 # 更新日志
 
+## [1.4.2] - 2026-10-20
+
+### 修复
+
+- **1.4.0 回归：压缩组启动时 NameError**。`_process_prefetched_file_groups` 中
+  保存 `file_paths` 误用了 `_compress_file_group` 的局部变量 `processed_file_group`，
+  每组启动即抛 `NameError: name 'processed_file_group' is not defined`，压缩完全
+  无法启动（任务 136 因此被取消）。改用本方法内可用的 `file_group`。
+- 版本升至 1.4.2
+
 ## [1.4.1] - 2026-10-20
 
 ### 修复

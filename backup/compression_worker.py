@@ -773,8 +773,10 @@ class CompressionWorker:
                     'group_type': self._group_type_of(len(file_group)),  # L/S（供分类型速率）
                     'group_size_bytes': total_group_size,  # 文件组总大小
                     # 组内文件路径（卡片"当前目录"用：按 current_file_index 取近似当前文件）
+                    # 注意：此处只有 file_group（预取器入队记录，可能已精简为 path/size），
+                    # processed_file_group 是 _compress_file_group 的局部变量，不能用。
                     'file_paths': [(f.get('path') or f.get('file_path') or '')
-                                   for f in processed_file_group],
+                                   for f in file_group],
                 }
                 
                 # 检查是否应该停止（在启动新任务前）
