@@ -1040,17 +1040,31 @@ class BackupEngine:
                 logger.info(f"执行耗时: {duration_seconds:.2f} 秒")
                 logger.info(f"完成时间: {format_datetime(task_end_time)}")
                 # 写带忙闲统计（记录到日志，便于事后核对写带效率）
+                # 完成后卡片需要的**平均值**落盘：写带平均速度 + 压缩开始时间
                 try:
                     _th_stats = self.tape_handler
                     _busy = float(getattr(_th_stats, '_tape_cum_seconds', 0) or 0)
+                    _cum_bytes = int(getattr(_th_stats, '_tape_cum_bytes', 0) or 0)
                     _first = getattr(_th_stats, '_tape_first_write_start', None)
-                    if _first and _busy > 0:
+                    _avg_mbps = 0.0
+                    if _first and _cum_bytes > 0:
                         _wall = max(0.001, time.time() - float(_first))
                         _idle = max(0.0, _wall - _busy)
+                        _avg_mbps = _cum_bytes / _wall / (1024 * 1024)
                         logger.info(
                             f"写带统计: 实际写入 {_busy:.0f} 秒，空闲等待 {_idle:.0f} 秒，"
-                            f"写入效率 {_busy / _wall * 100:.1f}%"
+                            f"写入效率 {_busy / _wall * 100:.1f}%，"
+                            f"平均速度 {_avg_mbps:.1f} MB/s"
                         )
+                    _cw = getattr(self, '_current_compression_worker', None)
+                    _comp_started = (float(getattr(_cw, 'compression_started_at', 0) or 0)
+                                     if _cw else 0.0)
+                    _starve_seconds = float(
+                        getattr(self.final_dir_monitor, '_starvation_seconds', 0.0) or 0.0)
+                    await self.backup_db.save_task_starvation(
+                        backup_task.id, _starve_seconds,
+                        {"tape_write_avg_speed_mbps": round(_avg_mbps, 1),
+                         "compression_started_at": _comp_started})
                 except Exception:
                     pass
                 
@@ -1325,6 +1339,19 @@ class BackupEngine:
             # 注入 compressor 引用：大小文件组调度需要读取守卫状态 _guard_active
             try:
                 fp.compressor = self.compressor
+            except Exception:
+                pass
+            # 注入写带喂不饱信号：final 待写文件数 <=1 → 立即放行保护区组（无防抖）
+            try:
+                _final_set_id = backup_set.set_id if backup_set else None
+                fp.final_pending_provider = (
+                    lambda: self.final_dir_monitor.count_final_files(_final_set_id))
+            except Exception:
+                pass
+            # 兼容旧布尔信号（保留，回退用）
+            try:
+                fp.starved_provider = (
+                    lambda: bool(getattr(self.final_dir_monitor, '_starve_start', None)))
             except Exception:
                 pass
             fp.start()
