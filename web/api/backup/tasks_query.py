@@ -316,10 +316,12 @@ async def get_backup_tasks(
                     guard_required_bytes = 0
                     active_large_groups = 0   # 在途大文件组数（带宽主导）
                     active_small_groups = 0   # 在途小文件组数（IOPS 主导）
+                    active_buffer_groups = 0  # 在途保护区组数（应急储备）
                     completed_large_groups = 0   # 累计已完成大文件组数
                     completed_small_groups = 0   # 累计已完成小文件组数
                     total_large_groups = 0       # 已分组总数（大文件组）
                     total_small_groups = 0       # 已分组总数（小文件组）
+                    total_buffer_groups = 0      # 已分组总数（保护区）
                     compression_started_at = None  # 压缩循环启动时间（epoch 秒，卡片平均速度以此为起点）
                     vegas_enabled = None         # Vegas 是否启用（None=未知/旧任务）
                     vegas_health = None          # NAS读取健康度（%，ewma/base；None=无基准/未启用）
@@ -342,6 +344,7 @@ async def get_backup_tasks(
                                         _types = list(getattr(_comp, '_active_group_types', []) or [])
                                         active_large_groups = _types.count('large')
                                         active_small_groups = _types.count('small')
+                                        active_buffer_groups = _types.count('buffer')
                                         completed_large_groups = int(
                                             getattr(_comp, '_completed_large_groups', 0) or 0)
                                         completed_small_groups = int(
@@ -421,6 +424,8 @@ async def get_backup_tasks(
                                                     getattr(fp, '_prefetched_large_groups', 0) or 0)
                                                 total_small_groups = int(
                                                     getattr(fp, '_prefetched_small_groups', 0) or 0)
+                                                total_buffer_groups = int(
+                                                    getattr(fp, '_prefetched_buffer_groups', 0) or 0)
                                             except Exception:
                                                 pass
 
@@ -595,7 +600,10 @@ async def get_backup_tasks(
                         # 配置的并行批次数：卡片用它画"压缩组 X/Y"的聚合条分母
                         "parallel_batches": parallel_batches,
                         # 压缩开始时间（epoch 秒）：右上角速度徽章的平均速度从此刻起算
-                        "compression_started_at": compression_started_at,
+                        "compression_started_at": (
+                            compression_started_at
+                            or (float(result_summary_dict.get('compression_started_at') or 0) or None)
+                        ),
                         # Vegas 健康度（%）：压缩/打包徽章红绿黄的依据；null=无基准
                         "vegas_enabled": vegas_enabled,
                         "vegas_health": vegas_health,
@@ -608,7 +616,11 @@ async def get_backup_tasks(
                         "tape_write_bytes": tape_write_bytes if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         "tape_write_total": tape_write_total if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         "tape_write_speed_mbps": round(tape_write_speed_mbps, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
-                        "tape_write_avg_speed_mbps": round(tape_write_avg_speed_mbps, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
+                        "tape_write_avg_speed_mbps": (
+                            round(tape_write_avg_speed_mbps, 1)
+                            if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id))
+                            else round(float(result_summary_dict.get('tape_write_avg_speed_mbps') or 0), 1)
+                        ),
                         # 本任务累计已完成写带的字节数（hover 显示"本任务累计已完成"）
                         "tape_write_cum_bytes": tape_write_cum_bytes if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         # 写带忙闲统计：busy=实际复制累计秒数，idle=从首次写带起算的空档秒数
@@ -635,12 +647,14 @@ async def get_backup_tasks(
                         # 在途组类型数量（卡片“压缩组: X/Y（L a / S b）”）
                         "active_large_groups": active_large_groups,
                         "active_small_groups": active_small_groups,
+                        "active_buffer_groups": active_buffer_groups,
                         # 累计已完成组数（卡片“… · 总 L x / S y”）
                         "completed_large_groups": completed_large_groups,
                         "completed_small_groups": completed_small_groups,
                         # 已分组总数（含队列/在途/已完成）
                         "total_large_groups": total_large_groups,
-                        "total_small_groups": total_small_groups
+                        "total_small_groups": total_small_groups,
+                        "total_buffer_groups": total_buffer_groups
                     })
 
                 # 追加计划任务（未运行模板）

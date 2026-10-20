@@ -106,14 +106,19 @@ class FileGroupPrefetcher:
         #  压缩循环提前退出，只剩少量在途组继续跑。）
         self.large_queue: asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=0)
         self.small_queue: asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=0)
+        # 保护区 B：组内文件数 < GROUP_SCAN_DEFER_BELOW，作为应急储备，
+        # 常规配额不取，只在紧急/兜底时放行；区内按文件数降序（最多先取=最慢产出）
+        self.buffer_queue: asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=0)
         self._queue_seq = 0
         self._queued_sizes_by_seq: dict = {}
         self._queued_counts_by_seq: dict = {}   # seq -> 组内文件数（hover 显示）
         # 已分组总数（按类型，含在途/队列中/已完成，仅调度模式统计）
         self._prefetched_large_groups = 0
         self._prefetched_small_groups = 0
+        self._prefetched_buffer_groups = 0
         self._large_done = False
         self._small_done = False
+        self._buffer_done = False
         self._large_take = 0
         self._small_take = 0
         self._guard_confirmed = False     # 防抖后的守卫状态
@@ -149,7 +154,8 @@ class FileGroupPrefetcher:
     def get_queue_size(self) -> int:
         """当前待压缩组数（兼容调度开关两种模式）"""
         if self.group_sched_enabled:
-            return self.large_queue.qsize() + self.small_queue.qsize()
+            return (self.large_queue.qsize() + self.small_queue.qsize()
+                    + self.buffer_queue.qsize())
         return self.file_group_queue.qsize()
 
     def get_queue_sizes(self) -> list:
@@ -262,7 +268,7 @@ class FileGroupPrefetcher:
         取到它就意味着该队列确实已取空。
         """
         if self.group_sched_enabled:
-            for q in (self.large_queue, self.small_queue):
+            for q in (self.large_queue, self.small_queue, self.buffer_queue):
                 self._queue_seq += 1
                 await q.put((1e18, self._queue_seq, 0, ([], -1)))
         else:
@@ -432,7 +438,7 @@ class FileGroupPrefetcher:
         loop = asyncio.get_running_loop()
         deadline = None if timeout is None else loop.time() + timeout
         while True:
-            if self._large_done and self._small_done:
+            if self._large_done and self._small_done and self._buffer_done:
                 return ([], -1)
 
             seq = None
@@ -452,29 +458,43 @@ class FileGroupPrefetcher:
                             and not self._large_done
                             and self._active_large_count() == 0)
             _urgent = (_urgent_ok and self._is_starved()) or _no_active_l
-            choice = self._choose_queue()
-            # 紧急且 L 队列有货 → 强制取 L（即使配额/守卫轮到 S）：
-            # L 带宽主导产出最快，final≤1 要最快填上；在途无 L 要立即补 L
-            if _urgent and choice != 'large' and not self.large_queue.empty():
-                choice = 'large'
-            q = self.large_queue if choice == 'large' else self.small_queue
-            other_q = self.small_queue if choice == 'large' else self.large_queue
+            # 三分区取组（B/L/S）：
+            #   紧急：B 有货取 B（不占配额）→ 否则取 L（不占配额）→ 否则 S 兜底
+            #   常规：按配额 4:1 取 L/S；两者都空 → 兜底取 B
+            q = None
+            if _urgent:
+                if not self._buffer_done and not self.buffer_queue.empty():
+                    q = self.buffer_queue
+                    choice = 'buffer'
+                elif not self._large_done and not self.large_queue.empty():
+                    q = self.large_queue
+                    choice = 'large'
+                elif not self._small_done and not self.small_queue.empty():
+                    q = self.small_queue
+                    choice = 'small'
+            if q is None:
+                choice = self._choose_queue()
+                q = self.large_queue if choice == 'large' else self.small_queue
+                if q.empty():
+                    # 常规选择的队列空 → 另一类 L/S 降级
+                    _other = (self.small_queue if q is self.large_queue
+                              else self.large_queue)
+                    if not _other.empty():
+                        q = _other
+                    elif not self._buffer_done and not self.buffer_queue.empty():
+                        q = self.buffer_queue   # L/S 都空 → 兜底取 B
+                        choice = 'buffer'
             try:
                 _raw = q.get_nowait()
             except asyncio.QueueEmpty:
+                if deadline is not None and deadline - loop.time() <= 0:
+                    return None
                 try:
-                    _raw = other_q.get_nowait()
-                    q = other_q
-                except asyncio.QueueEmpty:
-                    if deadline is not None and deadline - loop.time() <= 0:
-                        return None
-                    try:
-                        _raw = await asyncio.wait_for(q.get(), timeout=2.0)
-                    except asyncio.TimeoutError:
-                        continue
-            if _urgent:
-                # 紧急取出不占配额（无论从 L 还是 S 队列直接取）——
-                # 不推进 L/S 配额计数，不打乱 4:1 节奏
+                    _raw = await asyncio.wait_for(q.get(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    continue
+            if _urgent or choice == 'buffer':
+                # 紧急取出 / 保护区取出：不占配额
                 choice = 'deferred'
             item, seq = self._unwrap(_raw)
 
@@ -489,8 +509,10 @@ class FileGroupPrefetcher:
             if item and isinstance(item, tuple) and len(item) == 2 and not item[0]:
                 if q is self.large_queue:
                     self._large_done = True
-                else:
+                elif q is self.small_queue:
                     self._small_done = True
+                else:
+                    self._buffer_done = True
                 continue
             if item and isinstance(item, tuple) and len(item) == 2 and item[0]:
                 file_groups, last_processed_id = item
@@ -499,7 +521,8 @@ class FileGroupPrefetcher:
                 files_in_removed = sum(len(g) for g in file_groups)
                 self.queued_files_count = max(0, self.queued_files_count - files_in_removed)
                 # 成功取到组后推进配额（降级取组不计数）
-                actual = 'large' if q is self.large_queue else 'small'
+                actual = ('large' if q is self.large_queue
+                          else 'small' if q is self.small_queue else 'buffer')
                 if choice is not None:
                     self._commit_take(actual, choice)
                     # 守卫期间记录 S 组连续取用数：满 N 个后下一次优先取 1 个 L
@@ -647,24 +670,34 @@ class FileGroupPrefetcher:
                     file_count = len(group)
 
                     if self.group_sched_enabled:
-                        # 分界阈值现读（UI 保存后立即生效）
+                        # 阈值现读（UI 保存后立即生效）：三分区
+                        #   < DEFER_BELOW → B（保护区，应急储备）
+                        #   < LARGE_THRESHOLD → L（大文件组，最快产出）
+                        #   >= LARGE_THRESHOLD → S（小文件组，最慢产出）
+                        _defer_below = int(self._live_setting(
+                            'GROUP_SCAN_DEFER_BELOW', 1000) or 0)
                         _threshold = int(self._live_setting(
                             'GROUP_LARGE_FILE_COUNT_THRESHOLD', 20000) or 20000)
-                        is_large = file_count < _threshold
-                        q = self.large_queue if is_large else self.small_queue
-                        if is_large:
+                        if _defer_below > 0 and file_count < _defer_below:
+                            _qtype = 'buffer'
+                            q = self.buffer_queue
+                            self._prefetched_buffer_groups += 1
+                            priority = -file_count   # 文件数降序（最多先取=最慢）
+                        elif file_count < _threshold:
+                            _qtype = 'large'
+                            q = self.large_queue
                             self._prefetched_large_groups += 1
+                            priority = file_count    # 文件数升序（最少先取=最快）
                         else:
+                            _qtype = 'small'
+                            q = self.small_queue
                             self._prefetched_small_groups += 1
-                        # large：文件数升序（优先最大文件组/最快产出）
-                        # small：文件数降序（优先最小文件组/最慢产出）
-                        priority = file_count if is_large else -file_count
+                            priority = -file_count   # 文件数降序（最多先取=最慢）
                         self._queue_seq += 1
                         seq = self._queue_seq
                         self._queued_sizes_by_seq[seq] = total_size
                         self._queued_counts_by_seq[seq] = file_count
                         await q.put((priority, seq, total_size, ([group], 0)))
-                        _qtype = 'large' if is_large else 'small'
                     else:
                         if self.file_group_queue.full():
                             logger.debug("[文件组预取器-内存模式] 队列已满，等待...")

@@ -406,12 +406,16 @@ class CompressionWorker:
             logger.debug(f"[压缩配置] 获取 scan_status 时出错，使用默认配置: {e}")
 
     def _group_type_of(self, file_count: int) -> str:
-        """按组内文件数判定 L/S（与调度器同口径，热读配置）"""
+        """按组内文件数三分：B（保护区）/ L（大文件组）/ S（小文件组），热读配置"""
         try:
             from config.settings import get_settings as _gs
-            thr = int(getattr(_gs(), 'GROUP_LARGE_FILE_COUNT_THRESHOLD', 20000) or 20000)
+            _s = _gs()
+            defer_below = int(getattr(_s, 'GROUP_SCAN_DEFER_BELOW', 1000) or 0)
+            thr = int(getattr(_s, 'GROUP_LARGE_FILE_COUNT_THRESHOLD', 20000) or 20000)
         except Exception:
-            thr = 20000
+            defer_below, thr = 1000, 20000
+        if defer_below > 0 and file_count < defer_below:
+            return 'buffer'
         return 'small' if file_count >= thr else 'large'
 
     def _update_vegas(self) -> None:
@@ -1049,8 +1053,7 @@ class CompressionWorker:
                         'percent': size_percent,
                         'current': current_file_index,
                         'total': total_files_in_group,
-                        'group_type': ('small' if total_files_in_group >= _large_file_threshold
-                                       else 'large'),
+                        'group_type': self._group_type_of(total_files_in_group),
                         'group_size_bytes': group_size_bytes,
                         'processed_bytes': processed_bytes,  # 已处理文件的实际大小
                         'current_dir': _current_dir,

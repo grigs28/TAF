@@ -532,8 +532,14 @@ class Compressor:
             #  同时记录组类型，供卡片显示 L/S 数量）
             self._active_groups.append((int(_group_bytes), str(temp_archive_path)))
             try:
-                _grp_type = ('small' if len(file_group) >= self._group_large_threshold
-                             else 'large')
+                _fc = len(file_group)
+                _defer_below = int(getattr(self.settings, 'GROUP_SCAN_DEFER_BELOW', 1000) or 0)
+                if _defer_below > 0 and _fc < _defer_below:
+                    _grp_type = 'buffer'
+                elif _fc >= self._group_large_threshold:
+                    _grp_type = 'small'
+                else:
+                    _grp_type = 'large'
             except Exception:
                 _grp_type = 'large'
             self._active_group_types.append(_grp_type)

@@ -1020,11 +1020,15 @@
                     }
                     // 如果 current 和 total 都是 0，显示百分比即可
                     // 紧凑格式示例: "压缩 ●70522/129504(54.5%)114.01G"
-                    // ● 色点 = 在途组类型：主蓝=大文件组(L) 浅蓝=小文件组(S) 灰=混合/未知
+                    // ● 色点 = 在途组类型：主蓝=L 浅蓝=S 橙=B（保护区） 灰=混合/未知
                     const _gt = compProg.group_type;
                     const _dotColor = _gt === 'large' ? 'var(--primary)'
-                        : _gt === 'small' ? 'var(--primary-light)' : 'rgba(255,255,255,.35)';
-                    const _lsDot = `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${_dotColor};margin-right:2px;vertical-align:0;" title="${_gt === 'large' ? '大文件组(L)' : _gt === 'small' ? '小文件组(S)' : '大小组混合'}"></span>`;
+                        : _gt === 'small' ? 'var(--primary-light)'
+                        : _gt === 'buffer' ? 'var(--warning)' : 'rgba(255,255,255,.35)';
+                    const _gtName = _gt === 'large' ? '大文件组(L)'
+                        : _gt === 'small' ? '小文件组(S)'
+                        : _gt === 'buffer' ? '保护区(B)' : '大小组混合';
+                    const _lsDot = `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${_dotColor};margin-right:2px;vertical-align:0;" title="${_gtName}"></span>`;
                     if (current === 0 && total === 0) {
                         currentStageLabel = `压缩 ${_lsDot}(${percent.toFixed(1)}%)`;
                     } else {
@@ -1154,13 +1158,15 @@
                     const _pct = _g ? Math.max(0, Math.min(100, Number(_g.percent) || 0)) : 0;
                     // 组类型着色（同色系）：大文件组 L = 主蓝，小文件组 S = 浅蓝
                     const _isSmall = _g && _g.group_type === 'small';
-                    const _fillColor = _isSmall ? 'var(--primary-light)' : 'var(--primary)';
+                    const _isBuffer = _g && _g.group_type === 'buffer';
+                    const _fillColor = _isBuffer ? 'var(--warning)'
+                        : (_isSmall ? 'var(--primary-light)' : 'var(--primary)');
                     const _bg = _pct <= 0
                         ? 'rgba(255,255,255,.18)'
                         : (_pct >= 100
                             ? _fillColor
                             : `linear-gradient(to top, ${_fillColor} 0 ${_pct}%, rgba(255,255,255,.18) ${_pct}% 100%)`);
-                    const _typeTag = _g ? (_isSmall ? '小' : '大') : '';
+                    const _typeTag = _g ? (_isBuffer ? '保' : (_isSmall ? '小' : '大')) : '';
                     const _title = _g
                         ? ('组' + (i + 1) + '[' + _typeTag + ']: ' + _pct.toFixed(1) + '%'
                             + (typeof _g.current === 'number' && typeof _g.total === 'number'
@@ -1171,10 +1177,12 @@
                         + 'border-radius:1px;vertical-align:-3px;background:' + _bg + '"></span>';
                 }
 
-                // 在途/总组数：卡片只显示精简数字，明细放悬停
-                //   显示：（在途L / 在途S · 总L / 总S）
+                // 在途/总组数：三分区 L/S/B（B=保护区，应急储备）
+                //   显示：（在途L/S/B · 队列L/S/B）
                 const _hasLs = (typeof task.active_large_groups === 'number'
                                 && typeof task.active_small_groups === 'number');
+                const _hasB = (typeof task.active_buffer_groups === 'number'
+                               && typeof task.total_buffer_groups === 'number');
                 const _hasTotal = (typeof task.total_large_groups === 'number'
                                    && typeof task.total_small_groups === 'number');
                 const _hasCompleted = (typeof task.completed_large_groups === 'number'
@@ -1187,21 +1195,31 @@
                 const _queueSmall = Math.max(0,
                     _numOr0(task.total_small_groups) - _numOr0(task.active_small_groups)
                     - _numOr0(task.completed_small_groups));
-                // 括号内两段：在途 L/S · 队列 L/S（累计已分组只放悬停，避免过长）
+                const _queueBuffer = Math.max(0,
+                    _numOr0(task.total_buffer_groups) - _numOr0(task.active_buffer_groups));
+                const _activeB = _numOr0(task.active_buffer_groups);
+                const _totalB = _numOr0(task.total_buffer_groups);
+                // 括号内两段：在途 L/S/B · 队列 L/S/B
                 const _lsText = _hasLs
                     ? `（${task.active_large_groups}/${task.active_small_groups}`
+                      + (_hasB ? `/${_activeB}` : '')
                       + (_hasTotal && _hasCompleted
                           ? `·${_queueLarge}/${_queueSmall}`
+                            + (_hasB ? `/${_queueBuffer}` : '')
                           : '')
                       + `）` : '';
                 const _lsTitle = `压缩组: 正在压缩 ${runningCount} 组 / 上限 ${totalSlots} 组\n`
-                    + `括号内两段: 在途 L/S · 队列 L/S`
+                    + `括号内两段: 在途 L/S/B · 队列 L/S/B（B=保护区）`
                     + (_hasLs
-                        ? `\n在途: 大文件组 ${task.active_large_groups} / 小文件组 ${task.active_small_groups}`
+                        ? `\n在途: 大文件组 ${task.active_large_groups}`
+                          + ` / 小文件组 ${task.active_small_groups}`
+                          + (_hasB ? ` / 保护区 ${_activeB}` : '')
                         : '')
                     + (_hasTotal && _hasCompleted
-                        ? `\n队列待压缩: 大文件组 ${_queueLarge} / 小文件组 ${_queueSmall}`
-                          + `（合计 ${_queueLarge + _queueSmall} 组）`
+                        ? `\n队列待压缩: 大文件组 ${_queueLarge}`
+                          + ` / 小文件组 ${_queueSmall}`
+                          + (_hasB ? ` / 保护区 ${_queueBuffer}` : '')
+                          + `（合计 ${_queueLarge + _queueSmall + (_hasB ? _queueBuffer : 0)} 组）`
                         : '')
                     + (_hasCompleted
                         ? `\n累计完成: 大文件组 ${task.completed_large_groups}`
@@ -1209,9 +1227,11 @@
                         : '')
                     + (_hasTotal
                         ? `\n累计已分组: 大文件组 ${task.total_large_groups}`
-                          + ` / 小文件组 ${task.total_small_groups}（含队列/在途/已完成）`
+                          + ` / 小文件组 ${task.total_small_groups}`
+                          + (_hasB ? ` / 保护区 ${_totalB}` : '')
+                          + `（含队列/在途/已完成）`
                         : '')
-                    + `\n颜色: 主蓝=大文件组(L)  浅蓝=小文件组(S)`;
+                    + `\n颜色: 主蓝=大文件组(L)  浅蓝=小文件组(S)  橙=保护区(B)`;
                 batchProgressHtml = normalizeCardHtml(`
                     <div class="d-flex justify-content-between align-items-center mb-1">
                         <small class="text-muted" title="${_lsTitle}">压缩组:</small>
@@ -1385,6 +1405,60 @@
         elapsed.appendChild(elapsedLabel);
         elapsed.appendChild(elapsedValue);
         body.appendChild(elapsed);
+
+        // 已完成任务：总大小 / 压缩后大小 / 压缩等待
+        //   压缩等待 = result_summary.tape_starvation_seconds
+        //   （final 目录为空、磁带等压缩产出的累计时间；完成后仍保留）
+        if (!isRunning && taskStatus === 'completed') {
+            const _procB = Number(task.processed_bytes) || 0;
+            const _totalB = Number(task.total_bytes) || 0;
+            const _srcB = _procB > 0 ? _procB : _totalB;
+            const _compB = Number(task.compressed_bytes) || 0;
+            const _starve = Number(task.tape_starvation_seconds) || 0;
+            const _ratio = _srcB > 0 ? (_compB / _srcB * 100).toFixed(1) + '%' : '-';
+
+            const sizeRow = document.createElement('div');
+            sizeRow.className = 'd-flex justify-content-between';
+            sizeRow.innerHTML = `<small class="text-muted">总大小:</small>`
+                + `<small class="text-muted" title="已处理源数据；扫描总量 ${formatBytes(_totalB)}">${formatBytes(_srcB)}</small>`;
+            body.appendChild(sizeRow);
+
+            const compRow = document.createElement('div');
+            compRow.className = 'd-flex justify-content-between';
+            compRow.innerHTML = `<small class="text-muted">压缩后大小:</small>`
+                + `<small class="text-muted" title="压缩率 ${_ratio}">${formatBytes(_compB)}（${_ratio}）</small>`;
+            body.appendChild(compRow);
+
+            // 平均压缩速度：已处理源数据 ÷ 压缩阶段耗时（优先用压缩实际开始时间）
+            const _cs = Number(task.compression_started_at) || 0;
+            const _endEpoch = task.completed_at
+                ? (new Date(task.completed_at).getTime() / 1000)
+                : (Date.now() / 1000);
+            const _compSec = (_cs > 0 && _endEpoch > _cs) ? (_endEpoch - _cs) : 0;
+            const _compSpeed = (_compSec > 0 && _srcB > 0)
+                ? (_srcB / _compSec / (1024 * 1024)) : 0;
+            const speedRow = document.createElement('div');
+            speedRow.className = 'd-flex justify-content-between';
+            speedRow.innerHTML = `<small class="text-muted">压缩速度:</small>`
+                + `<small class="text-muted" title="平均：已处理源数据 ÷ 压缩阶段耗时">${
+                    _compSpeed > 0 ? _compSpeed.toFixed(1) + ' MB/s' : '—'}</small>`;
+            body.appendChild(speedRow);
+
+            const waitRow = document.createElement('div');
+            waitRow.className = 'd-flex justify-content-between';
+            waitRow.innerHTML = `<small class="text-muted">压缩等待:</small>`
+                + `<small class="text-muted" title="磁带端 final 目录为空、等待压缩产出的累计时间">${formatEta(_starve) || '0 秒'}</small>`;
+            body.appendChild(waitRow);
+
+            // 平均写带速度（任务完成后从 result_summary 读取）
+            const _tapeAvg = Number(task.tape_write_avg_speed_mbps) || 0;
+            const tapeRow = document.createElement('div');
+            tapeRow.className = 'd-flex justify-content-between';
+            tapeRow.innerHTML = `<small class="text-muted">磁带写入:</small>`
+                + `<small class="text-muted" title="平均写带速度（从第一次写带起算）">${
+                    _tapeAvg > 0 ? _tapeAvg.toFixed(1) + ' MB/s' : '—'}</small>`;
+            body.appendChild(tapeRow);
+        }
 
         if (task.error_message) {
             const error = document.createElement('div');
