@@ -71,7 +71,7 @@ class SystemEnvConfig(BaseModel):
     group_sched_enabled: Optional[bool] = Field(None, description="大小文件组调度总开关：按组内文件数分大/小文件组、全程按配额取组、守卫拦停时只取小文件组；关闭=原 FIFO 顺序")
     group_sched_ratio: Optional[str] = Field(None, description="全程配额（大:小），如 2:1、3:1、1:1")
     group_large_threshold: Optional[int] = Field(None, description="大/小文件组分界：组内文件数低于此值为大文件组（默认 20000）")
-    group_scan_defer_below: Optional[int] = Field(None, description="扫描期保护阈值：扫描期间不消费文件数低于此值的大文件组（默认 5000，0=禁用）")
+    group_scan_defer_below: Optional[int] = Field(None, description="大组保护阈值：全程不消费文件数低于此值的大文件组（默认 5000，0=禁用）；写带喂不饱时放出")
     group_prefetch_lead_seconds: Optional[int] = Field(None, description="预分组比压缩提前启动的秒数（默认 30；0=同时启动；需小于扫描等待超时）")
     group_vegas_enabled: Optional[bool] = Field(None, description="自适应并发（Vegas）开关：关闭后并发严格按配置/磁盘水位执行，不再按 NAS 读取速率增减")
     group_vegas_beta: Optional[float] = Field(None, description="降并发阈值 β（默认 3.0，越小越敏感）：deficit 超过它时并发乘性下降")
@@ -336,7 +336,7 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             updates["GROUP_LARGE_FILE_COUNT_THRESHOLD"] = str(config.group_large_threshold)
         if config.group_scan_defer_below is not None:
             if config.group_scan_defer_below < 0:
-                raise ValueError("扫描期保护阈值必须 ≥ 0（0=禁用）")
+                raise ValueError("大组保护阈值必须 ≥ 0（0=禁用）")
             updates["GROUP_SCAN_DEFER_BELOW"] = str(config.group_scan_defer_below)
         if config.group_prefetch_lead_seconds is not None:
             if config.group_prefetch_lead_seconds < 0 or config.group_prefetch_lead_seconds > 3600:

@@ -586,6 +586,48 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 
+// ===== 分组阈值推荐：随「最大文件大小」自动换算 =====
+// 分组目标 = MAX_FILE_SIZE × 95%（与后端 min_group_size 同口径）
+// 大/小分界按平均 1 MB、保护区按平均 10 MB（NFS 小文件性能拐点）
+function recommendedGroupThresholds() {
+    const el = document.getElementById('maxFileSizeGB');
+    const gb = el ? parseFloat(el.value) : NaN;
+    if (!isFinite(gb) || gb <= 0) return null;
+    const groupMB = gb * 1024 * 0.95;
+    const roundStep = (v, step) => Math.max(step, Math.round(v / step) * step);
+    return {
+        large: roundStep(groupMB / 1, 500),      // 平均 1 MB
+        protect: roundStep(groupMB / 10, 100),   // 平均 10 MB
+    };
+}
+
+function updateGroupThresholdHints(apply) {
+    const r = recommendedGroupThresholds();
+    if (!r) return;
+    const h1 = document.getElementById('groupLargeRecommend');
+    const h2 = document.getElementById('groupScanDeferRecommend');
+    if (h1) h1.textContent = r.large.toLocaleString();
+    if (h2) h2.textContent = r.protect.toLocaleString();
+    if (apply) {
+        const e1 = document.getElementById('groupLargeThreshold');
+        const e2 = document.getElementById('groupScanDeferBelow');
+        if (e1) e1.value = r.large;
+        if (e2) e2.value = r.protect;
+    }
+}
+
+function onMaxFileSizeChanged() {
+    // 用户改了最大文件大小 → 自动填入推荐阈值（仍可手动改）
+    updateGroupThresholdHints(true);
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    const mfs = document.getElementById('maxFileSizeGB');
+    if (!mfs) return;
+    mfs.addEventListener('change', onMaxFileSizeChanged);
+    mfs.addEventListener('blur', onMaxFileSizeChanged);
+});
+
 // ===== 统一系统配置管理 =====
 // 加载所有系统配置
 // 磁盘限流开关联动：关闭时把同组磁盘参数一并置灰（仅不可编辑，数值不变、照常提交）
@@ -686,7 +728,11 @@ async function loadAllSystemConfig() {
                 // 将字节转换为GB
                 const maxFileSizeGB = config.max_file_size / (1024 * 1024 * 1024);
                 const maxFileSizeGBInput = document.getElementById('maxFileSizeGB');
-                if (maxFileSizeGBInput) maxFileSizeGBInput.value = maxFileSizeGB.toFixed(1);
+                if (maxFileSizeGBInput) {
+                    maxFileSizeGBInput.value = maxFileSizeGB.toFixed(1);
+                    // 初次加载只刷新「推荐值」提示，不覆盖已保存的阈值
+                    updateGroupThresholdHints(false);
+                }
             }
             if (config.backup_compress_dir) {
                 const backupCompressDirInput = document.getElementById('backupCompressDir');

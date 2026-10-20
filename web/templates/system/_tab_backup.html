@@ -150,16 +150,18 @@
                     </div>
                     <div class="mb-3">
                         <label class="form-label">大/小文件组分界（组内文件数）</label>
-                        <input type="number" class="form-control" id="groupLargeThreshold" value="20000" min="100" step="1000">
+                        <input type="number" class="form-control" id="groupLargeThreshold" value="20000" min="100" step="500">
                         <small class="form-text text-secondary">组内文件数低于此值为大文件组（带宽主导），否则为小文件组（IOPS 主导）</small>
+                        <small class="form-text text-secondary">✓ 推荐 <b id="groupLargeRecommend">—</b>（平均约 1 MB；按最大文件大小 × 95% 换算）</small>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label">扫描期保护阈值（组内文件数）</label>
-                        <input type="number" class="form-control" id="groupScanDeferBelow" value="5000" min="0" step="500">
+                        <label class="form-label">大组保护阈值（组内文件数）</label>
+                        <input type="number" class="form-control" id="groupScanDeferBelow" value="2000" min="0" step="100">
                         <small class="form-text text-secondary">
-                            扫描期间不消费文件数低于此值的大文件组（产出最快，留给扫描完成后喂饱写带）；
-                            其他队列取空时才降级使用。0 = 禁用保护。
+                            全程不消费文件数低于此值的大文件组（产出最快，作为写带应急储备）；
+                            只有写带喂不饱（final 空 ≥30 秒）或其它队列取空时才放出来。0 = 禁用保护。
                         </small>
+                        <small class="form-text text-secondary">✓ 推荐 <b id="groupScanDeferRecommend">—</b>（平均约 10 MB）</small>
                     </div>
                     <div class="mb-3">
                         <div class="form-check form-switch">

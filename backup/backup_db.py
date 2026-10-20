@@ -3802,11 +3802,13 @@ class BackupDB:
         except Exception as e:
             logger.info(f"更新扫描进度失败（忽略继续）: {str(e)}")
     
-    async def save_task_starvation(self, task_id: int, seconds: float):
-        """把“等待压缩”累计秒数合并写入 backup_tasks.result_summary。
+    async def save_task_starvation(self, task_id: int, seconds: float, extra: dict = None):
+        """把「等待压缩」等完成统计合并写入 backup_tasks.result_summary。
 
-        任务完成后卡片仍可显示该指标；运行中的实时值由任务查询接口
-        从 FinalDirMonitor 直接读取，不依赖这里。
+        任务完成后卡片仍可显示这些指标；运行中的实时值由任务查询接口
+        从 FinalDirMonitor / TapeHandler 直接读取，不依赖这里。
+
+        extra: 额外要落盘的统计（写带忙闲、压缩开始时间等），数值会四舍五入到 0.1。
         """
         try:
             from utils.scheduler.db_utils import get_opengauss_connection
@@ -3826,6 +3828,12 @@ class BackupDB:
                 if not isinstance(summary, dict):
                     summary = {}
                 summary["tape_starvation_seconds"] = round(float(seconds or 0), 1)
+                if extra:
+                    for k, v in extra.items():
+                        if isinstance(v, (int, float)) and not isinstance(v, bool):
+                            summary[k] = round(float(v), 1)
+                        else:
+                            summary[k] = v
                 await conn.execute(
                     "UPDATE backup_tasks SET result_summary = $2::jsonb, updated_at = now() "
                     "WHERE id = $1",
