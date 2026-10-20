@@ -88,6 +88,8 @@ class CompressionWorker:
         self._last_progress_bytes: Dict[int, int] = {}  # group_idx -> 上次采样 processed_bytes
         # 写带饿死护栏：final 长时间无文件可写时不得继续降并发（否则喂不饱写带）
         self.write_starved_provider = None
+        # 首次填充完成标志：初始阶段每 3 秒启动一个组，填满后进入稳态（完成即补）
+        self._initial_fill_done = False
         self._disk_throttled = False  # 磁盘限流状态（迟滞状态机）
         self._last_adjust_time = 0.0  # 上次并行批次调整时间（限流检查节流）
         self._disk_critical = False  # 磁盘空间危急降级状态
@@ -801,16 +803,14 @@ class CompressionWorker:
                 if self.use_prefetcher:
                     await self._adjust_parallel_batches()
                 
-                # 顺序启动：启动一个任务后，等待3秒，再启动下一个（启动后的任务并行执行）
-                # 这样可以避免队列竞争，确保任务顺序启动
-                if len(self.running_compression_futures) < self.parallel_batches:
-                    # 还没达到并行限制，等待3秒后继续启动下一个任务
-                    # 这样可以顺序启动多个任务，避免队列竞争
-                    await asyncio.sleep(3.0)
-                else:
-                    # 已达到并行限制，等待2秒后再检查
-                    await asyncio.sleep(2.0)
-                # 继续循环，获取下一个文件组（不等待当前任务完成）
+                # 启动节奏：只有**首次填充**阶段每 3 秒启动一个（避免瞬间拉起大量
+                # zstd/tar、抢队列）；填满并发后进入稳态，组完成即补、不再等待。
+                if not self._initial_fill_done:
+                    if len(self.running_compression_futures) >= self.parallel_batches:
+                        self._initial_fill_done = True
+                    else:
+                        await asyncio.sleep(3.0)
+                # 稳态：不 sleep，直接回循环顶部（达到上限会等组完成）
 
             except asyncio.TimeoutError:
                 # 超时时检查扫描状态，如果扫描未完成，继续等待
