@@ -111,17 +111,16 @@
                             <label class="form-check-label" for="diskGuardEnabled">启用空间守卫</label>
                         </div>
                         <small class="form-text text-secondary">
-                            剩余空间低于守卫线（在途组数×最大文件大小×系数）时暂停发放新压缩组，磁带排空后自动放行。
-                            关闭后下方三项随之置灰（数值保留）。磁盘限流与空间守卫至少保留一个。
+                            剩余空间低于守卫线时暂停开新组，磁带排空后自动恢复。
+                            关闭后下方三项置灰（数值保留）；磁盘限流与守卫至少开一个。
                         </small>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">守卫安全系数</label>
                         <input type="number" class="form-control" id="diskGuardSafetyFactor" value="1.2" min="1" max="3" step="0.1">
                         <small class="form-text text-secondary">
-                            守卫线 = 在途组数 × 最大文件大小 × 本系数（默认 1.2）。在途组数取实际正在压缩的组数，
-                            组数少时判定线自动降低，不会误拦；1.2 表示全部在途产出落地后仍剩"在途量×20%"空闲。
-                            调大更保守，调小让 SSD 用得更满（低于 1.0 会让在途产出越界，故不允许）。
+                            守卫线 = 在途组数 × 最大文件大小 × 系数（默认 1.2）。
+                            调大更保守，调小让 SSD 更满（最低 1.0）。
                         </small>
                     </div>
                     <div class="mb-3">
