@@ -1335,7 +1335,10 @@
                 const _scanFiles = _scanStats ? (Number(_scanStats.scanned_files) || 0) : 0;
                 const _scanRate = computeScanRate(task, _scanFiles);
                 // 紧凑格式：压缩计数(压缩速率)/扫描计数(扫描速率)，如 717221(45/s)/5,660,000(1607/s)
-                const _fileProgressHtml = _scanFiles > 0
+                // 只要扫描进行中（scan_live_stats 存在）就显示，即使已扫描为 0
+                // （用户要求：扫描期就显示 0/200,000，不要等到有数据或压缩开始）
+                const _scanning = !!_scanStats;
+                const _fileProgressHtml = _scanning
                     ? `${Number(progressInfo.processedFiles || 0).toLocaleString()}${_fileRate ? `(${_fileRate}/s)` : ''}`
                         + `/${_scanFiles.toLocaleString()}${_scanRate > 0 ? `(${_scanRate}/s)` : ''}`
                     : `${Number(progressInfo.processedFiles || 0).toLocaleString()}/${Number(progressInfo.totalFiles || progressInfo.processedFiles || 0).toLocaleString()}${_fileRate ? ` · ${_fileRate}/s` : ''}`;
