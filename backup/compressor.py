@@ -380,8 +380,15 @@ class Compressor:
                 logger.warning(f"pgzip_threads 值无效: {pgzip_threads}，使用默认值 {compression_threads}")
                 pgzip_threads = int(compression_threads)
             
-            # 获取 zstd 线程数配置
-            zstd_threads = getattr(self.settings, 'ZSTD_THREADS', compression_threads)
+            # 获取 zstd 线程数配置（现读 live settings：UI 保存后下一组压缩即生效，
+            # 与并发数等运行时参数保持一致；读取失败回退构造时的 settings）
+            try:
+                from config.settings import get_settings as _gs_live
+                _live_zstd = _gs_live()
+                zstd_threads = getattr(_live_zstd, 'ZSTD_THREADS',
+                                       getattr(self.settings, 'ZSTD_THREADS', compression_threads))
+            except Exception:
+                zstd_threads = getattr(self.settings, 'ZSTD_THREADS', compression_threads)
             try:
                 zstd_threads = int(zstd_threads)
             except (ValueError, TypeError):
