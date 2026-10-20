@@ -1205,7 +1205,9 @@
                 const _cL = 'var(--primary)';
                 const _cS = 'var(--primary-light)';
                 const _cB = 'var(--warning)';
-                const _numColored = (v, c) => `<span style="color:${c}">${v}</span>`;
+                // 注意：外层 <small class="text-muted"> 的 color 规则带 !important，
+                // 内联 color 必须同样带 !important 才能覆盖（否则仍显示灰色）
+                const _numColored = (v, c) => `<span style="color:${c} !important;font-weight:600">${v}</span>`;
                 const _lsText = _hasLs
                     ? '（'
                       + _numColored(task.active_large_groups, _cL) + '/'
