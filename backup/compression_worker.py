@@ -281,10 +281,16 @@ class CompressionWorker:
             if self.use_prefetcher:
                 self.base_parallel_batches = getattr(fresh_settings, 'COMPRESSION_PARALLEL_BATCHES', 3)
                 self.batches_reduction = getattr(fresh_settings, 'COMPRESSION_BATCHES_REDUCTION', 1)
-                # Vegas 开关热生效（UI 保存后当前任务也立即遵循）
+                # Vegas 开关与参数热生效（UI 保存后当前任务也立即遵循）
                 try:
                     self._vegas_enabled = bool(
                         getattr(fresh_settings, 'GROUP_VEGAS_ENABLED', self._vegas_enabled))
+                    self._vegas_beta = float(
+                        getattr(fresh_settings, 'GROUP_VEGAS_BETA', self._vegas_beta) or self._vegas_beta)
+                    self._vegas_decay = float(
+                        getattr(fresh_settings, 'GROUP_VEGAS_DECAY', self._vegas_decay) or self._vegas_decay)
+                    _vm = int(getattr(fresh_settings, 'GROUP_VEGAS_MIN_BATCHES', self._vegas_min) or self._vegas_min)
+                    self._vegas_min = max(1, _vm)
                 except Exception:
                     pass
 

@@ -758,6 +758,15 @@ async function loadAllSystemConfig() {
                     ? !!config.group_vegas_enabled
                     : true;
             }
+            const vb = document.getElementById('vegasBeta');
+            if (vb) vb.value = (config.group_vegas_beta !== undefined && config.group_vegas_beta !== null)
+                ? config.group_vegas_beta : 3.0;
+            const vd = document.getElementById('vegasDecay');
+            if (vd) vd.value = (config.group_vegas_decay !== undefined && config.group_vegas_decay !== null)
+                ? config.group_vegas_decay : 0.7;
+            const vm = document.getElementById('vegasMinBatches');
+            if (vm) vm.value = (config.group_vegas_min_batches !== undefined && config.group_vegas_min_batches !== null)
+                ? config.group_vegas_min_batches : 2;
             // 空间守卫开关（默认启用；老数据无该字段时按启用处理）
             const gsw = document.getElementById('diskGuardEnabled');
             if (gsw) {
@@ -920,6 +929,24 @@ async function saveEnvConfigSection() {
             group_vegas_enabled: (() => {
                 const sw = document.getElementById('vegasEnabled');
                 return sw ? !!sw.checked : null;
+            })(),
+            group_vegas_beta: (() => {
+                const input = document.getElementById('vegasBeta');
+                if (!input || input.value === '') return null;
+                const parsed = parseFloat(input.value);
+                return isNaN(parsed) ? null : parsed;
+            })(),
+            group_vegas_decay: (() => {
+                const input = document.getElementById('vegasDecay');
+                if (!input || input.value === '') return null;
+                const parsed = parseFloat(input.value);
+                return isNaN(parsed) ? null : parsed;
+            })(),
+            group_vegas_min_batches: (() => {
+                const input = document.getElementById('vegasMinBatches');
+                if (!input || input.value === '') return null;
+                const parsed = parseInt(input.value, 10);
+                return isNaN(parsed) ? null : parsed;
             })(),
             disk_throttle_high_percent: (() => {
                 const input = document.getElementById('diskThrottleHighPercent');
