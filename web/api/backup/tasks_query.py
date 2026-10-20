@@ -231,9 +231,11 @@ async def get_backup_tasks(
                             _wall = max(0.0, _now - float(_first))
                             # 空闲 = 墙钟 − (已完成文件耗时 + 当前文件已写时间)
                             tape_write_idle_seconds = max(0.0, _wall - tape_write_busy_seconds)
-                        if _first and _cum_bytes > 0:
-                            _wall = max(0.001, _now - float(_first))
-                            tape_write_avg_speed_mbps = _cum_bytes / _wall / (1024 * 1024)
+                        # 平均写带速度：分母用**实际写带耗时**（_tape_cum_seconds），
+                        # final 为空/等压缩的空闲时间不计入（与"忙时口径"一致；
+                        # 分子 _cum_bytes 也仅含已完成文件，口径对齐）
+                        if _cum_seconds > 0 and _cum_bytes > 0:
+                            tape_write_avg_speed_mbps = _cum_bytes / _cum_seconds / (1024 * 1024)
                 except Exception as _tape_err:
                     logger.debug(f"[任务查询] 读取磁带写入状态失败（卡片将不显示磁带速度）: {_tape_err}")
 

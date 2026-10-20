@@ -1050,7 +1050,9 @@ class BackupEngine:
                     if _first and _cum_bytes > 0:
                         _wall = max(0.001, time.time() - float(_first))
                         _idle = max(0.0, _wall - _busy)
-                        _avg_mbps = _cum_bytes / _wall / (1024 * 1024)
+                        # 平均速度按实际写带耗时（不含 final 空等），与卡片口径一致
+                        _avg_mbps = (_cum_bytes / _busy / (1024 * 1024)
+                                     if _busy > 0 else 0.0)
                         logger.info(
                             f"写带统计: 实际写入 {_busy:.0f} 秒，空闲等待 {_idle:.0f} 秒，"
                             f"写入效率 {_busy / _wall * 100:.1f}%，"

@@ -816,7 +816,7 @@
             tape.title = `正在写入磁带: ${task.tape_writing_file}\n`
                 + `当前文件进度: ${formatBytes(_writeBytes)} / ${formatBytes(_writeTotal)}（${_writePct}%）\n`
                 + `瞬时速度: ${(Number(task.tape_write_speed_mbps) || 0).toFixed(1)} MB/s\n`
-                + `平均速度: ${_avgMbps.toFixed(1)} MB/s（从第一次写带起算，含文件间空档）\n`
+                + `平均速度: ${_avgMbps.toFixed(1)} MB/s（按实际写带耗时，不含 final 空等）\n`
                 + `本任务累计已完成: ${formatBytes(_cumBytes)}\n`
                 + `等待压缩: ${formatEta(_starve) || '0 秒'}（final 无待写文件、等压缩产出）\n`
                 + `实际写入: ${formatEta(_busy) || '0 秒'}　·　空闲等待: ${formatEta(_idle) || '0 秒'}`
@@ -1458,7 +1458,7 @@
             const tapeRow = document.createElement('div');
             tapeRow.className = 'd-flex justify-content-between';
             tapeRow.innerHTML = `<small class="text-muted">磁带写入:</small>`
-                + `<small class="text-muted" title="平均写带速度（从第一次写带起算）">${
+                + `<small class="text-muted" title="平均写带速度（按实际写带耗时，不含 final 空等）">${
                     _tapeAvg > 0 ? _tapeAvg.toFixed(1) + ' MB/s' : '—'}</small>`;
             body.appendChild(tapeRow);
         }
