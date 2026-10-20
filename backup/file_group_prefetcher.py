@@ -83,7 +83,6 @@ class FileGroupPrefetcher:
         # 按组内文件数分类：< 阈值 = 大文件组（带宽主导），>= 阈值 = 小文件组（IOPS 主导）。
         # 调度规则（计划05：全程统一配额，不再区分扫描期/完成后）：
         #   · 全程 2大:1小；守卫触发时只取小文件组（文件数最多、产出最慢）
-        #   · 大组保护（全程）：暂存"文件数 < GROUP_SCAN_DEFER_BELOW"的组（产出最快，
         #     作为写带应急储备）。只有写带喂不饱（final 空 >= GROUP_STARVE_RELEASE_SEC）
         #     或 L/S 都空时才取出来；扫描完成后不再无条件放回
         #   · 某类耗尽时取另一类；都空则等待
@@ -95,8 +94,6 @@ class FileGroupPrefetcher:
         self._scan_ratio = self._parse_ratio(getattr(_s, 'GROUP_SCHED_SCAN_RATIO', '2:1'))
         self._normal_ratio = self._parse_ratio(getattr(_s, 'GROUP_SCHED_NORMAL_RATIO', '2:1'))
         # 扫描期大组保护阈值（0=禁用）
-        self._defer_below = int(getattr(_s, 'GROUP_SCAN_DEFER_BELOW', 5000) or 0)
-        self._deferred_items: list = []   # 大组保护区：全程暂存"文件数<阈值"的组，写带饥饿/无组时才放
         # 守卫状态切换防抖：跟随“空间不足检查间隔”（守卫每轮检查的节奏），
         # 默认 30 秒；不再使用独立固定值。
         self._sched_debounce = float(
@@ -124,12 +121,12 @@ class FileGroupPrefetcher:
         self._guard_seen = False
         self.compressor = None            # 由 BackupEngine 注入（读取 _guard_active）
         # 写带喂不饱信号（由 BackupEngine 注入）：
-        #   final_pending_provider() -> final 目录待写文件数；<= 1 即放行保护区组
+        #   final_pending_provider() -> final 目录待写文件数；<= 1 触发紧急取 L
         #     （压缩判定时 final 里通常已有 1 个正在写的文件，故用 <=1 而非 ==0）
         #   starved_provider() -> bool 旧布尔信号（兼容，无防抖）
         self.final_pending_provider = None
         self.starved_provider = None
-        self._force_small_once = False    # 暂存保护区组后优先试小文件组，避免 L 队列空转
+
         # 磁盘守卫期间：每取 N 个 S 组，至少取 1 个 L 组（N 现读 GROUP_GUARD_S_PER_L）
         self._guard_s_take = 0
         self._guard_now = False
@@ -147,10 +144,9 @@ class FileGroupPrefetcher:
             return (2, 1)
 
     def get_queue_size(self) -> int:
-        """当前待压缩组数（兼容调度开关两种模式；含扫描期保护区暂存组）"""
+        """当前待压缩组数（兼容调度开关两种模式）"""
         if self.group_sched_enabled:
-            return (self.large_queue.qsize() + self.small_queue.qsize()
-                    + len(self._deferred_items))
+            return self.large_queue.qsize() + self.small_queue.qsize()
         return self.file_group_queue.qsize()
 
     def get_queue_sizes(self) -> list:
@@ -313,15 +309,13 @@ class FileGroupPrefetcher:
         _commit_take() 计数。这样某类队列为空时降级取另一类不会消耗配额，
         下次仍优先配额要求的类型。
         """
-        # 上一次从 L 取到保护区组（已暂存）：优先试 S，避免在 L 里反复空转
-        if self._force_small_once:
-            self._force_small_once = False
-            if not self.small_queue.empty():
-                return 'small'
         # 在途必须有至少 1 个 L（大文件组）：实际在压缩的组里没有 L，
         # 且 L 队列还有货 → 强制取 L。守卫拦停/配额都让位于此保证，
         # 避免纯 S 并发把写带饿死（L 带宽主导、产出快）。
+        # 同样受"压缩启动 60 秒后生效"约束（启动期在途类型未登记，恒无 L 会误触发）。
+        _cs_q = getattr(self.compressor, 'compression_started_at', None)
         if (not self._large_done and self.compressor is not None
+                and _cs_q and (time.time() - float(_cs_q)) >= 60.0
                 and self._active_large_count() == 0
                 and not self.large_queue.empty()):
             return 'large'
@@ -390,7 +384,7 @@ class FileGroupPrefetcher:
         return None
 
     def _is_starved(self) -> bool:
-        """写带喂不饱：final 目录待写文件数 <= 1 → 立即放行保护区组（无防抖）。
+        """写带喂不饱：final 目录待写文件数 <= 1 → 触发紧急取 L（无防抖）。
 
         为什么是 <=1 而不是 ==0：压缩取组判定时 final 里通常已经有 1 个
         "上一个压缩完成、正在写入磁带"的文件，==0 几乎永远不成立。
@@ -414,99 +408,62 @@ class FileGroupPrefetcher:
           large → 取文件数最小（最大文件组，产出最快）
           small → 取文件数最大（最小文件组，产出最慢）
 
-        大组保护（全程）：L 队列里"文件数 < GROUP_SCAN_DEFER_BELOW"的组平时
-        暂存不消费，作为写带应急储备；只有下面两种情况才放出来：
-          ① 写带喂不饱（final 为空持续 >= GROUP_STARVE_RELEASE_SEC 秒）
-          ② L/S 都空，没有别的组可取（兜底，防卡死）
-        扫描完成后不再无条件放回 L —— 保护区全程有效。
+        紧急规则（压缩启动 60 秒后生效）：final≤1 或在途无 L 时强制取 L
+        （不占配额，不影响 4:1 计数状态）；否则按配额正常取。
         """
         loop = asyncio.get_running_loop()
         deadline = None if timeout is None else loop.time() + timeout
         while True:
             if self._large_done and self._small_done:
-                if self._deferred_items:
-                    # 兜底：结束信号已取走但保护区仍有存货 —— 不允许丢组，直接降级取出
-                    logger.warning(
-                        f"[文件组调度] 双队列已结束但保护区仍有 "
-                        f"{len(self._deferred_items)} 组，降级取出")
-                    _raw = self._deferred_items.pop(0)
-                    item, seq = self._unwrap(_raw)
-                    if seq is not None:
-                        self._queued_sizes_by_seq.pop(seq, None)
-                        self._queued_counts_by_seq.pop(seq, None)
-                    return item
                 return ([], -1)
 
             seq = None
             _raw = None
-            _from_deferred = False
             choice = None
             q = None
 
-            # ===== 紧急状态（final<=1 或 在途无 L，均无防抖）=====
-            # 规则（完整放行链路，紧急取出一律不占配额）：
-            #   ① 紧急 → 保护区有货：取保护区
-            #   ② 紧急 → 保护区空：取 L 队列的组（不暂存，直接消费）
-            #   ③ 紧急 → L 队列也空：取 S（兜底，有组就取，绝不空转）
-            #   ④ L/S 队列都空（无论紧急与否）：取保护区（唯一来源）
-            #   ⑤ 全空：等待
-            _no_active_l = (self.compressor is not None
+            # ===== 紧急状态（final≤1 或 在途无 L；压缩启动 60 秒后才生效）=====
+            # 紧急 → 若 choice 轮到 S 且 L 有货则强制取 L；取出不占配额
+            # （choice='deferred'，不推进 L/S 计数，4:1 轮转状态不受影响）
+            # 紧急判定只压缩启动 60 秒后生效：启动初期 final 必空
+            # （还没产出文件）、在途类型未登记（组还没过守卫），两个条件
+            # 恒真会误触发，把首批组导向紧急通道。
+            _cs = getattr(self.compressor, 'compression_started_at', None) \
+                if self.compressor is not None else None
+            _urgent_ok = bool(_cs) and (time.time() - float(_cs)) >= 60.0
+            _no_active_l = (_urgent_ok and self.compressor is not None
                             and not self._large_done
                             and self._active_large_count() == 0)
-            _urgent = self._is_starved() or _no_active_l
-            if self._deferred_items and _urgent:
-                # 紧急 → 保护区优先（产出最快的组先把 final 填上 / 补上在途 L）
-                _raw = self._deferred_items.pop(0)
-                q = self.large_queue
-                _from_deferred = True
-                choice = 'deferred'   # 不占配额
-            else:
-                choice = self._choose_queue()
-                # 紧急且 L 队列有货 → 强制取 L（即使配额/守卫轮到 S）：
-                # L 带宽主导产出最快，final≤1 要最快填上；在途无 L 要立即补 L
-                if _urgent and choice != 'large' and not self.large_queue.empty():
-                    choice = 'large'
-                q = self.large_queue if choice == 'large' else self.small_queue
-                other_q = self.small_queue if choice == 'large' else self.large_queue
+            _urgent = (_urgent_ok and self._is_starved()) or _no_active_l
+            choice = self._choose_queue()
+            # 紧急且 L 队列有货 → 强制取 L（即使配额/守卫轮到 S）：
+            # L 带宽主导产出最快，final≤1 要最快填上；在途无 L 要立即补 L
+            if _urgent and choice != 'large' and not self.large_queue.empty():
+                choice = 'large'
+            q = self.large_queue if choice == 'large' else self.small_queue
+            other_q = self.small_queue if choice == 'large' else self.large_queue
+            try:
+                _raw = q.get_nowait()
+            except asyncio.QueueEmpty:
                 try:
-                    _raw = q.get_nowait()
+                    _raw = other_q.get_nowait()
+                    q = other_q
                 except asyncio.QueueEmpty:
+                    if deadline is not None and deadline - loop.time() <= 0:
+                        return None
                     try:
-                        _raw = other_q.get_nowait()
-                        q = other_q
-                    except asyncio.QueueEmpty:
-                        # 两类队列都空 → 降级取保护区组（兜底："没合适的可以用"）
-                        if self._deferred_items:
-                            _raw = self._deferred_items.pop(0)
-                            q = self.large_queue
-                            _from_deferred = True
-                            choice = 'deferred'   # 不占配额
-                        else:
-                            if deadline is not None and deadline - loop.time() <= 0:
-                                return None
-                            try:
-                                _raw = await asyncio.wait_for(q.get(), timeout=2.0)
-                            except asyncio.TimeoutError:
-                                continue
-                if _urgent:
-                    # 紧急取出不占配额（无论从 L 还是 S 队列直接取）——
-                    # 不推进 L/S 配额计数，不打乱 4:1 节奏
-                    choice = 'deferred'
+                        _raw = await asyncio.wait_for(q.get(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        continue
+            if _urgent:
+                # 紧急取出不占配额（无论从 L 还是 S 队列直接取）——
+                # 不推进 L/S 配额计数，不打乱 4:1 节奏
+                choice = 'deferred'
             item, seq = self._unwrap(_raw)
 
-            # 大组保护（全程）：L 队列取出的"文件数 < 阈值"的组 → 暂存不消费
-            # 阈值现读（UI 保存后立即生效）。
-            # 紧急豁免：_urgent（final≤1 或 在途无 L）时不暂存、直接消费——
-            # 否则"强制取 L"会取出来又被暂存回去（单向黑洞）。
-            if (not _from_deferred and q is self.large_queue and not _urgent):
-                _defer_below = int(self._live_setting('GROUP_SCAN_DEFER_BELOW', 5000) or 0)
-                if _defer_below > 0:
-                    _fc = self._item_file_count(item)
-                    if _fc is not None and _fc < _defer_below:
-                        self._deferred_items.append(_raw)
-                        # 避免 L 队列里全是保护区组时空转：下一次优先试小文件组
-                        self._force_small_once = True
-                        continue
+            # （原大组保护/暂存逻辑已整体移除）普通路径取到什么消费什么；
+            # 此前"文件数<阈值即暂存"让 L 队首（priority=文件数升序）全部被
+            # 保护，普通配额取不到任何 L，形成单向黑洞。
 
             if seq is not None:
                 self._queued_sizes_by_seq.pop(seq, None)

@@ -552,7 +552,10 @@ class CompressionWorker:
 
     async def _process_prefetched_file_groups(self):
         """处理预取的文件组（openGauss模式）- 并发控制"""
-        # 压缩循环真正启动的时刻（卡片"平均压缩速度"的计时起点）
+        # 压缩循环真正启动的时刻（卡片"平均压缩速度"的计时起点；
+        # 也是紧急判定（final≤1/在途无L）的生效起点——
+        # 启动初期 final 必空、在途类型未登记，两个条件恒真会误触发，
+        # 前 60 秒跳过紧急判定，走正常配额）
         self.compression_started_at = time.time()
         # 根据扫描状态动态调整并行批次数量
         if self.use_prefetcher:
