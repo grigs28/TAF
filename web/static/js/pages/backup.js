@@ -501,9 +501,16 @@
                 if (stageCode === 'compress') {
                     // 颜色 = NAS读取健康度（组级聚合速率 ewma/base）：
                     // 绿 ≥85% 正常 / 黄 60~85% 轻度降速 / 红 <60% 拥塞（Vegas 降并发中）
-                    // 无基准（任务初期/Vegas关闭）保持原琥珀色
-                    const _vh = task ? Number(task.vegas_health) : NaN;
-                    if (Number.isFinite(_vh)) {
+                    // Vegas 关闭 → 固定灰色（并发按配置执行，健康度不参与任何决策）；
+                    // 开启但尚无基准 → 琥珀色。
+                    // 注意：后端关闭时 vegas_health 为 null，不能用 Number(null)
+                    //（结果 0，会被误判成 <60% 的红色）。
+                    if (task && task.vegas_enabled === false) {
+                        return 'bg-secondary pulse-badge';
+                    }
+                    const _vhRaw = task ? task.vegas_health : null;
+                    const _vh = Number(_vhRaw);
+                    if (_vhRaw !== null && _vhRaw !== undefined && Number.isFinite(_vh)) {
                         if (_vh >= 85) return 'bg-success pulse-badge';
                         if (_vh >= 60) return 'bg-warning text-dark pulse-badge';
                         return 'bg-danger pulse-badge';
