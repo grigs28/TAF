@@ -1217,17 +1217,28 @@
                 
                 const stageSection = document.createElement('div');
                 stageSection.className = 'mb-2';
-                // 当前目录（压缩阶段）：取第一个在途组的近似当前文件目录，单行截断；
-                // hover 显示全部在途组的目录（多组并发时每组各一个）
+                // 当前目录（压缩阶段）：显示“文件数最多的在途组”的当前目录
+                // （通常是最慢的 S 组，生命周期长、跳变少，更能代表当前在压什么）；
+                // 该组刚启动尚未上报目录时，按文件数降序回退到下一个有目录的组。
+                // hover 仍显示全部在途组的目录（多组并发时每组各一个）。
                 let _dirHtml = '';
                 {
                     const _groups = ((task.current_compression_progress || {}).task_progress_list) || [];
-                    const _dirs = _groups.map(function (g) { return g && g.current_dir; }).filter(Boolean);
-                    if (_dirs.length) {
-                        const _dirTitle = _dirs.join('\n');
+                    const _withDir = _groups
+                        .filter(function (g) { return g && g.current_dir; })
+                        .sort(function (a, b) {
+                            return (Number(b.total) || 0) - (Number(a.total) || 0);
+                        });
+                    if (_withDir.length) {
+                        const _dirTitle = _withDir
+                            .map(function (g) {
+                                return (Number(g.total) || 0) + ' 文件: ' + g.current_dir;
+                            })
+                            .join('\n');
+                        const _top = _withDir[0];
                         _dirHtml = `<div class="d-flex align-items-center" style="min-width:0;">
                             <small class="text-muted flex-shrink-0">当前目录:</small>
-                            <small class="text-muted ms-2" title="${_dirTitle}" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;">${_dirs[0]}</small>
+                            <small class="text-muted ms-2" title="${_dirTitle}" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;">${_top.current_dir}</small>
                         </div>`;
                     }
                 }
