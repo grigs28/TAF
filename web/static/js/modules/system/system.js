@@ -645,7 +645,10 @@ function vegasRecommend(N) {
     }
     let decay = Math.pow(minB / N, 1 / 3);
     decay = Math.max(0.3, Math.min(0.95, Math.round(decay * 20) / 20));
-    return { beta: beta, decay: decay, minB: minB, concurrency: N };
+    // α 约为 β/3（保持“维持区”宽度），限 [0.5, 2.0]
+    let alpha = Math.round((beta / 3) * 10) / 10;
+    alpha = Math.max(0.5, Math.min(2.0, alpha));
+    return { beta: beta, alpha: alpha, decay: decay, minB: minB, concurrency: N };
 }
 
 function updateVegasRecommend() {
@@ -666,6 +669,7 @@ function updateVegasRecommend() {
     setText('vegasDecayRecommend', r.minB >= r.concurrency
         ? '—（无降空间）'
         : r.decay.toFixed(2));
+    setText('vegasAlphaRecommend', r.alpha.toFixed(1));
     setText('vegasMinRecommend', String(r.minB));
 }
 
@@ -685,6 +689,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 if (el) el.value = v;
             };
             setVal('vegasBeta', r.beta);
+            setVal('vegasAlpha', r.alpha.toFixed(1));
             setVal('vegasDecay', r.decay.toFixed(2));
             setVal('vegasMinBatches', r.minB);
             updateVegasRecommend();
@@ -880,6 +885,9 @@ async function loadAllSystemConfig() {
             const vb = document.getElementById('vegasBeta');
             if (vb) vb.value = (config.group_vegas_beta !== undefined && config.group_vegas_beta !== null)
                 ? config.group_vegas_beta : 3.0;
+            const va = document.getElementById('vegasAlpha');
+            if (va) va.value = (config.group_vegas_alpha !== undefined && config.group_vegas_alpha !== null)
+                ? config.group_vegas_alpha : 1.0;
             const vd = document.getElementById('vegasDecay');
             if (vd) vd.value = (config.group_vegas_decay !== undefined && config.group_vegas_decay !== null)
                 ? config.group_vegas_decay : 0.7;
@@ -1060,6 +1068,12 @@ async function saveEnvConfigSection() {
             })(),
             group_vegas_beta: (() => {
                 const input = document.getElementById('vegasBeta');
+                if (!input || input.value === '') return null;
+                const parsed = parseFloat(input.value);
+                return isNaN(parsed) ? null : parsed;
+            })(),
+            group_vegas_alpha: (() => {
+                const input = document.getElementById('vegasAlpha');
                 if (!input || input.value === '') return null;
                 const parsed = parseFloat(input.value);
                 return isNaN(parsed) ? null : parsed;

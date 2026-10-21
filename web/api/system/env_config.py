@@ -77,6 +77,7 @@ class SystemEnvConfig(BaseModel):
     group_prefetch_lead_seconds: Optional[int] = Field(None, description="预分组比压缩提前启动的秒数（默认 30；0=同时启动；需小于扫描等待超时）")
     group_vegas_enabled: Optional[bool] = Field(None, description="自适应并发（Vegas）开关：关闭后并发严格按配置/磁盘水位执行，不再按 NAS 读取速率增减")
     group_vegas_beta: Optional[float] = Field(None, description="降并发阈值 β（默认 3.0，越小越敏感）：deficit 超过它时并发乘性下降")
+    group_vegas_alpha: Optional[float] = Field(None, description="上探阈值 α（默认 1.0）：deficit 低于它时并发 +1 缓慢恢复")
     group_vegas_decay: Optional[float] = Field(None, description="每次降并发比例（默认 0.7，范围 0.3-0.95）")
     group_vegas_min_batches: Optional[int] = Field(None, description="自适应并发下限（默认 2）")
 
@@ -180,6 +181,7 @@ async def get_env_config():
             "group_prefetch_lead_seconds": parse_int(env_vars.get("GROUP_PREFETCH_LEAD_SECONDS"), 30),
             "group_vegas_enabled": parse_bool(env_vars.get("GROUP_VEGAS_ENABLED"), True),
             "group_vegas_beta": float(env_vars.get("GROUP_VEGAS_BETA", 3.0) or 3.0),
+            "group_vegas_alpha": float(env_vars.get("GROUP_VEGAS_ALPHA", 1.0) or 1.0),
             "group_vegas_decay": float(env_vars.get("GROUP_VEGAS_DECAY", 0.7) or 0.7),
             "group_vegas_min_batches": parse_int(env_vars.get("GROUP_VEGAS_MIN_BATCHES"), 2),
             "disk_guard_safety_factor": float(env_vars.get("DISK_GUARD_SAFETY_FACTOR", 1.2) or 1.2),
@@ -363,6 +365,10 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             if config.group_vegas_beta < 1.0 or config.group_vegas_beta > 20.0:
                 raise ValueError("降并发阈值 β 必须在 1.0-20.0 之间")
             updates["GROUP_VEGAS_BETA"] = str(config.group_vegas_beta)
+        if config.group_vegas_alpha is not None:
+            if config.group_vegas_alpha < 0.1 or config.group_vegas_alpha > 10.0:
+                raise ValueError("上探阈值 α 必须在 0.1-10.0 之间")
+            updates["GROUP_VEGAS_ALPHA"] = str(config.group_vegas_alpha)
         if config.group_vegas_decay is not None:
             if config.group_vegas_decay < 0.3 or config.group_vegas_decay > 0.95:
                 raise ValueError("降并发比例必须在 0.3-0.95 之间")

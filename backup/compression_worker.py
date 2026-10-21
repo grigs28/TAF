@@ -303,6 +303,8 @@ class CompressionWorker:
                         self._vegas_base = 0.0
                     self._vegas_beta = float(
                         getattr(fresh_settings, 'GROUP_VEGAS_BETA', self._vegas_beta) or self._vegas_beta)
+                    self._vegas_alpha = float(
+                        getattr(fresh_settings, 'GROUP_VEGAS_ALPHA', self._vegas_alpha) or self._vegas_alpha)
                     self._vegas_decay = float(
                         getattr(fresh_settings, 'GROUP_VEGAS_DECAY', self._vegas_decay) or self._vegas_decay)
                     _vm = int(getattr(fresh_settings, 'GROUP_VEGAS_MIN_BATCHES', self._vegas_min) or self._vegas_min)

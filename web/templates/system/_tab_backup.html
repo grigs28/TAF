@@ -196,6 +196,12 @@
                         </small>
                     </div>
                     <div class="mb-3">
+                        <label class="form-label">上探阈值 α</label>
+                        <input type="number" class="form-control" id="vegasAlpha" value="1.0" min="0.1" max="10" step="0.1">
+                        <small class="form-text text-secondary">deficit 低于此值时并发 +1 缓慢恢复；越小越保守（默认 1.0）</small>
+                        <small class="form-text text-secondary">✓ 推荐 <b id="vegasAlphaRecommend">—</b></small>
+                    </div>
+                    <div class="mb-3">
                         <label class="form-label">降并发阈值 β</label>
                         <input type="number" class="form-control" id="vegasBeta" value="3.0" min="1" max="20" step="0.5">
                         <small class="form-text text-secondary">deficit 超过此值时并发乘性下降；越小越敏感（默认 3.0）</small>
