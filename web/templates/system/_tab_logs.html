@@ -22,7 +22,11 @@
                     <div class="d-flex justify-content-between align-items-center mb-2">
                         <h6 class="card-title mb-0">系统日志</h6>
                         <div class="d-flex align-items-center gap-2">
-                            <span class="text-secondary small">日志级别</span>
+                            <span class="text-secondary small"
+                                  title="修改全局日志记录级别（写入 .env），影响文件与数据库的日志量；不是仅筛选当前列表">
+                                日志级别
+                                <i class="bi bi-info-circle"></i>
+                            </span>
                             <div class="btn-group btn-group-sm" id="logLevelToggle">
                                 <button class="btn btn-outline-secondary" data-level="DEBUG">DEBUG</button>
                                 <button class="btn btn-outline-info active" data-level="INFO">INFO</button>

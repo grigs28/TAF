@@ -102,173 +102,136 @@ async def get_system_logs(
         
         logs = []
         
+        # 默认最近 30 天（备份为月任务；前端也会传 start_time）
+        if not start_time:
+            start_time = datetime.now() - timedelta(days=30)
+        if not end_time:
+            end_time = datetime.now()
+
         # 使用原生SQL查询（openGauss/PostgreSQL）
         from utils.scheduler.db_utils import get_opengauss_connection
 
+        # ---- 条件构造（UNION ALL 统一排序分页）----
+        # 此前两表各自 LIMIT/OFFSET 再合并，翻页会重复/遗漏。
+        op_where = ["operation_time >= $1", "operation_time <= $2"]
+        op_params = [start_time, end_time]
+        idx = 3
+        if category:
+            op_where.append(f"category::text = ${idx}")
+            op_params.append(category); idx += 1
+        if operation_type:
+            op_where.append(f"operation_type = ${idx}::operationtype")
+            op_params.append(operation_type); idx += 1
+        if resource_type:
+            op_where.append(f"resource_type = ${idx}")
+            op_params.append(resource_type); idx += 1
+        if user_id:
+            op_where.append(f"user_id = ${idx}")
+            op_params.append(user_id); idx += 1
+        if level:
+            _lv = level.lower()
+            if _lv in ('error', 'critical'):
+                op_where.append("success = false")
+            elif _lv == 'warning':
+                op_where.append("false")      # 操作日志没有 warning 级别
+            elif _lv == 'info':
+                op_where.append("success = true")
+
+        sys_where = [f"log_time >= ${idx}", f"log_time <= ${idx + 1}"]
+        sys_params = [start_time, end_time]
+        idx += 2
+        if category:
+            sys_where.append(f"category::text = ${idx}")
+            sys_params.append(category); idx += 1
+        if level:
+            sys_where.append(f"log_level = ${idx}::loglevel")
+            sys_params.append(level.lower()); idx += 1
+        # 选择“操作类型”时只看操作日志：系统日志不参与，避免混入无关记录
+        if operation_type:
+            sys_where.append("false")
+
+        all_params = op_params + sys_params
+        count_params = list(all_params)
+        limit_idx = idx
+        offset_idx = idx + 1
+        all_params.extend([limit, offset])
+
+        union_sql = f"""
+            SELECT * FROM (
+                SELECT 'operation' AS src, id, operation_time AS ts,
+                       CASE WHEN success THEN 'info' ELSE 'error' END AS level,
+                       category::text AS category,
+                       operation_type::text AS operation_type,
+                       operation_name, success,
+                       operation_description, error_message, result_message,
+                       NULL::text AS message, NULL::text AS module,
+                       NULL::text AS function, NULL::text AS stack_trace
+                FROM operation_logs
+                WHERE {' AND '.join(op_where)}
+                UNION ALL
+                SELECT 'system' AS src, id, log_time AS ts,
+                       log_level::text AS level,
+                       category::text AS category,
+                       NULL::text AS operation_type,
+                       NULL::text AS operation_name,
+                       NULL::boolean AS success,
+                       NULL::text AS operation_description,
+                       NULL::text AS error_message,
+                       NULL::text AS result_message,
+                       message, module, function, stack_trace
+                FROM system_logs
+                WHERE {' AND '.join(sys_where)}
+            ) t
+            ORDER BY ts DESC
+            LIMIT ${limit_idx} OFFSET ${offset_idx}
+        """
+
+        count_sql = f"""
+            SELECT COUNT(*) AS c FROM (
+                SELECT id FROM operation_logs WHERE {' AND '.join(op_where)}
+                UNION ALL
+                SELECT id FROM system_logs WHERE {' AND '.join(sys_where)}
+            ) t
+        """
+
         async with get_opengauss_connection() as conn:
-            # 查询操作日志
-            operation_where = []
-            params = []
-            param_idx = 1
-
-            operation_where.append(f"operation_time >= ${param_idx}")
-            params.append(start_time)
-            param_idx += 1
-
-            operation_where.append(f"operation_time <= ${param_idx}")
-            params.append(end_time)
-            param_idx += 1
-
-            if category:
-                operation_where.append(f"category = ${param_idx}")
-                params.append(category)
-                param_idx += 1
-            if operation_type:
-                operation_where.append(f"operation_type = ${param_idx}::operationtype")
-                params.append(operation_type)
-                param_idx += 1
-            if resource_type:
-                operation_where.append(f"resource_type = ${param_idx}")
-                params.append(resource_type)
-                param_idx += 1
-            if user_id:
-                operation_where.append(f"user_id = ${param_idx}")
-                params.append(user_id)
-                param_idx += 1
-            if level:
-                # 操作日志只有 success (info) / failure (error) 两种
-                if level.lower() in ('error', 'critical'):
-                    operation_where.append("success = false")
-                elif level.lower() == 'warning':
-                    operation_where.append("false")  # 操作日志无 warning 级别，返回空
-
-            # 添加LIMIT和OFFSET参数
-            limit_param_idx = param_idx
-            offset_param_idx = param_idx + 1
-            params.extend([limit, offset])
-
-            operation_sql = f"""
-                SELECT * FROM operation_logs
-                WHERE {' AND '.join(operation_where)}
-                ORDER BY operation_time DESC
-                LIMIT ${limit_param_idx} OFFSET ${offset_param_idx}
-            """
-
-            operation_rows = await conn.fetch(operation_sql, *params)
-
-            # 统计操作日志总数
-            count_params = params[:-2]  # 去掉 limit 和 offset
-            count_sql = f"SELECT COUNT(*) as cnt FROM operation_logs WHERE {' AND '.join(operation_where)}"
+            rows = await conn.fetch(union_sql, *all_params)
             count_row = await conn.fetchrow(count_sql, *count_params)
-            operation_total = count_row['cnt'] if count_row else 0
+            total_count = int(count_row['c']) if count_row else 0
 
-            # 查询系统日志
-            system_where = []
-            system_params = []
-            system_param_idx = 1
-
-            system_where.append(f"log_time >= ${system_param_idx}")
-            system_params.append(start_time)
-            system_param_idx += 1
-
-            system_where.append(f"log_time <= ${system_param_idx}")
-            system_params.append(end_time)
-            system_param_idx += 1
-
-            if category:
-                system_where.append(f"category::text LIKE ${system_param_idx}")
-                system_params.append(f"{category}%")
-                system_param_idx += 1
-            if level:
-                system_where.append(f"log_level = ${system_param_idx}::loglevel")
-                system_params.append(level.lower())
-                system_param_idx += 1
-
-            # 添加LIMIT和OFFSET参数
-            system_limit_param_idx = system_param_idx
-            system_offset_param_idx = system_param_idx + 1
-            system_params.extend([limit, offset])
-
-            system_sql = f"""
-                SELECT * FROM system_logs
-                WHERE {' AND '.join(system_where)}
-                ORDER BY log_time DESC
-                LIMIT ${system_limit_param_idx} OFFSET ${system_offset_param_idx}
-            """
-
-            system_rows = await conn.fetch(system_sql, *system_params)
-
-            # 统计系统日志总数
-            sys_count_params = system_params[:-2]
-            sys_count_sql = f"SELECT COUNT(*) as cnt FROM system_logs WHERE {' AND '.join(system_where)}"
-            sys_count_row = await conn.fetchrow(sys_count_sql, *sys_count_params)
-            system_total = sys_count_row['cnt'] if sys_count_row else 0
-
-            # 格式化操作日志
-            for row in operation_rows:
+        logs = []
+        for row in rows:
+            ts = row['ts'].isoformat() if row['ts'] else None
+            if row['src'] == 'operation':
                 logs.append({
                     "id": row['id'],
                     "type": "operation",
-                    "timestamp": row['operation_time'].isoformat() if row['operation_time'] else None,
-                    "level": "info" if row.get('success', True) else "error",
-                    "category": row.get('category') or "operation",
-                    "operation_type": row.get('operation_type') if isinstance(row.get('operation_type'), str) else (row.get('operation_type').value if hasattr(row.get('operation_type'), 'value') else None),
-                    "resource_type": row.get('resource_type'),
-                    "resource_id": row.get('resource_id'),
-                    "resource_name": row.get('resource_name'),
-                    "user_id": row.get('user_id'),
-                    "username": row.get('username'),
-                    "operation_name": row.get('operation_name'),
-                    "operation_description": row.get('operation_description'),
-                    "success": row.get('success', True),
-                    "result_message": row.get('result_message'),
-                    "error_message": row.get('error_message'),
-                    "ip_address": row.get('ip_address'),
-                    "duration_ms": row.get('duration_ms'),
-                    "details": {
-                        "request_method": row.get('request_method'),
-                        "request_url": row.get('request_url'),
-                        "response_status": row.get('response_status'),
-                        "old_values": json.loads(row['old_values']) if isinstance(row.get('old_values'), str) else row.get('old_values'),
-                        "new_values": json.loads(row['new_values']) if isinstance(row.get('new_values'), str) else row.get('new_values')
-                    }
+                    "timestamp": ts,
+                    "level": row['level'],
+                    "category": row['category'] or "operation",
+                    "operation_type": row['operation_type'],
+                    "operation_name": row['operation_name'],
+                    "success": bool(row['success']) if row['success'] is not None else True,
+                    "operation_description": row['operation_description'],
+                    "error_message": row['error_message'],
+                    "result_message": row['result_message'],
                 })
-
-            # 格式化系统日志
-            for row in system_rows:
+            else:
                 logs.append({
                     "id": row['id'],
                     "type": "system",
-                    "timestamp": row['log_time'].isoformat() if row['log_time'] else None,
-                    "level": row.get('log_level') if isinstance(row.get('log_level'), str) else (row.get('log_level').value if hasattr(row.get('log_level'), 'value') else "info"),
-                    "category": row.get('category') if isinstance(row.get('category'), str) else (row.get('category').value if hasattr(row.get('category'), 'value') else "system"),
-                    "message": row.get('message'),
-                    "module": row.get('module'),
-                    "function": row.get('function'),
-                    "file_path": row.get('file_path'),
-                    "line_number": row.get('line_number'),
-                    "user_id": row.get('user_id'),
-                    "task_id": row.get('task_id'),
-                    "details": json.loads(row['details']) if isinstance(row.get('details'), str) else row.get('details'),
-                    "exception_type": row.get('exception_type'),
-                    "stack_trace": row.get('stack_trace'),
-                    "duration_ms": row.get('duration_ms'),
-                    "memory_usage_mb": row.get('memory_usage_mb'),
-                    "cpu_usage_percent": row.get('cpu_usage_percent')
+                    "timestamp": ts,
+                    "level": row['level'] or 'info',
+                    "category": row['category'] or 'system',
+                    "message": row['message'],
+                    "module": row['module'],
+                    "function": row['function'],
+                    "stack_trace": row['stack_trace'],
                 })
-        
-        # 按时间排序（最新的在前）
-        logs.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
-
-        # 限制返回数量
-        logs = logs[:limit]
-        total_count = operation_total + system_total
 
         return {
             "success": True,
             "total": total_count,
-            "operation_total": operation_total,
-            "system_total": system_total,
             "logs": logs,
             "pagination": {
                 "limit": limit,
@@ -301,7 +264,7 @@ async def export_logs_to_excel(
         import json
 
         if not start_time:
-            start_time = datetime.now() - timedelta(days=7)
+            start_time = datetime.now() - timedelta(days=30)
         if not end_time:
             end_time = datetime.now()
 
