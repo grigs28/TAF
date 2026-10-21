@@ -174,11 +174,59 @@ class TapeHandler:
                 logger.warning("[LTFS] 驱动器中没有磁带")
                 return False, "驱动器中没有磁带"
             else:
-                logger.warning(f"[LTFS] 磁带状态未知: {output[:100]}")
-                return False, f"状态未知: {output[:100]}"
+                # 介质在驱动器里但没有加载到读写通路（如停服时 mt offline 后
+                # 整机重启，驱动器上电不会自动 load）。尝试 mt load 兜底。
+                logger.warning(f"[LTFS] 磁带状态未知，尝试 mt load: {output[:100]}")
+                loaded, msg = await self._load_tape_if_needed(tape_device)
+                if loaded:
+                    return True, "磁带已加载（mt load）"
+                return False, msg
         except Exception as e:
             logger.error(f"[LTFS] 检查磁带状态失败: {e}")
             return False, str(e)
+
+    async def _load_tape_if_needed(self, tape_device: str, timeout: float = 120.0) -> Tuple[bool, str]:
+        """介质在驱动器内但未加载时，发送 mt load 并等待 ONLINE。
+
+        LTO 驱动器上电时只会恢复"断电前正在加载"的介质；已经 unload 过的
+        磁带必须收到显式 LOAD 命令。生产换带时驱动器会自动加载，所以平时
+        碰不到；但"停服时 eject → 重启"后必须兜底，否则挂载直接失败。
+
+        Args:
+            tape_device: 磁带设备（如 /dev/nst0）
+            timeout: 等待 ONLINE 的最长秒数
+
+        Returns:
+            (是否加载成功, 信息)
+        """
+        logger.info("[LTFS] 磁带在驱动器内但未加载，执行 mt load...")
+        try:
+            result = await self._run_command(['mt', '-f', tape_device, 'load'], timeout=180)
+            if result.returncode != 0:
+                msg = (result.stderr or result.stdout or '').strip()
+                logger.warning(f"[LTFS] mt load 失败: {msg}")
+                return False, f"mt load 失败: {msg[:200]}"
+        except Exception as e:
+            logger.warning(f"[LTFS] mt load 异常: {e}")
+            return False, f"mt load 异常: {e}"
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            await asyncio.sleep(3)
+            try:
+                st = await self._run_command(['mt', '-f', tape_device, 'status'], timeout=30)
+                out = st.stdout + st.stderr
+            except Exception as e:
+                logger.warning(f"[LTFS] 查询加载状态失败: {e}")
+                continue
+            if 'ONLINE' in out:
+                logger.info("[LTFS] 磁带加载完成（ONLINE）")
+                return True, "磁带已加载"
+            if 'DR_OPEN' in out or 'No tape' in out:
+                return False, "mt load 后驱动器中没有磁带"
+
+        logger.warning(f"[LTFS] mt load 后 {int(timeout)} 秒仍未 ONLINE")
+        return False, f"mt load 后 {int(timeout)} 秒仍未 ONLINE"
 
     async def reset_tape_device(self) -> bool:
         """重置磁带设备（清除预留）"""
