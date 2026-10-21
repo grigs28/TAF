@@ -1559,9 +1559,13 @@ class BackupEngine:
                         from utils.scheduler.db_utils import get_opengauss_connection
                         async with get_opengauss_connection() as _conn:
                             await _conn.execute(
-                                "UPDATE backup_tasks SET backup_set_id = $1 WHERE id = $2 AND (backup_set_id IS NULL OR backup_set_id != $1)",
+                                # 占位符按出现顺序绑定（psycopg3_compat），
+                                # 重复使用同一编号会多出一个 %s 导致参数不足
+                                "UPDATE backup_tasks SET backup_set_id = $1 "
+                                "WHERE id = $2 AND (backup_set_id IS NULL OR backup_set_id != $3)",
                                 backup_set.id,
-                                backup_task.id
+                                backup_task.id,
+                                backup_set.id
                             )
                     except Exception as _e:
                         logger.debug(f"续写场景：确保 backup_tasks.backup_set_id 已写入数据库: {_e}")

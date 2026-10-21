@@ -596,12 +596,18 @@ class BatchDBWriter:
         import asyncio
         from utils.scheduler.db_utils import is_opengauss, get_backup_files_table_by_set_id
 
+        # 占位符按出现顺序绑定：SQL 中 $2..$25 先出现、$1（WHERE id）最后，
+        # 而 _prepare_update_params 返回 (id, 其余字段...)；
+        # 必须重排为“按出现顺序”，否则 id 会被绑定到 file_name（类型/语义错位）。
+        _first_field = update_data[0][0] if update_data else None
+        update_data = [tuple(list(row[1:]) + [row[0]]) for row in update_data]
+
         # openGauss模式下需要手动管理事务
         if is_opengauss():
             # 多表方案：根据批次中的 backup_set_id 决定物理表名
             if not update_data:
                 return
-            sample_backup_set_id = update_data[0][0]
+            sample_backup_set_id = _first_field
             table_name = await get_backup_files_table_by_set_id(conn, sample_backup_set_id)
             # 在openGauss模式下，确保事务正确提交
             max_retries = 3
@@ -3835,9 +3841,12 @@ class BackupDB:
                         else:
                             summary[k] = v
                 await conn.execute(
-                    "UPDATE backup_tasks SET result_summary = $2::jsonb, updated_at = now() "
-                    "WHERE id = $1",
-                    task_id, json.dumps(summary, ensure_ascii=False))
+                    # 占位符必须按出现顺序编号：psycopg3_compat 按出现顺序把
+                    # $N 转成 %s，若 $2 出现在 $1 前会绑错参数
+                    # （曾导致 result_summary 收到 smallint → cannot cast to jsonb）
+                    "UPDATE backup_tasks SET result_summary = $1::jsonb, updated_at = now() "
+                    "WHERE id = $2",
+                    json.dumps(summary, ensure_ascii=False), task_id)
         except Exception as e:
             logger.warning(f"[备份数据库] 保存等待压缩统计失败 (task_id={task_id}): {e}")
 
