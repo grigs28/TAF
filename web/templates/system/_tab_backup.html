@@ -7,6 +7,9 @@
         font-size: 1.05rem;
         font-weight: 600;
         letter-spacing: 0.02em;
+        /* 深色主题下 Bootstrap 的 .text-secondary 偏暗，改用主题浅蓝 */
+        color: var(--primary-light, #b8e3f9) !important;
+        border-bottom-color: rgba(120, 202, 242, 0.35) !important;
     }
 </style>
 <div class="tab-pane fade" id="backup" role="tabpanel">
