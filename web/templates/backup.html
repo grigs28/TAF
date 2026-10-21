@@ -168,6 +168,17 @@
 /* 预分组：深紫 #6f42c1 在深色背景上几乎看不清，改用亮紫 */
 .stage-badges .badge.bg-purple { color: #c084fc !important; }
 
+/* 错误日志按钮：任务有错误时红色边框 + 脉冲 */
+.btn.has-errors {
+    border-color: var(--danger, #ff5577) !important;
+    color: var(--danger, #ff5577) !important;
+    animation: pulse-error-border 1.5s ease-in-out infinite;
+}
+@keyframes pulse-error-border {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255, 85, 119, 0.6); }
+    50%      { box-shadow: 0 0 0 4px rgba(255, 85, 119, 0); }
+}
+
 .pulse-badge.badge-health-good {
     animation: pulse-health-good 1.5s ease-in-out infinite;
 }

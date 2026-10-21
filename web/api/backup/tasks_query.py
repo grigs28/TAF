@@ -599,6 +599,16 @@ async def get_backup_tasks(
                         "started_at": row["started_at"],
                         "completed_at": row["completed_at"],
                         "error_message": row["error_message"],
+                        # 是否有错误（供“错误日志”按钮显示红色脉冲）：
+                        # 只依据新版本才有的结构化字段（error_logs / 隔离文件 /
+                        # 验证失败数），老任务没有这些字段 → 不标红。
+                        "has_errors": bool(
+                            isinstance(result_summary_dict, dict) and (
+                                result_summary_dict.get('error_logs')
+                                or int(result_summary_dict.get('quarantined_files') or 0) > 0
+                                or int(result_summary_dict.get('verify_failed') or 0) > 0
+                            )
+                        ),
                         "is_template": row["is_template"] or False,
                         "tape_device": row["tape_device"],
                         "source_paths": source_paths or [],

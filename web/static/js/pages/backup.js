@@ -852,9 +852,15 @@
             errBtn.type = 'button';
             // 与页面其它次要操作按钮一致：青色描边 + 浅色文字（不用醒目的红色）
             errBtn.className = 'btn btn-outline-secondary';
+            if (task.has_errors) {
+                // 有错误（error_logs/隔离/验证失败/任务错误）→ 红色边框 + 脉冲
+                errBtn.classList.add('has-errors');
+            }
             errBtn.style.cssText = 'font-size:0.72rem; padding:0.1rem 0.45rem; white-space:nowrap; line-height:1.5;';
             errBtn.textContent = '错误日志';
-            errBtn.title = '查看本次任务的错误（压缩 / 写磁带 / 扫描）';
+            errBtn.title = task.has_errors
+                ? '本次任务有错误，点击查看（压缩 / 写磁带 / 扫描）'
+                : '查看本次任务的错误（压缩 / 写磁带 / 扫描）';
             errBtn.addEventListener('click', () => showTaskErrorLogs(task));
             badgeWrapper.insertBefore(errBtn, badgeWrapper.firstChild);
         }
