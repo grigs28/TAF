@@ -1,5 +1,19 @@
 # 更新日志
 
+## [1.9.28] - 2026-10-22
+
+### 修复
+
+- **卸载后 offline 状态反馈与边界补漏**（1.9.27 审查发现）：
+  - `safe_unmount_ltfs` 第 5 步 `mt offline` 失败时不再返回
+    "安全卸载完成"，改为 `卸载完成，但磁带离线失败: ...`（`success`
+    仍为 True，挂载点确实已卸载）
+  - `TapeHandler.unmount_ltfs(eject=True)` 在卸载成功后补一次
+    `offline_tape()`：覆盖"挂载点实际已卸载、`safe_unmount_ltfs` 提前
+    返回而未 offline"的边界（否则带子保持加载状态）
+  - `eject_tape` 重试：非 PMM 错误也等待 5 秒再试，避免无间隔连试
+- 版本升至 1.9.28
+
 ## [1.9.27] - 2026-10-22
 
 ### 修复

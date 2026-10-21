@@ -737,6 +737,15 @@ class TapeHandler:
             self._ltfs_mounted = False
             self._ltfs_process = None
 
+            # 边界：挂载点实际已卸载时 safe_unmount_ltfs 会直接返回，
+            # 不会执行 mt offline，而带子可能仍处于加载状态。
+            # eject 场景下补一次 offline（已离线时只做一次 mt status，无副作用）。
+            if eject and success:
+                try:
+                    await self.offline_tape()
+                except Exception as e:
+                    logger.warning(f"[LTFS] 卸载后补 offline 失败（非致命）: {e}")
+
             # 记录卸载到数据库
             try:
                 from utils.log_utils import log_operation

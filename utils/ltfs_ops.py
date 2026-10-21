@@ -190,15 +190,21 @@ async def safe_unmount_ltfs(
             logger.info("[LTFS卸载] 挂载点已卸载")
 
         # 步骤 5: mt offline — 磁带离线
+        offline_failed_msg = None
         if tape_device:
             logger.info(f"[LTFS卸载] 5/5 磁带离线 ({tape_device})...")
             eject_ok, eject_msg = await eject_tape(tape_device)
             if eject_ok:
                 logger.info("[LTFS卸载] 磁带已离线")
             else:
+                offline_failed_msg = eject_msg
                 logger.warning(f"[LTFS卸载] mt offline 失败（非致命）: {eject_msg}")
         else:
             logger.info("[LTFS卸载] 5/5 未指定设备，跳过 mt offline")
+
+        if offline_failed_msg:
+            logger.warning("[LTFS卸载] 挂载点已卸载，但磁带离线失败")
+            return True, f"卸载完成，但磁带离线失败: {offline_failed_msg}"
 
         logger.info("[LTFS卸载] 安全卸载完成")
         return True, "安全卸载完成"
@@ -286,15 +292,19 @@ async def eject_tape(tape_device, timeout=600):
         if attempt == 0:
             logger.warning(f"[磁带弹出] mt offline 失败，10 秒后重试: {msg}")
             await asyncio.sleep(10)
-        elif attempt == 1 and (
-            "Medium removal prevented" in msg
-            or "medium removal prevented" in msg
-            or "Input/output error" in msg
-        ):
-            # 驱动器 PMM（Prevent Medium Removal）标志未清除
-            logger.warning("[磁带弹出] 介质移除被阻止，发送 ALLOW MEDIUM REMOVAL 后重试...")
-            await _allow_medium_removal(tape_device)
-            await asyncio.sleep(2)
+        elif attempt == 1:
+            if (
+                "Medium removal prevented" in msg
+                or "medium removal prevented" in msg
+                or "Input/output error" in msg
+            ):
+                # 驱动器 PMM（Prevent Medium Removal）标志未清除
+                logger.warning("[磁带弹出] 介质移除被阻止，发送 ALLOW MEDIUM REMOVAL 后重试...")
+                await _allow_medium_removal(tape_device)
+                await asyncio.sleep(2)
+            else:
+                logger.warning(f"[磁带弹出] mt offline 再次失败，5 秒后重试: {msg}")
+                await asyncio.sleep(5)
 
     logger.error(f"[磁带弹出] mt offline 最终失败: {last_msg}")
     return False, last_msg
