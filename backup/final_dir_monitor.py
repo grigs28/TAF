@@ -53,6 +53,9 @@ class FinalDirMonitor:
         # 本轮扫描时记录的每个文件大小：写带前再 stat 对比，变化则跳过（下轮再试）。
         # 稳定性判定从“每文件 sleep 2 秒”改为“扫描时记大小 + 写带前对比”，零等待。
         self._scan_sizes: Dict[str, int] = {}
+        # 上一轮扫描是否发现过文件：用于判定“final 空后首文件”，
+        # 该文件仍做 2 秒稳定性复核（压缩器刚写完、监控立刻发现的窗口）
+        self._last_scan_had_files = False
         self._current_tape_file: Optional[str] = None  # 当前正在写入磁带的文件路径
         # "压缩喂不饱写带"的累计等待时间：final 目录无文件可写、等压缩产出的时长。
         # 统计口径（用户明确）：第一次写带开始之后，final 为空的累计时间。
@@ -124,6 +127,7 @@ class FinalDirMonitor:
             # 且内存随文件数增长。
             self._processed_files.clear()
             self._scan_sizes.clear()
+            self._last_scan_had_files = False
 
     def finalize_starvation(self) -> float:
         """任务收尾调用：丢弃未结算的最后一段等待。
@@ -489,6 +493,13 @@ class FinalDirMonitor:
                     found_files.sort(key=_size_key, reverse=True)
 
                     # 顺序处理找到的文件（移动完一个再移动下一个）
+                    # 首次写带 / final 空后首文件：做 2 秒稳定性复核
+                    # （压缩器刚写完、监控立刻发现的窗口）；
+                    # 其后的积压文件用 size 对比（零等待）。
+                    _is_first_after_empty = (
+                        (not self._has_written_once) or (not self._last_scan_had_files))
+                    self._last_scan_had_files = bool(found_files)
+
                     if found_files:
                         # 有文件可写了：结算"压缩喂不饱"的等待时间
                         if self._starve_start is not None:
@@ -497,31 +508,45 @@ class FinalDirMonitor:
                         logger.info(f"[Final监控] 扫描到 {len(found_files)} 个新文件待移动到磁带"
                                     f"（最大优先，首个 {format_bytes(_size_key(found_files[0]))}）")
                         
-                        for file_path in found_files:
+                        for _i, file_path in enumerate(found_files):
                             if not self._running:
                                 break
-                            
+
                             file_key = str(file_path)
-                            
+
                             # 检查文件是否仍然存在
                             if not file_path.exists():
                                 logger.debug(f"[Final监控] 文件已不存在，跳过: {file_path.name}")
                                 self._processed_files.add(file_key)
                                 continue
-                            
-                            # 稳定性：与扫描时记录的大小一致才写；变化则跳过（下轮再试），
-                            # 不拉黑、不等待。替代原先每文件 sleep 2 秒的复核。
-                            try:
-                                _cur_size = file_path.stat().st_size
-                            except OSError:
-                                logger.debug(f"[Final监控] 文件 stat 失败，跳过: {file_path.name}")
-                                continue
-                            _rec_size = self._scan_sizes.get(file_key)
-                            if _rec_size is not None and _cur_size != _rec_size:
-                                logger.info(
-                                    f"[Final监控] 文件仍在写入（{_rec_size} -> {_cur_size}），"
-                                    f"留待下一轮: {file_path.name}")
-                                continue
+
+                            if _is_first_after_empty and _i == 0:
+                                # 首次 / final 空后首文件：2 秒两次 stat 复核
+                                try:
+                                    _s1 = file_path.stat().st_size
+                                    time.sleep(2.0)
+                                    _s2 = file_path.stat().st_size
+                                except OSError:
+                                    logger.debug(f"[Final监控] 文件 stat 失败，跳过: {file_path.name}")
+                                    continue
+                                if _s1 != _s2:
+                                    logger.info(
+                                        f"[Final监控] 首文件仍在写入（{_s1} -> {_s2}），"
+                                        f"留待下一轮: {file_path.name}")
+                                    continue
+                            else:
+                                # 积压文件：与扫描时记录的大小一致才写（零等待）
+                                try:
+                                    _cur_size = file_path.stat().st_size
+                                except OSError:
+                                    logger.debug(f"[Final监控] 文件 stat 失败，跳过: {file_path.name}")
+                                    continue
+                                _rec_size = self._scan_sizes.get(file_key)
+                                if _rec_size is not None and _cur_size != _rec_size:
+                                    logger.info(
+                                        f"[Final监控] 文件仍在写入（{_rec_size} -> {_cur_size}），"
+                                        f"留待下一轮: {file_path.name}")
+                                    continue
 
                             # 移动文件到磁带（持锁：与任务收尾线程互斥）
                             with self._tape_op_lock:
