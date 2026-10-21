@@ -188,11 +188,6 @@ class FinalDirMonitor:
             logger.debug(f"[Final监控] 提取backup_set_id失败: {file_path}, 错误: {str(e)}")
             return None
 
-    def _move_file_to_tape(self, file_path: Path) -> bool:
-        """写带串行化入口：同一时刻只允许一个文件写入磁带"""
-        with self._tape_op_lock:
-            return self._move_file_to_tape_locked(file_path)
-
     def _move_file_to_tape_locked(self, file_path: Path) -> bool:
         """
         移动单个文件到磁带（调用方必须持有 _tape_op_lock）
