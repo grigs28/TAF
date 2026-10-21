@@ -289,8 +289,14 @@ class CompressionWorker:
                 self.batches_reduction = getattr(fresh_settings, 'COMPRESSION_BATCHES_REDUCTION', 1)
                 # Vegas 开关与参数热生效（UI 保存后当前任务也立即遵循）
                 try:
+                    _was_vegas_enabled = self._vegas_enabled
                     self._vegas_enabled = bool(
                         getattr(fresh_settings, 'GROUP_VEGAS_ENABLED', self._vegas_enabled))
+                    if _was_vegas_enabled and not self._vegas_enabled:
+                        # 关闭自适应：清除已下调的并发上限与快速闸，立即回到配置值；
+                        # 否则重新开启时会立刻被旧 limit 夹住，看起来像“开关无效”
+                        self._vegas_limit = 0
+                        self._vegas_hold_until = 0.0
                     self._vegas_beta = float(
                         getattr(fresh_settings, 'GROUP_VEGAS_BETA', self._vegas_beta) or self._vegas_beta)
                     self._vegas_decay = float(
@@ -472,8 +478,11 @@ class CompressionWorker:
             delta, act = totals[typ]
             st = self._vegas_states[typ]
             if act < 2:
-                # 样本不足：大文件组单文件分钟级无 delta，单组平均值噪声大
-                return None
+                # 低并发时放宽样本门槛：并发已降到最低附近时，每类往往只有
+                # 1 个在途组；若仍要求 act>=2，三类全部无信号 → 永远无法上探
+                # 或触发“低并发重校准”，会卡死在最低并发。
+                if not (cur_limit <= self._vegas_min + 2 and act >= 1):
+                    return None
             rate = delta / dt / act / (1024 * 1024)  # 真实窗口，MB/s/组
             st['ewma'] = (rate if st['ewma'] <= 0
                           else 0.3 * rate + 0.7 * st['ewma'])
@@ -521,7 +530,9 @@ class CompressionWorker:
         note = ''
         if deficit > self._vegas_beta:
             new_limit = max(self._vegas_min, int(cur_limit * self._vegas_decay))
-            if starved and cur_limit < self.base_parallel_batches:
+            if starved and cur_limit <= self.base_parallel_batches:
+                # 写带已饿死：任何并发水平下都先不降（速率低可能只是小文件组慢）
+                self._vegas_low_windows = 0
                 note = '写带饿死，暂不降并发'
             elif (new_limit <= self._vegas_min
                   and cur_limit <= self._vegas_min + 2):
@@ -537,17 +548,24 @@ class CompressionWorker:
                     note = (f'低并发仍低速率（{self._vegas_low_windows}/3），'
                             f'暂不再降')
             elif new_limit < cur_limit:
+                self._vegas_low_windows = 0
                 self._vegas_limit = new_limit
                 note = (f"速率跌至基准 {self._vegas_rate_ewma / self._vegas_base * 100:.0f}%，"
                         f"并发×{self._vegas_decay}→{new_limit}")
+            else:
+                self._vegas_low_windows = 0
             if deficit > 2 * self._vegas_beta and not starved:
                 self._vegas_hold_until = now + 10.0
                 note += "，触发快速闸（暂停发新组一个窗口）"
         elif deficit < self._vegas_alpha and 0 < self._vegas_limit < self.base_parallel_batches:
+            self._vegas_low_windows = 0
             up = min(self.base_parallel_batches, self._vegas_limit + 1)
             if up > self._vegas_limit:
                 self._vegas_limit = up
                 note = f"速率充分，并发上探→{up}"
+        else:
+            # 正常窗口（deficit 处于 α~β 之间，或已在上限）：连续计数中断
+            self._vegas_low_windows = 0
 
         if note:
             _sl = self._vegas_states['large']
