@@ -1114,13 +1114,14 @@
             const _st = (task.status || '').toLowerCase();
             const isTerminal = ['completed', 'failed', 'canceled', 'cancelled', 'interrupted'].indexOf(_st) >= 0;
             if (isTerminal) {
-                // 完成文案按任务性质区分：验证任务不叫“备份完成”
+                // 完成文案 + 图标按任务性质区分（一眼可辨）：
+                //   📦 备份 / 📼 磁带验证 / 📄 文件验证
                 const _tt = (task.task_type || '').toLowerCase();
                 const _vt = (task.verify_type || '').toLowerCase();
-                let _doneLabel = '🎉 备份完成';
+                let _doneLabel = '📦 备份完成';
                 if (_tt === 'verify') {
-                    _doneLabel = (_vt === 'tape' ? '🎉 磁带验证完成'
-                        : (_vt === 'directory' ? '🎉 文件验证完成' : '🎉 验证完成'));
+                    _doneLabel = (_vt === 'tape' ? '📼 磁带验证完成'
+                        : (_vt === 'directory' ? '📄 文件验证完成' : '✅ 验证完成'));
                 }
                 const finalMap = {
                     completed:   { label: _doneLabel,    cls: 'bg-success' },
