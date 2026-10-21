@@ -690,19 +690,28 @@ class FinalDirMonitor:
             if not qdir.exists() or not qdir.is_dir():
                 return 0
 
-            set_id_re = re.compile(r'^\d{4}-\d{2}_\d{6}$')
+            # 任务 ID 超过 6 位时 set_id 后缀会变长，用 {6,}
+            set_id_re = re.compile(r'^\d{4}-\d{2}_\d{6,}$')
             for item in list(qdir.iterdir()):
                 try:
                     if item.is_dir():
                         if not set_id_re.match(item.name):
                             logger.info(f"[Final监控] 隔离目录保留非任务子目录: {item}")
                             continue
-                        deleted += sum(
+                        # 删除后按实际剩余数统计，避免 rmtree 失败时计数虚高
+                        _before = sum(
                             1 for _r, _d, _fs in os.walk(item) for _f in _fs)
                         shutil.rmtree(item, ignore_errors=True)
+                        _after = (sum(1 for _r, _d, _fs in os.walk(item)
+                                      for _f in _fs) if item.exists() else 0)
+                        deleted += max(0, _before - _after)
+                        if _after:
+                            logger.warning(
+                                f"[Final监控] 隔离子目录未完全删除: {item}（剩余 {_after} 个文件）")
                     elif item.is_file() and self._is_archive_file(item):
                         item.unlink(missing_ok=True)
-                        deleted += 1
+                        if not item.exists():
+                            deleted += 1
                 except Exception as e:
                     logger.warning(f"[Final监控] 清理隔离项失败 {item}: {e}")
 
