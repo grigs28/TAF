@@ -446,6 +446,18 @@ class FileGroupPrefetcher:
             choice = None
             q = None
 
+            # ===== 守卫最高优先级 =====
+            # 磁盘守卫拦停时，任何路径（含写带饿的紧急路径、在途无 L）都
+            # 不再取新组：先让写带消耗在途产出、守卫解除后再恢复，避免
+            # “没空间了还继续压缩”。（用户明确：守卫必须最高）
+            if self.compressor is not None:
+                if self._update_guard_state():
+                    self._guard_now = True
+                    if deadline is not None and deadline - loop.time() <= 0:
+                        return None
+                    await asyncio.sleep(1.0)
+                    continue
+
             # ===== 紧急状态（final≤1 或 在途无 L；压缩启动 60 秒后才生效）=====
             # 紧急 → 若 choice 轮到 S 且 L 有货则强制取 L；取出不占配额
             # （choice='deferred'，不推进 L/S 计数，4:1 轮转状态不受影响）
