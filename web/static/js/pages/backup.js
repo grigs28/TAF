@@ -851,7 +851,12 @@
         body.appendChild(header);
 
         const highlightClass = 'fw-semibold text-body-emphasis text-break';
-        const sourcePathsLabel = (task.source_paths || []).join(', ') || 'N/A';
+        // 磁带验证没有源路径（source_paths 为空）→ 显示「磁带」，
+        // 而不是无意义的 N/A
+        const _isTapeVerify = ((task.task_type || '').toLowerCase() === 'verify'
+            && (task.verify_type || '').toLowerCase() === 'tape');
+        const sourcePathsLabel = (task.source_paths || []).join(', ')
+            || (_isTapeVerify ? '磁带' : 'N/A');
         const source = document.createElement('div');
         source.className = 'mb-2 d-flex align-items-baseline';
         // 一行显示：标签不压缩，路径超出用省略号截断，悬停 title 显示完整路径
