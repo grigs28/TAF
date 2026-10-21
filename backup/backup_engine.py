@@ -232,12 +232,13 @@ class BackupEngine:
                 except Exception as e:
                     logger.warning(f"[关闭] 停止Final目录监控器失败: {str(e)}")
 
-            # 4. 清理 final 目录（删除残留的压缩文件）
+            # 4. 清理 final 目录（残留压缩文件移入隔离目录，不删除）
             if self.final_dir_monitor:
                 try:
                     logger.info("[关闭] 4/7 清理final目录...")
-                    deleted = self.final_dir_monitor.cleanup_final_dir()
-                    logger.info(f"[关闭] final目录已清理，删除 {deleted} 个残留文件")
+                    quarantined = await asyncio.get_event_loop().run_in_executor(
+                        None, self.final_dir_monitor.cleanup_final_dir)
+                    logger.info(f"[关闭] final目录已清理，隔离 {quarantined} 个残留文件")
                 except Exception as e:
                     logger.warning(f"[关闭] 清理final目录失败: {str(e)}")
 
@@ -1020,12 +1021,26 @@ class BackupEngine:
             duration_seconds = (task_end_time - task_start_time).total_seconds()
             duration_ms = int(duration_seconds * 1000)
 
+            # 写带收尾统计（隔离清单）一并落盘，任务完成后卡片/排查仍可见
+            _final_extra = {}
+            try:
+                _fin = getattr(backup_task, 'final_retry_stats', None) or {}
+                if _fin:
+                    _final_extra = {
+                        'final_retry_attempted': int(_fin.get('attempted') or 0),
+                        'final_retry_written': int(_fin.get('written') or 0),
+                        'quarantined_files': len(_fin.get('quarantined') or []),
+                        'quarantined_bytes': int(_fin.get('quarantined_bytes') or 0),
+                    }
+            except Exception:
+                _final_extra = {}
+
             # 写“等待压缩”统计到 result_summary（任务完成后卡片仍可显示）
             try:
                 _starve_seconds = float(
                     getattr(self.final_dir_monitor, '_starvation_seconds', 0.0) or 0.0)
                 await self.backup_db.save_task_starvation(
-                    backup_task.id, _starve_seconds)
+                    backup_task.id, _starve_seconds, _final_extra or None)
             except Exception as _starve_err:
                 logger.debug(f"[备份引擎] 保存等待压缩统计失败: {_starve_err}")
 
@@ -1066,7 +1081,8 @@ class BackupEngine:
                     await self.backup_db.save_task_starvation(
                         backup_task.id, _starve_seconds,
                         {"tape_write_avg_speed_mbps": round(_avg_mbps, 1),
-                         "compression_started_at": _comp_started})
+                         "compression_started_at": _comp_started,
+                         **_final_extra})
                 except Exception:
                     pass
                 
@@ -1711,6 +1727,30 @@ class BackupEngine:
             # 等待所有文件移动到final目录（检查final目录是否为空）
             # 注意：移动到final就算完成，不需要等待移动到磁带
             final_move_completed = True  # 默认完成（如果没有final_dir_monitor）
+            # 写带收尾（必须在"等待 final 为空"之前）：
+            #   final 中可能残留此前写带失败、已被监控器拉黑的文件；不强制处理的话，
+            #   任务会一直等到 1 小时超时判失败，且停机清理会把它们删掉。
+            #   这里逐个再试一次写带；仍失败的移入隔离目录（QUARANTINE_DIR），
+            #   保留数据供补写/排查，同时让 final 清空。
+            if self.final_dir_monitor:
+                try:
+                    # 收尾可能包含大文件跨盘隔离，放 executor 执行，避免阻塞事件循环
+                    _final_stats = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        self.final_dir_monitor.finalize_pending_files,
+                        (backup_set.set_id if backup_set else None),
+                    )
+                    backup_task.final_retry_stats = _final_stats
+                    _q = _final_stats.get('quarantined') or []
+                    _f = _final_stats.get('failed') or []
+                    if _q:
+                        logger.warning(
+                            f"[备份引擎] ⚠️ {len(_q)} 个文件写带失败，已移入隔离目录: "
+                            f"{self.final_dir_monitor._get_quarantine_dir()}")
+                    if _f:
+                        logger.error(f"[备份引擎] ❌ {len(_f)} 个文件既未写带也无法隔离")
+                except Exception as _finalize_err:
+                    logger.error(f"[备份引擎] 写带收尾失败: {_finalize_err}", exc_info=True)
             if self.final_dir_monitor:
                 logger.info("[备份引擎] 压缩完成，等待所有文件移动到final目录...")
                 max_wait_time = 3600  # 最多等待1小时

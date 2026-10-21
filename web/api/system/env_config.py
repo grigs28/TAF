@@ -53,6 +53,7 @@ class SystemEnvConfig(BaseModel):
     auto_erase_expired: Optional[bool] = Field(None, description="自动擦除过期磁带")
     max_file_size: Optional[int] = Field(None, description="最大文件大小（字节）")
     backup_compress_dir: Optional[str] = Field(None, description="压缩文件临时目录")
+    quarantine_dir: Optional[str] = Field(None, description="写带失败文件隔离目录（默认 /TAF/quarantine，不占 SSD）")
     scan_update_interval: Optional[int] = Field(None, description="后台扫描进度更新间隔（文件数）")
     scan_engine: Optional[str] = Field(None, description="扫描引擎：nfs=优化扫描，classic=经典扫描")
     scan_log_interval_seconds: Optional[int] = Field(None, description="扫描批次进度日志的最小间隔（秒），默认60")
@@ -156,6 +157,7 @@ async def get_env_config():
             # compression_level已移除，由压缩配置中的compression_level替代
             "max_file_size": parse_int(env_vars.get("MAX_FILE_SIZE"), 12 * 1024 * 1024 * 1024),
             "backup_compress_dir": env_vars.get("BACKUP_COMPRESS_DIR", "temp/compress"),
+            "quarantine_dir": env_vars.get("QUARANTINE_DIR", "/TAF/quarantine"),
             "scan_update_interval": parse_int(env_vars.get("SCAN_UPDATE_INTERVAL"), 500),
             "scan_engine": env_vars.get("SCAN_ENGINE", "nfs"),
             "scan_log_interval_seconds": parse_int(env_vars.get("SCAN_LOG_INTERVAL_SECONDS"), 60),
@@ -269,6 +271,11 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             updates["MAX_FILE_SIZE"] = str(config.max_file_size)
         if config.backup_compress_dir is not None:
             updates["BACKUP_COMPRESS_DIR"] = config.backup_compress_dir
+        if config.quarantine_dir is not None:
+            _qdir = str(config.quarantine_dir).strip()
+            if not _qdir:
+                raise ValueError("隔离目录不能为空")
+            updates["QUARANTINE_DIR"] = _qdir
         if config.scan_update_interval is not None:
             updates["SCAN_UPDATE_INTERVAL"] = str(config.scan_update_interval)
         if config.scan_engine is not None:

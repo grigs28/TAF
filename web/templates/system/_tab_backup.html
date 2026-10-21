@@ -52,6 +52,14 @@
                         <input type="text" class="form-control" id="backupCompressDir" value="temp/compress">
                     </div>
                     <div class="mb-3">
+                        <label class="form-label">写带失败隔离目录</label>
+                        <input type="text" class="form-control" id="quarantineDir" value="/TAF/quarantine">
+                        <small class="form-text text-secondary">
+                            任务收尾时 final 中仍写不进磁带的文件移动到这里（不删除，供补写/排查）；
+                            建议放系统盘，避免占用 SSD 压缩空间
+                        </small>
+                    </div>
+                    <div class="mb-3">
                         <label class="form-label">压缩并行批次数量</label>
                         <input type="number" class="form-control" id="compressionParallelBatches" value="3" min="1" step="1">
                         <small class="form-text text-secondary">同时进行的压缩组数，扫描期按下项扣减</small>

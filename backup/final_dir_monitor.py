@@ -57,6 +57,9 @@ class FinalDirMonitor:
         self._starvation_seconds: float = 0.0
         self._starve_start: Optional[float] = None
         self._has_written_once: bool = False   # 是否已完成过至少一次写带
+        # 任务收尾期间的互斥标志：finalize_pending_files() 执行时暂停轮询，
+        # 避免监控线程与收尾逻辑同时处理同一文件（重复写带/竞态删除）。
+        self._finalizing: bool = False
         
     def start(self):
         """启动监控线程"""
@@ -265,7 +268,120 @@ class FinalDirMonitor:
         except Exception as e:
             logger.error(f"[Final监控] 移动文件到磁带失败: {file_path}, 错误: {str(e)}", exc_info=True)
             return False
-    
+
+    # ===== 写带收尾：残余文件强制重试 + 失败隔离 =====
+
+    @staticmethod
+    def _is_archive_file(file_path: Path) -> bool:
+        """与监控/空目录判定相同的压缩文件口径"""
+        return (file_path.suffix in ['.7z', '.gz', '.tar', '.zst']
+                or file_path.name.endswith('.tar.gz'))
+
+    def _get_quarantine_dir(self) -> Path:
+        """隔离目录（默认 /TAF/quarantine，不占 SSD 压缩盘）"""
+        qdir = getattr(self.settings, 'QUARANTINE_DIR', None) or '/TAF/quarantine'
+        return Path(qdir)
+
+    def _quarantine_file(self, file_path: Path, set_id: Optional[str] = None) -> Optional[Path]:
+        """把写带失败的文件移动到隔离目录（不删除，保留补写/排查）。
+
+        跨文件系统时 shutil.move 会退化为"复制+删除"，大文件会占用一段
+        收尾时间，但只在失败路径发生。
+        """
+        try:
+            qdir = self._get_quarantine_dir()
+            if set_id:
+                qdir = qdir / str(set_id)
+            qdir.mkdir(parents=True, exist_ok=True)
+
+            target = qdir / file_path.name
+            if target.exists():
+                # 同名文件已在隔离目录：加时间戳避免覆盖
+                target = qdir / f"{file_path.stem}.{int(time.time())}{file_path.suffix}"
+
+            shutil.move(str(file_path), str(target))
+            logger.warning(f"[Final监控] ⚠️ 文件写带失败，已移入隔离目录: {file_path} -> {target}")
+            return target
+        except Exception as e:
+            logger.error(f"[Final监控] 移动到隔离目录失败: {file_path}, 错误: {e}")
+            return None
+
+    def finalize_pending_files(self, set_id: Optional[str] = None) -> Dict:
+        """任务收尾：把 final 目录中所有剩余文件强制再写一次带。
+
+        覆盖三类此前会被永久跳过的文件：
+          · 写带失败后被 `_processed_files` 拉黑的；
+          · 监控线程尚未轮询到的；
+          · 压缩侧同名竞态导致路径已不存在的。
+        仍失败的文件移动到隔离目录（QUARANTINE_DIR），使 final 清空以便任务
+        正常判定完成，同时保留数据供人工补写/排查。
+
+        Returns:
+            dict: {attempted, written, quarantined: [...], failed: [...], bytes}
+        """
+        stats = {'attempted': 0, 'written': 0,
+                 'quarantined': [], 'failed': [], 'bytes': 0, 'quarantined_bytes': 0}
+        self._finalizing = True
+        try:
+            final_dir = self._get_final_dir()
+            if set_id:
+                final_dir = final_dir / set_id
+            if not final_dir.exists():
+                return stats
+
+            files = []
+            for root, dirs, names in os.walk(final_dir):
+                for name in names:
+                    fp = Path(root) / name
+                    if fp.is_file() and self._is_archive_file(fp):
+                        files.append(fp)
+
+            if not files:
+                return stats
+
+            logger.info(f"[Final监控] 写带收尾：final 中仍有 {len(files)} 个文件，逐个重试写带...")
+            for fp in files:
+                if not fp.exists():
+                    continue
+                self._processed_files.discard(str(fp))   # 允许重试
+                stats['attempted'] += 1
+                try:
+                    stats['bytes'] += fp.stat().st_size
+                except OSError:
+                    pass
+
+                self._current_tape_file = str(fp)
+                try:
+                    ok = self._move_file_to_tape(fp)
+                finally:
+                    self._current_tape_file = None
+
+                if ok:
+                    stats['written'] += 1
+                    continue
+
+                try:
+                    _qbytes = fp.stat().st_size
+                except OSError:
+                    _qbytes = 0
+                qpath = self._quarantine_file(fp, set_id)
+                if qpath:
+                    stats['quarantined'].append(str(qpath))
+                    stats['quarantined_bytes'] += _qbytes
+                else:
+                    stats['failed'].append(str(fp))
+
+            logger.info(
+                f"[Final监控] 写带收尾完成：尝试 {stats['attempted']} 个，"
+                f"成功 {stats['written']} 个，隔离 {len(stats['quarantined'])} 个，"
+                f"无法隔离 {len(stats['failed'])} 个")
+            return stats
+        except Exception as e:
+            logger.error(f"[Final监控] 写带收尾异常: {e}", exc_info=True)
+            return stats
+        finally:
+            self._finalizing = False
+
     def _monitor_loop(self):
         """监控循环：扫描final目录，发现文件后顺序移动到磁带"""
         logger.info("[Final监控] ========== Final目录监控线程已启动 ==========")
@@ -274,6 +390,11 @@ class FinalDirMonitor:
         try:
             while self._running:
                 try:
+                    # 收尾期间暂停轮询：由 finalize_pending_files 独占处理 final，
+                    # 避免与本次写带/隔离产生重复写入或删除竞态。
+                    if self._finalizing:
+                        time.sleep(1)
+                        continue
                     # 扫描final目录
                     final_dir = self._get_final_dir()
                     
@@ -427,15 +548,16 @@ class FinalDirMonitor:
             return 0
 
     def cleanup_final_dir(self) -> int:
-        """清理final目录中所有文件（保留当前正在写入磁带的文件）
+        """停机时把 final 目录中未写带的文件移入隔离目录（不删除）
 
-        用于系统关闭时，删除未写入磁带的压缩文件，避免下次启动时重复处理。
-        正在写入磁带的文件会被保留（由 FinalDirMonitor.stop() 等待其完成）。
+        只保留当前正在写入磁带的文件（由 FinalDirMonitor.stop() 等待其完成）。
+        隔离而非删除：这些文件已经压缩完成，删除会直接丢失；停机后可由人工
+        补齐磁带或由下次任务重试。
 
         Returns:
-            int: 删除的文件数量
+            int: 已隔离的文件数量
         """
-        deleted_count = 0
+        quarantined_count = 0
         try:
             final_dir = self._get_final_dir()
             if not final_dir.exists():
@@ -459,14 +581,16 @@ class FinalDirMonitor:
                         continue
 
                     try:
-                        file_path.unlink(missing_ok=True)
-                        deleted_count += 1
-                        logger.info(f"[Final监控] 已删除: {file_path}")
+                        set_id = self._extract_backup_set_id_from_path(file_path)
+                        qpath = self._quarantine_file(file_path, set_id)
+                        if qpath:
+                            quarantined_count += 1
+                            logger.info(f"[Final监控] 已隔离: {file_path} -> {qpath}")
                     except Exception as e:
-                        logger.warning(f"[Final监控] 删除文件失败 {file_path}: {e}")
+                        logger.warning(f"[Final监控] 隔离文件失败 {file_path}: {e}")
 
             # 清理空的 set_id 子目录
-            if deleted_count > 0:
+            if quarantined_count > 0:
                 for item in final_dir.iterdir():
                     if item.is_dir():
                         try:
@@ -483,11 +607,11 @@ class FinalDirMonitor:
                         except Exception:
                             pass
 
-            logger.info(f"[Final监控] final目录清理完成，共删除 {deleted_count} 个文件")
+            logger.info(f"[Final监控] final目录清理完成，共隔离 {quarantined_count} 个文件")
         except Exception as e:
             logger.error(f"[Final监控] 清理final目录失败: {e}")
 
-        return deleted_count
+        return quarantined_count
 
     def cleanup_set_id_dir(self, set_id: str) -> bool:
         """清理指定set_id的空目录（任务完成后调用）

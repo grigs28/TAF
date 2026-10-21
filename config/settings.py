@@ -177,6 +177,9 @@ class Settings(BaseSettings):
     BACKUP_TEMP_DIR: str = "temp/backup"
     RECOVERY_TEMP_DIR: str = "temp/recovery"
     BACKUP_COMPRESS_DIR: str = "temp/compress"  # 压缩文件临时目录（先压缩到这里，再移动到磁带机）
+    # 写带失败文件的隔离目录：任务收尾时 final 中仍写不进磁带的文件移动到这里，
+    # 不删除（保留补写/排查）；放系统盘（/TAF）避免占用 SSD 压缩盘空间。
+    QUARANTINE_DIR: str = "/TAF/quarantine"
     VERIFY_TEMP_DIR: str = "temp/verify"  # 验证任务临时目录
     COMPRESSION_THREADS: int = 3  # Python压缩线程数（py7zr/PGZip）
     # 压缩方法配置

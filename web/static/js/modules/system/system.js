@@ -738,6 +738,10 @@ async function loadAllSystemConfig() {
                 const backupCompressDirInput = document.getElementById('backupCompressDir');
                 if (backupCompressDirInput) backupCompressDirInput.value = config.backup_compress_dir;
             }
+            if (config.quarantine_dir) {
+                const quarantineDirInput = document.getElementById('quarantineDir');
+                if (quarantineDirInput) quarantineDirInput.value = config.quarantine_dir;
+            }
             if (config.scan_update_interval) {
                 const scanUpdateIntervalInput = document.getElementById('scanUpdateInterval');
                 if (scanUpdateIntervalInput) scanUpdateIntervalInput.value = config.scan_update_interval;
@@ -898,6 +902,7 @@ async function saveEnvConfigSection() {
             auto_erase_expired: document.getElementById('autoEraseExpired')?.checked || null,
             max_file_size: parseFloat(document.getElementById('maxFileSizeGB')?.value) * 1024 * 1024 * 1024 || null,
             backup_compress_dir: document.getElementById('backupCompressDir')?.value || null,
+            quarantine_dir: document.getElementById('quarantineDir')?.value || null,
             scan_update_interval: (() => {
                 const input = document.getElementById('scanUpdateInterval');
                 if (!input) return null;
