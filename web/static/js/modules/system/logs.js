@@ -51,7 +51,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // 筛选器变化自动刷新
-    ['logCategory', 'logOperationType'].forEach(function(id) {
+    ['logCategory', 'logOperationType', 'logTimeRange'].forEach(function(id) {
         var el = document.getElementById(id);
         if (el) {
             el.addEventListener('change', function() {
@@ -115,6 +115,8 @@ document.addEventListener('DOMContentLoaded', function() {
             if (category && category.value) params.set('category', category.value);
             if (currentLogLevel) params.set('level', currentLogLevel);
             if (opType && opType.value) params.set('operation_type', opType.value);
+            const _startTime = buildStartTimeParam();
+            if (_startTime) params.set('start_time', _startTime);
             window.open('/api/system/logs/export?' + params.toString(), '_blank');
         });
     }
@@ -201,6 +203,17 @@ async function loadLogFilterOptions() {
     }
 }
 
+// 按时间范围下拉构造本地时间字符串（后端按无时区 datetime 解析）
+function buildStartTimeParam() {
+    const el = document.getElementById('logTimeRange');
+    const days = el ? parseInt(el.value, 10) : 30;
+    if (!Number.isFinite(days) || days <= 0) return '';
+    const d = new Date(Date.now() - days * 24 * 3600 * 1000);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+        + `T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 // 加载系统日志
 async function loadSystemLogs() {
     const logContainer = document.getElementById('logContainer');
@@ -224,6 +237,8 @@ async function loadSystemLogs() {
         if (category) params.append('category', category);
         if (level) params.append('level', level);
         if (operationType) params.append('operation_type', operationType);
+        const _startTime = buildStartTimeParam();
+        if (_startTime) params.append('start_time', _startTime);
         
         const response = await fetch(`/api/system/logs?${params.toString()}`, {credentials: 'include'});
         

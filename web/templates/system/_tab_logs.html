@@ -37,6 +37,17 @@
                     
                     <!-- 筛选条件 -->
                     <div class="row mb-3">
+                        <div class="col-md-3">
+                            <label class="form-label small">时间范围</label>
+                            <select class="form-select form-select-sm bg-dark text-light" id="logTimeRange"
+                                    title="备份为月任务，默认显示最近 30 天">
+                                <option value="1">最近 24 小时</option>
+                                <option value="7">最近 7 天</option>
+                                <option value="30" selected>最近 30 天</option>
+                                <option value="90">最近 90 天</option>
+                                <option value="180">最近 180 天</option>
+                            </select>
+                        </div>
                         <div class="col-md-2">
                             <label class="form-label small">分类</label>
                             <select class="form-select form-select-sm bg-dark text-light" id="logCategory">
@@ -49,8 +60,8 @@
                                 <option value="">所有操作</option>
                             </select>
                         </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">操作</label>
+                        <div class="col-md-5">
+                            <label class="form-label small">操作 / 设置</label>
                             <div class="d-flex gap-2 align-items-center">
                                 <select class="form-select form-select-sm bg-dark text-light"
                                         id="logRetentionMonths" title="数据库日志保留时间（超过自动清理）"
@@ -60,13 +71,12 @@
                                     <option value="3">保留 3 个月</option>
                                     <option value="4">保留 4 个月</option>
                                     <option value="5">保留 5 个月</option>
-                                    <option value="6">保留 6 个月</option>
+                                    <option value="6" selected>保留 6 个月</option>
                                     <option value="7">保留 7 个月</option>
                                     <option value="8">保留 8 个月</option>
                                     <option value="9">保留 9 个月</option>
                                     <option value="10">保留 10 个月</option>
                                     <option value="11">保留 11 个月</option>
-                                    <option value="6" selected>保留 6 个月</option>
                                     <option value="12">保留 1 年</option>
                                     <option value="24">保留 2 年</option>
                                 </select>
