@@ -1386,7 +1386,7 @@
             // 后端 progress_percent 按 抽样数/扫描数 计算（≈抽样比例，默认 1%），
             // 直接当进度显示会恒为 1% 造成误导，故此处不显示百分比，改用状态 + 四个计数表达。
             if (isVerifyTask) {
-                // 从 description / operation_status 解析（后端格式：已扫描 X, 抽样 Y, 通过 P, 失败 F）
+                // 从 description / operation_status 解析（后端格式：..., 通过 P, 失败 F）
                 const descText = (task.description || '') + ' ' + (task.operation_status || '');
                 const passMatch = descText.match(/通过\s*(\d+)/);
                 const failMatch = descText.match(/失败\s*(\d+)/);
@@ -1394,19 +1394,50 @@
                 const verifyFailed = failMatch ? parseInt(failMatch[1], 10) : null;
                 const failedClass = (verifyFailed || 0) > 0 ? 'text-danger fw-semibold' : 'text-muted';
 
-                const scanned = progressInfo.totalFiles || 0;
-                const sampled = progressInfo.processedFiles || 0;
-                // 抽样比例：优先用任务记录里落库的配置值（该次运行实际使用），
-                // 老数据没有该字段时回退到"已抽样/已扫描"推算值
-                const configuredPct = (typeof task.verify_percent === 'number' && task.verify_percent > 0)
+                const _vTypeRaw = (task.verify_type || '').toLowerCase();
+                const _vTypeLabel = _vTypeRaw === 'tape' ? '磁带验证'
+                    : (_vTypeRaw === 'directory' ? '目录验证' : '验证');
+                const _pct = (typeof task.verify_percent === 'number' && task.verify_percent > 0)
                     ? task.verify_percent : null;
-                const derivedPct = scanned > 0 ? (sampled * 100 / scanned) : null;
-                const sampleRateText = configuredPct !== null
-                    ? `（${configuredPct}%）`
-                    : (derivedPct !== null ? `（${derivedPct.toFixed(2)}%）` : '');
                 const statusText = (task.status || '').toLowerCase() === 'completed'
                     ? '已完成'
                     : ((task.status || '').toLowerCase() === 'failed' ? '失败' : '验证中');
+
+                // 统一“总量”语义：目录验证 total_files=扫描数；磁带验证=归档总数
+                const _total = progressInfo.totalFiles || 0;
+                const _sampled = progressInfo.processedFiles || 0;
+
+                let _countHtml = '';
+                if (_vTypeRaw === 'tape') {
+                    const _totalArchives = Number(task.verify_total_archives) || _total;
+                    const _sampleTotal = (_pct !== null && _totalArchives > 0)
+                        ? Math.max(1, Math.min(_totalArchives,
+                            Math.floor(_totalArchives * _pct / 100)))
+                        : null;
+                    _countHtml = `
+                        <div class="d-flex justify-content-between">
+                            <small class="text-muted">归档总数:</small>
+                            <small class="text-muted">${_totalArchives ? _totalArchives.toLocaleString() : '—'}</small>
+                        </div>
+                        <div class="d-flex justify-content-between">
+                            <small class="text-muted">抽样进度:</small>
+                            <small class="text-muted">${_sampled.toLocaleString()}${_sampleTotal ? ' / ' + _sampleTotal.toLocaleString() : ''}</small>
+                        </div>`;
+                } else {
+                    const derivedPct = _total > 0 ? (_sampled * 100 / _total) : null;
+                    const sampleRateText = _pct !== null
+                        ? `（${_pct}%）`
+                        : (derivedPct !== null ? `（${derivedPct.toFixed(2)}%）` : '');
+                    _countHtml = `
+                        <div class="d-flex justify-content-between">
+                            <small class="text-muted">已扫描文件:</small>
+                            <small class="text-muted">${_total.toLocaleString()}</small>
+                        </div>
+                        <div class="d-flex justify-content-between">
+                            <small class="text-muted">已抽样验证:</small>
+                            <small class="text-muted">${_sampled.toLocaleString()}${sampleRateText}</small>
+                        </div>`;
+                }
 
                 progressSection.innerHTML = normalizeCardHtml(`
                     ${batchProgressHtml}
@@ -1415,13 +1446,14 @@
                         <small class="text-muted">${statusText}</small>
                     </div>
                     <div class="d-flex justify-content-between">
-                        <small class="text-muted">已扫描文件:</small>
-                        <small class="text-muted">${scanned.toLocaleString()}</small>
+                        <small class="text-muted">验证类型:</small>
+                        <small class="text-muted">${_vTypeLabel}</small>
                     </div>
                     <div class="d-flex justify-content-between">
-                        <small class="text-muted">已抽样验证:</small>
-                        <small class="text-muted">${sampled.toLocaleString()}${sampleRateText}</small>
+                        <small class="text-muted">抽样比例:</small>
+                        <small class="text-muted">${_pct !== null ? _pct + '%' : '—'}</small>
                     </div>
+                    ${_countHtml}
                     ${verifyPassed !== null ? `
                     <div class="d-flex justify-content-between">
                         <small class="text-muted">通过:</small>

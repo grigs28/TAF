@@ -1131,6 +1131,12 @@ class VerifyActionHandler(ActionHandler):
 
             logger.info(f"[磁带验证] 发现 {len(archives)} 个归档，抽样 {sample_count} 个")
 
+            # 归档总数先落库：运行中卡片即可显示“归档总数/抽样进度”
+            if task_id:
+                await self._save_verify_summary(task_id, {
+                    'verify_total_archives': len(archives),
+                })
+
             # 5. 创建临时目录
             from config.settings import get_settings
             settings = get_settings()
@@ -1164,12 +1170,13 @@ class VerifyActionHandler(ActionHandler):
                         progress_pct = ((i + 1) / sample_count) * 100
                         await self._update_verify_progress(
                             task_id,
-                            total_files=sample_count,
-                            processed_files=i + 1,
+                            # 统一“总量”语义：目录验证=扫描数，磁带验证=归档总数
+                            total_files=len(archives),
+                            processed_files=i + 1,      # 已抽样验证数量
                             progress_percent=min(99.0, progress_pct),
                             operation_stage='verify',
                             scan_status='completed',
-                            description=f"[磁带验证中...] {i+1}/{sample_count}, 通过 {passed}, 失败 {failed}"
+                            description=f"[磁带验证中...] 归档 {i+1}/{sample_count}, 通过 {passed}, 失败 {failed}"
                         )
             finally:
                 # 6. 清理临时目录
