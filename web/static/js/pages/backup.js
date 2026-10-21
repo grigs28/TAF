@@ -577,6 +577,19 @@
         };
     }
 
+    // 验证类型解析：新任务用落库的 verify_type；旧任务该字段缺失，
+    // 回退从 description/operation_status 文本推断（"磁带验证完成"/"目录验证完成"）。
+    // 返回 'tape' | 'directory' | ''（未知）
+    function resolveVerifyType(task) {
+        const vt = String((task && task.verify_type) || '').toLowerCase();
+        if (vt === 'tape' || vt === 'directory') return vt;
+        const txt = String((task && task.description) || '') + ' '
+            + String((task && task.operation_status) || '');
+        if (txt.indexOf('磁带验证') >= 0) return 'tape';
+        if (txt.indexOf('目录验证') >= 0) return 'directory';
+        return vt;
+    }
+
     function formatCompressionRatio(value) {
         if (!value || value <= 0) return '-';
         return (value * 100).toFixed(2) + '%';
@@ -854,7 +867,7 @@
         // 磁带验证没有源路径（source_paths 为空）→ 显示「磁带」，
         // 而不是无意义的 N/A
         const _isTapeVerify = ((task.task_type || '').toLowerCase() === 'verify'
-            && (task.verify_type || '').toLowerCase() === 'tape');
+            && resolveVerifyType(task) === 'tape');
         const sourcePathsLabel = (task.source_paths || []).join(', ')
             || (_isTapeVerify ? '磁带' : 'N/A');
         const source = document.createElement('div');
@@ -1117,7 +1130,7 @@
                 // 完成文案 + 图标按任务性质区分（一眼可辨）：
                 //   📦 备份 / 📼 磁带验证 / 📄 文件验证
                 const _tt = (task.task_type || '').toLowerCase();
-                const _vt = (task.verify_type || '').toLowerCase();
+                const _vt = resolveVerifyType(task);
                 let _doneLabel = '📦 备份完成';
                 if (_tt === 'verify') {
                     _doneLabel = (_vt === 'tape' ? '📼 磁带验证完成'
@@ -1419,7 +1432,7 @@
                 const verifyFailed = failMatch ? parseInt(failMatch[1], 10) : null;
                 const failedClass = (verifyFailed || 0) > 0 ? 'text-danger fw-semibold' : 'text-muted';
 
-                const _vTypeRaw = (task.verify_type || '').toLowerCase();
+                const _vTypeRaw = resolveVerifyType(task);
                 const _vTypeLabel = _vTypeRaw === 'tape' ? '磁带验证'
                     : (_vTypeRaw === 'directory' ? '目录验证' : '验证');
                 const _pct = (typeof task.verify_percent === 'number' && task.verify_percent > 0)
@@ -1619,9 +1632,10 @@
                     return m ? parseInt(m[1], 10) : null;
                 };
                 const _hasVal = (v) => v !== null && v !== undefined && !Number.isNaN(Number(v));
-                const _vtype = task.verify_type === 'tape'
+                const _vtDone = resolveVerifyType(task);
+                const _vtype = _vtDone === 'tape'
                     ? '磁带验证'
-                    : (task.verify_type === 'directory' ? '目录验证' : '验证');
+                    : (_vtDone === 'directory' ? '目录验证' : '验证');
                 const _pct = _hasVal(task.verify_percent) ? Number(task.verify_percent) : null;
                 const _scanned = _hasVal(task.verify_scanned) ? Number(task.verify_scanned)
                     : (_hasVal(task.verify_total_archives) ? Number(task.verify_total_archives)
@@ -1632,7 +1646,7 @@
                     : _num(/通过\s*(\d+)/);
                 const _failed = _hasVal(task.verify_failed) ? Number(task.verify_failed)
                     : (_num(/失败\s*(\d+)/) || 0);
-                const _scannedLabel = task.verify_type === 'tape' ? '归档总数' : '已扫描文件';
+                const _scannedLabel = _vtDone === 'tape' ? '归档总数' : '已扫描文件';
 
                 const _mkVerifyRow = (label, valueHtml, title) => {
                     const row = document.createElement('div');
