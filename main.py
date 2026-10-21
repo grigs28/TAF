@@ -537,6 +537,14 @@ async def main():
     # 设置asyncio异常处理器（在事件循环运行后）
     setup_asyncio_exception_handler()
 
+    # 注入主事件循环给 SystemLogHandler：后台线程（FinalDirMonitor、
+    # executor）没有运行中的循环，否则它们的警告/错误无法写入 system_logs
+    try:
+        from utils.system_log_handler import SystemLogHandler
+        SystemLogHandler.set_main_loop(asyncio.get_running_loop())
+    except Exception:
+        pass
+
     # 安装生产环境保护器
     install_production_guard()
 
