@@ -48,8 +48,11 @@ class FinalDirMonitor:
         self._worker_thread: Optional[threading.Thread] = None
         self._running = False
         self._lock = threading.Lock()
-        self._scan_interval = 10  # 扫描间隔（秒）
+        self._scan_interval = 5  # 扫描间隔（秒）；5 秒兼顾发现延迟与开销
         self._processed_files: Set[str] = set()  # 已处理文件的集合（完整路径）
+        # 本轮扫描时记录的每个文件大小：写带前再 stat 对比，变化则跳过（下轮再试）。
+        # 稳定性判定从“每文件 sleep 2 秒”改为“扫描时记大小 + 写带前对比”，零等待。
+        self._scan_sizes: Dict[str, int] = {}
         self._current_tape_file: Optional[str] = None  # 当前正在写入磁带的文件路径
         # "压缩喂不饱写带"的累计等待时间：final 目录无文件可写、等压缩产出的时长。
         # 统计口径（用户明确）：第一次写带开始之后，final 为空的累计时间。
@@ -120,6 +123,7 @@ class FinalDirMonitor:
             # 会跨任务累积——同一天重跑同一 set_id 时同名文件会被永久跳过，
             # 且内存随文件数增长。
             self._processed_files.clear()
+            self._scan_sizes.clear()
 
     def finalize_starvation(self) -> float:
         """任务收尾调用：丢弃未结算的最后一段等待。
@@ -206,25 +210,9 @@ class FinalDirMonitor:
                 return False
 
             # 获取源文件大小（用于验证）
+            # 稳定性由监控线程在扫描阶段（记录 size + 写带前对比）保证，
+            # 这里不再 sleep 2 秒复核；复制后的大小校验仍是最终防线。
             source_size = source_file.stat().st_size
-
-            # 复制前稳定性复核（P1-5）：间隔 2 秒两次 stat，大小变化说明
-            # 压缩侧仍在写入（或同名任务并发写），本轮跳过、下轮再试，
-            # 避免复制到一半源文件继续增长导致大小校验失败。
-            try:
-                _s1 = source_file.stat().st_size
-                time.sleep(2.0)
-                _s2 = source_file.stat().st_size
-            except OSError:
-                logger.warning(f"[Final监控] 文件在复核期间消失: {source_file}")
-                return False
-            if _s1 != _s2:
-                logger.warning(
-                    f"[Final监控] 文件仍在写入（{_s1} -> {_s2}），本轮跳过: {source_file.name}")
-                # 通知调用方：这是“暂时跳过”，不要标记为已处理（下一轮重试）
-                self._defer_current_file = True
-                return False
-            source_size = _s2
 
             logger.info(f"[Final监控] 开始移动文件到磁带: {source_file.name} (大小: {format_bytes(source_size)})")
 
@@ -458,21 +446,35 @@ class FinalDirMonitor:
                         continue
                     
                     # 递归扫描所有子目录，查找压缩文件
+                    # 稳定性判定交给“扫描时记大小 + 写带前对比”：
+                    #   ① 已处理（成功/失败拉黑）→ 跳过，失败文件只由收尾重试
+                    #   ② 记录本轮 size，写带前再 stat 对比，变化则跳过（零等待）
                     found_files = []
+                    seen_now = set()
                     for root, dirs, files in os.walk(final_dir):
                         root_path = Path(root)
                         for file_name in files:
                             file_path = root_path / file_name
-                            
+
                             if not file_path.is_file():
                                 continue
-                            
+
                             # 检查是否是压缩文件
                             if file_path.suffix in ['.7z', '.gz', '.tar', '.zst'] or file_path.name.endswith('.tar.gz'):
-                                # 检查是否已处理过
                                 file_key = str(file_path)
-                                if file_key not in self._processed_files:
-                                    found_files.append(file_path)
+                                seen_now.add(file_key)
+                                # 已处理过（含失败拉黑）→ 跳过；失败文件由收尾强制重试
+                                if file_key in self._processed_files:
+                                    continue
+                                try:
+                                    self._scan_sizes[file_key] = file_path.stat().st_size
+                                except OSError:
+                                    continue
+                                found_files.append(file_path)
+
+                    # 清理已消失文件的 size 记录（防内存增长）
+                    for k in [k for k in self._scan_sizes if k not in seen_now]:
+                        self._scan_sizes.pop(k, None)
                     
                     # 每批内按文件大小降序（最大文件优先）：
                     #   · 大文件连续写保持磁带流式，减少文件间 sync/backhitch；
@@ -507,6 +509,20 @@ class FinalDirMonitor:
                                 self._processed_files.add(file_key)
                                 continue
                             
+                            # 稳定性：与扫描时记录的大小一致才写；变化则跳过（下轮再试），
+                            # 不拉黑、不等待。替代原先每文件 sleep 2 秒的复核。
+                            try:
+                                _cur_size = file_path.stat().st_size
+                            except OSError:
+                                logger.debug(f"[Final监控] 文件 stat 失败，跳过: {file_path.name}")
+                                continue
+                            _rec_size = self._scan_sizes.get(file_key)
+                            if _rec_size is not None and _cur_size != _rec_size:
+                                logger.info(
+                                    f"[Final监控] 文件仍在写入（{_rec_size} -> {_cur_size}），"
+                                    f"留待下一轮: {file_path.name}")
+                                continue
+
                             # 移动文件到磁带（持锁：与任务收尾线程互斥）
                             with self._tape_op_lock:
                                 self._current_tape_file = str(file_path)
