@@ -1460,7 +1460,7 @@ class CompressionWorker:
                         try:
                             _paths = [
                                 (f.get('path') or f.get('file_path') or '?')
-                                for f in (processed_file_group or [])
+                                for f in (file_group or [])
                             ]
                             _sample = '；'.join(_paths[:20])
                             if len(_paths) > 20:

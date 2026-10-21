@@ -65,6 +65,10 @@ class FinalDirMonitor:
         self.error_logs: list = []
         # 本轮是否因“文件仍在写入”而跳过（调用方据此不标记已处理，留待下次轮询）
         self._defer_current_file: bool = False
+        # 写带串行化：监控线程与任务收尾（finalize_pending_files，executor 线程）
+        # 可能同时处理 final 中的同一文件；对同一目标路径并发 cp 会导致
+        # 一方大小校验失败并 unlink 目标，从而破坏另一方正在写入的数据。
+        self._tape_op_lock = threading.Lock()
         
     def start(self):
         """启动监控线程"""
@@ -185,8 +189,13 @@ class FinalDirMonitor:
             return None
 
     def _move_file_to_tape(self, file_path: Path) -> bool:
+        """写带串行化入口：同一时刻只允许一个文件写入磁带"""
+        with self._tape_op_lock:
+            return self._move_file_to_tape_locked(file_path)
+
+    def _move_file_to_tape_locked(self, file_path: Path) -> bool:
         """
-        移动单个文件到磁带
+        移动单个文件到磁带（调用方必须持有 _tape_op_lock）
 
         Args:
             file_path: 源文件路径
@@ -194,6 +203,7 @@ class FinalDirMonitor:
         Returns:
             bool: 是否成功
         """
+        self._defer_current_file = False
         try:
             source_file = file_path
             if not source_file.exists():
@@ -398,11 +408,10 @@ class FinalDirMonitor:
                     pass
 
                 self._current_tape_file = str(fp)
-                self._defer_current_file = False
-                try:
-                    ok = self._move_file_to_tape(fp)
-                finally:
-                    self._current_tape_file = None
+                # 持锁执行：若监控线程正在写同一文件，等待其完成后再判断
+                with self._tape_op_lock:
+                    ok = self._move_file_to_tape_locked(fp)
+                self._current_tape_file = None
 
                 if ok:
                     stats['written'] += 1
@@ -501,13 +510,14 @@ class FinalDirMonitor:
                                 self._processed_files.add(file_key)
                                 continue
                             
-                            # 移动文件到磁带
+                            # 移动文件到磁带（持锁：与任务收尾线程互斥）
                             self._current_tape_file = str(file_path)
-                            self._defer_current_file = False
-                            success = self._move_file_to_tape(file_path)
+                            with self._tape_op_lock:
+                                success = self._move_file_to_tape_locked(file_path)
+                                deferred = self._defer_current_file
                             self._current_tape_file = None
 
-                            if self._defer_current_file:
+                            if deferred:
                                 # 文件仍在写入：不标记已处理，下一轮重新检查
                                 logger.info(f"[Final监控] 文件仍在写入，留待下一轮: {file_path.name}")
                                 continue
@@ -602,16 +612,15 @@ class FinalDirMonitor:
             return 0
 
     def cleanup_final_dir(self) -> int:
-        """停机时把 final 目录中未写带的文件移入隔离目录（不删除）
+        """停机时删除 final 目录中未写带的文件
 
-        只保留当前正在写入磁带的文件（由 FinalDirMonitor.stop() 等待其完成）。
-        隔离而非删除：这些文件已经压缩完成，删除会直接丢失；停机后可由人工
-        补齐磁带或由下次任务重试。
+        停机意味着本次任务要重新开始，残留的压缩产物一律清除（不保留、
+        不隔离）；只保留当前正在写入磁带的文件（由 stop() 等待其完成）。
 
         Returns:
-            int: 已隔离的文件数量
+            int: 删除的文件数量
         """
-        quarantined_count = 0
+        deleted_count = 0
         try:
             final_dir = self._get_final_dir()
             if not final_dir.exists():
@@ -635,16 +644,14 @@ class FinalDirMonitor:
                         continue
 
                     try:
-                        set_id = self._extract_backup_set_id_from_path(file_path)
-                        qpath = self._quarantine_file(file_path, set_id)
-                        if qpath:
-                            quarantined_count += 1
-                            logger.info(f"[Final监控] 已隔离: {file_path} -> {qpath}")
+                        file_path.unlink(missing_ok=True)
+                        deleted_count += 1
+                        logger.info(f"[Final监控] 已删除: {file_path}")
                     except Exception as e:
-                        logger.warning(f"[Final监控] 隔离文件失败 {file_path}: {e}")
+                        logger.warning(f"[Final监控] 删除文件失败 {file_path}: {e}")
 
             # 清理空的 set_id 子目录
-            if quarantined_count > 0:
+            if deleted_count > 0:
                 for item in final_dir.iterdir():
                     if item.is_dir():
                         try:
@@ -661,11 +668,11 @@ class FinalDirMonitor:
                         except Exception:
                             pass
 
-            logger.info(f"[Final监控] final目录清理完成，共隔离 {quarantined_count} 个文件")
+            logger.info(f"[Final监控] final目录清理完成，共删除 {deleted_count} 个文件")
         except Exception as e:
             logger.error(f"[Final监控] 清理final目录失败: {e}")
 
-        return quarantined_count
+        return deleted_count
 
     def cleanup_set_id_dir(self, set_id: str) -> bool:
         """清理指定set_id的空目录（任务完成后调用）

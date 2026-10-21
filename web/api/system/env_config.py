@@ -275,6 +275,8 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             _qdir = str(config.quarantine_dir).strip()
             if not _qdir:
                 raise ValueError("隔离目录不能为空")
+            if not _qdir.startswith('/'):
+                raise ValueError("隔离目录必须是绝对路径（以 / 开头）")
             updates["QUARANTINE_DIR"] = _qdir
         if config.scan_update_interval is not None:
             updates["SCAN_UPDATE_INTERVAL"] = str(config.scan_update_interval)

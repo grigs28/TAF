@@ -236,9 +236,9 @@ class BackupEngine:
             if self.final_dir_monitor:
                 try:
                     logger.info("[关闭] 4/7 清理final目录...")
-                    quarantined = await asyncio.get_event_loop().run_in_executor(
+                    deleted = await asyncio.get_event_loop().run_in_executor(
                         None, self.final_dir_monitor.cleanup_final_dir)
-                    logger.info(f"[关闭] final目录已清理，隔离 {quarantined} 个残留文件")
+                    logger.info(f"[关闭] final目录已清理，删除 {deleted} 个残留文件")
                 except Exception as e:
                     logger.warning(f"[关闭] 清理final目录失败: {str(e)}")
 
