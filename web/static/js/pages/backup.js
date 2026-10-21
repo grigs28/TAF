@@ -613,16 +613,16 @@
                     // 另：bg-amber/bg-purple/bg-emerald 在 CSS 中并无定义，
                     // 不要再用（等于无底色）。
                     if (task && task.vegas_enabled === false) {
-                        return 'bg-primary pulse-badge';
+                        return 'badge-health-off pulse-badge';
                     }
                     const _vhRaw = task ? task.vegas_health : null;
                     const _vh = Number(_vhRaw);
                     if (_vhRaw !== null && _vhRaw !== undefined && Number.isFinite(_vh)) {
-                        if (_vh >= 85) return 'bg-success pulse-badge';
-                        if (_vh >= 60) return 'bg-warning text-dark pulse-badge';
-                        return 'bg-danger pulse-badge';
+                        if (_vh >= 85) return 'badge-health-good pulse-badge';
+                        if (_vh >= 60) return 'badge-health-warn pulse-badge';
+                        return 'badge-health-bad pulse-badge';
                     }
-                    return 'bg-primary pulse-badge';
+                    return 'badge-health-off pulse-badge';
                 }
                 if (stageCode === 'finalize') {
                     return 'bg-emerald pulse-badge';

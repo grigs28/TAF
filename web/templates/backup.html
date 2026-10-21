@@ -157,6 +157,43 @@
 .stage-badges .badge.bg-secondary {
     color: #9aa4b2 !important;
 }
+
+/* ===== Vegas 健康度灯：使用主题色（ai.css 变量），透明底 + 同色脉冲 =====
+   绿 var(--success) #00cc88 / 黄 var(--warning) #ffaa00 /
+   红 var(--danger) #ff5577 / 关闭或未知 var(--primary) #78caf2 */
+.stage-badges .badge.badge-health-good { color: var(--success, #00cc88) !important; }
+.stage-badges .badge.badge-health-warn { color: var(--warning, #ffaa00) !important; }
+.stage-badges .badge.badge-health-bad  { color: var(--danger, #ff5577) !important; }
+.stage-badges .badge.badge-health-off  { color: var(--primary, #78caf2) !important; }
+
+.pulse-badge.badge-health-good {
+    animation: pulse-health-good 1.5s ease-in-out infinite;
+}
+@keyframes pulse-health-good {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(0, 204, 136, 0.7); }
+    50%      { opacity: 0.9; box-shadow: 0 0 0 8px rgba(0, 204, 136, 0); }
+}
+.pulse-badge.badge-health-warn {
+    animation: pulse-health-warn 1.5s ease-in-out infinite;
+}
+@keyframes pulse-health-warn {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(255, 170, 0, 0.7); }
+    50%      { opacity: 0.9; box-shadow: 0 0 0 8px rgba(255, 170, 0, 0); }
+}
+.pulse-badge.badge-health-bad {
+    animation: pulse-health-bad 1.5s ease-in-out infinite;
+}
+@keyframes pulse-health-bad {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(255, 85, 119, 0.7); }
+    50%      { opacity: 0.9; box-shadow: 0 0 0 8px rgba(255, 85, 119, 0); }
+}
+.pulse-badge.badge-health-off {
+    animation: pulse-health-off 1.5s ease-in-out infinite;
+}
+@keyframes pulse-health-off {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(120, 202, 242, 0.7); }
+    50%      { opacity: 0.9; box-shadow: 0 0 0 8px rgba(120, 202, 242, 0); }
+}
 </style>
 {% endblock %}
 
