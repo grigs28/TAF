@@ -271,10 +271,17 @@ class BackupEngine:
 
             # 6. sync + 卸载LTFS（sync确保数据写入磁带）
             logger.info("[关闭] 6/7 卸载LTFS...")
-            if self.tape_handler and self.tape_handler._ltfs_mounted:
+            if self.tape_handler:
                 try:
-                    await self.tape_handler.unmount_ltfs()
-                    logger.info("[关闭] LTFS已安全卸载")
+                    if self.tape_handler._ltfs_mounted:
+                        # eject=True：卸载后执行 mt offline，让带子退出读写通路。
+                        # 否则带子带着"加载状态 + 停在索引分区末尾"随系统关机，
+                        # 重启后读卷标签可能失败（2026-10-22 已发生一次）。
+                        await self.tape_handler.unmount_ltfs(eject=True)
+                        logger.info("[关闭] LTFS已安全卸载")
+                    else:
+                        # 未挂载但带子可能仍加载，同样 offline 收尾
+                        await self.tape_handler.offline_tape()
                 except Exception as e:
                     logger.warning(f"[关闭] 卸载LTFS失败: {str(e)}")
 

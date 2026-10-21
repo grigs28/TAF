@@ -679,6 +679,40 @@ class TapeHandler:
         await _send_failure_notification(error_msg)
         return False, error_msg
 
+    async def offline_tape(self) -> bool:
+        """把介质卸载出读写通路（停机收尾用）。
+
+        LTFS 卸载后带子仍处于加载状态（停在索引分区末尾），若此时系统
+        关机/重启，驱动器会在下电前带着"加载状态"复位，重启后 LTFS 按
+        MAM 分区信息定位标签可能落错位置（曾导致读 ANSI 标签失败）。
+
+        磁带有 ONLINE 位才执行 mt offline；未加载时直接返回，避免无谓报错。
+        """
+        from utils.ltfs_ops import eject_tape
+
+        tape_device = self._get_tape_device()
+        try:
+            result = await self._run_command(['mt', '-f', tape_device, 'status'], timeout=30)
+            output = result.stdout + result.stderr
+            if 'ONLINE' not in output:
+                logger.info("[LTFS] 磁带未加载，无需 offline")
+                return True
+        except Exception as e:
+            logger.warning(f"[LTFS] 检查磁带状态失败，跳过 offline: {e}")
+            return False
+
+        try:
+            ok, msg = await eject_tape(tape_device, timeout=600)
+        except Exception as e:
+            logger.warning(f"[LTFS] 磁带 offline 异常: {e}")
+            return False
+
+        if ok:
+            logger.info(f"[LTFS] 磁带已 offline（{msg}）")
+        else:
+            logger.warning(f"[LTFS] 磁带 offline 失败（非致命）: {msg}")
+        return ok
+
     async def unmount_ltfs(self, eject: bool = False) -> bool:
         """安全卸载 LTFS（委托给标准工具函数）
 

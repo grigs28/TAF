@@ -1,5 +1,19 @@
 # 更新日志
 
+## [1.9.25] - 2026-10-22
+
+### 修复
+
+- **停机未 offline，带子随系统关机后卷标签读取失败**：
+  2026-10-22 06:11 停服卸载 LTFS 时 `unmount_ltfs()` 未传 eject，
+  `safe_unmount_ltfs` 第 5 步因 `tape_device=None` 跳过 `mt offline`，
+  带子以"加载状态 + 停在索引分区末尾"随系统正常重启；06:20 挂载读
+  partition 1 标签失败（Act=4096，ILI），格式化重建后恢复。
+  - 停机流程 6/7 改为 `unmount_ltfs(eject=True)`，卸载后执行 `mt offline`
+  - 新增 `TapeHandler.offline_tape()`：未挂载但带子仍 ONLINE 时同样
+    offline 收尾；未加载则跳过（不触发 mt load）
+- 版本升至 1.9.25
+
 ## [1.9.24] - 2026-10-22
 
 ### 修复
