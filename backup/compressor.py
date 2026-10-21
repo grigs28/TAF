@@ -299,7 +299,58 @@ class Compressor:
                    f"平均组大小: {format_bytes(sum(group_sizes) / len(group_sizes))}")
         
         return groups
-    
+
+    def _claim_archive_path(self, backup_set_id: str, base_filename: str,
+                            archive_suffix: str, backup_dir: Path) -> Path:
+        """原子占用唯一的压缩输出文件名。
+
+        为什么不能用 exists()：文件由异步 zstd 子进程延迟创建。同一秒内并发
+        的多个组，会在前一个任务的文件尚未落盘时读到相同的 sequence，生成
+        同一个文件名 → 两个 zstd 进程写同一 inode（线上故障根因：一个任务
+        移走文件后，另一个报“压缩文件不存在”导致组失败；极端情况下输出被
+        互相截断，损坏文件被当作正常备份写带）。
+
+        用 O_CREAT|O_EXCL 原子创建占位文件：内核保证同一路径只有一个创建者，
+        其余任务递增序号重试。zstd 以 `-f -o` 打开时会覆盖占位文件。
+        """
+        if backup_set_id not in self._last_archive_info:
+            self._last_archive_info[backup_set_id] = {'last_filename': None, 'sequence': 0}
+        info = self._last_archive_info[backup_set_id]
+        sequence = int(info.get('sequence') or 0)
+        max_attempts = 1000
+
+        def _name(seq: int) -> str:
+            return (f"{base_filename}_{seq:04d}{archive_suffix}" if seq > 0
+                    else f"{base_filename}{archive_suffix}")
+
+        for _ in range(max_attempts):
+            filename = _name(sequence)
+            path = (backup_dir / filename).absolute()
+            try:
+                fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+                os.close(fd)
+            except FileExistsError:
+                sequence += 1
+                info['sequence'] = sequence
+                continue
+            info['last_filename'] = filename
+            info['sequence'] = sequence
+            return path
+
+        # 极端情况（同一秒内上千个组）：退回微秒时间戳，同样原子占用
+        from datetime import datetime as _dt
+        while True:
+            precise_timestamp = _dt.now().strftime('%Y%m%d_%H%M%S_%f')
+            filename = f"backup_{backup_set_id}_{precise_timestamp}{archive_suffix}"
+            path = (backup_dir / filename).absolute()
+            try:
+                fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+                os.close(fd)
+            except FileExistsError:
+                continue
+            info['last_filename'] = filename
+            return path
+
     async def compress_file_group(
         self, 
         file_group: List[Dict], 
@@ -489,49 +540,16 @@ class Compressor:
             # 生成唯一的压缩文件名，确保不重复
             backup_set_id = backup_set.set_id
             base_filename = f"backup_{backup_set_id}_{timestamp}"
-            
-            # 获取或初始化该备份集的序号信息
-            if backup_set_id not in self._last_archive_info:
-                self._last_archive_info[backup_set_id] = {'last_filename': None, 'sequence': 0}
-            
-            archive_info = self._last_archive_info[backup_set_id]
-            sequence = archive_info['sequence']
-            
-            # 生成文件名，如果序号 > 0，添加序号后缀
-            if sequence > 0:
-                filename = f"{base_filename}_{sequence:04d}{archive_suffix}"
-            else:
-                filename = f"{base_filename}{archive_suffix}"
-            
-            archive_path = backup_dir / filename
-            temp_archive_path = archive_path.absolute()
-            
-            # 检查文件是否已存在，如果存在则增加序号
-            max_attempts = 1000  # 最多尝试1000次
-            attempt = 0
-            while temp_archive_path.exists() and attempt < max_attempts:
-                sequence += 1
-                archive_info['sequence'] = sequence
-                if sequence > 0:
-                    filename = f"{base_filename}_{sequence:04d}{archive_suffix}"
-                else:
-                    filename = f"{base_filename}{archive_suffix}"
-                archive_path = backup_dir / filename
-                temp_archive_path = archive_path.absolute()
-                attempt += 1
-            
-            if attempt >= max_attempts:
-                logger.error(f"[压缩] 无法生成唯一的压缩文件名，已尝试 {max_attempts} 次，使用带微秒时间戳的文件名")
-                # 使用更精确的时间戳（包含微秒）
-                from datetime import datetime
-                precise_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-                filename = f"backup_{backup_set_id}_{precise_timestamp}{archive_suffix}"
-                archive_path = backup_dir / filename
-                temp_archive_path = archive_path.absolute()
-            
-            # 记录本次使用的文件名和序号
-            archive_info['last_filename'] = filename
-            archive_info['sequence'] = sequence
+
+            # 原子占用唯一文件名（O_CREAT|O_EXCL，不依赖 exists()）：
+            # 同秒并发的多个组此前会拿到同一文件名（异步 zstd 还没创建文件），
+            # 导致双写同一 inode / 组失败。
+            temp_archive_path = self._claim_archive_path(
+                backup_set_id, base_filename, archive_suffix, backup_dir)
+            filename = temp_archive_path.name
+            archive_path = temp_archive_path
+            archive_info = self._last_archive_info.get(backup_set_id, {})
+            sequence = int(archive_info.get('sequence') or 0)
 
             # ★ 通过守卫 = 真正开始压缩 = 从现在起会落地产出，此刻才计入
             # （此时产出文件路径已确定，记录路径供守卫按"剩余待产出"计算需求；
@@ -993,6 +1011,12 @@ class Compressor:
             logger.error(f"压缩文件组失败: {str(e)}")
             import traceback
             traceback.print_exc()
+            # 清理本次组独占的占位/半成品文件（组已失败，文件不再需要）
+            try:
+                if 'temp_archive_path' in locals() and temp_archive_path.exists():
+                    temp_archive_path.unlink()
+            except Exception:
+                pass
             return None
 
     def compute_required_free(self, pending_group_bytes: int = 0) -> Tuple[int, Dict]:
