@@ -655,9 +655,14 @@ function updateVegasRecommend() {
         const el = document.getElementById(id);
         if (el) el.textContent = text;
     };
-    setText('vegasBetaRecommend', r.concurrency <= 3
-        ? `${r.beta}（并发过低，快速闸不适用）`
-        : `${r.beta}（并发 ${r.concurrency}，快速闸 2β=${2 * r.beta} < 并发）`);
+    const betaEl = document.getElementById('vegasBetaRecommend');
+    if (betaEl) {
+        betaEl.textContent = String(r.beta);
+        // 依据放悬停，行内只显示数值（避免多段说明挤在一起）
+        betaEl.title = r.concurrency <= 3
+            ? '并发过低，快速闸不适用'
+            : `按并发 ${r.concurrency} 推荐；快速闸 2β=${2 * r.beta} < 并发`;
+    }
     setText('vegasDecayRecommend', r.minB >= r.concurrency
         ? '—（无降空间）'
         : r.decay.toFixed(2));
