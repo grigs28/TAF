@@ -628,6 +628,66 @@ document.addEventListener('DOMContentLoaded', function () {
     mfs.addEventListener('blur', onMaxFileSizeChanged);
 });
 
+// ===== Vegas 参数推荐：随「压缩并行批次数量」换算 =====
+// 目标：
+//   β    —— 约 N/3，限 [2,5]，且保证快速闸 2β < N（否则快速闸永远不触发）
+//   decay—— 约 3 档从 N 降到下限：decay = (min/N)^(1/3)
+//   min  —— 约 N/4（1~4），并发很低时允许降到 1
+function vegasRecommend(N) {
+    N = Math.max(1, parseInt(N, 10) || 6);
+    let minB = Math.min(N, Math.max(1, Math.min(4, Math.round(N / 4))));
+    let beta = Math.min(5, Math.max(2, Math.round((N / 3) * 2) / 2));
+    if (N <= 3) {
+        beta = 1;
+    } else if (2 * beta >= N) {
+        // 保证 deficit 上限（=N）能跨过快速闸阈值 2β
+        beta = Math.max(1, Math.min(5, Math.floor((N - 1) / 2 * 2) / 2));
+    }
+    let decay = Math.pow(minB / N, 1 / 3);
+    decay = Math.max(0.3, Math.min(0.95, Math.round(decay * 20) / 20));
+    return { beta: beta, decay: decay, minB: minB, concurrency: N };
+}
+
+function updateVegasRecommend() {
+    const nEl = document.getElementById('compressionParallelBatches');
+    const r = vegasRecommend(nEl ? parseInt(nEl.value, 10) : 6);
+    const setText = (id, text) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = text;
+    };
+    setText('vegasBetaRecommend', r.concurrency <= 3
+        ? `${r.beta}（并发过低，快速闸不适用）`
+        : `${r.beta}（并发 ${r.concurrency}，快速闸 2β=${2 * r.beta} < 并发）`);
+    setText('vegasDecayRecommend', r.minB >= r.concurrency
+        ? '—（无降空间）'
+        : r.decay.toFixed(2));
+    setText('vegasMinRecommend', String(r.minB));
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    const nEl = document.getElementById('compressionParallelBatches');
+    if (nEl) {
+        nEl.addEventListener('change', updateVegasRecommend);
+        nEl.addEventListener('input', updateVegasRecommend);
+    }
+    const applyBtn = document.getElementById('applyVegasRecommend');
+    if (applyBtn) {
+        applyBtn.addEventListener('click', function () {
+            const nEl2 = document.getElementById('compressionParallelBatches');
+            const r = vegasRecommend(nEl2 ? parseInt(nEl2.value, 10) : 6);
+            const setVal = (id, v) => {
+                const el = document.getElementById(id);
+                if (el) el.value = v;
+            };
+            setVal('vegasBeta', r.beta);
+            setVal('vegasDecay', r.decay.toFixed(2));
+            setVal('vegasMinBatches', r.minB);
+            updateVegasRecommend();
+        });
+    }
+    updateVegasRecommend();
+});
+
 // ===== 统一系统配置管理 =====
 // 加载所有系统配置
 // 磁盘限流开关联动：关闭时把同组磁盘参数一并置灰（仅不可编辑，数值不变、照常提交）
@@ -821,6 +881,8 @@ async function loadAllSystemConfig() {
             const vm = document.getElementById('vegasMinBatches');
             if (vm) vm.value = (config.group_vegas_min_batches !== undefined && config.group_vegas_min_batches !== null)
                 ? config.group_vegas_min_batches : 2;
+            // 按当前并发刷新 Vegas 参数推荐值
+            updateVegasRecommend();
             // 空间守卫开关（默认启用；老数据无该字段时按启用处理）
             const gsw = document.getElementById('diskGuardEnabled');
             if (gsw) {

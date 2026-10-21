@@ -186,16 +186,24 @@
                         <label class="form-label">降并发阈值 β</label>
                         <input type="number" class="form-control" id="vegasBeta" value="3.0" min="1" max="20" step="0.5">
                         <small class="form-text text-secondary">deficit 超过此值时并发乘性下降；越小越敏感（默认 3.0）</small>
+                        <small class="form-text text-secondary">✓ 推荐 <b id="vegasBetaRecommend">—</b>（按当前并发，保证快速闸 2β 小于并发）</small>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">每次降并发比例</label>
                         <input type="number" class="form-control" id="vegasDecay" value="0.7" min="0.3" max="0.95" step="0.05">
                         <small class="form-text text-secondary">如 0.7 表示并发 ×0.7（默认 0.7，范围 0.3-0.95）</small>
+                        <small class="form-text text-secondary">✓ 推荐 <b id="vegasDecayRecommend">—</b>（约 3 档降到下限）</small>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">自适应并发下限</label>
                         <input type="number" class="form-control" id="vegasMinBatches" value="2" min="1" max="64" step="1">
                         <small class="form-text text-secondary">自适应最多降到该并发数（默认 2）</small>
+                        <small class="form-text text-secondary">✓ 推荐 <b id="vegasMinRecommend">—</b></small>
+                        <div class="mt-2">
+                            <button type="button" class="btn btn-outline-secondary btn-sm" id="applyVegasRecommend">
+                                <i class="bi bi-magic me-1"></i>应用建议
+                            </button>
+                        </div>
                     </div>
 
                     <!-- ── 磁盘限流 ── -->
