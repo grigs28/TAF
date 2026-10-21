@@ -24,7 +24,6 @@ import logging
 import os
 import re
 import subprocess
-import time
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -78,7 +77,6 @@ async def safe_unmount_ltfs(
     tape_device=None,
     wait_ltfs=True,
     max_wait=3600,
-    ltfs_process=None,
 ):
     """完整5步安全卸载 LTFS（遵循 IBM/Quantum 官方文档）
 
@@ -87,9 +85,6 @@ async def safe_unmount_ltfs(
         tape_device: 磁带设备路径（如 /dev/nst0），为 None 则跳过 mt offline
         wait_ltfs: 是否等待 LTFS 进程退出（索引+CM数据写入）
         max_wait: 等待 LTFS 进程退出的最大秒数
-        ltfs_process: asyncio 子进程对象（挂载时创建）。传入后可直接拿到
-            退出码，用于确认索引/MAM 是否真的写完；为 None 时退化为
-            pgrep 轮询（只能知道进程消失，拿不到退出码）。
 
     Returns:
         (success, message)
@@ -123,47 +118,33 @@ async def safe_unmount_ltfs(
             except Exception:
                 pass
 
-        # 步骤 3: 等待 LTFS 进程完全退出（写索引+CM数据），并校验退出码
+        # 步骤 3: 等待 LTFS 进程完全退出（写索引+CM数据）
+        #
+        # 注意：不能用挂载时创建的 asyncio 进程对象判断"索引写完"——LTFS
+        # 启动后会 fork 出服务子进程，父进程在初始化完成后立即退出（退出码
+        # 0），而子进程此时仍在写索引。2026-10-22 实测：拿到退出码 0 时
+        # LTFS 还在写索引，紧接着的 mt offline 报 Medium removal prevented。
+        # 因此必须轮询所有 ltfs 进程消失。
         if wait_ltfs:
-            if ltfs_process is not None:
-                logger.info("[LTFS卸载] 3/5 等待 LTFS 进程退出（写入索引和CM数据）...")
-                exited, waited, returncode = await _wait_process_exit(ltfs_process, max_wait)
-                if not exited:
-                    logger.warning(
-                        f"[LTFS卸载] LTFS 进程在 {max_wait} 秒后仍未退出，"
-                        f"无法确认索引写入结果"
-                    )
-                elif returncode == 0:
-                    logger.info(
-                        f"[LTFS卸载] LTFS 进程正常退出（退出码 0，等待 {waited} 秒，"
-                        f"索引/MAM 已写入）"
-                    )
-                else:
-                    logger.warning(
-                        f"[LTFS卸载] LTFS 进程退出码 {returncode}（等待 {waited} 秒）"
-                        f"——索引/MAM 可能未正常写入，建议检查磁带完整性"
-                    )
-            else:
-                # 进程对象不可用（如服务重启后），退化为 pgrep 轮询：
-                # 只能确认进程消失，拿不到退出码
-                try:
-                    result = subprocess.run(
-                        ["pgrep", "-x", "ltfs"],
-                        capture_output=True, text=True, timeout=5,
-                    )
-                    already_exited = result.returncode != 0
-                except Exception:
-                    already_exited = True
+            # fusermount 返回后先检查 LTFS 进程是否已退出
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-x", "ltfs"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                already_exited = result.returncode != 0
+            except Exception:
+                already_exited = True
 
-                if already_exited:
-                    logger.info("[LTFS卸载] 3/5 LTFS 进程已退出（fusermount 返回时已清理完毕）")
+            if already_exited:
+                logger.info("[LTFS卸载] 3/5 LTFS 进程已退出（fusermount 返回时已清理完毕）")
+            else:
+                logger.info("[LTFS卸载] 3/5 等待 LTFS 进程退出（写入索引和CM数据）...")
+                exited, waited = await _wait_ltfs_exit(max_wait)
+                if exited:
+                    logger.info(f"[LTFS卸载] LTFS 进程已退出（等待 {waited} 秒）")
                 else:
-                    logger.info("[LTFS卸载] 3/5 等待 LTFS 进程退出（写入索引和CM数据）...")
-                    exited, waited = await _wait_ltfs_exit(max_wait)
-                    if exited:
-                        logger.info(f"[LTFS卸载] LTFS 进程已退出（等待 {waited} 秒，无法获取退出码）")
-                    else:
-                        logger.warning(f"[LTFS卸载] LTFS 进程在 {max_wait} 秒后仍未退出")
+                    logger.warning(f"[LTFS卸载] LTFS 进程在 {max_wait} 秒后仍未退出")
         else:
             logger.info("[LTFS卸载] 3/5 跳过等待 LTFS 进程退出")
 
@@ -279,6 +260,10 @@ async def eject_tape(tape_device, timeout=600):
     mt offline 会将磁带卷回并弹出（与 mt eject 等价）。
     超时后不杀进程（mt 仍在后台运行），返回超时状态由调用方处理。
 
+    失败时会重试：第一次等 10 秒（LTFS 刚退出时驱动器可能还没清 PMM）；
+    若报 "Medium removal prevented"，发送 SCSI ALLOW MEDIUM REMOVAL
+    （0x1E）解除 PMM 后再试。
+
     Args:
         tape_device: 磁带设备路径（如 /dev/nst0）
         timeout: 超时秒数（默认600s），超时不杀进程
@@ -289,6 +274,34 @@ async def eject_tape(tape_device, timeout=600):
     if not tape_device:
         return False, "未指定磁带设备"
 
+    last_msg = ""
+    for attempt in range(3):
+        ok, msg = await _mt_offline_once(tape_device, timeout)
+        if ok:
+            return True, msg
+        last_msg = msg
+        # 超时说明 mt 进程仍在后台运行，再发起新进程会争用设备，不能重试
+        if "超时" in msg:
+            return False, msg
+        if attempt == 0:
+            logger.warning(f"[磁带弹出] mt offline 失败，10 秒后重试: {msg}")
+            await asyncio.sleep(10)
+        elif attempt == 1 and (
+            "Medium removal prevented" in msg
+            or "medium removal prevented" in msg
+            or "Input/output error" in msg
+        ):
+            # 驱动器 PMM（Prevent Medium Removal）标志未清除
+            logger.warning("[磁带弹出] 介质移除被阻止，发送 ALLOW MEDIUM REMOVAL 后重试...")
+            await _allow_medium_removal(tape_device)
+            await asyncio.sleep(2)
+
+    logger.error(f"[磁带弹出] mt offline 最终失败: {last_msg}")
+    return False, last_msg
+
+
+async def _mt_offline_once(tape_device, timeout=600):
+    """执行一次 mt offline（内部辅助）"""
     try:
         logger.info(f"[磁带弹出] mt -f {tape_device} offline（超时 {timeout}s，超时不杀进程）...")
         proc = await asyncio.create_subprocess_exec(
@@ -314,19 +327,50 @@ async def eject_tape(tape_device, timeout=600):
         if proc.returncode == 0:
             logger.info("[磁带弹出] 磁带已弹出")
             return True, "磁带已弹出"
-        else:
-            # 读取 stderr
-            try:
-                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
-            except Exception:
-                stderr = None
-            err = stderr.decode("utf-8", errors="ignore").strip() if stderr else f"返回码 {proc.returncode}"
-            logger.error(f"[磁带弹出] mt offline 失败: {err}")
-            return False, err
+
+        # 读取 stderr
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+        except Exception:
+            stderr = None
+        err = stderr.decode("utf-8", errors="ignore").strip() if stderr else f"返回码 {proc.returncode}"
+        logger.error(f"[磁带弹出] mt offline 失败: {err}")
+        return False, err
     except FileNotFoundError:
         return False, "mt 命令未找到"
     except Exception as e:
         return False, str(e)
+
+
+async def _allow_medium_removal(tape_device):
+    """发送 SCSI ALLOW MEDIUM REMOVAL (0x1E)，解除驱动器 PMM 标志。
+
+    LTFS 异常退出时可能遗留 Prevent Medium Removal 标志，导致 mt offline
+    报 "Medium removal prevented" / "Input/output error"。
+    """
+    sg_device = resolve_ltfs_sg_device(None, tape_device)
+    if not sg_device:
+        logger.warning("[磁带弹出] 无法解析 sg 设备，跳过 ALLOW MEDIUM REMOVAL")
+        return False
+
+    def _run():
+        return subprocess.run(
+            ["sg_raw", sg_device, "1e", "00", "00", "00", "00", "00"],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    try:
+        r = await asyncio.to_thread(_run)
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 0 and "Good" in out:
+            logger.info("[磁带弹出] ALLOW MEDIUM REMOVAL 发送成功")
+            return True
+        logger.warning(f"[磁带弹出] ALLOW MEDIUM REMOVAL 返回码 {r.returncode}: {out.strip()[:200]}")
+    except FileNotFoundError:
+        logger.warning("[磁带弹出] sg_raw 未安装，跳过 ALLOW MEDIUM REMOVAL")
+    except Exception as e:
+        logger.warning(f"[磁带弹出] ALLOW MEDIUM REMOVAL 异常: {e}")
+    return False
 
 
 # ========== 内部辅助函数 ==========
@@ -357,29 +401,6 @@ async def _do_unmount(mount_point):
     except Exception as e:
         logger.warning(f"[LTFS] fusermount 失败: {e}")
         return False
-
-
-async def _wait_process_exit(process, max_wait=3600, poll_interval=5):
-    """等待 asyncio 子进程退出并返回退出码。
-
-    比 pgrep 轮询更可靠：能区分"正常写完索引后退出"（退出码 0）和
-    "写索引/MAM 失败后异常退出"（非 0）。每 60 秒输出一次等待日志。
-
-    Returns:
-        (exited, waited_seconds, returncode)
-        returncode 为 None 表示超时未退出
-    """
-    start = time.time()
-    waited = 0
-    while waited < max_wait:
-        try:
-            returncode = await asyncio.wait_for(process.wait(), timeout=poll_interval)
-            return True, int(time.time() - start), returncode
-        except asyncio.TimeoutError:
-            waited += poll_interval
-            if waited % 60 == 0:
-                logger.info(f"[LTFS卸载] LTFS 进程仍在写索引... ({waited}s)")
-    return False, int(time.time() - start), None
 
 
 async def _wait_ltfs_exit(max_wait=3600, poll_interval=5):

@@ -1,5 +1,22 @@
 # 更新日志
 
+## [1.9.27] - 2026-10-22
+
+### 修复
+
+- **回退 1.9.26 的进程退出码校验（LTFS fork 导致误判）**：
+  实测发现 LTFS 启动后会 fork 出服务子进程，父进程初始化完成即退出
+  （退出码 0）。用挂载时的 process 对象判断"索引写完"会提前放行：
+  实测 07:26:35 拿到退出码 0 时 LTFS 仍在写索引（07:27:01 才
+  `Volume unmounted successfully`），紧接着的 `mt offline` 报
+  `Medium removal prevented`。恢复 pgrep 轮询等待所有 ltfs 进程消失。
+- **mt offline 增加重试与 PMM 解除**：
+  - 第一次失败等 10 秒重试（LTFS 刚退出时驱动器可能尚未清除 PMM）
+  - 报 `Medium removal prevented` / `Input/output error` 时发送
+    SCSI ALLOW MEDIUM REMOVAL（0x1E，sg_raw）后再重试
+  - 超时不重试（mt 进程仍在后台运行，重复发起会争用设备）
+- 版本升至 1.9.27
+
 ## [1.9.26] - 2026-10-22
 
 ### 改进
