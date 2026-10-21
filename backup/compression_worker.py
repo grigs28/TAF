@@ -297,6 +297,10 @@ class CompressionWorker:
                         # 否则重新开启时会立刻被旧 limit 夹住，看起来像“开关无效”
                         self._vegas_limit = 0
                         self._vegas_hold_until = 0.0
+                        self._vegas_low_windows = 0
+                        # 展示值重置：重开前卡片显示“无基准”，避免旧健康度误导
+                        self._vegas_rate_ewma = 0.0
+                        self._vegas_base = 0.0
                     self._vegas_beta = float(
                         getattr(fresh_settings, 'GROUP_VEGAS_BETA', self._vegas_beta) or self._vegas_beta)
                     self._vegas_decay = float(
