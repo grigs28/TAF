@@ -1453,6 +1453,32 @@ class CompressionWorker:
                     self.total_size += compressed_size
                     self.total_original_size += original_size
 
+                    # 压缩比异常（源 >100MB 且压缩后 <0.1%）：记录本组文件清单，
+                    # 供已完成任务卡片的「错误日志」弹窗定位（这类文件可能未真正备份）
+                    if (original_size > 100 * 1024 * 1024 and compressed_size > 0
+                            and compressed_size / original_size < 0.001):
+                        try:
+                            _paths = [
+                                (f.get('path') or f.get('file_path') or '?')
+                                for f in (processed_file_group or [])
+                            ]
+                            _sample = '；'.join(_paths[:20])
+                            if len(_paths) > 20:
+                                _sample += f"；等 {len(_paths)} 个文件"
+                            _ratio = compressed_size / original_size * 100
+                            self.error_logs.append({
+                                'category': 'compress',
+                                'time': time.strftime('%Y-%m-%d %H:%M:%S'),
+                                'message': (
+                                    f"组 #{group_idx + 1} 压缩比异常："
+                                    f"{format_bytes(original_size)} → "
+                                    f"{format_bytes(compressed_size)}（{_ratio:.3f}%）"
+                                ),
+                                'detail': f"文件清单（{len(_paths)} 个）：{_sample}",
+                            })
+                        except Exception:
+                            pass
+
                     # 记录压缩失败的文件（带文件名）到系统日志
                     failed_files = compressed_info.get('failed_files', [])
                     if failed_files:

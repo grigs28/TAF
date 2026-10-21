@@ -110,6 +110,10 @@ class FinalDirMonitor:
             self._starve_start = None
             self._has_written_once = False
             self.error_logs = []
+            # 新任务开始：清空上一任务的处理记录。监控线程常驻，集合若不清空
+            # 会跨任务累积——同一天重跑同一 set_id 时同名文件会被永久跳过，
+            # 且内存随文件数增长。
+            self._processed_files.clear()
 
     def finalize_starvation(self) -> float:
         """任务收尾调用：丢弃未结算的最后一段等待。
