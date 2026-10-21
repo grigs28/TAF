@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -77,6 +78,7 @@ async def safe_unmount_ltfs(
     tape_device=None,
     wait_ltfs=True,
     max_wait=3600,
+    ltfs_process=None,
 ):
     """完整5步安全卸载 LTFS（遵循 IBM/Quantum 官方文档）
 
@@ -85,6 +87,9 @@ async def safe_unmount_ltfs(
         tape_device: 磁带设备路径（如 /dev/nst0），为 None 则跳过 mt offline
         wait_ltfs: 是否等待 LTFS 进程退出（索引+CM数据写入）
         max_wait: 等待 LTFS 进程退出的最大秒数
+        ltfs_process: asyncio 子进程对象（挂载时创建）。传入后可直接拿到
+            退出码，用于确认索引/MAM 是否真的写完；为 None 时退化为
+            pgrep 轮询（只能知道进程消失，拿不到退出码）。
 
     Returns:
         (success, message)
@@ -118,27 +123,47 @@ async def safe_unmount_ltfs(
             except Exception:
                 pass
 
-        # 步骤 3: 等待 LTFS 进程完全退出（写索引+CM数据）
+        # 步骤 3: 等待 LTFS 进程完全退出（写索引+CM数据），并校验退出码
         if wait_ltfs:
-            # fusermount 返回后先检查 LTFS 进程是否已退出
-            try:
-                result = subprocess.run(
-                    ["pgrep", "-x", "ltfs"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                already_exited = result.returncode != 0
-            except Exception:
-                already_exited = True
-
-            if already_exited:
-                logger.info("[LTFS卸载] 3/5 LTFS 进程已退出（fusermount 返回时已清理完毕）")
-            else:
+            if ltfs_process is not None:
                 logger.info("[LTFS卸载] 3/5 等待 LTFS 进程退出（写入索引和CM数据）...")
-                exited, waited = await _wait_ltfs_exit(max_wait)
-                if exited:
-                    logger.info(f"[LTFS卸载] LTFS 进程已退出（等待 {waited} 秒）")
+                exited, waited, returncode = await _wait_process_exit(ltfs_process, max_wait)
+                if not exited:
+                    logger.warning(
+                        f"[LTFS卸载] LTFS 进程在 {max_wait} 秒后仍未退出，"
+                        f"无法确认索引写入结果"
+                    )
+                elif returncode == 0:
+                    logger.info(
+                        f"[LTFS卸载] LTFS 进程正常退出（退出码 0，等待 {waited} 秒，"
+                        f"索引/MAM 已写入）"
+                    )
                 else:
-                    logger.warning(f"[LTFS卸载] LTFS 进程在 {max_wait} 秒后仍未退出")
+                    logger.warning(
+                        f"[LTFS卸载] LTFS 进程退出码 {returncode}（等待 {waited} 秒）"
+                        f"——索引/MAM 可能未正常写入，建议检查磁带完整性"
+                    )
+            else:
+                # 进程对象不可用（如服务重启后），退化为 pgrep 轮询：
+                # 只能确认进程消失，拿不到退出码
+                try:
+                    result = subprocess.run(
+                        ["pgrep", "-x", "ltfs"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    already_exited = result.returncode != 0
+                except Exception:
+                    already_exited = True
+
+                if already_exited:
+                    logger.info("[LTFS卸载] 3/5 LTFS 进程已退出（fusermount 返回时已清理完毕）")
+                else:
+                    logger.info("[LTFS卸载] 3/5 等待 LTFS 进程退出（写入索引和CM数据）...")
+                    exited, waited = await _wait_ltfs_exit(max_wait)
+                    if exited:
+                        logger.info(f"[LTFS卸载] LTFS 进程已退出（等待 {waited} 秒，无法获取退出码）")
+                    else:
+                        logger.warning(f"[LTFS卸载] LTFS 进程在 {max_wait} 秒后仍未退出")
         else:
             logger.info("[LTFS卸载] 3/5 跳过等待 LTFS 进程退出")
 
@@ -332,6 +357,29 @@ async def _do_unmount(mount_point):
     except Exception as e:
         logger.warning(f"[LTFS] fusermount 失败: {e}")
         return False
+
+
+async def _wait_process_exit(process, max_wait=3600, poll_interval=5):
+    """等待 asyncio 子进程退出并返回退出码。
+
+    比 pgrep 轮询更可靠：能区分"正常写完索引后退出"（退出码 0）和
+    "写索引/MAM 失败后异常退出"（非 0）。每 60 秒输出一次等待日志。
+
+    Returns:
+        (exited, waited_seconds, returncode)
+        returncode 为 None 表示超时未退出
+    """
+    start = time.time()
+    waited = 0
+    while waited < max_wait:
+        try:
+            returncode = await asyncio.wait_for(process.wait(), timeout=poll_interval)
+            return True, int(time.time() - start), returncode
+        except asyncio.TimeoutError:
+            waited += poll_interval
+            if waited % 60 == 0:
+                logger.info(f"[LTFS卸载] LTFS 进程仍在写索引... ({waited}s)")
+    return False, int(time.time() - start), None
 
 
 async def _wait_ltfs_exit(max_wait=3600, poll_interval=5):

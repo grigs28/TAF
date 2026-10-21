@@ -733,6 +733,8 @@ class TapeHandler:
                 mount_point=mount_point,
                 tape_device=tape_device,
                 wait_ltfs=True,
+                # 传入挂载时的进程对象：卸载后可拿到退出码，确认索引/MAM 已写入
+                ltfs_process=self._ltfs_process,
             )
             self._ltfs_mounted = False
             self._ltfs_process = None
