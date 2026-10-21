@@ -1060,6 +1060,31 @@ class BackupEngine:
                         'message': str(backup_task.error_message)[:500],
                         'detail': '',
                     })
+                # 压缩比异常等条目带完整文件清单（'files'）：写独立导出文件，
+                # result_summary 只保留摘要，避免 jsonb 膨胀。
+                try:
+                    _export_dir = Path('logs') / 'task_errors'
+                    _export_dir.mkdir(parents=True, exist_ok=True)
+                    _export_path = _export_dir / f"task_{backup_task.id}.txt"
+                    _sections = []
+                    for _it in _err_logs:
+                        if isinstance(_it, dict) and _it.get('files'):
+                            _sections.append((_it.get('message') or '', _it.pop('files')))
+                    if _sections:
+                        with open(_export_path, 'w', encoding='utf-8') as _ef:
+                            _ef.write(f"任务 {backup_task.id} 错误文件清单\n")
+                            _ef.write(f"生成时间: {format_datetime(now())}\n")
+                            for _msg, _files in _sections:
+                                _ef.write(f"\n# {_msg}\n")
+                                for _p in _files:
+                                    _ef.write(f"{_p}\n")
+                        for _it in _err_logs:
+                            if (isinstance(_it, dict)
+                                    and _it.get('category') == 'compress'):
+                                _it['export_available'] = True
+                        _final_extra['error_export_file'] = str(_export_path)
+                except Exception as _exp_err:
+                    logger.debug(f"[备份引擎] 写错误清单导出文件失败: {_exp_err}")
                 _final_extra['error_logs'] = _err_logs[:200]
             except Exception as _errlog_err:
                 logger.debug(f"[备份引擎] 汇总错误日志失败: {_errlog_err}")

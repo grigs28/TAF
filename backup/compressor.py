@@ -937,7 +937,10 @@ class Compressor:
                 max_checks = int(max_wait_seconds / check_interval)
                 last_size = None
                 stable_count = 0
-                stable_required = 3
+                # 连续 10 次（0.5s 间隔 = 5 秒）大小不变才认定写完：
+                # 原先 1.5 秒窗口在 NFS 读取停顿/同名双写时会把仍在写入的文件
+                # 提前移入 final，导致写带大小校验失败。
+                stable_required = 10
                 
                 while wait_count < max_checks and stable_count < stable_required:
                     await asyncio.sleep(check_interval)

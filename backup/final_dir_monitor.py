@@ -63,6 +63,8 @@ class FinalDirMonitor:
         # 错误明细（供“错误日志”弹窗，任务结束时持久化到 result_summary）
         # 元素：{'category': 'tape', 'time': str, 'message': str, 'detail': str}
         self.error_logs: list = []
+        # 本轮是否因“文件仍在写入”而跳过（调用方据此不标记已处理，留待下次轮询）
+        self._defer_current_file: bool = False
         
     def start(self):
         """启动监控线程"""
@@ -200,6 +202,25 @@ class FinalDirMonitor:
 
             # 获取源文件大小（用于验证）
             source_size = source_file.stat().st_size
+
+            # 复制前稳定性复核（P1-5）：间隔 2 秒两次 stat，大小变化说明
+            # 压缩侧仍在写入（或同名任务并发写），本轮跳过、下轮再试，
+            # 避免复制到一半源文件继续增长导致大小校验失败。
+            try:
+                _s1 = source_file.stat().st_size
+                time.sleep(2.0)
+                _s2 = source_file.stat().st_size
+            except OSError:
+                logger.warning(f"[Final监控] 文件在复核期间消失: {source_file}")
+                return False
+            if _s1 != _s2:
+                logger.warning(
+                    f"[Final监控] 文件仍在写入（{_s1} -> {_s2}），本轮跳过: {source_file.name}")
+                # 通知调用方：这是“暂时跳过”，不要标记为已处理（下一轮重试）
+                self._defer_current_file = True
+                return False
+            source_size = _s2
+
             logger.info(f"[Final监控] 开始移动文件到磁带: {source_file.name} (大小: {format_bytes(source_size)})")
 
             # 从路径提取backup_set_id
@@ -377,6 +398,7 @@ class FinalDirMonitor:
                     pass
 
                 self._current_tape_file = str(fp)
+                self._defer_current_file = False
                 try:
                     ok = self._move_file_to_tape(fp)
                 finally:
@@ -481,9 +503,15 @@ class FinalDirMonitor:
                             
                             # 移动文件到磁带
                             self._current_tape_file = str(file_path)
+                            self._defer_current_file = False
                             success = self._move_file_to_tape(file_path)
                             self._current_tape_file = None
-                            
+
+                            if self._defer_current_file:
+                                # 文件仍在写入：不标记已处理，下一轮重新检查
+                                logger.info(f"[Final监控] 文件仍在写入，留待下一轮: {file_path.name}")
+                                continue
+
                             # 标记为已处理（无论成功与否，避免重复处理）
                             self._processed_files.add(file_key)
                             

@@ -1474,7 +1474,10 @@ class CompressionWorker:
                                     f"{format_bytes(original_size)} → "
                                     f"{format_bytes(compressed_size)}（{_ratio:.3f}%）"
                                 ),
-                                'detail': f"文件清单（{len(_paths)} 个）：{_sample}",
+                                'detail': (f"文件清单（{len(_paths)} 个）：{_sample}"
+                                           + ("（完整清单可在弹窗中导出）" if len(_paths) > 20 else "")),
+                                # 完整清单（任务结束时写入导出文件，不塞进 result_summary）
+                                'files': _paths,
                             })
                         except Exception:
                             pass

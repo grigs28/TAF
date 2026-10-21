@@ -259,6 +259,18 @@
                 （${formatBytes(Number(data.quarantined_bytes) || 0)}），可在隔离目录补写/排查。</div>`;
         }
 
+        // 压缩比异常等完整文件清单：任务结束时写入导出文件，可下载
+        const _hasExport = !!data.error_export_file
+            || logs.some(it => it && it.export_available);
+        if (_hasExport) {
+            html += `<div class="mt-2">
+                <a class="btn btn-sm btn-outline-secondary"
+                   href="/api/backup/tasks/${encodeURIComponent(data.task_id)}/error-logs/export"
+                   download>导出文件清单</a>
+                <small class="text-muted ms-2">完整文件路径（纯文本）</small>
+            </div>`;
+        }
+
         bodyEl.innerHTML = html;
     }
 

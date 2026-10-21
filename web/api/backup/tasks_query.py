@@ -1095,9 +1095,39 @@ async def get_task_error_logs(task_id: int, http_request: Request):
             "error_logs": rs.get('error_logs') or [],
             "quarantined_files": rs.get('quarantined_files', 0),
             "quarantined_bytes": rs.get('quarantined_bytes', 0),
+            "error_export_file": rs.get('error_export_file'),
         }
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"读取任务错误日志失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/tasks/{task_id}/error-logs/export")
+async def export_task_error_logs(task_id: int):
+    """导出任务错误文件清单（压缩比异常等完整文件路径）。
+
+    文件由任务结束时写入 `logs/task_errors/task_{task_id}.txt`，按纯文本
+    下载；路径由 task_id 拼接，不接受任意文件路径。
+    """
+    from pathlib import Path as _Path
+    from fastapi.responses import PlainTextResponse
+
+    _fp = _Path('logs') / 'task_errors' / f"task_{int(task_id)}.txt"
+    if not _fp.exists():
+        raise HTTPException(status_code=404, detail="该任务没有可导出的错误文件清单")
+    try:
+        _content = _fp.read_text(encoding='utf-8')
+    except Exception as e:
+        logger.error(f"读取错误清单文件失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return PlainTextResponse(
+        content=_content,
+        media_type='text/plain; charset=utf-8',
+        headers={
+            'Content-Disposition':
+                f'attachment; filename="task_{int(task_id)}_error_files.txt"'
+        },
+    )
