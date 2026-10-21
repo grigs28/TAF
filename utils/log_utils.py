@@ -191,3 +191,57 @@ async def log_system(
         logger.error(f"记录系统日志失败: {str(e)}")
         logger.error(f"错误详情:\n{traceback.format_exc()}")
         return False
+
+
+async def cleanup_expired_logs(months: Optional[int] = None) -> Dict[str, int]:
+    """删除超过保留期的操作日志与系统日志。
+
+    Args:
+        months: 保留月数；None 时读取 settings.LOG_RETENTION_MONTHS（默认 12）。
+                <=0 表示不清理。
+
+    Returns:
+        {'operation_logs': 删除数, 'system_logs': 删除数}
+    """
+    try:
+        from config.settings import get_settings
+        _m = int(months if months is not None else
+                 (getattr(get_settings(), 'LOG_RETENTION_MONTHS', 12) or 12))
+    except Exception:
+        _m = 12
+    if _m <= 0:
+        return {'operation_logs': 0, 'system_logs': 0}
+
+    result = {'operation_logs': 0, 'system_logs': 0}
+    try:
+        async with get_opengauss_connection() as conn:
+            op_where = "operation_time < now() - ($1::int * interval '1 month')"
+            sys_where = "log_time < now() - ($1::int * interval '1 month')"
+
+            row = await conn.fetchrow(
+                f"SELECT COUNT(*) AS c FROM operation_logs WHERE {op_where}", _m)
+            result['operation_logs'] = int(row['c']) if row else 0
+            row = await conn.fetchrow(
+                f"SELECT COUNT(*) AS c FROM system_logs WHERE {sys_where}", _m)
+            result['system_logs'] = int(row['c']) if row else 0
+
+            if result['operation_logs']:
+                await conn.execute(
+                    f"DELETE FROM operation_logs WHERE {op_where}", _m)
+            if result['system_logs']:
+                await conn.execute(
+                    f"DELETE FROM system_logs WHERE {sys_where}", _m)
+
+            # psycopg3 binary protocol 需要显式提交事务
+            actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+            try:
+                await actual_conn.commit()
+            except Exception:
+                pass
+
+        logger.info(
+            f"[日志保留] 保留 {_m} 个月，清理操作日志 "
+            f"{result['operation_logs']} 条、系统日志 {result['system_logs']} 条")
+    except Exception as e:
+        logger.warning(f"[日志保留] 清理过期日志失败: {e}")
+    return result

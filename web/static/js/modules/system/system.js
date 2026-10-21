@@ -742,6 +742,10 @@ async function loadAllSystemConfig() {
                 const quarantineDirInput = document.getElementById('quarantineDir');
                 if (quarantineDirInput) quarantineDirInput.value = config.quarantine_dir;
             }
+            if (config.log_retention_months) {
+                const logRetentionSelect = document.getElementById('logRetentionMonths');
+                if (logRetentionSelect) logRetentionSelect.value = String(config.log_retention_months);
+            }
             if (config.scan_update_interval) {
                 const scanUpdateIntervalInput = document.getElementById('scanUpdateInterval');
                 if (scanUpdateIntervalInput) scanUpdateIntervalInput.value = config.scan_update_interval;
@@ -903,6 +907,12 @@ async function saveEnvConfigSection() {
             max_file_size: parseFloat(document.getElementById('maxFileSizeGB')?.value) * 1024 * 1024 * 1024 || null,
             backup_compress_dir: document.getElementById('backupCompressDir')?.value || null,
             quarantine_dir: document.getElementById('quarantineDir')?.value || null,
+            log_retention_months: (() => {
+                const el = document.getElementById('logRetentionMonths');
+                if (!el) return null;
+                const v = parseInt(el.value);
+                return Number.isFinite(v) ? v : null;
+            })(),
             scan_update_interval: (() => {
                 const input = document.getElementById('scanUpdateInterval');
                 if (!input) return null;

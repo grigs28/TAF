@@ -407,6 +407,9 @@ class TapeBackupSystem:
                 
                 asyncio.create_task(shutdown_monitor())
 
+            # 数据库日志保留清理：启动时执行一次，之后每 24 小时执行
+            asyncio.create_task(_log_retention_loop())
+
             await serve(self.web_app, config)
 
         except Exception as e:
@@ -496,6 +499,18 @@ class TapeBackupSystem:
         except Exception as e:
             logger = logging.getLogger(__name__)
             logger.error(f"系统关闭时发生错误: {str(e)}")
+
+
+async def _log_retention_loop():
+    """数据库日志保留清理：启动时执行一次，之后每 24 小时执行"""
+    from utils.log_utils import cleanup_expired_logs
+    _logger = logging.getLogger(__name__)
+    while True:
+        try:
+            await cleanup_expired_logs()
+        except Exception as e:
+            _logger.warning(f"日志保留清理失败: {e}")
+        await asyncio.sleep(24 * 3600)
 
 
 def setup_signal_handlers(system):

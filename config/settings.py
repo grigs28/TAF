@@ -180,6 +180,9 @@ class Settings(BaseSettings):
     # 写带失败文件的隔离目录：任务收尾时 final 中仍写不进磁带的文件移动到这里，
     # 不删除（保留补写/排查）；放系统盘（/TAF）避免占用 SSD 压缩盘空间。
     QUARANTINE_DIR: str = "/TAF/quarantine"
+    # 数据库日志保留时间（月）：operation_logs / system_logs 超过该期限的记录
+    # 由后台任务每日清理（1=1个月，12=1年，24=2年）
+    LOG_RETENTION_MONTHS: int = 12
     VERIFY_TEMP_DIR: str = "temp/verify"  # 验证任务临时目录
     COMPRESSION_THREADS: int = 3  # Python压缩线程数（py7zr/PGZip）
     # 压缩方法配置

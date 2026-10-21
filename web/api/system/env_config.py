@@ -54,6 +54,7 @@ class SystemEnvConfig(BaseModel):
     max_file_size: Optional[int] = Field(None, description="最大文件大小（字节）")
     backup_compress_dir: Optional[str] = Field(None, description="压缩文件临时目录")
     quarantine_dir: Optional[str] = Field(None, description="写带失败文件隔离目录（默认 /TAF/quarantine，不占 SSD）")
+    log_retention_months: Optional[int] = Field(None, description="数据库日志保留月数（1=1个月，12=1年，24=2年）")
     scan_update_interval: Optional[int] = Field(None, description="后台扫描进度更新间隔（文件数）")
     scan_engine: Optional[str] = Field(None, description="扫描引擎：nfs=优化扫描，classic=经典扫描")
     scan_log_interval_seconds: Optional[int] = Field(None, description="扫描批次进度日志的最小间隔（秒），默认60")
@@ -158,6 +159,7 @@ async def get_env_config():
             "max_file_size": parse_int(env_vars.get("MAX_FILE_SIZE"), 12 * 1024 * 1024 * 1024),
             "backup_compress_dir": env_vars.get("BACKUP_COMPRESS_DIR", "temp/compress"),
             "quarantine_dir": env_vars.get("QUARANTINE_DIR", "/TAF/quarantine"),
+            "log_retention_months": parse_int(env_vars.get("LOG_RETENTION_MONTHS"), 12),
             "scan_update_interval": parse_int(env_vars.get("SCAN_UPDATE_INTERVAL"), 500),
             "scan_engine": env_vars.get("SCAN_ENGINE", "nfs"),
             "scan_log_interval_seconds": parse_int(env_vars.get("SCAN_LOG_INTERVAL_SECONDS"), 60),
@@ -278,6 +280,10 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             if not _qdir.startswith('/'):
                 raise ValueError("隔离目录必须是绝对路径（以 / 开头）")
             updates["QUARANTINE_DIR"] = _qdir
+        if config.log_retention_months is not None:
+            if config.log_retention_months < 1 or config.log_retention_months > 120:
+                raise ValueError("日志保留时间必须在 1~120 个月之间")
+            updates["LOG_RETENTION_MONTHS"] = str(config.log_retention_months)
         if config.scan_update_interval is not None:
             updates["SCAN_UPDATE_INTERVAL"] = str(config.scan_update_interval)
         if config.scan_engine is not None:
@@ -455,6 +461,15 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
         from config.settings import reload_settings
         reload_settings()
         logger.info("配置已重新加载，新配置将立即生效")
+
+        # 日志保留时间变更后立即清理一次（后台执行，不阻塞保存响应）
+        if config.log_retention_months is not None:
+            try:
+                import asyncio as _aio
+                from utils.log_utils import cleanup_expired_logs as _clean_logs
+                _aio.create_task(_clean_logs(int(config.log_retention_months)))
+            except Exception as _clean_err:
+                logger.warning(f"触发日志保留清理失败: {_clean_err}")
 
         # 如果修改了日志级别，立即动态更新 root logger
         if 'LOG_LEVEL' in updates:
