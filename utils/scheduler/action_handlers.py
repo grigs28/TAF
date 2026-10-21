@@ -928,6 +928,30 @@ class VerifyActionHandler(ActionHandler):
                     pass
         return task_id
 
+    async def _save_verify_summary(self, task_id: int, summary: Dict) -> None:
+        """把验证结果统计合并写入 result_summary。
+
+        卡片直接读取这些结构化字段，不再从 description 字符串解析；
+        与创建时写入的 verify_type/verify_percent 合并（jsonb ||）。
+        """
+        try:
+            async with get_opengauss_connection() as conn:
+                await conn.execute(
+                    "UPDATE backup_tasks SET result_summary = "
+                    "COALESCE(result_summary, '{}'::jsonb) || $2::jsonb, updated_at = now() "
+                    "WHERE id = $1",
+                    task_id,
+                    json.dumps(summary, ensure_ascii=False),
+                )
+                actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                if hasattr(actual_conn, 'commit'):
+                    try:
+                        await actual_conn.commit()
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning(f"[验证任务] 写入结果统计失败 (task_id={task_id}): {e}")
+
     async def _update_verify_progress(self, task_id: int, **kwargs):
         """更新验证任务进度到 backup_tasks 表"""
         sets = []
@@ -1176,6 +1200,14 @@ class VerifyActionHandler(ActionHandler):
                 "passed": passed,
                 "failed": failed,
             }
+            # 结构化统计落库（卡片按验证类型显示，不再解析 description）
+            if task_id:
+                await self._save_verify_summary(task_id, {
+                    'verify_total_archives': len(archives),
+                    'verify_sampled': sample_count,
+                    'verify_passed': passed,
+                    'verify_failed': failed,
+                })
             if errors:
                 result["errors"] = errors[:20]  # 限制错误数量
 
@@ -1373,6 +1405,18 @@ class VerifyActionHandler(ActionHandler):
             "passed": passed,
             "failed": failed,
         }
+        # 结构化统计落库（线程中运行：提交到主事件循环）
+        if task_id and loop:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._save_verify_summary(task_id, {
+                        'verify_scanned': total_scanned,
+                        'verify_sampled': total_sampled,
+                        'verify_passed': passed,
+                        'verify_failed': failed,
+                    }), loop)
+            except Exception as _sv_err:
+                logger.warning(f"[目录验证] 提交结果统计失败: {_sv_err}")
         if errors:
             result["errors"] = errors[:20]
         return result

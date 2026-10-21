@@ -1,5 +1,20 @@
 # 更新日志
 
+## [1.8.9] - 2026-10-21
+
+### 新增
+
+- **已完成任务卡片按任务类型显示**：
+  - **验证任务**（`verify`）：显示 验证类型（磁带/目录）、抽样比例、
+    已扫描文件/归档总数、已抽样验证、通过、失败；不再显示压缩后大小、
+    压缩速度、压缩等待、磁带写入（验证任务不压缩、不写带）。
+  - **备份任务**（full/incremental/differential/monthly_full）：保持原有统计。
+- 验证任务完成时把结构化统计写入 `result_summary`
+  （`verify_scanned` / `verify_total_archives` / `verify_sampled` /
+  `verify_passed` / `verify_failed`）；旧任务回退解析 `description`。
+- 任务查询接口新增上述字段。
+- 版本升至 1.8.9
+
 ## [1.8.8] - 2026-10-21
 
 ### 修复

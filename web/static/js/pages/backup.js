@@ -1549,58 +1549,103 @@
         elapsed.appendChild(elapsedValue);
         body.appendChild(elapsed);
 
-        // 已完成任务：总大小 / 压缩后大小 / 压缩等待
-        //   压缩等待 = result_summary.tape_starvation_seconds
-        //   （final 目录为空、磁带等压缩产出的累计时间；完成后仍保留）
+        // 已完成任务：按任务类型显示统计
+        //   验证任务：验证类型/抽样比例/已扫描/已抽样/通过/失败（不写磁带，无压缩字段）
+        //   备份任务：总大小/压缩后大小/压缩速度/压缩等待/磁带写入
         if (!isRunning && taskStatus === 'completed') {
-            const _procB = Number(task.processed_bytes) || 0;
-            const _totalB = Number(task.total_bytes) || 0;
-            const _srcB = _procB > 0 ? _procB : _totalB;
-            const _compB = Number(task.compressed_bytes) || 0;
-            const _starve = Number(task.tape_starvation_seconds) || 0;
-            const _ratio = _srcB > 0 ? (_compB / _srcB * 100).toFixed(1) + '%' : '-';
+            const _isVerifyTask = (task.task_type || '').toLowerCase() === 'verify';
+            if (_isVerifyTask) {
+                // 优先 result_summary 结构化字段；旧任务回退解析 description
+                const _desc = (task.description || '') + ' ' + (task.operation_status || '');
+                const _num = (re) => {
+                    const m = _desc.match(re);
+                    return m ? parseInt(m[1], 10) : null;
+                };
+                const _hasVal = (v) => v !== null && v !== undefined && !Number.isNaN(Number(v));
+                const _vtype = task.verify_type === 'tape'
+                    ? '磁带验证'
+                    : (task.verify_type === 'directory' ? '目录验证' : '验证');
+                const _pct = _hasVal(task.verify_percent) ? Number(task.verify_percent) : null;
+                const _scanned = _hasVal(task.verify_scanned) ? Number(task.verify_scanned)
+                    : (_hasVal(task.verify_total_archives) ? Number(task.verify_total_archives)
+                        : _num(/已扫描\s*(\d+)/));
+                const _sampled = _hasVal(task.verify_sampled) ? Number(task.verify_sampled)
+                    : _num(/抽样\s*(\d+)/);
+                const _passed = _hasVal(task.verify_passed) ? Number(task.verify_passed)
+                    : _num(/通过\s*(\d+)/);
+                const _failed = _hasVal(task.verify_failed) ? Number(task.verify_failed)
+                    : (_num(/失败\s*(\d+)/) || 0);
+                const _scannedLabel = task.verify_type === 'tape' ? '归档总数' : '已扫描文件';
 
-            const sizeRow = document.createElement('div');
-            sizeRow.className = 'd-flex justify-content-between';
-            sizeRow.innerHTML = `<small class="text-muted">总大小:</small>`
-                + `<small class="text-muted" title="已处理源数据；扫描总量 ${formatBytes(_totalB)}">${formatBytes(_srcB)}</small>`;
-            body.appendChild(sizeRow);
+                const _mkVerifyRow = (label, valueHtml, title) => {
+                    const row = document.createElement('div');
+                    row.className = 'd-flex justify-content-between';
+                    row.innerHTML = `<small class="text-muted">${label}</small>`
+                        + `<small class="text-muted"${title ? ` title="${title}"` : ''}>${valueHtml}</small>`;
+                    body.appendChild(row);
+                };
 
-            const compRow = document.createElement('div');
-            compRow.className = 'd-flex justify-content-between';
-            compRow.innerHTML = `<small class="text-muted">压缩后大小:</small>`
-                + `<small class="text-muted" title="压缩率 ${_ratio}">${formatBytes(_compB)}（${_ratio}）</small>`;
-            body.appendChild(compRow);
+                _mkVerifyRow('验证类型:', _vtype);
+                _mkVerifyRow('抽样比例:', _pct !== null ? `${_pct}%` : '—',
+                    '该次运行实际使用的抽样比例');
+                _mkVerifyRow(_scannedLabel + ':',
+                    _scanned !== null ? Number(_scanned).toLocaleString() : '—');
+                _mkVerifyRow('已抽样验证:',
+                    _sampled !== null ? Number(_sampled).toLocaleString() : '—');
+                _mkVerifyRow('通过:',
+                    `<span class="text-success">${_passed !== null ? Number(_passed).toLocaleString() : '—'}</span>`);
+                _mkVerifyRow('失败数:',
+                    `<span class="${_failed > 0 ? 'text-danger fw-semibold' : ''}">${Number(_failed).toLocaleString()}</span>`);
+            } else {
+                const _procB = Number(task.processed_bytes) || 0;
+                const _totalB = Number(task.total_bytes) || 0;
+                const _srcB = _procB > 0 ? _procB : _totalB;
+                const _compB = Number(task.compressed_bytes) || 0;
+                const _starve = Number(task.tape_starvation_seconds) || 0;
+                const _ratio = _srcB > 0 ? (_compB / _srcB * 100).toFixed(1) + '%' : '-';
 
-            // 平均压缩速度：已处理源数据 ÷ 压缩阶段耗时（优先用压缩实际开始时间）
-            const _cs = Number(task.compression_started_at) || 0;
-            const _endEpoch = task.completed_at
-                ? (new Date(task.completed_at).getTime() / 1000)
-                : (Date.now() / 1000);
-            const _compSec = (_cs > 0 && _endEpoch > _cs) ? (_endEpoch - _cs) : 0;
-            const _compSpeed = (_compSec > 0 && _srcB > 0)
-                ? (_srcB / _compSec / (1024 * 1024)) : 0;
-            const speedRow = document.createElement('div');
-            speedRow.className = 'd-flex justify-content-between';
-            speedRow.innerHTML = `<small class="text-muted">压缩速度:</small>`
-                + `<small class="text-muted" title="平均：已处理源数据 ÷ 压缩阶段耗时">${
-                    _compSpeed > 0 ? _compSpeed.toFixed(1) + ' MB/s' : '—'}</small>`;
-            body.appendChild(speedRow);
+                const sizeRow = document.createElement('div');
+                sizeRow.className = 'd-flex justify-content-between';
+                sizeRow.innerHTML = `<small class="text-muted">总大小:</small>`
+                    + `<small class="text-muted" title="已处理源数据；扫描总量 ${formatBytes(_totalB)}">${formatBytes(_srcB)}</small>`;
+                body.appendChild(sizeRow);
 
-            const waitRow = document.createElement('div');
-            waitRow.className = 'd-flex justify-content-between';
-            waitRow.innerHTML = `<small class="text-muted">压缩等待:</small>`
-                + `<small class="text-muted" title="磁带端 final 目录为空、等待压缩产出的累计时间">${formatEta(_starve) || '0 秒'}</small>`;
-            body.appendChild(waitRow);
+                const compRow = document.createElement('div');
+                compRow.className = 'd-flex justify-content-between';
+                compRow.innerHTML = `<small class="text-muted">压缩后大小:</small>`
+                    + `<small class="text-muted" title="压缩率 ${_ratio}">${formatBytes(_compB)}（${_ratio}）</small>`;
+                body.appendChild(compRow);
 
-            // 平均写带速度（任务完成后从 result_summary 读取）
-            const _tapeAvg = Number(task.tape_write_avg_speed_mbps) || 0;
-            const tapeRow = document.createElement('div');
-            tapeRow.className = 'd-flex justify-content-between';
-            tapeRow.innerHTML = `<small class="text-muted">磁带写入:</small>`
-                + `<small class="text-muted" title="平均写带速度（按实际写带耗时，不含 final 空等）">${
-                    _tapeAvg > 0 ? _tapeAvg.toFixed(1) + ' MB/s' : '—'}</small>`;
-            body.appendChild(tapeRow);
+                // 平均压缩速度：已处理源数据 ÷ 压缩阶段耗时（优先用压缩实际开始时间）
+                const _cs = Number(task.compression_started_at) || 0;
+                const _endEpoch = task.completed_at
+                    ? (new Date(task.completed_at).getTime() / 1000)
+                    : (Date.now() / 1000);
+                const _compSec = (_cs > 0 && _endEpoch > _cs) ? (_endEpoch - _cs) : 0;
+                const _compSpeed = (_compSec > 0 && _srcB > 0)
+                    ? (_srcB / _compSec / (1024 * 1024)) : 0;
+                const speedRow = document.createElement('div');
+                speedRow.className = 'd-flex justify-content-between';
+                speedRow.innerHTML = `<small class="text-muted">压缩速度:</small>`
+                    + `<small class="text-muted" title="平均：已处理源数据 ÷ 压缩阶段耗时">${
+                        _compSpeed > 0 ? _compSpeed.toFixed(1) + ' MB/s' : '—'}</small>`;
+                body.appendChild(speedRow);
+
+                const waitRow = document.createElement('div');
+                waitRow.className = 'd-flex justify-content-between';
+                waitRow.innerHTML = `<small class="text-muted">压缩等待:</small>`
+                    + `<small class="text-muted" title="磁带端 final 目录为空、等待压缩产出的累计时间">${formatEta(_starve) || '0 秒'}</small>`;
+                body.appendChild(waitRow);
+
+                // 平均写带速度（任务完成后从 result_summary 读取）
+                const _tapeAvg = Number(task.tape_write_avg_speed_mbps) || 0;
+                const tapeRow = document.createElement('div');
+                tapeRow.className = 'd-flex justify-content-between';
+                tapeRow.innerHTML = `<small class="text-muted">磁带写入:</small>`
+                    + `<small class="text-muted" title="平均写带速度（按实际写带耗时，不含 final 空等）">${
+                        _tapeAvg > 0 ? _tapeAvg.toFixed(1) + ' MB/s' : '—'}</small>`;
+                body.appendChild(tapeRow);
+            }
         }
 
         if (task.error_message) {

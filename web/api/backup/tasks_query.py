@@ -584,6 +584,17 @@ async def get_backup_tasks(
                                         if isinstance(result_summary_dict, dict) else None),
                         "verify_percent": (result_summary_dict.get('verify_percent')
                                            if isinstance(result_summary_dict, dict) else None),
+                        # 验证结果统计（完成时写入；旧任务为 None，前端回退解析 description）
+                        "verify_scanned": (result_summary_dict.get('verify_scanned')
+                                           if isinstance(result_summary_dict, dict) else None),
+                        "verify_total_archives": (result_summary_dict.get('verify_total_archives')
+                                                  if isinstance(result_summary_dict, dict) else None),
+                        "verify_sampled": (result_summary_dict.get('verify_sampled')
+                                           if isinstance(result_summary_dict, dict) else None),
+                        "verify_passed": (result_summary_dict.get('verify_passed')
+                                          if isinstance(result_summary_dict, dict) else None),
+                        "verify_failed": (result_summary_dict.get('verify_failed')
+                                          if isinstance(result_summary_dict, dict) else None),
                         "created_at": row["created_at"],
                         "started_at": row["started_at"],
                         "completed_at": row["completed_at"],
