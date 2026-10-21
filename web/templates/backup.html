@@ -122,11 +122,11 @@
 @keyframes pulse-prefetch {
     0%, 100% {
         opacity: 1;
-        box-shadow: 0 0 0 0 rgba(111, 66, 193, 0.7);
+        box-shadow: 0 0 0 0 rgba(192, 132, 252, 0.8);
     }
     50% {
         opacity: 0.9;
-        box-shadow: 0 0 0 8px rgba(111, 66, 193, 0);
+        box-shadow: 0 0 0 8px rgba(192, 132, 252, 0);
     }
 }
 
@@ -165,6 +165,8 @@
 .stage-badges .badge.badge-health-warn { color: var(--warning, #ffaa00) !important; }
 .stage-badges .badge.badge-health-bad  { color: var(--danger, #ff5577) !important; }
 .stage-badges .badge.badge-health-off  { color: var(--primary, #78caf2) !important; }
+/* 预分组：深紫 #6f42c1 在深色背景上几乎看不清，改用亮紫 */
+.stage-badges .badge.bg-purple { color: #c084fc !important; }
 
 .pulse-badge.badge-health-good {
     animation: pulse-health-good 1.5s ease-in-out infinite;
