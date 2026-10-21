@@ -454,24 +454,39 @@ class FileGroupPrefetcher:
             # 恒真会误触发，把首批组导向紧急通道。
             _cs = self._compression_started_at() if self.compressor is not None else None
             _urgent_ok = bool(_cs) and (time.time() - float(_cs)) >= 60.0
+            _starved = bool(_urgent_ok and self._is_starved())
             _no_active_l = (_urgent_ok and self.compressor is not None
                             and not self._large_done
                             and self._active_large_count() == 0)
-            _urgent = (_urgent_ok and self._is_starved()) or _no_active_l
+            _urgent = _starved or _no_active_l
             # 三分区取组（B/L/S）：
-            #   紧急：B 有货取 B（不占配额）→ 否则取 L（不占配额）→ 否则 S 兜底
-            #   常规：按配额 4:1 取 L/S；两者都空 → 兜底取 B
+            #   写带饿（final≤1）：B→L→S（B 产出最快，优先喂带）
+            #   仅在途无 L（写带不饿）：L→S→B（强制补 L）
+            #   常规：按配额取 L/S；两者都空 → 兜底取 B
+            #   紧急/保护区取出不占配额（choice 后续改为 deferred）
+            #
+            # 注意：“在途无 L”不能也按 B 优先——B 队列有货时会一直取 B，
+            # 在途永远无 L，紧急条件持续成立，形成 B 饥饿死循环
+            # （2026-10-21 任务 146 观测：386L/274S 队列有货，在途却全是 B）。
             q = None
             if _urgent:
-                if not self._buffer_done and not self.buffer_queue.empty():
-                    q = self.buffer_queue
-                    choice = 'buffer'
-                elif not self._large_done and not self.large_queue.empty():
-                    q = self.large_queue
-                    choice = 'large'
-                elif not self._small_done and not self.small_queue.empty():
-                    q = self.small_queue
-                    choice = 'small'
+                if _starved:
+                    _urgent_order = (
+                        (self.buffer_queue, 'buffer', self._buffer_done),
+                        (self.large_queue, 'large', self._large_done),
+                        (self.small_queue, 'small', self._small_done),
+                    )
+                else:
+                    _urgent_order = (
+                        (self.large_queue, 'large', self._large_done),
+                        (self.small_queue, 'small', self._small_done),
+                        (self.buffer_queue, 'buffer', self._buffer_done),
+                    )
+                for _q_cand, _choice_cand, _done_cand in _urgent_order:
+                    if not _done_cand and not _q_cand.empty():
+                        q = _q_cand
+                        choice = _choice_cand
+                        break
             if q is None:
                 choice = self._choose_queue()
                 q = self.large_queue if choice == 'large' else self.small_queue
