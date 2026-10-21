@@ -674,6 +674,44 @@ class FinalDirMonitor:
 
         return deleted_count
 
+    def cleanup_quarantine_dir(self) -> int:
+        """停机时清空隔离目录（本次任务将重新开始，隔离文件不再保留）。
+
+        安全约束：只删除符合备份集命名（YYYY-MM_NNNNNN）的子目录和压缩文件，
+        其他内容一律保留——即使 QUARANTINE_DIR 被误配到 /TAF 等目录，也不会
+        误删无关文件。
+
+        Returns:
+            int: 删除的文件数量
+        """
+        import re
+        deleted = 0
+        try:
+            qdir = self._get_quarantine_dir()
+            if not qdir.exists() or not qdir.is_dir():
+                return 0
+
+            set_id_re = re.compile(r'^\d{4}-\d{2}_\d{6}$')
+            for item in list(qdir.iterdir()):
+                try:
+                    if item.is_dir():
+                        if not set_id_re.match(item.name):
+                            logger.info(f"[Final监控] 隔离目录保留非任务子目录: {item}")
+                            continue
+                        deleted += sum(
+                            1 for _r, _d, _fs in os.walk(item) for _f in _fs)
+                        shutil.rmtree(item, ignore_errors=True)
+                    elif item.is_file() and self._is_archive_file(item):
+                        item.unlink(missing_ok=True)
+                        deleted += 1
+                except Exception as e:
+                    logger.warning(f"[Final监控] 清理隔离项失败 {item}: {e}")
+
+            logger.info(f"[Final监控] 隔离目录已清理，删除 {deleted} 个文件")
+        except Exception as e:
+            logger.error(f"[Final监控] 清理隔离目录失败: {e}")
+        return deleted
+
     def cleanup_set_id_dir(self, set_id: str) -> bool:
         """清理指定set_id的空目录（任务完成后调用）
 

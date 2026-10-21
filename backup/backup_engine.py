@@ -239,6 +239,10 @@ class BackupEngine:
                     deleted = await asyncio.get_event_loop().run_in_executor(
                         None, self.final_dir_monitor.cleanup_final_dir)
                     logger.info(f"[关闭] final目录已清理，删除 {deleted} 个残留文件")
+                    # 停机意味着本次任务重新开始：隔离目录中的失败文件也不再保留
+                    q_deleted = await asyncio.get_event_loop().run_in_executor(
+                        None, self.final_dir_monitor.cleanup_quarantine_dir)
+                    logger.info(f"[关闭] 隔离目录已清理，删除 {q_deleted} 个文件")
                 except Exception as e:
                     logger.warning(f"[关闭] 清理final目录失败: {str(e)}")
 
