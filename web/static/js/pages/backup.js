@@ -837,8 +837,9 @@
         if (String(task.status || '').toLowerCase() === 'completed') {
             const errBtn = document.createElement('button');
             errBtn.type = 'button';
-            errBtn.className = 'btn btn-sm btn-outline-danger';
-            errBtn.style.cssText = 'font-size:0.72rem; padding:0.1rem 0.45rem; white-space:nowrap;';
+            // 与页面其它次要操作按钮一致：青色描边 + 浅色文字（不用醒目的红色）
+            errBtn.className = 'btn btn-outline-secondary';
+            errBtn.style.cssText = 'font-size:0.72rem; padding:0.1rem 0.45rem; white-space:nowrap; line-height:1.5;';
             errBtn.textContent = '错误日志';
             errBtn.title = '查看本次任务的错误（压缩 / 写磁带 / 扫描）';
             errBtn.addEventListener('click', () => showTaskErrorLogs(task));
