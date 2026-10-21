@@ -64,6 +64,9 @@ class CompressionWorker:
         self.compression_group_failed = False
         self.failed_groups = 0
         self.failed_files_total = 0
+        # 错误明细（供“错误日志”弹窗，任务结束时持久化到 result_summary）
+        # 元素：{'category': 'compress', 'time': str, 'message': str, 'detail': str}
+        self.error_logs: list = []
         # 压缩实际开始时间（epoch 秒）：卡片平均压缩速度以此为起点，
         # 不含前置扫描/等待时间
         self.compression_started_at: Optional[float] = None
@@ -1593,6 +1596,12 @@ class CompressionWorker:
                         f"[#{group_idx + 1}] ❌ 压缩返回空（组失败）: {total_files} 个文件未备份，"
                         f"样例: {_fail_paths[:5]}"
                     )
+                    self.error_logs.append({
+                        'category': 'compress',
+                        'time': time.strftime('%Y-%m-%d %H:%M:%S'),
+                        'message': f"组 #{group_idx + 1} 压缩失败：{total_files} 个文件未备份",
+                        'detail': '；'.join(_fail_paths[:5]),
+                    })
                     try:
                         from utils.log_utils import log_system
                         from models.system_log import LogLevel, LogCategory
@@ -1619,5 +1628,11 @@ class CompressionWorker:
             self.backup_task.compression_failed = True
             self.failed_groups += 1
             self.failed_files_total += len(file_group or [])
+            self.error_logs.append({
+                'category': 'compress',
+                'time': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'message': f"组 #{group_idx + 1} 压缩异常：{str(e)[:300]}",
+                'detail': f"涉及 {len(file_group or [])} 个文件",
+            })
             raise
 

@@ -1035,6 +1035,35 @@ class BackupEngine:
             except Exception:
                 _final_extra = {}
 
+            # 错误日志汇总（压缩/写带/扫描/任务级）：任务完成后“错误日志”弹窗读取。
+            # 压缩 worker 与 FinalDirMonitor 的明细只在内存，必须在这里落盘。
+            try:
+                _err_logs = list(getattr(backup_task, 'error_logs_cache', []) or [])
+                if self.final_dir_monitor:
+                    _err_logs += list(
+                        getattr(self.final_dir_monitor, 'error_logs', []) or [])
+                _scan_stats = getattr(backup_task, '_scan_stats', None) or {}
+                _ec = int(_scan_stats.get('error_count', 0) or 0)
+                _ed = int(_scan_stats.get('error_dirs', 0) or 0)
+                if _ec or _ed:
+                    _err_logs.append({
+                        'category': 'scan',
+                        'time': format_datetime(now()),
+                        'message': (f"扫描异常：{_ec} 个文件/条目读取失败，"
+                                    f"{_ed} 个目录无法访问"),
+                        'detail': '',
+                    })
+                if getattr(backup_task, 'error_message', None):
+                    _err_logs.append({
+                        'category': 'task',
+                        'time': format_datetime(now()),
+                        'message': str(backup_task.error_message)[:500],
+                        'detail': '',
+                    })
+                _final_extra['error_logs'] = _err_logs[:200]
+            except Exception as _errlog_err:
+                logger.debug(f"[备份引擎] 汇总错误日志失败: {_errlog_err}")
+
             # 写“等待压缩”统计到 result_summary（任务完成后卡片仍可显示）
             try:
                 _starve_seconds = float(
@@ -1706,6 +1735,12 @@ class BackupEngine:
             finally:
                 # 停止压缩循环、文件移动任务和预取器
                 await compression_worker.stop()
+                # 错误明细快照（worker 引用随后置空；任务结束写 result_summary）
+                try:
+                    backup_task.error_logs_cache = list(
+                        getattr(compression_worker, 'error_logs', []) or [])
+                except Exception:
+                    pass
                 # 清除压缩工作线程引用
                 self._current_compression_worker = None
                 # 注意：不再需要file_move_worker，FinalDirMonitor独立运行

@@ -194,6 +194,98 @@
         return response.json();
     }
 
+    // ===== 已完成任务：错误日志弹窗 =====
+    function escapeHtml(value) {
+        return String(value == null ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function renderTaskErrorLogs(data) {
+        const bodyEl = document.getElementById('taskErrorLogBody');
+        if (!bodyEl) return;
+        const logs = data.error_logs || [];
+        const catNames = {
+            compress: '压缩',
+            tape: '写磁带',
+            scan: '扫描',
+            task: '任务',
+            other: '其他'
+        };
+
+        if (!logs.length && !data.error_message) {
+            bodyEl.innerHTML = '<div class="text-muted">本次任务没有记录到错误。</div>';
+            return;
+        }
+
+        let html = '';
+        if (data.error_message) {
+            html += `<div class="mb-3">
+                <div class="fw-semibold text-danger mb-1">任务错误</div>
+                <div class="small text-break">${escapeHtml(data.error_message)}</div>
+            </div>`;
+        }
+
+        // 按分类分组（保持固定顺序：压缩 → 写磁带 → 扫描 → 任务 → 其他）
+        const order = ['compress', 'tape', 'scan', 'task', 'other'];
+        const groups = {};
+        for (const item of logs) {
+            const cat = item && item.category ? item.category : 'other';
+            (groups[cat] = groups[cat] || []).push(item);
+        }
+
+        for (const cat of order.concat(Object.keys(groups).filter(c => !order.includes(c)))) {
+            const items = groups[cat];
+            if (!items || !items.length) continue;
+            html += `<div class="mb-3">
+                <div class="fw-semibold mb-1">${escapeHtml(catNames[cat] || cat)}
+                    <span class="badge bg-secondary ms-1">${items.length}</span>
+                </div>
+                <ul class="list-unstyled mb-0">`;
+            for (const it of items) {
+                html += `<li class="small mb-1 text-break">
+                    <span class="text-muted me-2">${escapeHtml(it.time || '')}</span>${escapeHtml(it.message || '')}
+                    ${it.detail ? `<div class="text-muted" style="padding-left:1.2rem;">${escapeHtml(it.detail)}</div>` : ''}
+                </li>`;
+            }
+            html += '</ul></div>';
+        }
+
+        if (data.quarantined_files) {
+            html += `<div class="small text-warning">已隔离 ${Number(data.quarantined_files).toLocaleString()} 个文件
+                （${formatBytes(Number(data.quarantined_bytes) || 0)}），可在隔离目录补写/排查。</div>`;
+        }
+
+        bodyEl.innerHTML = html;
+    }
+
+    async function showTaskErrorLogs(task) {
+        const id = task.task_id || task.id;
+        const titleEl = document.getElementById('taskErrorLogTitle');
+        const bodyEl = document.getElementById('taskErrorLogBody');
+        if (titleEl) {
+            titleEl.textContent = task.task_name ? `— ${task.task_name}` : '';
+        }
+        if (bodyEl) {
+            bodyEl.innerHTML = '<div class="text-muted">加载中...</div>';
+        }
+        const modalEl = document.getElementById('taskErrorLogModal');
+        if (modalEl && window.bootstrap && bootstrap.Modal) {
+            bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        }
+        try {
+            const data = await fetchJSON(`/api/backup/tasks/${id}/error-logs`);
+            renderTaskErrorLogs(data);
+        } catch (error) {
+            if (bodyEl) {
+                bodyEl.innerHTML = `<div class="text-danger">加载失败: ${escapeHtml(error.message)}</div>`;
+            }
+        }
+    }
+
     async function loadBackupStatistics() {
         try {
             const stats = await fetchJSON('/api/backup/statistics');
@@ -728,6 +820,18 @@
         } else {
             // 非运行状态，显示状态徽章
             badgeWrapper.innerHTML = buildStatusBadge(task);
+        }
+
+        // 已完成任务：在状态徽章左侧加「错误日志」按钮（仅 completed）
+        if (String(task.status || '').toLowerCase() === 'completed') {
+            const errBtn = document.createElement('button');
+            errBtn.type = 'button';
+            errBtn.className = 'btn btn-sm btn-outline-danger';
+            errBtn.style.cssText = 'font-size:0.72rem; padding:0.1rem 0.45rem; white-space:nowrap;';
+            errBtn.textContent = '错误日志';
+            errBtn.title = '查看本次任务的错误（压缩 / 写磁带 / 扫描）';
+            errBtn.addEventListener('click', () => showTaskErrorLogs(task));
+            badgeWrapper.insertBefore(errBtn, badgeWrapper.firstChild);
         }
 
         header.appendChild(badgeWrapper);

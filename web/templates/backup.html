@@ -360,6 +360,27 @@
 {% include 'system/_modal_scheduler_task.html' %}
 {% include 'system/_modal_directory_browser.html' %}
 
+<!-- 已完成任务：错误日志弹窗 -->
+<div class="modal fade" id="taskErrorLogModal" tabindex="-1" aria-labelledby="taskErrorLogModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="taskErrorLogModalLabel">
+                    错误日志 <small class="text-muted" id="taskErrorLogTitle"></small>
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body" id="taskErrorLogBody">
+                <div class="text-muted">加载中...</div>
+            </div>
+            <div class="modal-footer">
+                <small class="text-muted me-auto">分类：压缩 / 写磁带 / 扫描 / 任务</small>
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 
 {% block extra_js %}
 {{ super() }}

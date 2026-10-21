@@ -60,6 +60,9 @@ class FinalDirMonitor:
         # 任务收尾期间的互斥标志：finalize_pending_files() 执行时暂停轮询，
         # 避免监控线程与收尾逻辑同时处理同一文件（重复写带/竞态删除）。
         self._finalizing: bool = False
+        # 错误明细（供“错误日志”弹窗，任务结束时持久化到 result_summary）
+        # 元素：{'category': 'tape', 'time': str, 'message': str, 'detail': str}
+        self.error_logs: list = []
         
     def start(self):
         """启动监控线程"""
@@ -106,6 +109,7 @@ class FinalDirMonitor:
             self._starvation_seconds = 0.0
             self._starve_start = None
             self._has_written_once = False
+            self.error_logs = []
 
     def finalize_starvation(self) -> float:
         """任务收尾调用：丢弃未结算的最后一段等待。
@@ -247,6 +251,15 @@ class FinalDirMonitor:
                 else:
                     error_msg = f"文件移动到磁带失败: {source_file.name}"
                     logger.error(f"[Final监控] ❌ {error_msg}")
+                    try:
+                        self.error_logs.append({
+                            'category': 'tape',
+                            'time': time.strftime('%Y-%m-%d %H:%M:%S'),
+                            'message': f"写磁带失败：{source_file.name}",
+                            'detail': f"源大小 {format_bytes(source_size)}",
+                        })
+                    except Exception:
+                        pass
                     # 发送钉钉通知
                     self._send_failure_notification(error_msg)
                     return False
@@ -301,6 +314,15 @@ class FinalDirMonitor:
 
             shutil.move(str(file_path), str(target))
             logger.warning(f"[Final监控] ⚠️ 文件写带失败，已移入隔离目录: {file_path} -> {target}")
+            try:
+                self.error_logs.append({
+                    'category': 'tape',
+                    'time': time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'message': f"写磁带失败，已隔离：{file_path.name}",
+                    'detail': f"隔离路径: {target}",
+                })
+            except Exception:
+                pass
             return target
         except Exception as e:
             logger.error(f"[Final监控] 移动到隔离目录失败: {file_path}, 错误: {e}")

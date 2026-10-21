@@ -1058,3 +1058,46 @@ async def get_backup_templates(
     except Exception as e:
         logger.error(f"获取备份任务模板列表失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/tasks/{task_id}/error-logs")
+async def get_task_error_logs(task_id: int, http_request: Request):
+    """读取单个任务的错误日志（压缩 / 写磁带 / 扫描 / 任务级）。
+
+    数据来源：任务结束时写入 `backup_tasks.result_summary.error_logs` 的明细。
+    注意：只有新版本跑出的任务才有该字段；旧任务返回空列表。
+    """
+    try:
+        async with get_opengauss_connection() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, task_name, status, error_message, result_summary "
+                "FROM backup_tasks WHERE id = $1",
+                task_id,
+            )
+        if not row:
+            raise HTTPException(status_code=404, detail="任务不存在")
+
+        rs = row.get('result_summary')
+        if isinstance(rs, str):
+            try:
+                rs = json.loads(rs)
+            except Exception:
+                rs = {}
+        if not isinstance(rs, dict):
+            rs = {}
+
+        status = row.get('status')
+        return {
+            "task_id": row.get('id'),
+            "task_name": row.get('task_name'),
+            "status": status.value if hasattr(status, 'value') else str(status or ''),
+            "error_message": row.get('error_message'),
+            "error_logs": rs.get('error_logs') or [],
+            "quarantined_files": rs.get('quarantined_files', 0),
+            "quarantined_bytes": rs.get('quarantined_bytes', 0),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"读取任务错误日志失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
