@@ -197,7 +197,7 @@ async def cleanup_expired_logs(months: Optional[int] = None) -> Dict[str, int]:
     """删除超过保留期的操作日志与系统日志。
 
     Args:
-        months: 保留月数；None 时读取 settings.LOG_RETENTION_MONTHS（默认 12）。
+        months: 保留月数；None 时读取 settings.LOG_RETENTION_MONTHS（默认 6）。
                 <=0 表示不清理。
 
     Returns:
@@ -206,7 +206,7 @@ async def cleanup_expired_logs(months: Optional[int] = None) -> Dict[str, int]:
     try:
         from config.settings import get_settings
         _m = int(months if months is not None else
-                 (getattr(get_settings(), 'LOG_RETENTION_MONTHS', 12) or 12))
+                 (getattr(get_settings(), 'LOG_RETENTION_MONTHS', 6) or 6))
     except Exception:
         _m = 12
     if _m <= 0:

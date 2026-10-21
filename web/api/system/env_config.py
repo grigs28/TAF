@@ -159,7 +159,7 @@ async def get_env_config():
             "max_file_size": parse_int(env_vars.get("MAX_FILE_SIZE"), 12 * 1024 * 1024 * 1024),
             "backup_compress_dir": env_vars.get("BACKUP_COMPRESS_DIR", "temp/compress"),
             "quarantine_dir": env_vars.get("QUARANTINE_DIR", "/TAF/quarantine"),
-            "log_retention_months": parse_int(env_vars.get("LOG_RETENTION_MONTHS"), 12),
+            "log_retention_months": parse_int(env_vars.get("LOG_RETENTION_MONTHS"), 6),
             "scan_update_interval": parse_int(env_vars.get("SCAN_UPDATE_INTERVAL"), 500),
             "scan_engine": env_vars.get("SCAN_ENGINE", "nfs"),
             "scan_log_interval_seconds": parse_int(env_vars.get("SCAN_LOG_INTERVAL_SECONDS"), 60),
