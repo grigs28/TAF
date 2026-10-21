@@ -1087,6 +1087,10 @@ async def get_task_error_logs(task_id: int, http_request: Request):
             rs = {}
 
         status = row.get('status')
+        # 导出文件是否真实存在（前端据此决定是否显示导出按钮）
+        from pathlib import Path as _Path
+        _export_available = (_Path('logs') / 'task_errors'
+                             / f"task_{int(task_id)}.txt").exists()
         return {
             "task_id": row.get('id'),
             "task_name": row.get('task_name'),
@@ -1096,6 +1100,7 @@ async def get_task_error_logs(task_id: int, http_request: Request):
             "quarantined_files": rs.get('quarantined_files', 0),
             "quarantined_bytes": rs.get('quarantined_bytes', 0),
             "error_export_file": rs.get('error_export_file'),
+            "error_export_available": _export_available,
         }
     except HTTPException:
         raise

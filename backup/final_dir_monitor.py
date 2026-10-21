@@ -407,11 +407,13 @@ class FinalDirMonitor:
                 except OSError:
                     pass
 
-                self._current_tape_file = str(fp)
-                # 持锁执行：若监控线程正在写同一文件，等待其完成后再判断
                 with self._tape_op_lock:
-                    ok = self._move_file_to_tape_locked(fp)
-                self._current_tape_file = None
+                    self._current_tape_file = str(fp)
+                    try:
+                        ok = self._move_file_to_tape_locked(fp)
+                    finally:
+                        # 异常路径也必须清除，避免停机清理误保留不存在的文件
+                        self._current_tape_file = None
 
                 if ok:
                     stats['written'] += 1
@@ -511,11 +513,13 @@ class FinalDirMonitor:
                                 continue
                             
                             # 移动文件到磁带（持锁：与任务收尾线程互斥）
-                            self._current_tape_file = str(file_path)
                             with self._tape_op_lock:
-                                success = self._move_file_to_tape_locked(file_path)
-                                deferred = self._defer_current_file
-                            self._current_tape_file = None
+                                self._current_tape_file = str(file_path)
+                                try:
+                                    success = self._move_file_to_tape_locked(file_path)
+                                    deferred = self._defer_current_file
+                                finally:
+                                    self._current_tape_file = None
 
                             if deferred:
                                 # 文件仍在写入：不标记已处理，下一轮重新检查
