@@ -138,6 +138,11 @@ class FileGroupPrefetcher:
         # 磁盘守卫期间：每取 N 个 S 组，至少取 1 个 L 组（N 现读 GROUP_GUARD_S_PER_L）
         self._guard_s_take = 0
         self._guard_now = False
+        # 守卫最高优先级：active 且有在途/等待组时暂停一切取组；
+        # _guard_probe_released = 已放行 1 个探测组进守卫（防死锁，不重复放行）
+        self._guard_probe_released = False
+        self._guard_probe_at = 0.0      # 探测组放行时刻（自愈用）
+        self._guard_pause_since = 0.0   # 本次暂停取组的起点（日志用）
 
     @staticmethod
     def _parse_ratio(value) -> tuple:
@@ -447,16 +452,39 @@ class FileGroupPrefetcher:
             q = None
 
             # ===== 守卫最高优先级 =====
-            # 磁盘守卫拦停时，任何路径（含写带饿的紧急路径、在途无 L）都
-            # 不再取新组：先让写带消耗在途产出、守卫解除后再恢复，避免
-            # “没空间了还继续压缩”。（用户明确：守卫必须最高）
-            if self.compressor is not None:
-                if self._update_guard_state():
-                    self._guard_now = True
+            # 守卫触发（compressor._guard_active）时暂停一切取组（含紧急路径）：
+            # 只让已取出的组继续走守卫/压缩，由写带释放空间。
+            # busy = 在途组 + 正在守卫内检查/等待的组 + 已放行的探测组。
+            # _guard_active 只在“有组进出守卫”时刷新：busy 清零后必须放行
+            # 1 个探测组进守卫，否则守卫永不解除（死锁）。
+            if (self.compressor is not None
+                    and bool(getattr(self.compressor, '_guard_active', False))):
+                _active_n = len(getattr(self.compressor, '_active_groups', None) or [])
+                _waiting_n = int(getattr(self.compressor, '_guard_waiting_groups', 0) or 0)
+                # 自愈：探测组已放行但迟迟未进守卫（组在进守卫前失败，如文件名
+                # 占位异常）→ 30 秒后作废探测标记，允许重新放行，避免永久暂停
+                if (self._guard_probe_released and _active_n == 0 and _waiting_n == 0
+                        and time.time() - self._guard_probe_at > 30.0):
+                    self._guard_probe_released = False
+                _busy = _active_n + _waiting_n + (1 if self._guard_probe_released else 0)
+                if _busy > 0:
+                    if self._guard_pause_since == 0.0:
+                        self._guard_pause_since = time.time()
+                        logger.info(
+                            f"[文件组调度] 空间守卫触发，暂停取组（在途/等待 {_busy} 组），"
+                            f"等待写带释放空间")
                     if deadline is not None and deadline - loop.time() <= 0:
                         return None
                     await asyncio.sleep(1.0)
                     continue
+                # 在途/等待全部结束：放行 1 个探测组进守卫（防死锁）
+                self._guard_probe_released = True
+                self._guard_probe_at = time.time()
+            else:
+                if self._guard_probe_released or self._guard_pause_since:
+                    logger.info("[文件组调度] 守卫解除，恢复取组")
+                self._guard_probe_released = False
+                self._guard_pause_since = 0.0
 
             # ===== 紧急状态（final≤1 或 在途无 L；压缩启动 60 秒后才生效）=====
             # 紧急 → 若 choice 轮到 S 且 L 有货则强制取 L；取出不占配额

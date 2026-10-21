@@ -123,6 +123,9 @@ class Compressor:
         #   · 放行时 → 一条 INFO（含本次拦停持续时长）
         self._guard_active: bool = False
         self._last_guard_log_time: float = 0.0
+        # 正在 _ensure_disk_space 内检查/等待守卫的组数（供预取器
+        # “守卫最高优先级”判断 busy = 在途 + 等待 + 探测）
+        self._guard_waiting_groups: int = 0
         # 记录每个备份集的上次压缩文件名和序号，确保文件名不重复
         # 格式: {backup_set_id: {'last_filename': str, 'sequence': int}}
         self._last_archive_info: Dict[str, Dict[str, Any]] = {}
@@ -162,6 +165,7 @@ class Compressor:
         self._guard_active = False
         self._last_release_time = None
         self._last_guard_log_time = 0.0
+        self._guard_waiting_groups = 0
 
     def _release_active_group(self, group_bytes: int = 0, group_path: str = "") -> None:
         """释放一个在途组的记账（优先按 (源字节, 路径) 精确匹配，容忍大小重复）"""
@@ -1123,6 +1127,18 @@ class Compressor:
         return required_free, detail
 
     async def _ensure_disk_space(self, target_dir: Path, pending_group_bytes: int = 0):
+        """守卫入口：登记“正在检查/等待守卫”的组数后转 impl。
+
+        计数供预取器的守卫最高优先级判断（busy = 在途 + 等待 + 探测）；
+        finally 保证组通过/失败/异常都会递减。
+        """
+        self._guard_waiting_groups += 1
+        try:
+            await self._ensure_disk_space_impl(target_dir, pending_group_bytes)
+        finally:
+            self._guard_waiting_groups -= 1
+
+    async def _ensure_disk_space_impl(self, target_dir: Path, pending_group_bytes: int = 0):
         """确保磁盘剩余空间满足"**在途真实产出** + **本组待产出**"
 
         `_active_group_bytes` 只记录**已通过守卫、真正在压缩**的组（它们在落地产出）。
