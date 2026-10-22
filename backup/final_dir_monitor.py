@@ -196,7 +196,7 @@ class FinalDirMonitor:
             logger.debug(f"[Final监控] 提取backup_set_id失败: {file_path}, 错误: {str(e)}")
             return None
 
-    def _move_file_to_tape_locked(self, file_path: Path) -> bool:
+    def _move_file_to_tape_locked(self, file_path: Path) -> Optional[bool]:
         """
         移动单个文件到磁带（调用方必须持有 _tape_op_lock）
 
@@ -204,14 +204,17 @@ class FinalDirMonitor:
             file_path: 源文件路径
 
         Returns:
-            bool: 是否成功
+            Optional[bool]: True=成功，False=失败，None=文件已不存在
+            （被其他流程处理，无需再处理）
         """
         self._defer_current_file = False
         try:
             source_file = file_path
             if not source_file.exists():
-                logger.warning(f"[Final监控] 文件不存在: {source_file}")
-                return False
+                # 文件已被其他路径处理（收尾线程 finalize_pending_files 先移走了）：
+                # 返回 None 表示"无需处理"，不要当成失败（原来会产生误报 ERROR）
+                logger.info(f"[Final监控] 文件已被处理（不存在）: {source_file.name}")
+                return None
 
             # 获取源文件大小（用于验证）
             # 稳定性由监控线程在扫描阶段（记录 size + 写带前对比）保证，
@@ -402,6 +405,9 @@ class FinalDirMonitor:
                         # 异常路径也必须清除，避免停机清理误保留不存在的文件
                         self._current_tape_file = None
 
+                if ok is None:
+                    # 文件已被其他路径处理，不计成功/失败
+                    continue
                 if ok:
                     stats['written'] += 1
                     continue
@@ -564,11 +570,13 @@ class FinalDirMonitor:
 
                             # 标记为已处理（无论成功与否，避免重复处理）
                             self._processed_files.add(file_key)
-                            
-                            if success:
+
+                            if success is None:
+                                # 文件已被收尾线程处理：跳过，不记失败
+                                logger.info(f"[Final监控] 文件已被其他流程处理: {file_path.name}")
+                            elif success:
                                 self._has_written_once = True
                                 logger.debug(f"[Final监控] 文件处理完成: {file_path.name}")
-
                             else:
                                 logger.error(f"[Final监控] 文件处理失败: {file_path.name}")
                     else:

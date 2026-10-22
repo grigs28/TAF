@@ -3697,7 +3697,14 @@ class BackupDB:
                                 total_files = $3,
                                 processed_bytes = $4,
                                 compressed_bytes = $5,
-                                result_summary = $6::jsonb,
+                                -- 合并写而不是整块覆盖：任务结束的统计
+                                -- （tape_starvation_seconds / 写带平均速度 /
+                                --  压缩开始时间 / error_logs）由
+                                -- save_task_starvation 写入，若这里用旧快照
+                                -- 整块覆盖会把它们冲掉（任务 148 已发生）。
+                                -- COALESCE 防护：$6 为 NULL 时保留原值而不是清空
+                                result_summary = COALESCE(result_summary, '{}'::jsonb)
+                                    || COALESCE($6::jsonb, '{}'::jsonb),
                                 description = $7,
                                 updated_at = $8
                             WHERE id = $9

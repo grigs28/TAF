@@ -1,5 +1,22 @@
 # 更新日志
 
+## [1.9.44] - 2026-10-22
+
+### 修复
+
+- **任务 148 暴露的两个问题**：
+  1. **扫描进度覆盖任务统计**：`update_scan_progress` 用读到的旧快照
+     整块覆盖 `result_summary`，把任务结束写入的
+     `tape_starvation_seconds` / `tape_write_avg_speed_mbps` /
+     `compression_started_at` / `error_logs` 冲掉（卡片显示"—"）。
+     改为 `COALESCE(result_summary,'{}') || COALESCE($6,'{}')` 合并写，
+     NULL 时保留原值。
+  2. **FinalMonitor 与收尾线程重复处理同一文件**：文件已被
+     `finalize_pending_files` 移走时，主循环仍报 ERROR
+     "文件处理失败"。`_move_file_to_tape_locked` 文件不存在改为返回
+     `None`（无需处理），两个调用点都不再计失败、不再尝试隔离。
+- 版本升至 1.9.44
+
 ## [1.9.43] - 2026-10-22
 
 ### 修复
