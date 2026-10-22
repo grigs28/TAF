@@ -940,14 +940,19 @@ class TapeRecoveryEngine:
                     "total_files": 0, "total_dirs": 0, "error": "文件不存在"}
 
         read_path = archive_path
+        local_info = {'ok': False, 'reused': False, 'error': '未使用本地副本'}
         try:
             cp = await self.ensure_local_copy(set_id, archive_filename)
             if cp.get('ok'):
                 read_path = cp['path']
+                local_info = {'ok': True, 'reused': bool(cp.get('reused'))}
             else:
+                local_info = {'ok': False, 'reused': False,
+                              'error': cp.get('error') or '未知错误'}
                 logger.warning(
                     f"[磁带恢复] 本地副本不可用，退回直接读磁带: {cp.get('error')}")
         except Exception as e:
+            local_info = {'ok': False, 'reused': False, 'error': str(e)}
             logger.warning(f"[磁带恢复] 准备本地副本异常，退回直接读磁带: {e}")
 
         try:
@@ -960,6 +965,8 @@ class TapeRecoveryEngine:
                 "total_entries": len(entries),
                 "total_files": len(files),
                 "total_dirs": len(dirs),
+                "source": "local_copy" if local_info.get('ok') else "tape",
+                "local_copy": local_info,
             }
         except Exception as e:
             logger.error(f"[磁带恢复] 列出归档内容失败: {e}")

@@ -927,8 +927,11 @@
                             childContainer.style.fontSize = '0.8rem';
                             childContainer.style.color = '#888';
                             // 输出到操作日志
-                            var loadLogEl = _addScanLog('正在读取归档文件列表: ' + a.filename + ' ...', 'scanning');
-                            _addProgressLog('正在读取归档文件列表: ' + a.filename + ' ...', 'scanning');
+                            var _szTxt = (a.size_display || formatBytes(a.size_bytes || 0));
+                            var loadLogEl = _addScanLog('正在读取归档文件列表: ' + a.filename
+                                + '（' + _szTxt + (cacheCount > 0 ? '，已缓存' : '，未缓存需先复制到 SSD') + '）...', 'scanning');
+                            _addProgressLog('正在读取归档文件列表: ' + a.filename
+                                + '（' + _szTxt + (cacheCount > 0 ? '，已缓存' : '，未缓存需先复制到 SSD') + '）...', 'scanning');
                             // 如果有缓存，从数据库分页加载；否则走原始解压
                             var loadUrl;
                             if (cacheCount > 0) {
@@ -998,8 +1001,21 @@
                                     return { name: f.name, size: f.size, is_dir: false, source_archive: a.filename };
                                 });
                                 updateSelectionSummary();
-                                // 日志输出结果
-                                var loadMsg = '归档 ' + a.filename + ': ' + files.length + ' 个文件';
+                                // 日志输出结果（区分：DB 缓存 / 本地副本 / 直读磁带）
+                                var loadMsg;
+                                if (data.source === 'cache') {
+                                    loadMsg = '归档 ' + a.filename + ': 从数据库缓存加载（' + files.length + ' 个文件）';
+                                } else if (data.local_copy && data.local_copy.ok) {
+                                    loadMsg = '归档 ' + a.filename + ': '
+                                        + (data.local_copy.reused ? '使用已有本地副本' : '已复制到 SSD')
+                                        + '，' + files.length + ' 个文件';
+                                } else if (data.local_copy && data.local_copy.ok === false) {
+                                    loadMsg = '归档 ' + a.filename + ': 本地副本失败（'
+                                        + (data.local_copy.error || '未知') + '），直读磁带，'
+                                        + files.length + ' 个文件';
+                                } else {
+                                    loadMsg = '归档 ' + a.filename + ': ' + files.length + ' 个文件';
+                                }
                                 _updateScanLog(loadLogEl, loadMsg, 'done');
                                 _addProgressLog(loadMsg, 'done');
                             })

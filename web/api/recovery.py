@@ -255,9 +255,12 @@ async def get_archive_contents(set_id: str, archive: str, request: Request,
 
         cache_info = await engine.check_archive_cache(tape_label, set_id, archive)
         if cache_info and cache_info.get("cached"):
-            return await engine.get_cached_archive_contents(
+            _cached = await engine.get_cached_archive_contents(
                 tape_label, set_id, archive, page, page_size,
             )
+            if isinstance(_cached, dict):
+                _cached['source'] = 'cache'
+            return _cached
 
     # 缓存未命中或 use_cache=False，走原始解压
     result = await engine.list_archive_contents(set_id, archive)
