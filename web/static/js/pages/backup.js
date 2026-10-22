@@ -950,8 +950,8 @@
                 const _starveLabel = formatStarveDuration(_starve);
                 _idleHtml = `<span class="badge bg-secondary bg-opacity-25 text-light" style="${_badgeStyle}; margin-left:2px;">等待${_starveLabel}</span>`;
             }
-            // "写带"与"MB/s"保持 <small> 的原字号；空闲徽章放在单位之后
-            _tapeSpeedHtml = `<small>写带 ${_speedHtml} <span class="text-muted">MB/s</span>${_idleHtml}</small>`;
+            // 加"已写/总大小"后内容变长，去掉"写带"前缀避免换行
+            _tapeSpeedHtml = `<small>${_speedHtml} <span class="text-muted">MB/s</span>${_idleHtml}</small>`;
         } else if (!_isRunningTask) {
             // 任务结束：显示本任务累计的“等待压缩”（由任务完成时写入 result_summary）
             const _starveDone = Number(task.tape_starvation_seconds) || 0;
