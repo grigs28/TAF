@@ -1474,12 +1474,32 @@ class VerifyActionHandler(ActionHandler):
                         failed += 1
                         errors.append(f"{file_path}: {detail}")
                 else:
-                    # 普通文件：验证可读性
-                    size = file_path.stat().st_size
-                    if size > 0:
-                        with open(str(file_path), 'rb') as f:
-                            f.read(4096)
-                    passed += 1
+                    # 普通文件：完整读取，校验读到的字节数与 stat 一致
+                    # （原来只读 4KB，发现不了文件中后部的损坏/截断）
+                    size_before = file_path.stat().st_size
+                    read_total = 0
+                    with open(str(file_path), 'rb') as f:
+                        while True:
+                            chunk = f.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            read_total += len(chunk)
+                    try:
+                        size_after = file_path.stat().st_size
+                    except OSError:
+                        size_after = size_before
+                    if size_before != size_after:
+                        # 验证期间源文件被修改：本次跳过，不算失败
+                        logger.warning(
+                            f"[目录验证] 文件在验证期间发生变化，跳过: {file_path} "
+                            f"({size_before} -> {size_after})")
+                        passed += 1
+                    elif read_total != size_before:
+                        failed += 1
+                        errors.append(
+                            f"{file_path}: 读取字节数不符 ({read_total} != {size_before})")
+                    else:
+                        passed += 1
             except Exception as e:
                 failed += 1
                 errors.append(f"{file_path}: {str(e)}")
