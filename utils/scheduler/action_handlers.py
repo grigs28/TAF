@@ -1103,6 +1103,30 @@ class VerifyActionHandler(ActionHandler):
         was_already_mounted = False
         mount_point = None
 
+        # 1.5 磁带身份校验：配置了 tape_label 时才校验（未配置则验证当前磁带）
+        expected_label = str(
+            config.get('tape_label') or config.get('tape_id') or '').strip()
+        if expected_label:
+            try:
+                _tm = getattr(tape_handler, 'tape_manager', None)
+                _tops = getattr(_tm, 'tape_operations', None)
+                if _tops and hasattr(_tops, '_read_tape_label'):
+                    _info = await _tops._read_tape_label()
+                    _actual = ((_info or {}).get('label')
+                               or (_info or {}).get('tape_id') or '')
+                    if _actual and _actual != expected_label:
+                        msg = (f"当前磁带 {_actual} 与预期 {expected_label} 不符，"
+                               f"跳过验证（请确认装载的磁带）")
+                        logger.warning(f"[磁带验证] {msg}")
+                        return {
+                            "status": "skipped", "message": msg,
+                            "total": 0, "sampled": 0, "passed": 0,
+                            "failed": 0, "corrupt": 0, "verify_errors": 0,
+                        }
+                    logger.info(f"[磁带验证] 磁带身份校验通过: {_actual}")
+            except Exception as _id_err:
+                logger.warning(f"[磁带验证] 读取磁带标签失败，跳过身份校验: {_id_err}")
+
         try:
             # 检查是否已挂载
             mount_point = Path(tape_handler._get_ltfs_mount_point())
@@ -1116,28 +1140,53 @@ class VerifyActionHandler(ActionHandler):
                     return {"status": "failed", "message": f"挂载 LTFS 失败: {msg}"}
                 logger.info("[磁带验证] LTFS 挂载成功")
 
-            # 3. 收集所有归档文件
+            # 3. 收集所有归档文件（跳过正在写入的：mtime 过新）
             archives = []
+            unstable_skipped = 0
             system_dirs = {'.LTFS', 'lost+found', '.Trash', '.Trashes',
                           '$RECYCLE.BIN', 'System Volume Information'}
+            _now_ts = time.time()
 
             for item in mount_point.iterdir():
                 if not item.is_dir() or item.name in system_dirs or item.name.startswith('.'):
                     continue
                 # 递归扫描：归档可能放在 set 目录下的子目录里
                 for f in item.rglob('*'):
-                    if f.is_file() and f.name.endswith(('.tar.zst', '.tar.gz', '.tgz', '.tar', '.7z', '.zip')):
-                        archives.append(f)
+                    if not f.is_file() or not f.name.endswith(
+                            ('.tar.zst', '.tar.gz', '.tgz', '.tar', '.7z', '.zip')):
+                        continue
+                    try:
+                        _st = f.stat()
+                    except OSError:
+                        continue
+                    # 60 秒内还在变化的归档可能仍在写入（备份任务同时在跑），跳过
+                    if _now_ts - _st.st_mtime < 60:
+                        unstable_skipped += 1
+                        continue
+                    archives.append(f)
+
+            if unstable_skipped:
+                logger.warning(
+                    f"[磁带验证] 跳过 {unstable_skipped} 个正在写入/刚写入的归档")
 
             if not archives:
-                return {"status": "success", "message": "磁带上未发现归档文件", "total": 0, "sampled": 0, "passed": 0, "failed": 0}
+                # 空带或装错带不能报"验证成功"，否则掩盖问题
+                return {
+                    "status": "skipped",
+                    "message": "磁带上未发现归档文件（请确认装载的磁带是否正确）",
+                    "total": 0, "sampled": 0, "passed": 0,
+                    "failed": 0, "corrupt": 0, "verify_errors": 0,
+                }
 
             # 4. 按百分比抽样
             sample_count = max(1, int(len(archives) * verify_percent / 100))
             sample_count = min(sample_count, len(archives))
             sampled = random.sample(archives, sample_count)
 
-            logger.info(f"[磁带验证] 发现 {len(archives)} 个归档，抽样 {sample_count} 个")
+            _actual_pct = (sample_count / len(archives) * 100) if archives else 0.0
+            logger.info(
+                f"[磁带验证] 发现 {len(archives)} 个归档，抽样 {sample_count} 个"
+                f"（实际 {_actual_pct:.1f}%，配置 {verify_percent}%）")
 
             # 归档总数先落库：运行中卡片即可显示“归档总数/抽样进度”
             if task_id:
@@ -1156,14 +1205,17 @@ class VerifyActionHandler(ActionHandler):
             corrupt = 0          # 归档内容损坏（解压/校验不通过）
             verify_errors = 0    # 验证过程异常（IO/临时错误等）
             errors = []
+            _last_progress_at = 0.0
 
             try:
                 for i, archive_path in enumerate(sampled):
                     logger.info(f"[磁带验证] 验证归档 {i+1}/{sample_count}: {archive_path.name}")
                     try:
-                        valid, detail = await asyncio.to_thread(
-                            self._verify_archive_extract, archive_path, verify_temp
-                        )
+                        # 单个归档上限 30 分钟：磁带/FUSE 卡死时不能无限挂住
+                        valid, detail = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                self._verify_archive_extract, archive_path, verify_temp),
+                            timeout=1800)
                         if valid:
                             passed += 1
                             logger.info(f"[磁带验证] ✓ {archive_path.name}: {detail}")
@@ -1172,13 +1224,23 @@ class VerifyActionHandler(ActionHandler):
                             corrupt += 1
                             errors.append(f"[归档损坏] {archive_path}: {detail}")
                             logger.warning(f"[磁带验证] ✗ {archive_path}: {detail}")
+                    except asyncio.TimeoutError:
+                        failed += 1
+                        verify_errors += 1
+                        errors.append(
+                            f"[验证超时] {archive_path}: 超过 1800 秒未完成")
+                        logger.error(
+                            f"[磁带验证] ✗ {archive_path.name}: 解压验证超时")
                     except Exception as e:
                         failed += 1
                         verify_errors += 1
                         errors.append(f"[验证异常] {archive_path}: {str(e)}")
                         logger.error(f"[磁带验证] ✗ {archive_path.name}: {e}")
-                    # 更新数据库进度
-                    if task_id:
+                    # 更新数据库进度：每 5 秒最多一次，最后一个必写（避免频繁 UPDATE）
+                    _now_p = time.time()
+                    if task_id and (_now_p - _last_progress_at >= 5
+                                    or i + 1 == sample_count):
+                        _last_progress_at = _now_p
                         progress_pct = ((i + 1) / sample_count) * 100
                         await self._update_verify_progress(
                             task_id,
