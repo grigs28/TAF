@@ -1019,8 +1019,14 @@ class VerifyActionHandler(ActionHandler):
                 thread_config['_event_loop'] = loop  # 传入事件循环，供线程内 DB 更新使用
                 result = await loop.run_in_executor(None, self._verify_directory_sync, thread_config, task_id)
 
-            # 更新为完成状态
-            final_status = 'completed' if result.get('status') == 'success' else 'failed'
+            # 更新为完成状态（skipped 不能算失败：有备份任务在跑时跳过是正常行为）
+            _result_status = result.get('status')
+            if _result_status == 'success':
+                final_status = 'completed'
+            elif _result_status == 'skipped':
+                final_status = 'cancelled'
+            else:
+                final_status = 'failed'
             # 参数（抽样比、验证类型…）+ 结果一起落库：参数由创建时写入，
             # 这里合并而不是覆盖，保证任务结束后仍能查到"当时用的抽样比例"
             final_summary = self._verify_params_from_config(config)
@@ -1037,7 +1043,8 @@ class VerifyActionHandler(ActionHandler):
             )
 
             await log_system(
-                level=LogLevel.INFO if result.get('status') == 'success' else LogLevel.ERROR,
+                level=(LogLevel.INFO if _result_status in ('success', 'skipped')
+                       else LogLevel.ERROR),
                 category=LogCategory.BACKUP,
                 message=f"验证任务完成: {result.get('message', '')}",
                 module="utils.scheduler.action_handlers",
@@ -1117,7 +1124,8 @@ class VerifyActionHandler(ActionHandler):
             for item in mount_point.iterdir():
                 if not item.is_dir() or item.name in system_dirs or item.name.startswith('.'):
                     continue
-                for f in item.iterdir():
+                # 递归扫描：归档可能放在 set 目录下的子目录里
+                for f in item.rglob('*'):
                     if f.is_file() and f.name.endswith(('.tar.zst', '.tar.gz', '.tgz', '.tar', '.7z', '.zip')):
                         archives.append(f)
 
@@ -1145,6 +1153,8 @@ class VerifyActionHandler(ActionHandler):
 
             passed = 0
             failed = 0
+            corrupt = 0          # 归档内容损坏（解压/校验不通过）
+            verify_errors = 0    # 验证过程异常（IO/临时错误等）
             errors = []
 
             try:
@@ -1159,11 +1169,13 @@ class VerifyActionHandler(ActionHandler):
                             logger.info(f"[磁带验证] ✓ {archive_path.name}: {detail}")
                         else:
                             failed += 1
-                            errors.append(f"{archive_path}: {detail}")
+                            corrupt += 1
+                            errors.append(f"[归档损坏] {archive_path}: {detail}")
                             logger.warning(f"[磁带验证] ✗ {archive_path}: {detail}")
                     except Exception as e:
                         failed += 1
-                        errors.append(f"{archive_path}: {str(e)}")
+                        verify_errors += 1
+                        errors.append(f"[验证异常] {archive_path}: {str(e)}")
                         logger.error(f"[磁带验证] ✗ {archive_path.name}: {e}")
                     # 更新数据库进度
                     if task_id:
@@ -1201,11 +1213,14 @@ class VerifyActionHandler(ActionHandler):
 
             result = {
                 "status": "success" if failed == 0 else "failed",
-                "message": f"磁带验证完成: 抽样 {sample_count}/{len(archives)}, 通过 {passed}, 失败 {failed}",
+                "message": f"磁带验证完成: 抽样 {sample_count}/{len(archives)}, 通过 {passed}, 失败 {failed}"
+                           + (f"（损坏 {corrupt}, 异常 {verify_errors}）" if failed else ""),
                 "total": len(archives),
                 "sampled": sample_count,
                 "passed": passed,
                 "failed": failed,
+                "corrupt": corrupt,
+                "verify_errors": verify_errors,
             }
             # 结构化统计落库（卡片按验证类型显示，不再解析 description）
             if task_id:
@@ -1214,6 +1229,8 @@ class VerifyActionHandler(ActionHandler):
                     'verify_sampled': sample_count,
                     'verify_passed': passed,
                     'verify_failed': failed,
+                    'verify_corrupt': corrupt,
+                    'verify_errors': verify_errors,
                 })
             if errors:
                 result["errors"] = errors[:20]  # 限制错误数量
@@ -1221,11 +1238,13 @@ class VerifyActionHandler(ActionHandler):
             return result
 
         finally:
-            # 如果是我们自己挂载的，验证完后卸载
+            # 如果是我们自己挂载的，验证完后卸载并 offline：
+            # 只卸载不 offline 会让带子带着"加载状态+索引分区末尾"留在驱动器里，
+            # 随后系统重启可能重演读卷标签失败的问题。
             if not was_already_mounted and mount_point and mount_point.is_mount():
                 try:
-                    await tape_handler.unmount_ltfs()
-                    logger.info("[磁带验证] 已卸载 LTFS")
+                    await tape_handler.unmount_ltfs(eject=True)
+                    logger.info("[磁带验证] 已卸载 LTFS 并离线磁带")
                 except Exception as e:
                     logger.warning(f"[磁带验证] 卸载 LTFS 失败: {e}")
 
