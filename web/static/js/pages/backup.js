@@ -1620,7 +1620,7 @@
                     </div>
                     <div class="d-flex justify-content-between">
                         <small class="text-muted">压缩后大小:${formatBytes(progressInfo.compressedBytes)}</small>
-                        <small class="${_ratioCls}">压缩率:${formatCompressionRatio(progressInfo.compressionRatio)}</small>
+                        <small class="text-muted">压缩率:<span class="${_ratioCls}">${formatCompressionRatio(progressInfo.compressionRatio)}</span></small>
                     </div>
                 `);
             }
