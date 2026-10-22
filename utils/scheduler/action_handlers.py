@@ -1159,6 +1159,16 @@ class VerifyActionHandler(ActionHandler):
                 logger.info("[磁带验证] LTFS 挂载成功")
 
             # 3. 收集所有归档文件（跳过正在写入的：mtime 过新）
+            # 当前磁带卷标（写入清单缓存时的键）
+            tape_label = 'unknown'
+            try:
+                _re_eng = getattr(self.system_instance, 'tape_recovery_engine', None)
+                if _re_eng:
+                    _st = await _re_eng.get_tape_status()
+                    tape_label = _st.get('tape_label') or 'unknown'
+            except Exception:
+                pass
+
             archives = []
             unstable_skipped = 0
             system_dirs = {'.LTFS', 'lost+found', '.Trash', '.Trashes',
@@ -1236,13 +1246,22 @@ class VerifyActionHandler(ActionHandler):
                     logger.info(f"[磁带验证] 验证归档 {i+1}/{sample_count}: {archive_path.name}")
                     try:
                         # 单个归档上限 30 分钟：磁带/FUSE 卡死时不能无限挂住
+                        _entries = []
                         valid, detail = await asyncio.wait_for(
                             asyncio.to_thread(
-                                self._verify_archive_extract, archive_path, verify_temp),
+                                self._verify_archive_extract, archive_path, verify_temp, _entries),
                             timeout=1800)
                         if valid:
                             passed += 1
                             logger.info(f"[磁带验证] ✓ {archive_path.name}: {detail}")
+                            # 解压时顺手拿到文件清单：写入 DB 缓存（未缓存才写），
+                            # 恢复检索时可直接命中，无需再读磁带
+                            try:
+                                await self._cache_verified_archive(
+                                    tape_label, archive_path, _entries)
+                            except Exception as _ce:
+                                logger.warning(
+                                    f"[磁带验证] 写入清单缓存失败（不影响验证）: {_ce}")
                         else:
                             failed += 1
                             corrupt += 1
@@ -1333,6 +1352,37 @@ class VerifyActionHandler(ActionHandler):
                     logger.info("[磁带验证] 已卸载 LTFS 并离线磁带")
                 except Exception as e:
                     logger.warning(f"[磁带验证] 卸载 LTFS 失败: {e}")
+
+    async def _cache_verified_archive(self, tape_label: str, archive_path: Path,
+                                      entries: list) -> None:
+        """把磁带验证时解压得到的文件清单写入 DB 缓存（未缓存才写）。
+
+        验证本来就完整解压了归档，清单是顺带产物；写入后恢复检索可直接
+        命中 DB，不再读磁带。失败只告警，不影响验证结果。
+        """
+        if not entries or not tape_label or tape_label == 'unknown':
+            return
+        engine = getattr(self.system_instance, 'tape_recovery_engine', None)
+        if not engine:
+            return
+        set_id = archive_path.parent.name
+        archive_name = archive_path.name
+        try:
+            info = await engine.check_archive_cache(tape_label, set_id, archive_name)
+            if info and info.get('cached'):
+                return
+        except Exception:
+            pass
+        try:
+            archive_size = archive_path.stat().st_size
+        except OSError:
+            archive_size = None
+        ok = await engine.save_archive_contents(
+            tape_label, set_id, archive_name, entries, archive_size)
+        if ok:
+            logger.info(
+                f"[磁带验证] 已缓存归档清单: {archive_name}"
+                f"（{len(entries)} 个文件）")
 
     @staticmethod
     def _should_exclude_file(file_path: str, exclude_patterns: List[str]) -> bool:
@@ -1720,8 +1770,13 @@ class VerifyActionHandler(ActionHandler):
             return False, str(e)
 
     @staticmethod
-    def _verify_archive_extract(archive_path: Path, temp_dir: Path) -> tuple:
+    def _verify_archive_extract(archive_path: Path, temp_dir: Path,
+                                entries_out: Optional[list] = None) -> tuple:
         """解压验证归档文件完整性（用于磁带验证，解压到临时目录后删除）
+
+        Args:
+            entries_out: 传入列表时，解压过程中收集归档内文件清单
+                [{name,size,is_dir,modified_time}]，供写入 DB 缓存使用
 
         Returns:
             (is_valid: bool, detail: str)
@@ -1732,23 +1787,42 @@ class VerifyActionHandler(ActionHandler):
 
         try:
             if name.endswith('.tar.zst'):
-                return VerifyActionHandler._extract_tar_zst(archive_path, temp_dir, size_mb)
+                return VerifyActionHandler._extract_tar_zst(
+                    archive_path, temp_dir, size_mb, entries_out)
             elif name.endswith(('.tar.gz', '.tgz')):
-                return VerifyActionHandler._extract_tar(archive_path, temp_dir, 'r:gz', size_mb)
+                return VerifyActionHandler._extract_tar(
+                    archive_path, temp_dir, 'r:gz', size_mb, entries_out)
             elif name.endswith('.tar'):
-                return VerifyActionHandler._extract_tar(archive_path, temp_dir, 'r:', size_mb)
+                return VerifyActionHandler._extract_tar(
+                    archive_path, temp_dir, 'r:', size_mb, entries_out)
             elif name.endswith('.zip'):
-                return VerifyActionHandler._extract_zip(archive_path, temp_dir, size_mb)
+                return VerifyActionHandler._extract_zip(
+                    archive_path, temp_dir, size_mb, entries_out)
             elif name.endswith('.7z'):
-                return VerifyActionHandler._extract_7z(archive_path, temp_dir, size_mb)
+                return VerifyActionHandler._extract_7z(
+                    archive_path, temp_dir, size_mb, entries_out)
             else:
                 return True, f"文件可读 ({size_mb:.1f}MB)"
         except Exception as e:
             return False, str(e)
 
     @staticmethod
-    def _extract_tar_zst(archive_path: Path, temp_dir: Path, size_mb: float) -> tuple:
-        """解压验证 .tar.zst"""
+    def _extract_tar_zst(archive_path: Path, temp_dir: Path, size_mb: float,
+                         entries_out: Optional[list] = None) -> tuple:
+        """解压验证 .tar.zst（entries_out 非 None 时收集文件清单）"""
+        def _collect(member):
+            if entries_out is not None:
+                try:
+                    entries_out.append({
+                        'name': member.name,
+                        'size': member.size if member.isfile() else 0,
+                        'is_dir': member.isdir(),
+                        'modified_time': (datetime.fromtimestamp(member.mtime).isoformat()
+                                          if member.mtime else None),
+                    })
+                except Exception:
+                    pass
+
         try:
             import zstandard as zstd
             dctx = zstd.ZstdDecompressor()
@@ -1758,6 +1832,7 @@ class VerifyActionHandler(ActionHandler):
                     with tarfile.open(fileobj=reader, mode='r|') as tar:
                         for member in tar:
                             member_count += 1
+                            _collect(member)
             return True, f"解压验证通过 ({size_mb:.1f}MB, {member_count} 个文件)"
         except ImportError:
             import subprocess
@@ -1770,6 +1845,7 @@ class VerifyActionHandler(ActionHandler):
                 with tarfile.open(fileobj=proc.stdout, mode='r|') as tar:
                     for member in tar:
                         member_count += 1
+                        _collect(member)
                 proc.wait(timeout=60)
             except Exception as e:
                 proc.kill()
@@ -1780,33 +1856,65 @@ class VerifyActionHandler(ActionHandler):
             return True, f"解压验证通过 ({size_mb:.1f}MB, {member_count} 个文件, CLI)"
 
     @staticmethod
-    def _extract_tar(archive_path: Path, temp_dir: Path, mode: str, size_mb: float) -> tuple:
-        """解压验证 tar/tar.gz"""
+    def _extract_tar(archive_path: Path, temp_dir: Path, mode: str, size_mb: float,
+                     entries_out: Optional[list] = None) -> tuple:
+        """解压验证 tar/tar.gz（entries_out 非 None 时收集文件清单）"""
         member_count = 0
         with tarfile.open(str(archive_path), mode) as tar:
             for member in tar:
                 member_count += 1
+                if entries_out is not None:
+                    try:
+                        entries_out.append({
+                            'name': member.name,
+                            'size': member.size if member.isfile() else 0,
+                            'is_dir': member.isdir(),
+                            'modified_time': (datetime.fromtimestamp(member.mtime).isoformat()
+                                              if member.mtime else None),
+                        })
+                    except Exception:
+                        pass
         return True, f"解压验证通过 ({size_mb:.1f}MB, {member_count} 个文件)"
 
     @staticmethod
-    def _extract_zip(archive_path: Path, temp_dir: Path, size_mb: float) -> tuple:
-        """解压验证 zip"""
+    def _extract_zip(archive_path: Path, temp_dir: Path, size_mb: float,
+                     entries_out: Optional[list] = None) -> tuple:
+        """解压验证 zip（entries_out 非 None 时收集文件清单）"""
         import zipfile
         with zipfile.ZipFile(str(archive_path), 'r') as zf:
             bad = zf.testzip()
             if bad:
                 return False, f"损坏的文件: {bad}"
-            count = len(zf.infolist())
+            infos = zf.infolist()
+            count = len(infos)
+            if entries_out is not None:
+                for zi in infos:
+                    entries_out.append({
+                        'name': zi.filename,
+                        'size': 0 if zi.is_dir() else int(zi.file_size or 0),
+                        'is_dir': zi.is_dir(),
+                        'modified_time': '%04d-%02d-%02d %02d:%02d:%02d' % zi.date_time,
+                    })
         return True, f"解压验证通过 ({size_mb:.1f}MB, {count} 个文件)"
 
     @staticmethod
-    def _extract_7z(archive_path: Path, temp_dir: Path, size_mb: float) -> tuple:
-        """解压验证 7z"""
+    def _extract_7z(archive_path: Path, temp_dir: Path, size_mb: float,
+                    entries_out: Optional[list] = None) -> tuple:
+        """解压验证 7z（entries_out 非 None 时收集文件清单）"""
         try:
             import py7zr
             with py7zr.SevenZipFile(str(archive_path), mode='r') as archive:
                 file_list = archive.list()
                 count = len([f for f in file_list if not f.is_directory])
+                if entries_out is not None:
+                    for f in file_list:
+                        entries_out.append({
+                            'name': f.filename,
+                            'size': 0 if f.is_directory else int(f.uncompressed or 0),
+                            'is_dir': bool(f.is_directory),
+                            'modified_time': (f.creationtime.strftime('%Y-%m-%d %H:%M:%S')
+                                              if getattr(f, 'creationtime', None) else None),
+                        })
             return True, f"解压验证通过 ({size_mb:.1f}MB, {count} 个文件)"
         except ImportError:
             return True, f"py7zr 未安装，跳过解压验证 ({size_mb:.1f}MB)"
