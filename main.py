@@ -258,6 +258,19 @@ class TapeBackupSystem:
                         self.backup_engine.tape_handler, self.dingtalk_notifier
                     )
                     logger.info("磁带恢复引擎依赖已绑定：TapeHandler, DingTalkNotifier")
+
+                # 启动时清理上次遗留的恢复临时副本（/mnt/SSD/recovery_tmp）
+                try:
+                    _n = self.tape_recovery_engine.cleanup_recovery_tmp()
+                    if _n:
+                        logger.info(f"[启动] 已清理恢复临时副本 {_n} 个")
+                except Exception as _ct_err:
+                    logger.warning(f"[启动] 清理恢复临时副本失败: {_ct_err}")
+                # 备份任务开始前也要清理该目录：把恢复引擎挂到备份引擎上
+                try:
+                    self.backup_engine.recovery_engine = self.tape_recovery_engine
+                except Exception:
+                    pass
             except Exception as tape_recovery_error:
                 logger.warning(f"磁带恢复引擎初始化失败: {str(tape_recovery_error)}")
 

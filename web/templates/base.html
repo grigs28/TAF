@@ -139,6 +139,42 @@
     <!-- 自定义JS -->
     <script src="{{ url_for('static', path='/js/main.js') }}"></script>
 
+    <!-- 备份运行时禁用“恢复”入口：恢复与备份互斥（后端也会拒绝） -->
+    <script>
+    (function() {
+        var _recovCheckTimer = null;
+        function _syncRecoveryNav() {
+            fetch('/api/backup/tasks?status=running&limit=5', {credentials: 'same-origin'})
+                .then(function(r) { return r.ok ? r.json() : null; })
+                .then(function(d) {
+                    if (!d) return;
+                    var tasks = (d && d.tasks) || [];
+                    var running = tasks.some(function(t) {
+                        return String((t && t.status) || '').toLowerCase() === 'running';
+                    });
+                    document.querySelectorAll('a[href="/recovery"]').forEach(function(a) {
+                        if (running) {
+                            a.style.pointerEvents = 'none';
+                            a.style.opacity = '0.45';
+                            a.setAttribute('aria-disabled', 'true');
+                            a.title = '备份任务运行中，暂不可恢复/检索';
+                        } else {
+                            a.style.pointerEvents = '';
+                            a.style.opacity = '';
+                            a.removeAttribute('aria-disabled');
+                            a.title = '';
+                        }
+                    });
+                })
+                .catch(function() { /* 忽略 */ });
+        }
+        document.addEventListener('DOMContentLoaded', function() {
+            _syncRecoveryNav();
+            _recovCheckTimer = setInterval(_syncRecoveryNav, 30000);
+        });
+    })();
+    </script>
+
     {% block extra_js %}{% endblock %}
 </body>
 </html>

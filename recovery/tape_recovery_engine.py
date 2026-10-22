@@ -762,15 +762,196 @@ class TapeRecoveryEngine:
     # Step 3: 归档内容列表
     # ================================================================
 
+    # ---------- 本地副本（/mnt/SSD/recovery_tmp） ----------
+    RECOVERY_TMP_ROOT = '/mnt/SSD/recovery_tmp'
+
+    def _recovery_tmp_root(self) -> Path:
+        root = Path(self.RECOVERY_TMP_ROOT)
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def _local_copy_path(self, set_id: str, archive_filename: str) -> Path:
+        return self._recovery_tmp_root() / set_id / archive_filename
+
+    async def _archive_is_cached(self, tape_label: str, set_id: str,
+                                 archive_filename: str) -> bool:
+        """该归档的文件清单是否已写入 DB（已列出过）"""
+        try:
+            from utils.scheduler.db_utils import get_opengauss_connection
+            async with get_opengauss_connection() as conn:
+                row = await conn.fetchrow(
+                    "SELECT COUNT(*) AS cnt FROM tape_archive_contents "
+                    "WHERE tape_label = $1 AND set_id = $2 AND archive_filename = $3",
+                    tape_label, set_id, archive_filename)
+                return bool(row and row['cnt'] > 0)
+        except Exception:
+            # 查不到时保守处理：视为未列出（不删）
+            return False
+
+    async def _ensure_space_for(self, need_bytes: int) -> tuple:
+        """确保 SSD 能放下副本；不足时删除"已列出文件"的旧副本（最旧优先）"""
+        root = self._recovery_tmp_root()
+        try:
+            usage = shutil.disk_usage(str(root))
+            free = usage.free
+        except OSError as e:
+            return False, f'无法读取磁盘空间: {e}'
+
+        need = int(need_bytes * 1.1) + 512 * 1024 * 1024
+        if free >= need:
+            return True, ''
+
+        copies = []
+        for p in root.rglob('*'):
+            if p.is_file() and not p.name.endswith('.part'):
+                try:
+                    copies.append((p.stat().st_mtime, p))
+                except OSError:
+                    pass
+        copies.sort()  # 最旧优先
+
+        tape_label = None
+        for _mtime, p in copies:
+            if free >= need:
+                break
+            try:
+                rel = p.relative_to(root)
+                set_id, arch = rel.parts[0], rel.parts[-1]
+            except Exception:
+                continue
+            if tape_label is None:
+                try:
+                    st = await self.get_tape_status()
+                    tape_label = st.get('tape_label') or 'unknown'
+                except Exception:
+                    tape_label = 'unknown'
+            # 只删已列出文件（清单已在 DB，删了不影响检索）的副本
+            if not await self._archive_is_cached(tape_label, set_id, arch):
+                continue
+            try:
+                size = p.stat().st_size
+                p.unlink()
+                free += size
+                logger.info(f"[磁带恢复] 空间不足，已删除已列出的副本: {p}")
+            except OSError:
+                pass
+
+        if free >= need:
+            return True, ''
+        return False, (f"SSD 空间不足（需要 {need / 1024 ** 3:.1f} GB，"
+                       f"可用 {free / 1024 ** 3:.1f} GB）")
+
+    async def ensure_local_copy(self, set_id: str, archive_filename: str,
+                                archive_size: Optional[int] = None) -> Dict[str, Any]:
+        """确保归档有本地副本（/mnt/SSD/recovery_tmp）。
+
+        Returns: {ok, path, reused, error}
+        """
+        src = self._get_mount_point() / set_id / archive_filename
+        if not src.exists():
+            return {'ok': False, 'error': '归档不存在（请确认磁带已挂载）'}
+        try:
+            src_size = src.stat().st_size
+        except OSError as e:
+            return {'ok': False, 'error': f'读取归档大小失败: {e}'}
+
+        dst = self._local_copy_path(set_id, archive_filename)
+        if dst.exists():
+            try:
+                if dst.stat().st_size == src_size:
+                    return {'ok': True, 'path': dst, 'reused': True}
+            except OSError:
+                pass
+            try:
+                dst.unlink()
+            except OSError:
+                pass
+
+        ok, err = await self._ensure_space_for(src_size)
+        if not ok:
+            return {'ok': False, 'error': err}
+
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        part = dst.with_name(dst.name + '.part')
+        last_err = None
+        for attempt in range(3):
+            try:
+                await asyncio.to_thread(shutil.copyfile, str(src), str(part))
+                part_size = part.stat().st_size
+                if part_size != src_size:
+                    raise IOError(f"复制大小不符: {part_size} != {src_size}")
+                part.replace(dst)
+                logger.info(f"[磁带恢复] 已复制归档到本地副本: {dst} "
+                            f"({src_size / 1024 ** 2:.0f} MB)")
+                return {'ok': True, 'path': dst, 'reused': False}
+            except Exception as e:
+                last_err = e
+                try:
+                    part.unlink()
+                except OSError:
+                    pass
+                logger.warning(f"[磁带恢复] 复制归档失败（第{attempt + 1}/3次）: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+        return {'ok': False, 'error': f'复制归档失败: {last_err}'}
+
+    async def archive_cache_status(self, tape_label: str, set_id: str) -> Dict[str, int]:
+        """批量查询该备份集各归档的缓存条数（0/缺失=未缓存）"""
+        result: Dict[str, int] = {}
+        try:
+            from utils.scheduler.db_utils import get_opengauss_connection
+            async with get_opengauss_connection() as conn:
+                rows = await conn.fetch(
+                    "SELECT archive_filename, COUNT(*) AS cnt FROM tape_archive_contents "
+                    "WHERE tape_label = $1 AND set_id = $2 GROUP BY archive_filename",
+                    tape_label, set_id)
+                for r in rows:
+                    result[r['archive_filename']] = int(r['cnt'] or 0)
+        except Exception as e:
+            logger.warning(f"[磁带恢复] 查询归档缓存状态失败: {e}")
+        return result
+
+    def cleanup_recovery_tmp(self, set_id: str = None) -> int:
+        """清理恢复临时副本（程序启动 / 备份任务开始前 / 离开页面）"""
+        root = Path(self.RECOVERY_TMP_ROOT)
+        if not root.exists():
+            return 0
+        target = (root / set_id) if set_id else root
+        removed = 0
+        try:
+            if target.exists():
+                removed = sum(1 for p in target.rglob('*') if p.is_file())
+                shutil.rmtree(str(target), ignore_errors=True)
+            if removed:
+                logger.info(f"[磁带恢复] 已清理恢复临时副本 {removed} 个: {target}")
+        except Exception as e:
+            logger.warning(f"[磁带恢复] 清理临时副本失败: {e}")
+        return removed
+
     async def list_archive_contents(self, set_id: str, archive_filename: str) -> Dict[str, Any]:
-        """列出单个归档文件的内部文件列表（不提取）"""
+        """列出单个归档文件的内部文件列表（不提取）
+
+        优先使用 /mnt/SSD/recovery_tmp 下的本地副本（复制一次后读写都在
+        SSD，避免长时间占用磁带）；副本不可用时退回直接读磁带。
+        """
         archive_path = self._get_mount_point() / set_id / archive_filename
         if not archive_path.exists():
             return {"archive": archive_filename, "entries": [], "total_entries": 0,
                     "total_files": 0, "total_dirs": 0, "error": "文件不存在"}
 
+        read_path = archive_path
         try:
-            entries = await asyncio.to_thread(self._list_archive_sync, archive_path)
+            cp = await self.ensure_local_copy(set_id, archive_filename)
+            if cp.get('ok'):
+                read_path = cp['path']
+            else:
+                logger.warning(
+                    f"[磁带恢复] 本地副本不可用，退回直接读磁带: {cp.get('error')}")
+        except Exception as e:
+            logger.warning(f"[磁带恢复] 准备本地副本异常，退回直接读磁带: {e}")
+
+        try:
+            entries = await asyncio.to_thread(self._list_archive_sync, read_path)
             files = [e for e in entries if not e["is_dir"]]
             dirs = [e for e in entries if e["is_dir"]]
             return {

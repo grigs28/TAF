@@ -350,6 +350,18 @@ class BackupEngine:
         task_id = backup_task.id
         task_name = backup_task.task_name
 
+        # 备份开始前清理恢复临时副本（/mnt/SSD/recovery_tmp）：
+        # 恢复与备份互斥（备份期间恢复 tab 变灰），此刻不会有进行中的恢复；
+        # 这些副本会占用 SSD 空间、影响压缩守卫，必须先清掉。
+        try:
+            _re_engine = getattr(self, 'recovery_engine', None)
+            if _re_engine:
+                _n = _re_engine.cleanup_recovery_tmp()
+                if _n:
+                    logger.info(f"[备份引擎] 已清理恢复临时副本 {_n} 个")
+        except Exception as _ct_err:
+            logger.warning(f"[备份引擎] 清理恢复临时副本失败: {_ct_err}")
+
         # 任务开始：重置在途/累计组统计（L/S 数量）
         try:
             self.compressor.reset_group_stats()

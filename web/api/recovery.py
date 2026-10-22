@@ -21,6 +21,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _reject_if_backup_running(request: Request):
+    """备份任务运行中时拒绝恢复/检索（前端恢复 tab 也会变灰）"""
+    try:
+        system = request.app.state.system
+        be = getattr(system, 'backup_engine', None) if system else None
+        task = getattr(be, '_current_task', None) if be else None
+        if task is not None and str(getattr(task, 'status', '')).lower() == 'running':
+            raise HTTPException(
+                status_code=409,
+                detail="备份任务运行中，暂不可恢复/检索，请等待任务结束")
+    except HTTPException:
+        raise
+    except Exception:
+        # 取不到状态时不拦截（保守放行，避免误伤）
+        pass
+
+
 # ============================================================
 # 请求模型
 # ============================================================
@@ -228,6 +245,7 @@ async def get_archive_contents(set_id: str, archive: str, request: Request,
                                           page: int = 1, page_size: int = 100,
                                           use_cache: bool = True):
     """获取单个归档文件的内部文件列表（支持分页和数据库缓存）"""
+    _reject_if_backup_running(request)
     engine = _get_engine(request)
 
     if use_cache:
@@ -296,6 +314,26 @@ async def get_cached_archive_contents(set_id: str, archive: str, request: Reques
     )
 
 
+@router.get("/backup-sets/{set_id}/archive-cache-status")
+async def get_archive_cache_status(set_id: str, request: Request,
+                                   tape_label: str = ""):
+    """批量查询该备份集各归档的文件清单缓存状态（供前端显示“已缓存”标志）"""
+    engine = _get_engine(request)
+    if not tape_label:
+        status = await engine.get_tape_status()
+        tape_label = status.get("tape_label") or "unknown"
+    cached_map = await engine.archive_cache_status(tape_label, set_id)
+    return {"tape_label": tape_label, "set_id": set_id, "cached": cached_map}
+
+
+@router.post("/cleanup-recovery-tmp")
+async def cleanup_recovery_tmp(request: Request, set_id: str = ""):
+    """清理 /mnt/SSD/recovery_tmp 下的恢复副本（离开页面时调用）"""
+    engine = _get_engine(request)
+    removed = engine.cleanup_recovery_tmp(set_id or None)
+    return {"removed": removed, "set_id": set_id or None}
+
+
 @router.get("/backup-sets/{set_id}/search-files-stream")
 async def search_files_stream(set_id: str, q: str, request: Request,
                                 tape_label: str = ""):
@@ -304,6 +342,7 @@ async def search_files_stream(set_id: str, q: str, request: Request,
     优先从数据库缓存搜索，未缓存的归档走解压并自动缓存。
     必须检索所有归档（因为重名文件可能存在于不同归档）。
     """
+    _reject_if_backup_running(request)
     engine = _get_engine(request)
 
     if not tape_label:
@@ -329,6 +368,7 @@ async def start_restore(
     request: Request,
 ):
     """创建并启动恢复任务"""
+    _reject_if_backup_running(request)
     engine = _get_engine(request)
 
     try:
