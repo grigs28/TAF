@@ -936,16 +936,74 @@ class Compressor:
 
                 # zstd 子进程已退出、归档写在本地 SSD，文件大小已确定；
                 # 同名双写已由 _claim_archive_path 的 O_CREAT|O_EXCL 原子占用解决，
-                # 无需再做 5 秒稳定性检测（原先每组完成都会白等 5 秒）。
-                # 移动文件
+                # 无需再做 5 秒稳定性检测。
+                source_file_size = temp_archive_path.stat().st_size
+
+                # 移动失败重试 3 次（递增等待 1s/2s）：磁盘满、瞬时 IO 错误时可恢复。
+                # 3 次仍失败则抛出，由 worker 标记该组失败（不得静默丢数据）。
                 loop_move = asyncio.get_event_loop()
-                await loop_move.run_in_executor(None, shutil.move, str(temp_archive_path), str(final_archive_path))
-                
-                # 验证移动成功
+                last_move_err = None
+                moved = False
+                for attempt in range(3):
+                    try:
+                        await loop_move.run_in_executor(
+                            None, shutil.move,
+                            str(temp_archive_path), str(final_archive_path))
+                        moved = True
+                        break
+                    except Exception as move_err:
+                        last_move_err = move_err
+                        logger.warning(
+                            f"[压缩] 移动到final失败（第{attempt + 1}/3次）: {move_err}")
+                        if attempt < 2:
+                            await asyncio.sleep(1.0 * (attempt + 1))
+
+                if not moved:
+                    logger.error(
+                        f"[压缩] 移动到final最终失败: {last_move_err}，"
+                        f"归档保留在 {temp_archive_path}")
+                    raise last_move_err
+
+                # 校验：目标存在 + 大小与源一致（防止复制不完整/截断）
                 if not final_archive_path.exists():
-                    logger.error(f"[压缩] 移动后目标文件不存在: {final_archive_path}")
-                    return None
-                
+                    raise FileNotFoundError(
+                        f"移动后目标文件不存在: {final_archive_path}")
+                final_file_size = final_archive_path.stat().st_size
+                if final_file_size != source_file_size:
+                    # 不完整归档必须删掉：否则 FinalDirMonitor 会把它写进磁带
+                    try:
+                        final_archive_path.unlink()
+                        logger.warning(
+                            f"[压缩] 已删除大小不匹配的不完整归档: {final_archive_path}")
+                    except OSError as del_bad_err:
+                        logger.warning(
+                            f"[压缩] 删除不完整归档失败，请人工清理: "
+                            f"{final_archive_path}: {del_bad_err}")
+                    raise ValueError(
+                        f"移动后大小不匹配: 源={source_file_size}, "
+                        f"目标={final_file_size}")
+
+                # 源文件残留（跨文件系统 move 会退化为"复制+删除"）：
+                # 最多重试 3 次清理；移动已成功，删除失败只告警不失败
+                if temp_archive_path.exists():
+                    logger.warning(
+                        f"[压缩] 移动后源文件仍存在: {temp_archive_path}，尝试清理")
+                    for attempt in range(3):
+                        try:
+                            if attempt > 0:
+                                await asyncio.sleep(1.0 * attempt)
+                            temp_archive_path.unlink()
+                            logger.info(
+                                f"[压缩] 源文件已清理（第{attempt + 1}次尝试）")
+                            break
+                        except FileNotFoundError:
+                            break
+                        except OSError as del_err:
+                            if attempt == 2:
+                                logger.warning(
+                                    f"[压缩] 无法删除源文件（已重试3次），"
+                                    f"移动已成功，可人工清理: {temp_archive_path}: {del_err}")
+
                 logger.info(f"[压缩] ✅ 文件已成功移动到final目录: {final_archive_path}")
                 
                 # 更新compress_result中的路径
