@@ -926,9 +926,15 @@
                 _speedHtml += `<span class="badge bg-secondary bg-opacity-25 text-light" style="${_badgeStyle}; margin-right:2px;">${task.final_pending_files}</span>`;
             }
             // 已写入数：当前正在写磁带的这个文件已写字节（切换文件瞬间为 0）
+            // 有总大小时显示 "已写/总大小"（如 5.8G/12.0G），否则只显示已写
             {
                 const _written = Number(task.tape_write_bytes) || 0;
-                const _writtenLabel = _written > 0 ? formatCompactBytes(_written) : '0M';
+                const _total = Number(task.tape_write_total) || 0;
+                const _writtenLabel = _written > 0
+                    ? (_total > 0
+                        ? formatCompactBytes(_written) + '/' + formatCompactBytes(_total)
+                        : formatCompactBytes(_written))
+                    : '0M';
                 _speedHtml += `<span class="badge bg-info text-dark" style="${_badgeStyle}; margin-right:2px;">${_writtenLabel}</span>`;
             }
             if (_curMbps > 0 && _avgMbps > 0) {
