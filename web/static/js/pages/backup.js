@@ -1592,6 +1592,11 @@
                 const _dataPct = progressInfo.totalBytes > 0
                     ? ((Number(progressInfo.processedBytes) || 0) / Number(progressInfo.totalBytes) * 100).toFixed(1)
                     : '0.0';
+                // 压缩率着色：压缩后占原始 ≥80% 说明压缩效果差 → 黄色；<80% → 绿色
+                const _ratioVal = Number(progressInfo.compressionRatio) || 0;
+                const _ratioCls = _ratioVal > 0
+                    ? (_ratioVal >= 0.8 ? 'text-warning' : 'text-success')
+                    : 'text-muted';
 
                 progressSection.innerHTML = normalizeCardHtml(`
                     ${batchProgressHtml}
@@ -1615,7 +1620,7 @@
                     </div>
                     <div class="d-flex justify-content-between">
                         <small class="text-muted">压缩后大小:${formatBytes(progressInfo.compressedBytes)}</small>
-                        <small class="text-muted">压缩率:${formatCompressionRatio(progressInfo.compressionRatio)}</small>
+                        <small class="${_ratioCls}">压缩率:${formatCompressionRatio(progressInfo.compressionRatio)}</small>
                     </div>
                 `);
             }
@@ -1693,7 +1698,12 @@
                 const _srcB = _procB > 0 ? _procB : _totalB;
                 const _compB = Number(task.compressed_bytes) || 0;
                 const _starve = Number(task.tape_starvation_seconds) || 0;
-                const _ratio = _srcB > 0 ? (_compB / _srcB * 100).toFixed(1) + '%' : '-';
+                const _ratioVal = _srcB > 0 ? (_compB / _srcB) : 0;
+                const _ratio = _srcB > 0 ? (_ratioVal * 100).toFixed(1) + '%' : '-';
+                // 压缩率着色：≥80% 黄色（压缩效果差），<80% 绿色
+                const _ratioCls = _ratioVal > 0
+                    ? (_ratioVal >= 0.8 ? 'text-warning' : 'text-success')
+                    : 'text-muted';
 
                 const sizeRow = document.createElement('div');
                 sizeRow.className = 'd-flex justify-content-between';
@@ -1704,7 +1714,7 @@
                 const compRow = document.createElement('div');
                 compRow.className = 'd-flex justify-content-between';
                 compRow.innerHTML = `<small class="text-muted">压缩后大小:</small>`
-                    + `<small class="text-muted" title="压缩率 ${_ratio}">${formatBytes(_compB)}（${_ratio}）</small>`;
+                    + `<small class="text-muted" title="压缩率 ${_ratio}">${formatBytes(_compB)}（<span class="${_ratioCls}">${_ratio}</span>）</small>`;
                 body.appendChild(compRow);
 
                 // 平均压缩速度：已处理源数据 ÷ 压缩阶段耗时（优先用压缩实际开始时间）
