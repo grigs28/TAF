@@ -6,6 +6,7 @@ Compression Module
 """
 
 import asyncio
+import hashlib
 import logging
 import time
 import os
@@ -27,6 +28,19 @@ from backup.utils import format_bytes
 from backup.compression_process_pool import _submit_compression_payload, CompressionProcessPool
 
 logger = logging.getLogger(__name__)
+
+
+def _file_digest(path, chunk: int = 4 * 1024 * 1024) -> str:
+    """计算文件内容摘要（blake2b-128，比 md5 快且同为标准库）。
+
+    仅在跨文件系统移动（copy+delete）时使用：大小一致只能证明"长度对上"，
+    证明不了"内容对得上"。同盘 rename 不复制数据，无需哈希。
+    """
+    h = hashlib.blake2b(digest_size=16)
+    with open(path, 'rb') as f:
+        for block in iter(lambda: f.read(chunk), b''):
+            h.update(block)
+    return h.hexdigest()
 
 
 # ========== 拆分后的实现模块（re-export，保持 from backup.compressor import ... 兼容） ==========
@@ -939,9 +953,25 @@ class Compressor:
                 # 无需再做 5 秒稳定性检测。
                 source_file_size = temp_archive_path.stat().st_size
 
+                # 跨文件系统移动会退化为"复制+删除"：大小一致只能证明长度对，
+                # 证明不了内容对，需在移动前记录内容摘要、移动后对比。
+                # 同盘 rename 不复制数据，跳过哈希（零成本）。
+                loop_move = asyncio.get_event_loop()
+                _cross_fs = False
+                _src_digest = None
+                try:
+                    _cross_fs = (os.stat(temp_archive_path).st_dev
+                                 != os.stat(final_dir).st_dev)
+                except OSError:
+                    _cross_fs = False
+                if _cross_fs:
+                    _src_digest = await loop_move.run_in_executor(
+                        None, _file_digest, temp_archive_path)
+                    logger.info(
+                        f"[压缩] 跨文件系统移动，源归档内容摘要: {_src_digest}")
+
                 # 移动失败重试 3 次（递增等待 1s/2s）：磁盘满、瞬时 IO 错误时可恢复。
                 # 3 次仍失败则抛出，由 worker 标记该组失败（不得静默丢数据）。
-                loop_move = asyncio.get_event_loop()
                 last_move_err = None
                 moved = False
                 for attempt in range(3):
@@ -982,6 +1012,26 @@ class Compressor:
                     raise ValueError(
                         f"移动后大小不匹配: 源={source_file_size}, "
                         f"目标={final_file_size}")
+
+                # 跨文件系统：大小之外再做内容摘要校验（复制过程可能写坏）
+                if _cross_fs and _src_digest:
+                    _dst_digest = await loop_move.run_in_executor(
+                        None, _file_digest, final_archive_path)
+                    if _dst_digest != _src_digest:
+                        try:
+                            final_archive_path.unlink()
+                            logger.warning(
+                                f"[压缩] 已删除内容校验失败的目标归档: "
+                                f"{final_archive_path}")
+                        except OSError as del_bad_err:
+                            logger.warning(
+                                f"[压缩] 删除校验失败归档失败，请人工清理: "
+                                f"{final_archive_path}: {del_bad_err}")
+                        raise ValueError(
+                            f"跨文件系统移动后内容校验失败: "
+                            f"源={_src_digest}, 目标={_dst_digest}")
+                    logger.info(
+                        f"[压缩] 跨文件系统移动内容校验通过: {_dst_digest}")
 
                 # 源文件残留（跨文件系统 move 会退化为"复制+删除"）：
                 # 最多重试 3 次清理；移动已成功，删除失败只告警不失败
