@@ -33,6 +33,18 @@
         return Math.round(bytes / 1024 ** 2) + 'M';
     }
 
+    // 写带等待时长：秒 → xhxmxs（1h23m45s / 23m45s / 45s）
+    // 数据源 tape_starvation_seconds（后端只给秒数，格式化全在前端）
+    function formatStarveDuration(seconds) {
+        const total = Math.max(0, Math.floor(Number(seconds) || 0));
+        const h = Math.floor(total / 3600);
+        const m = Math.floor((total % 3600) / 60);
+        const s = total % 60;
+        if (h > 0) return `${h}h${m}m${s}s`;
+        if (m > 0) return `${m}m${s}s`;
+        return `${s}s`;
+    }
+
     // 速率计算（文件/秒），两类数据源共用：
     //   processed_files —— 压缩组完成时整组跃增（每组约 1~2 分钟），5 秒瞬时差分
     //                      大多数时候为 0；采用"最近一次变化"口径：计数一变化即
@@ -929,9 +941,7 @@
             let _idleHtml = '';
             {
                 const _starve = Number(task.tape_starvation_seconds) || 0;
-                const _starveLabel = _starve >= 3600
-                    ? (Math.round(_starve / 360) / 10) + 'h'
-                    : (_starve >= 60 ? Math.round(_starve / 60) + 'm' : Math.round(_starve) + 's');
+                const _starveLabel = formatStarveDuration(_starve);
                 _idleHtml = `<span class="badge bg-secondary bg-opacity-25 text-light" style="${_badgeStyle}; margin-left:2px;">等待${_starveLabel}</span>`;
             }
             // "写带"与"MB/s"保持 <small> 的原字号；空闲徽章放在单位之后
@@ -940,9 +950,7 @@
             // 任务结束：显示本任务累计的“等待压缩”（由任务完成时写入 result_summary）
             const _starveDone = Number(task.tape_starvation_seconds) || 0;
             if (_starveDone > 0) {
-                const _starveLabel = _starveDone >= 3600
-                    ? (Math.round(_starveDone / 360) / 10) + 'h'
-                    : (_starveDone >= 60 ? Math.round(_starveDone / 60) + 'm' : Math.round(_starveDone) + 's');
+                const _starveLabel = formatStarveDuration(_starveDone);
                 _tapeSpeedHtml = `<small>等待压缩 <span class="badge bg-secondary bg-opacity-25 text-light" `
                     + `style="font-weight:400; padding:0.2em 0.45em; font-size:0.85rem;">${_starveLabel}</span></small>`;
             }
