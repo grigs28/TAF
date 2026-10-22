@@ -10,6 +10,7 @@ import asyncio
 import os
 import random
 import shutil
+import threading
 import uuid
 import tarfile
 import time
@@ -1017,7 +1018,15 @@ class VerifyActionHandler(ActionHandler):
                 thread_config = dict(config)
                 thread_config['source_paths'] = resolved_paths
                 thread_config['_event_loop'] = loop  # 传入事件循环，供线程内 DB 更新使用
-                result = await loop.run_in_executor(None, self._verify_directory_sync, thread_config, task_id)
+                # 取消标志：任务被取消时通知线程退出，避免线程继续扫描/读文件
+                _stop_event = threading.Event()
+                thread_config['_stop_event'] = _stop_event
+                try:
+                    result = await loop.run_in_executor(None, self._verify_directory_sync, thread_config, task_id)
+                except asyncio.CancelledError:
+                    _stop_event.set()
+                    logger.warning("[目录验证] 任务被取消，已通知验证线程停止")
+                    raise
 
             # 更新为完成状态（skipped 不能算失败：有备份任务在跑时跳过是正常行为）
             _result_status = result.get('status')
@@ -1378,11 +1387,13 @@ class VerifyActionHandler(ActionHandler):
         verify_percent = float(config.get('verify_percent', 1))
         verify_enabled = config.get('verify_enabled', False)
         exclude_patterns = config.get('exclude_patterns', [])
+        stop_event = config.get('_stop_event')  # 任务取消时由 execute 设置
 
         if not source_paths:
             return {"status": "failed", "message": "未指定验证源路径"}
 
         BATCH_SIZE = 100
+        MAX_ERRORS = 200     # 错误详情只保留前 N 条，避免大量失败时内存膨胀
         passed = 0
         failed = 0
         total_scanned = 0
@@ -1407,6 +1418,7 @@ class VerifyActionHandler(ActionHandler):
                 return
             if not task_id or not loop:
                 return
+            coro = None
             try:
                 coro = self._update_verify_progress(
                     task_id,
@@ -1419,13 +1431,28 @@ class VerifyActionHandler(ActionHandler):
                 )
                 asyncio.run_coroutine_threadsafe(coro, loop)
             except Exception:
-                pass
+                # 提交失败时关闭协程，避免 "coroutine was never awaited"
+                try:
+                    if coro is not None:
+                        coro.close()
+                except Exception:
+                    pass
             last_db_update = now_ts
 
         # 立即写入初始状态（扫描开始）
         _try_db_update('scan', 'running', '扫描文件中...', force=True)
 
+        def _add_errors(items):
+            """收集错误详情（最多 MAX_ERRORS 条，防止内存膨胀）"""
+            for err_msg in items:
+                if len(errors) >= MAX_ERRORS:
+                    break
+                errors.append(err_msg)
+
         for src in source_paths:
+            if stop_event is not None and stop_event.is_set():
+                logger.warning("[目录验证] 收到停止信号，终止验证")
+                break
             src_path = Path(src)
             if not src_path.exists():
                 logger.warning(f"[目录验证] 路径不存在: {src}")
@@ -1442,10 +1469,13 @@ class VerifyActionHandler(ActionHandler):
                 total_sampled += s
                 for err_msg in e:
                     logger.warning(f"[目录验证] 验证失败: {err_msg}")
-                errors.extend(e)
+                _add_errors(e)
             elif src_path.is_dir():
                 batch = []
                 for root, dirs, files in os.walk(str(src_path)):
+                    if stop_event is not None and stop_event.is_set():
+                        logger.warning("[目录验证] 收到停止信号，终止扫描/验证")
+                        break
                     if exclude_patterns:
                         dirs[:] = [d for d in dirs if not self._should_exclude_file(str(Path(root) / d), exclude_patterns)]
                     for f in files:
@@ -1466,10 +1496,10 @@ class VerifyActionHandler(ActionHandler):
                             total_sampled += s
                             for err_msg in e:
                                 logger.warning(f"[目录验证] 验证失败: {err_msg}")
-                            errors.extend(e)
+                            _add_errors(e)
                             batch = []
-                            # 批次验证后更新进度（进入验证阶段）
-                            _try_db_update('verify', 'completed', '验证文件中...', force=True)
+                            # 批次验证后更新进度（走 10 秒节流，避免每批一次 UPDATE）
+                            _try_db_update('verify', 'completed', '验证文件中...')
                             # 每60秒输出一次进度日志
                             now_ts = time.monotonic()
                             if now_ts - last_progress_log >= 60:
@@ -1485,7 +1515,7 @@ class VerifyActionHandler(ActionHandler):
                     total_sampled += s
                     for err_msg in e:
                         logger.warning(f"[目录验证] 验证失败: {err_msg}")
-                    errors.extend(e)
+                    _add_errors(e)
                     _try_db_update('verify', 'completed', '验证文件中...', force=True)
 
         # 清理临时目录
@@ -1553,14 +1583,27 @@ class VerifyActionHandler(ActionHandler):
                 else:
                     # 普通文件：完整读取，校验读到的字节数与 stat 一致
                     # （原来只读 4KB，发现不了文件中后部的损坏/截断）
-                    size_before = file_path.stat().st_size
+                    try:
+                        size_before = file_path.stat().st_size
+                    except FileNotFoundError:
+                        # 源文件在验证期间被删除：源目录正在变化，不算失败
+                        logger.warning(
+                            f"[目录验证] 文件已消失，跳过: {file_path}")
+                        passed += 1
+                        continue
                     read_total = 0
-                    with open(str(file_path), 'rb') as f:
-                        while True:
-                            chunk = f.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            read_total += len(chunk)
+                    try:
+                        with open(str(file_path), 'rb') as f:
+                            while True:
+                                chunk = f.read(1024 * 1024)
+                                if not chunk:
+                                    break
+                                read_total += len(chunk)
+                    except FileNotFoundError:
+                        logger.warning(
+                            f"[目录验证] 文件读取前已消失，跳过: {file_path}")
+                        passed += 1
+                        continue
                     try:
                         size_after = file_path.stat().st_size
                     except OSError:
@@ -1579,7 +1622,8 @@ class VerifyActionHandler(ActionHandler):
                         passed += 1
             except Exception as e:
                 failed += 1
-                errors.append(f"{file_path}: {str(e)}")
+                if len(errors) < 200:
+                    errors.append(f"{file_path}: {str(e)}")
 
         return passed, failed, len(sampled), errors
 
