@@ -1108,13 +1108,18 @@ class VerifyActionHandler(ActionHandler):
             config.get('tape_label') or config.get('tape_id') or '').strip()
         if expected_label:
             try:
-                _tm = getattr(tape_handler, 'tape_manager', None)
+                # tape_handler 构造时 tape_manager=None，必须从 system_instance 取
+                _tm = (getattr(self.system_instance, 'tape_manager', None)
+                       or getattr(tape_handler, 'tape_manager', None))
                 _tops = getattr(_tm, 'tape_operations', None)
                 if _tops and hasattr(_tops, '_read_tape_label'):
                     _info = await _tops._read_tape_label()
                     _actual = ((_info or {}).get('label')
                                or (_info or {}).get('tape_id') or '')
-                    if _actual and _actual != expected_label:
+                    if not _actual:
+                        logger.warning(
+                            "[磁带验证] 无法读取当前磁带标签，磁带身份校验未执行")
+                    elif _actual != expected_label:
                         msg = (f"当前磁带 {_actual} 与预期 {expected_label} 不符，"
                                f"跳过验证（请确认装载的磁带）")
                         logger.warning(f"[磁带验证] {msg}")
@@ -1123,7 +1128,11 @@ class VerifyActionHandler(ActionHandler):
                             "total": 0, "sampled": 0, "passed": 0,
                             "failed": 0, "corrupt": 0, "verify_errors": 0,
                         }
-                    logger.info(f"[磁带验证] 磁带身份校验通过: {_actual}")
+                    else:
+                        logger.info(f"[磁带验证] 磁带身份校验通过: {_actual}")
+                else:
+                    logger.warning(
+                        "[磁带验证] tape_operations 不可用，磁带身份校验未执行")
             except Exception as _id_err:
                 logger.warning(f"[磁带验证] 读取磁带标签失败，跳过身份校验: {_id_err}")
 
@@ -1171,9 +1180,15 @@ class VerifyActionHandler(ActionHandler):
 
             if not archives:
                 # 空带或装错带不能报"验证成功"，否则掩盖问题
+                if unstable_skipped:
+                    _msg = (f"磁带上 {unstable_skipped} 个归档均在写入中"
+                            f"（mtime < 60 秒），本次跳过验证，请稍后重试")
+                else:
+                    _msg = "磁带上未发现归档文件（请确认装载的磁带是否正确）"
+                logger.warning(f"[磁带验证] {_msg}")
                 return {
                     "status": "skipped",
-                    "message": "磁带上未发现归档文件（请确认装载的磁带是否正确）",
+                    "message": _msg,
                     "total": 0, "sampled": 0, "passed": 0,
                     "failed": 0, "corrupt": 0, "verify_errors": 0,
                 }
