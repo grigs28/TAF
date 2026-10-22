@@ -1267,6 +1267,16 @@ class VerifyActionHandler(ActionHandler):
                             corrupt += 1
                             errors.append(f"[归档损坏] {archive_path}: {detail}")
                             logger.warning(f"[磁带验证] ✗ {archive_path}: {detail}")
+                            # 标记损坏：恢复页面直接显示“损坏”，不再反复读带
+                            try:
+                                _re_eng2 = getattr(self.system_instance,
+                                                   'tape_recovery_engine', None)
+                                if _re_eng2 and tape_label and tape_label != 'unknown':
+                                    await _re_eng2.mark_archive_corrupt(
+                                        tape_label, archive_path.parent.name,
+                                        archive_path.name, detail)
+                            except Exception as _me:
+                                logger.warning(f"[磁带验证] 标记归档损坏失败: {_me}")
                     except asyncio.TimeoutError:
                         failed += 1
                         verify_errors += 1

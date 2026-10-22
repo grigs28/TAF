@@ -1,5 +1,20 @@
 # 更新日志
 
+## [1.9.49] - 2026-10-22
+
+### 功能
+
+- **坏归档标记与跳过**：
+  - 新增 `tape_archive_status` 表（tape_label/set_id/archive_filename/
+    status/error_message），记录损坏归档
+  - 磁带验证解压失败（`valid=False`）→ `mark_archive_corrupt`
+  - 恢复检索解压失败（zstd/tar 错误）→ 自动标记
+  - `archive-contents` 命中损坏标记 → 直接返回"归档已损坏"，
+    不再读带重试
+  - `archive-cache-status` 返回 `corrupt` 映射；前端显示红色"损坏"
+    徽章，展开时直接提示、不发起请求
+- 版本升至 1.9.49
+
 ## [1.9.48] - 2026-10-22
 
 ### 功能

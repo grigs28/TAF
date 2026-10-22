@@ -896,9 +896,54 @@ class TapeRecoveryEngine:
                     await asyncio.sleep(1.0 * (attempt + 1))
         return {'ok': False, 'error': f'复制归档失败: {last_err}'}
 
-    async def archive_cache_status(self, tape_label: str, set_id: str) -> Dict[str, int]:
-        """批量查询该备份集各归档的缓存条数（0/缺失=未缓存）"""
-        result: Dict[str, int] = {}
+    async def mark_archive_corrupt(self, tape_label: str, set_id: str,
+                                   archive_filename: str, error: str = '') -> bool:
+        """标记归档损坏（磁带验证解压失败/恢复读取失败）。
+
+        恢复页面据此显示“损坏”并直接跳过，不再反复读带重试。
+        """
+        try:
+            from utils.scheduler.db_utils import get_opengauss_connection
+            async with get_opengauss_connection() as conn:
+                # openGauss 不支持 ON CONFLICT，用 DELETE + INSERT 保证幂等
+                await conn.execute(
+                    "DELETE FROM tape_archive_status "
+                    "WHERE tape_label = $1 AND set_id = $2 AND archive_filename = $3",
+                    tape_label, set_id, archive_filename)
+                await conn.execute(
+                    "INSERT INTO tape_archive_status "
+                    "(tape_label, set_id, archive_filename, status, error_message, updated_at) "
+                    "VALUES ($1, $2, $3, 'corrupt', $4, now())",
+                    tape_label, set_id, archive_filename, str(error or '')[:1000])
+            logger.warning(
+                f"[磁带恢复] 已标记归档损坏: {archive_filename} ({str(error)[:120]})")
+            return True
+        except Exception as e:
+            logger.warning(f"[磁带恢复] 标记归档损坏失败: {e}")
+            return False
+
+    async def get_corrupt_archives(self, tape_label: str, set_id: str) -> Dict[str, str]:
+        """返回该备份集中已标记损坏的归档 {archive_filename: error}"""
+        result: Dict[str, str] = {}
+        try:
+            from utils.scheduler.db_utils import get_opengauss_connection
+            async with get_opengauss_connection() as conn:
+                rows = await conn.fetch(
+                    "SELECT archive_filename, error_message FROM tape_archive_status "
+                    "WHERE tape_label = $1 AND set_id = $2 AND status = 'corrupt'",
+                    tape_label, set_id)
+                for r in rows:
+                    result[r['archive_filename']] = r['error_message'] or ''
+        except Exception as e:
+            logger.warning(f"[磁带恢复] 查询损坏归档失败: {e}")
+        return result
+
+    async def archive_cache_status(self, tape_label: str, set_id: str) -> Dict[str, Any]:
+        """批量查询该备份集各归档的缓存状态。
+
+        Returns: {"cached": {archive: count}, "corrupt": {archive: error}}
+        """
+        cached: Dict[str, int] = {}
         try:
             from utils.scheduler.db_utils import get_opengauss_connection
             async with get_opengauss_connection() as conn:
@@ -907,10 +952,11 @@ class TapeRecoveryEngine:
                     "WHERE tape_label = $1 AND set_id = $2 GROUP BY archive_filename",
                     tape_label, set_id)
                 for r in rows:
-                    result[r['archive_filename']] = int(r['cnt'] or 0)
+                    cached[r['archive_filename']] = int(r['cnt'] or 0)
         except Exception as e:
             logger.warning(f"[磁带恢复] 查询归档缓存状态失败: {e}")
-        return result
+        corrupt = await self.get_corrupt_archives(tape_label, set_id)
+        return {"cached": cached, "corrupt": corrupt}
 
     def cleanup_recovery_tmp(self, set_id: str = None) -> int:
         """清理恢复临时副本（程序启动 / 备份任务开始前 / 离开页面）"""

@@ -540,6 +540,31 @@ class DatabaseManager:
                 except Exception as cache_err:
                     logger.warning(f"创建磁带归档内容缓存表时出错: {cache_err}", exc_info=True)
 
+                # ========= 磁带归档状态表（损坏标记） =========
+                # 磁带验证解压失败 / 恢复读取失败时记录，恢复页面据此显示
+                # “损坏”并直接跳过，不再反复读带重试。
+                try:
+                    cur.execute("""
+                        SELECT 1 FROM information_schema.tables WHERE table_name = 'tape_archive_status'
+                    """)
+                    if not cur.fetchone():
+                        cur.execute("""
+                            CREATE TABLE tape_archive_status (
+                                id BIGSERIAL PRIMARY KEY,
+                                tape_label VARCHAR(64),
+                                set_id VARCHAR(128) NOT NULL,
+                                archive_filename VARCHAR(256) NOT NULL,
+                                status VARCHAR(16) NOT NULL DEFAULT 'corrupt',
+                                error_message TEXT,
+                                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                                UNIQUE (tape_label, set_id, archive_filename)
+                            )
+                        """)
+                        conn.commit()
+                        logger.info("✅ 创建表 tape_archive_status 成功")
+                except Exception as arc_status_err:
+                    logger.warning(f"创建磁带归档状态表时出错: {arc_status_err}", exc_info=True)
+
                 # ===== SSO 账号本地授权表 =====
                 # 记录所有通过 yz-login 登录过 TAF 的账号（含被拒绝的），
                 # 并允许在本地覆盖该账号的角色（yz 管理员可在本地降为 user/denied，

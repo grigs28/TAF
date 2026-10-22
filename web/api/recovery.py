@@ -253,11 +253,23 @@ async def get_archive_contents(set_id: str, archive: str, request: Request,
     _reject_if_backup_running(request)
     engine = _get_engine(request)
 
-    if use_cache:
-        # 尝试从数据库缓存读取
-        tape_status = await engine.get_tape_status()
-        tape_label = tape_status.get("tape_label") or "unknown"
+    tape_status = await engine.get_tape_status()
+    tape_label = tape_status.get("tape_label") or "unknown"
 
+    # 已标记损坏的归档：直接返回错误，不再读带重试
+    try:
+        _corrupt_map = await engine.get_corrupt_archives(tape_label, set_id)
+        if archive in _corrupt_map:
+            return {
+                "archive": archive, "entries": [], "total_entries": 0,
+                "total_files": 0, "total_dirs": 0,
+                "error": f"归档已损坏：{_corrupt_map[archive] or '内容校验失败'}",
+                "corrupt": True,
+            }
+    except Exception:
+        pass
+
+    if use_cache:
         cache_info = await engine.check_archive_cache(tape_label, set_id, archive)
         if cache_info and cache_info.get("cached"):
             _cached = await engine.get_cached_archive_contents(
@@ -269,6 +281,17 @@ async def get_archive_contents(set_id: str, archive: str, request: Request,
 
     # 缓存未命中或 use_cache=False，走原始解压
     result = await engine.list_archive_contents(set_id, archive)
+
+    # 解压失败（坏归档）→ 自动标记损坏，下次直接跳过不再读带
+    if result.get("error") and not result.get("entries"):
+        _err_txt = str(result.get("error") or "")
+        if ("zstd" in _err_txt.lower() or "archive" in _err_txt.lower()
+                or "tar" in _err_txt.lower() or "frame" in _err_txt.lower()):
+            try:
+                asyncio.create_task(engine.mark_archive_corrupt(
+                    tape_label, set_id, archive, _err_txt))
+            except Exception:
+                pass
 
     # 如果缓存未命中，异步保存到数据库
     if use_cache and result.get("entries"):
@@ -325,13 +348,15 @@ async def get_cached_archive_contents(set_id: str, archive: str, request: Reques
 @router.get("/backup-sets/{set_id}/archive-cache-status")
 async def get_archive_cache_status(set_id: str, request: Request,
                                    tape_label: str = ""):
-    """批量查询该备份集各归档的文件清单缓存状态（供前端显示“已缓存”标志）"""
+    """批量查询该备份集各归档的清单缓存/损坏状态（供前端显示标志）"""
     engine = _get_engine(request)
     if not tape_label:
         status = await engine.get_tape_status()
         tape_label = status.get("tape_label") or "unknown"
-    cached_map = await engine.archive_cache_status(tape_label, set_id)
-    return {"tape_label": tape_label, "set_id": set_id, "cached": cached_map}
+    status_map = await engine.archive_cache_status(tape_label, set_id)
+    return {"tape_label": tape_label, "set_id": set_id,
+            "cached": status_map.get("cached", {}),
+            "corrupt": status_map.get("corrupt", {})}
 
 
 @router.post("/cleanup-recovery-tmp")

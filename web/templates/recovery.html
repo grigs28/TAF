@@ -853,11 +853,13 @@
 
         // 归档清单缓存状态（DB 已有清单的显示“已缓存”，展开时直接读 DB）
         window._archiveCacheCounts = {};
+        window._archiveCorruptMap = {};
         try {
             var _crsp2 = await fetch('/api/recovery/backup-sets/' + encodeURIComponent(setId) + '/archive-cache-status');
             if (_crsp2.ok) {
                 var _cjson2 = await _crsp2.json();
                 window._archiveCacheCounts = _cjson2.cached || {};
+                window._archiveCorruptMap = _cjson2.corrupt || {};
             }
         } catch (e) { /* 取不到就不显示标志，不影响功能 */ }
         if (_mySeq !== _selectBackupSetSeq) return;   // 已有更新的选择，丢弃本次结果
@@ -896,9 +898,11 @@
                     '<input type="checkbox" data-role="archive" data-archive="' + escapeHtml(a.filename) + '">' +
                     '<i class="bi ' + icon + '"></i>' +
                     '<span>' + escapeHtml(a.filename) + '</span>' +
-                    ((window._archiveCacheCounts[a.filename] || 0) > 0
-                        ? '<span class="badge bg-info bg-opacity-25 text-info ms-1" style="font-size:0.7rem;" title="文件清单已缓存，展开无需读磁带">已缓存</span>'
-                        : '') +
+                    ((window._archiveCorruptMap && window._archiveCorruptMap[a.filename])
+                        ? '<span class="badge bg-danger bg-opacity-25 text-danger ms-1" style="font-size:0.7rem;" title="归档已损坏，无法列出内容">损坏</span>'
+                        : ((window._archiveCacheCounts[a.filename] || 0) > 0
+                            ? '<span class="badge bg-info bg-opacity-25 text-info ms-1" style="font-size:0.7rem;" title="文件清单已缓存，展开无需读磁带">已缓存</span>'
+                            : '')) +
                     (a.timestamp_display ? '<small class="text-muted ms-2">' + escapeHtml(a.timestamp_display) + '</small>' : '') +
                     '<small class="text-muted ms-auto" style="font-size:0.75rem;">' + (a.size_display || formatBytes(a.size_bytes || 0)) + '</small>';
                 // 子文件容器（默认折叠）
@@ -920,6 +924,16 @@
                             }
                         });
                         childContainer.style.display = '';
+                        // 已标记损坏的归档：不请求、不读带，直接提示
+                        if (window._archiveCorruptMap && window._archiveCorruptMap[a.filename]) {
+                            childContainer.textContent = '归档已损坏：'
+                                + (window._archiveCorruptMap[a.filename] || '内容校验失败');
+                            childContainer.style.paddingLeft = '20px';
+                            childContainer.style.fontSize = '0.8rem';
+                            childContainer.style.color = '#f55';
+                            childContainer.setAttribute('data-loaded', 'corrupt');
+                            return;
+                        }
                         // 检查是否有缓存数据（检索全部后标记了 data-cache-count）
                         var cacheCount = parseInt(childContainer.getAttribute('data-cache-count') || '0');
                         // 首次展开时加载文件列表
@@ -1097,9 +1111,11 @@
                 '<input type="checkbox" data-role="archive" data-archive="' + escapeHtml(archName) + '">' +
                 '<i class="bi bi-file-earmark-zip text-warning"></i>' +
                 '<span>' + escapeHtml(archName) + '</span>' +
-                ((window._archiveCacheCounts && (window._archiveCacheCounts[archName] || 0) > 0)
-                    ? '<span class="badge bg-info bg-opacity-25 text-info ms-1" style="font-size:0.7rem;" title="文件清单已缓存，展开无需读磁带">已缓存</span>'
-                    : '') +
+                ((window._archiveCorruptMap && window._archiveCorruptMap[archName])
+                    ? '<span class="badge bg-danger bg-opacity-25 text-danger ms-1" style="font-size:0.7rem;" title="归档已损坏，无法列出内容">损坏</span>'
+                    : ((window._archiveCacheCounts && (window._archiveCacheCounts[archName] || 0) > 0)
+                        ? '<span class="badge bg-info bg-opacity-25 text-info ms-1" style="font-size:0.7rem;" title="文件清单已缓存，展开无需读磁带">已缓存</span>'
+                        : '')) +
                 '<small class="text-muted ms-auto" style="font-size:0.75rem;">' + fileCount + ' 个文件</small>';
             // 子文件容器
             var childContainer = document.createElement('div');
