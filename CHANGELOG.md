@@ -1,5 +1,18 @@
 # 更新日志
 
+## [1.9.35] - 2026-10-22
+
+### 修复
+
+- **异常失败的备份任务补全日志与统计落库**（审查发现）：
+  `execute_backup_task` 的 `except Exception` 分支原来只更新状态和
+  error_message 就返回，跳过了统计写入：
+  - 系统日志从 `asyncio.create_task` 改为 `await`（进程退出时异步任务会丢）
+  - 补 `log_operation`（操作日志），与成功/失败分支保持一致
+  - 补 `save_task_starvation`：写入 `tape_starvation_seconds` 与
+    `error_logs`（含异常类型/堆栈摘要），任务卡片"错误日志"不再为空
+- 版本升至 1.9.35
+
 ## [1.9.34] - 2026-10-22
 
 ### 样式

@@ -1341,21 +1341,62 @@ class BackupEngine:
             logger.error(f"异常信息: {error_msg}")
             logger.error(f"异常堆栈:\n{error_trace}")
             
-            # 记录操作日志（直接await确保完成，审计日志为毫秒级操作）
-            asyncio.create_task(log_system(
-                level=LogLevel.ERROR,
-                category=LogCategory.BACKUP,
-                message=f"备份任务执行异常: {task_name}",
-                module="backup.backup_engine",
-                function="execute_backup_task",
-                task_id=task_id,
-                exception_type=type(e).__name__,
-                stack_trace=error_trace,
-                details={
-                    "error_message": error_msg,
-                    "task_name": task_name
-                }
-            ))
+            # 系统日志：异常路径必须同步落库（原为 create_task，进程退出会丢）
+            try:
+                await log_system(
+                    level=LogLevel.ERROR,
+                    category=LogCategory.BACKUP,
+                    message=f"备份任务执行异常: {task_name}",
+                    module="backup.backup_engine",
+                    function="execute_backup_task",
+                    task_id=task_id,
+                    exception_type=type(e).__name__,
+                    stack_trace=error_trace,
+                    details={
+                        "error_message": error_msg,
+                        "task_name": task_name
+                    }
+                )
+            except Exception as _syslog_err:
+                logger.warning(f"记录异常系统日志失败: {_syslog_err}")
+
+            # 操作日志：与成功/失败分支保持一致（原异常路径缺失）
+            try:
+                await log_operation(
+                    operation_type=OperationType.BACKUP_COMPLETE,
+                    resource_type="backup",
+                    resource_id=str(task_id),
+                    resource_name=task_name,
+                    operation_name="备份任务异常",
+                    operation_description=f"备份任务执行异常: {task_name}",
+                    category="backup",
+                    success=False,
+                    error_message=error_msg[:500],
+                    duration_ms=int((now() - task_start_time).total_seconds() * 1000),
+                )
+            except Exception as _oplog_err:
+                logger.warning(f"记录异常操作日志失败: {_oplog_err}")
+
+            # 任务统计 + 错误清单落库：
+            # 原异常路径直接 return，result_summary 只有扫描统计、卡片错误日志为空
+            try:
+                _err_logs = list(getattr(backup_task, 'error_logs_cache', []) or [])
+                if self.final_dir_monitor:
+                    _err_logs += list(
+                        getattr(self.final_dir_monitor, 'error_logs', []) or [])
+                _err_logs.append({
+                    'category': 'task',
+                    'time': format_datetime(now()),
+                    'message': error_msg[:500],
+                    'detail': error_trace[:2000],
+                })
+                _starve_seconds = float(
+                    getattr(self.final_dir_monitor, '_starvation_seconds', 0.0) or 0.0)
+                await self.backup_db.save_task_starvation(
+                    backup_task.id, _starve_seconds, {'error_logs': _err_logs[:200]})
+            except Exception as _stat_err:
+                logger.warning(f"异常路径保存任务统计失败: {_stat_err}")
+
             if backup_task:
                 # 使用 setattr 设置 error_message，因为 BackupTask 可能是数据类或字典
                 try:
