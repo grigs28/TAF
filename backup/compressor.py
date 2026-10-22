@@ -933,35 +933,10 @@ class Compressor:
                     return None
                 
                 logger.debug(f"[压缩] 开始移动文件到final目录: {final_archive_path}")
-                
-                # 等待文件稳定
-                max_wait_seconds = 30
-                check_interval = 0.5
-                wait_count = 0
-                max_checks = int(max_wait_seconds / check_interval)
-                last_size = None
-                stable_count = 0
-                # 连续 10 次（0.5s 间隔 = 5 秒）大小不变才认定写完：
-                # 原先 1.5 秒窗口在 NFS 读取停顿/同名双写时会把仍在写入的文件
-                # 提前移入 final，导致写带大小校验失败。
-                stable_required = 10
-                
-                while wait_count < max_checks and stable_count < stable_required:
-                    await asyncio.sleep(check_interval)
-                    wait_count += 1
-                    if temp_archive_path.exists():
-                        current_size = temp_archive_path.stat().st_size
-                        if last_size is not None and current_size == last_size:
-                            stable_count += 1
-                        else:
-                            stable_count = 0
-                        last_size = current_size
-                    else:
-                        break
-                
-                if wait_count >= max_checks:
-                    logger.warning(f"[压缩] 等待文件稳定超时，但继续尝试移动")
-                
+
+                # zstd 子进程已退出、归档写在本地 SSD，文件大小已确定；
+                # 同名双写已由 _claim_archive_path 的 O_CREAT|O_EXCL 原子占用解决，
+                # 无需再做 5 秒稳定性检测（原先每组完成都会白等 5 秒）。
                 # 移动文件
                 loop_move = asyncio.get_event_loop()
                 await loop_move.run_in_executor(None, shutil.move, str(temp_archive_path), str(final_archive_path))
