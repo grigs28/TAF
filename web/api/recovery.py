@@ -235,7 +235,12 @@ async def scan_tape_stream(request: Request):
 
 @router.get("/backup-sets/{set_id}/contents")
 async def get_backup_set_contents(set_id: str, request: Request):
-    """获取备份集的完整文件列表（合并所有归档）"""
+    """获取备份集的完整文件列表（合并所有归档）
+
+    注意：该接口逐个读取所有归档（不走 DB 缓存/本地副本），
+    只适合归档很少的场景；恢复页面主要用 archive-contents。
+    """
+    _reject_if_backup_running(request)
     engine = _get_engine(request)
     return await engine.list_backup_set_contents(set_id)
 

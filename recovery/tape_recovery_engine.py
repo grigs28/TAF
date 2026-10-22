@@ -872,7 +872,8 @@ class TapeRecoveryEngine:
             return {'ok': False, 'error': err}
 
         dst.parent.mkdir(parents=True, exist_ok=True)
-        part = dst.with_name(dst.name + '.part')
+        # .part 带唯一后缀：并发展开同一归档时不会互相覆盖写
+        part = dst.with_name(f"{dst.name}.{uuid.uuid4().hex[:8]}.part")
         last_err = None
         for attempt in range(3):
             try:

@@ -416,6 +416,7 @@
     var selectedFilesMap = {}; // { archiveName: null|[file1,file2] }  null=全部
     var currentRecoveryId = null;
     var statusPollTimer = null;
+    var _selectBackupSetSeq = 0;   // selectBackupSet 请求序号（防快速切换时旧结果覆盖）
 
     // 离开恢复页面：清理本次备份集的本地副本（/mnt/SSD/recovery_tmp），尽力而为
     window.addEventListener('beforeunload', function() {
@@ -843,6 +844,7 @@
     }
 
     async function selectBackupSet(setId) {
+        var _mySeq = ++_selectBackupSetSeq;   // 防止快速切换备份集时旧请求覆盖新渲染
         selectedSetId = setId;
         selectedFilesMap = {};
         allArchiveData = {};
@@ -858,6 +860,7 @@
                 window._archiveCacheCounts = _cjson2.cached || {};
             }
         } catch (e) { /* 取不到就不显示标志，不影响功能 */ }
+        if (_mySeq !== _selectBackupSetSeq) return;   // 已有更新的选择，丢弃本次结果
 
         // 优先使用扫描流已缓存的归档数据（无需再调 API）
         var cached = _scanStreamedSets[setId];
