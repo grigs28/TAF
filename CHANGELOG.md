@@ -1,5 +1,18 @@
 # 更新日志
 
+## [1.9.52] - 2026-10-23
+
+### 功能
+
+- **恢复任务结束后也卸载 LTFS 并 offline**：
+  `execute_recovery` 完成/失败时调用 `_offline_after_recovery`：
+  已挂载 → `unmount_ltfs(eject=True)`；未挂载但带子仍加载 →
+  `offline_tape()` 兜底；失败只告警
+  - 磁带验证任务在 1.9.39 已改为 `unmount_ltfs(eject=True)`
+  - offline 的磁带可正常挂载：`mount_with_retry` 启动 LTFS 后由
+    LTFS 自身发 LOAD（`LTFS11330I Loading cartridge`），无需额外处理
+- 版本升至 1.9.52
+
 ## [1.9.51] - 2026-10-23
 
 ### 功能

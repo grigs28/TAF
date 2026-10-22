@@ -1542,6 +1542,9 @@ class TapeRecoveryEngine:
                          f"文件: {task['processed_files']}, "
                          f"大小: {self._format_bytes(task['processed_bytes'])}")
 
+            # 恢复完成：卸载 LTFS 并 offline（与备份任务一致，防掉电标签问题）
+            await self._offline_after_recovery("恢复完成")
+
             # 发送通知
             await self._send_notification(recovery_id, "completed")
             return True
@@ -1551,8 +1554,30 @@ class TapeRecoveryEngine:
             task["error_message"] = str(e)
             task["completed_at"] = datetime.now().isoformat()
             logger.error(f"[磁带恢复] 恢复失败: {recovery_id}, 错误: {e}", exc_info=True)
+            try:
+                await self._offline_after_recovery("恢复失败")
+            except Exception:
+                pass
             await self._send_notification(recovery_id, "failed", str(e))
             return False
+
+    async def _offline_after_recovery(self, reason: str = '恢复任务结束'):
+        """恢复结束后卸载 LTFS 并 offline：避免带子带加载状态被掉电影响。"""
+        try:
+            th = getattr(self, 'tape_handler', None)
+            if th:
+                if getattr(th, '_ltfs_mounted', False):
+                    ok = await th.unmount_ltfs(eject=True)
+                    logger.info(f"[磁带恢复] {reason}：已卸载 LTFS 并离线磁带（{ok}）")
+                else:
+                    try:
+                        await th.offline_tape()
+                    except Exception:
+                        pass
+            else:
+                await self.eject_tape()
+        except Exception as e:
+            logger.warning(f"[磁带恢复] {reason}：离线磁带失败（非致命）: {e}")
 
     async def _send_notification(self, recovery_id: str, status: str, error: str = None):
         """发送恢复通知"""
