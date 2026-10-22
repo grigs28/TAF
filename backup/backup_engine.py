@@ -297,6 +297,31 @@ class BackupEngine:
         except Exception as e:
             logger.error(f"[关闭] 关闭备份引擎时发生错误: {str(e)}")
 
+    async def _offline_tape_after_task(self, reason: str = '任务结束'):
+        """任务结束后卸载 LTFS 并 offline。
+
+        避免磁带以"加载状态 + 停在索引分区末尾"跟随系统关机/掉电，
+        防止重启后卷标签读取失败。下次挂载时由 mt load 兜底或 LTFS
+        自身 LOAD 重新加载。
+        """
+        try:
+            # 延迟 20 秒：等写带收尾、文件系统缓存、残留操作完全结束再卸载
+            await asyncio.sleep(20)
+            th = getattr(self, 'tape_handler', None)
+            if not th:
+                return
+            if getattr(th, '_ltfs_mounted', False):
+                ok = await th.unmount_ltfs(eject=True)
+                logger.info(f"[备份引擎] {reason}：已卸载 LTFS 并离线磁带（{ok}）")
+            else:
+                # 未挂载但带子可能仍加载（任务早期失败等）
+                try:
+                    await th.offline_tape()
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"[备份引擎] {reason}：离线磁带失败（非致命）: {e}")
+
     async def _send_tape_error_notification(self, error_msg: str):
         """发送磁带错误通知"""
         if self.dingtalk_notifier:
@@ -1296,7 +1321,14 @@ class BackupEngine:
             logger.info(f"任务ID: {task_id}")
             logger.info(f"执行结果: {'成功' if success else '失败'}")
             logger.info(f"总耗时: {duration_seconds:.2f} 秒")
-            
+
+            # 任务结束（无论成功/失败）：卸载 LTFS 并 offline。
+            # 带子带着"加载状态+索引分区末尾"停着时，一旦掉电/异常重启，
+            # 可能出现卷标签读取失败（2026-10-22 已发生）。offline 后由下次
+            # 挂载时的 mt load / LTFS 自身 LOAD 重新加载。
+            await self._offline_tape_after_task(
+                "备份任务完成" if success else "备份任务失败")
+
             return success
 
         except KeyboardInterrupt:
