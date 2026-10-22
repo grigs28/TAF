@@ -922,6 +922,21 @@ class TapeRecoveryEngine:
             logger.warning(f"[磁带恢复] 标记归档损坏失败: {e}")
             return False
 
+    async def clear_archive_corrupt(self, tape_label: str, set_id: str,
+                                    archive_filename: str) -> bool:
+        """清除损坏标记（验证/读取成功时调用，避免旧的误标一直生效）"""
+        try:
+            from utils.scheduler.db_utils import get_opengauss_connection
+            async with get_opengauss_connection() as conn:
+                await conn.execute(
+                    "DELETE FROM tape_archive_status "
+                    "WHERE tape_label = $1 AND set_id = $2 AND archive_filename = $3",
+                    tape_label, set_id, archive_filename)
+            return True
+        except Exception as e:
+            logger.warning(f"[磁带恢复] 清除损坏标记失败: {e}")
+            return False
+
     async def get_corrupt_archives(self, tape_label: str, set_id: str) -> Dict[str, str]:
         """返回该备份集中已标记损坏的归档 {archive_filename: error}"""
         result: Dict[str, str] = {}

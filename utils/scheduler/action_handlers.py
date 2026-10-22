@@ -1377,6 +1377,11 @@ class VerifyActionHandler(ActionHandler):
             return
         set_id = archive_path.parent.name
         archive_name = archive_path.name
+        # 验证成功说明数据完好：清除可能存在的旧损坏标记（误标自愈）
+        try:
+            await engine.clear_archive_corrupt(tape_label, set_id, archive_name)
+        except Exception:
+            pass
         try:
             info = await engine.check_archive_cache(tape_label, set_id, archive_name)
             if info and info.get('cached'):

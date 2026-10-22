@@ -292,6 +292,13 @@ async def get_archive_contents(set_id: str, archive: str, request: Request,
                     tape_label, set_id, archive, _err_txt))
             except Exception:
                 pass
+    elif result.get("entries"):
+        # 读取成功：清除可能存在的旧损坏标记（误标自愈）
+        try:
+            asyncio.create_task(engine.clear_archive_corrupt(
+                tape_label, set_id, archive))
+        except Exception:
+            pass
 
     # 如果缓存未命中，异步保存到数据库
     if use_cache and result.get("entries"):
