@@ -1471,6 +1471,12 @@ class BackupEngine:
                 await self.backup_db.update_task_status(backup_task, BackupTaskStatus.FAILED)
             return False
         finally:
+            # 异常/取消路径同样要 offline（正常路径在 return 前已做；
+            # 此前 except 分支没有 offline，带子会保持挂载到停机）
+            try:
+                await self._offline_tape_after_task("备份任务异常/取消收尾")
+            except Exception as _off_err:
+                logger.warning(f"[备份引擎] 异常路径 offline 失败（非致命）: {_off_err}")
             self._current_task = None
             # 同步清理 task_manager 的当前任务
             self.task_manager._current_task = None
@@ -1847,7 +1853,32 @@ class BackupEngine:
             processed_files = 0
             total_size = 0
             try:
-                await compression_worker.compression_task
+                # 无进展看门狗：不给 compression_task 设固定超时（正常任务十几个小时），
+                # 而是检测"组数/文件数/字节数"是否还有变化 + 是否有组在压。
+                # 30 分钟无任何进展且无在压组 → 判定收尾挂起（任务 149 曾因僵尸
+                # future 卡死），跳出等待，由 finally 的 stop() 取消残留任务。
+                _wd_snapshot = None
+                _wd_stuck_since = None
+                while True:
+                    done, _ = await asyncio.wait(
+                        {compression_worker.compression_task}, timeout=60)
+                    if compression_worker.compression_task.done():
+                        break
+                    _active = int(getattr(self.compressor, '_active_compressing', 0) or 0)
+                    _snap = (compression_worker.group_idx,
+                             compression_worker.processed_files,
+                             compression_worker.total_size)
+                    if _snap != _wd_snapshot or _active > 0:
+                        _wd_snapshot = _snap
+                        _wd_stuck_since = None
+                        continue
+                    if _wd_stuck_since is None:
+                        _wd_stuck_since = time.time()
+                    elif time.time() - _wd_stuck_since > 1800:
+                        logger.error(
+                            "[备份引擎] 压缩 worker 30 分钟无进展且无在压组，"
+                            "判定收尾挂起，强制停止（已完成数据不受影响）")
+                        break
                 # 压缩完成，获取统计信息
                 processed_files = compression_worker.processed_files
                 total_size = compression_worker.total_size
@@ -2186,6 +2217,18 @@ class BackupEngine:
                     logger.error(f"清理后台扫描任务失败: {str(cleanup_error)}")
                 finally:
                     logger.info("后台扫描任务清理完成")
+            elif scan_progress_task and scan_progress_task.done():
+                # 扫描协程已结束（等待期外异常退出过）：消费异常，避免静默丢失
+                # （此前只在"未完成"时处理，已失败协程的异常从未被 retrieve）
+                _scan_late_exc = None
+                try:
+                    _scan_late_exc = scan_progress_task.exception()
+                except asyncio.CancelledError:
+                    pass
+                if _scan_late_exc is not None:
+                    logger.error(
+                        f"[备份引擎] 后台扫描任务异常退出（此前未传播）: {_scan_late_exc}",
+                        exc_info=_scan_late_exc)
 
             # 释放磁带操作锁
             try:

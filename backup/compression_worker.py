@@ -599,6 +599,19 @@ class CompressionWorker:
 
         while self._running:
             try:
+                # 清理已完成但残留在列表中的 task：列表只在"并发满"分支清理，
+                # 收尾阶段并发不满时 done-task 残留会让 all_compression_done
+                # （len==0）判据失真，退出判定永远不满足（任务 149 卡死根因之一）
+                if self.running_compression_futures:
+                    _stale = [t for t in self.running_compression_futures if t.done()]
+                    if _stale:
+                        for task in _stale:
+                            self.running_compression_futures.remove(task)
+                            try:
+                                await task  # 消费异常，避免 "never retrieved"
+                            except Exception as e:
+                                logger.error(f"压缩任务异常: {str(e)}", exc_info=True)
+
                 # 定期（每10秒）检查扫描状态与磁盘使用率，动态调整并行批次数
                 # 注意：不能用 group_idx % N 作条件——重积压时 group_idx 长时间不变，
                 # 会导致限流检查被跳过（磁盘涨到 85% 也未触发限流）
@@ -712,17 +725,25 @@ class CompressionWorker:
                         continue
                     elif not all_compression_done:
                         # 扫描已完成，预取器已执行，但还有正在运行的压缩任务，等待它们完成
-                        logger.debug(
+                        # （带超时：列表混入僵尸 future 时不再永久挂起——任务 149 卡死点）
+                        logger.info(
                             f"扫描已完成，预取器执行次数: {prefetch_loop_count}，"
                             f"等待 {len(self.running_compression_futures)} 个正在运行的压缩任务完成..."
                         )
-                        done, _ = await asyncio.wait(self.running_compression_futures)
-                        # 处理所有已完成的任务（包括异常）
+                        done, pending = await asyncio.wait(
+                            self.running_compression_futures, timeout=600)
                         for task in done:
                             try:
                                 await task
                             except Exception as e:
                                 logger.error(f"压缩任务异常: {str(e)}", exc_info=True)
+                        if pending:
+                            logger.warning(
+                                f"[压缩循环] {len(pending)} 个压缩任务 600 秒未完成，"
+                                f"强制取消（数据已写带的组不受影响）")
+                            for task in pending:
+                                task.cancel()
+                            await asyncio.wait(pending, timeout=10)
                         self.running_compression_futures.clear()
                         # 继续检查，确保所有条件都满足
                         continue
@@ -760,16 +781,24 @@ class CompressionWorker:
                             await asyncio.sleep(2)
                             continue
                         
-                        # 等待所有正在运行的任务完成
+                        # 等待所有正在运行的任务完成（带超时：僵尸 future 不再永久挂起，
+                        # 任务 149 曾因此卡死；数据已写带的组取消收尾不丢数据）
                         if self.running_compression_futures:
-                            logger.debug(f"收到结束信号，等待 {len(self.running_compression_futures)} 个正在运行的压缩任务完成...")
-                            done, _ = await asyncio.wait(self.running_compression_futures)
-                            # 处理所有已完成的任务（包括异常）
+                            logger.info(f"收到结束信号，等待 {len(self.running_compression_futures)} 个正在运行的压缩任务完成...")
+                            done, pending = await asyncio.wait(
+                                self.running_compression_futures, timeout=600)
                             for task in done:
                                 try:
                                     await task
                                 except Exception as e:
                                     logger.error(f"压缩任务异常: {str(e)}", exc_info=True)
+                            if pending:
+                                logger.warning(
+                                    f"[压缩循环] 结束信号分支：{len(pending)} 个压缩任务 "
+                                    f"600 秒未完成，强制取消（数据已写带的组不受影响）")
+                                for task in pending:
+                                    task.cancel()
+                                await asyncio.wait(pending, timeout=10)
                             self.running_compression_futures.clear()
                         
                         # 在内存中设置压缩完成状态
@@ -897,16 +926,23 @@ class CompressionWorker:
                     logger.error("处理文件组异常，扫描已完成，退出压缩循环（标记压缩失败）")
                     break
         
-        # 确保所有任务都已完成
+        # 确保所有任务都已完成（带超时：僵尸 future 不再永久挂起——任务 149 卡死点）
         if self.running_compression_futures:
-            logger.debug(f"等待剩余的 {len(self.running_compression_futures)} 个压缩任务完成...")
-            done, _ = await asyncio.wait(self.running_compression_futures)
+            logger.info(f"等待剩余的 {len(self.running_compression_futures)} 个压缩任务完成...")
+            done, pending = await asyncio.wait(self.running_compression_futures, timeout=600)
             # 处理所有已完成的任务（包括异常）
             for task in done:
                 try:
                     await task
                 except Exception as e:
                     logger.error(f"压缩任务异常: {str(e)}", exc_info=True)
+            if pending:
+                logger.warning(
+                    f"[压缩循环] 收尾：{len(pending)} 个压缩任务 600 秒未完成，"
+                    f"强制取消（数据已写带的组不受影响）")
+                for task in pending:
+                    task.cancel()
+                await asyncio.wait(pending, timeout=10)
             self.running_compression_futures.clear()
         
         # 在内存中设置压缩完成状态：

@@ -1,5 +1,26 @@
 # 更新日志
 
+## [1.9.55] - 2026-10-23
+
+### 修复
+
+- **压缩收尾永久卡死（任务 149 根因修复）**：
+  任务 149 在 19:00 数据全部写带后卡在压缩 worker 的
+  `await asyncio.wait(running_compression_futures)`（无超时等待一个僵尸
+  future），任务永远 running；重启时的 `stop()` cancel 恰好解开。
+  - 三处 `asyncio.wait(...)` 全部加 `timeout=600`：超时后 cancel 残留
+    任务并 WARNING（数据已写带的组不受影响）；等待日志 debug → INFO
+  - 循环顶部每轮剔除已完成但残留在列表中的 task（列表原本只在
+    "并发满"分支清理，收尾阶段 `all_compression_done = len==0` 判据失真）
+  - 引擎层加**无进展看门狗**：每 60 秒检查组数/文件数/字节数与在压组数，
+    30 分钟无进展且无在压组 → 判定挂起 → finally 的 `stop()` 清理
+    （不给整个 compression_task 设固定超时，正常任务十几个小时）
+- **扫描协程异常消费**：finally 只处理"未完成"的扫描任务；已失败协程
+  的异常从未被 retrieve（静默丢失）。现在 done 且有异常时记录 ERROR
+- **execute 层异常/取消路径补 offline**：原来只有正常路径尾部 offline，
+  except 分支跳过；带子保持挂载直到停机
+- 版本升至 1.9.55
+
 ## [1.9.54] - 2026-10-23
 
 ### 优化
