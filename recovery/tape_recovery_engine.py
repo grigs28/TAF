@@ -1542,8 +1542,8 @@ class TapeRecoveryEngine:
                          f"文件: {task['processed_files']}, "
                          f"大小: {self._format_bytes(task['processed_bytes'])}")
 
-            # 恢复完成：卸载 LTFS 并 offline（与备份任务一致，防掉电标签问题）
-            await self._offline_after_recovery("恢复完成")
+            # 只读操作，索引无变更：保持挂载不 offline，便于继续检索/恢复；
+            # 带子在干净快照状态，掉电无风险（下次写任务/停机时会 offline）
 
             # 发送通知
             await self._send_notification(recovery_id, "completed")
@@ -1554,34 +1554,8 @@ class TapeRecoveryEngine:
             task["error_message"] = str(e)
             task["completed_at"] = datetime.now().isoformat()
             logger.error(f"[磁带恢复] 恢复失败: {recovery_id}, 错误: {e}", exc_info=True)
-            try:
-                await self._offline_after_recovery("恢复失败")
-            except Exception:
-                pass
             await self._send_notification(recovery_id, "failed", str(e))
             return False
-
-    async def _offline_after_recovery(self, reason: str = '恢复任务结束'):
-        """恢复结束后卸载 LTFS 并 offline：避免带子带加载状态被掉电影响。"""
-        try:
-            logger.info(f"[磁带恢复] {reason}：准备卸载 LTFS 并 offline 磁带")
-            th = getattr(self, 'tape_handler', None)
-            if th:
-                if getattr(th, '_ltfs_mounted', False):
-                    logger.info("[磁带恢复] LTFS 已挂载，开始卸载（含 mt offline）...")
-                    ok = await th.unmount_ltfs(eject=True)
-                    logger.info(f"[磁带恢复] {reason}：卸载并 offline 完成（结果={ok}）")
-                else:
-                    logger.info("[磁带恢复] LTFS 未挂载，检查带子是否仍加载并 offline...")
-                    try:
-                        await th.offline_tape()
-                    except Exception as _oe:
-                        logger.warning(f"[磁带恢复] offline_tape 异常: {_oe}")
-            else:
-                await self.eject_tape()
-                logger.info(f"[磁带恢复] {reason}：已通过 eject_tape 卸载并 offline")
-        except Exception as e:
-            logger.warning(f"[磁带恢复] {reason}：离线磁带失败（非致命）: {e}")
 
     async def _send_notification(self, recovery_id: str, status: str, error: str = None):
         """发送恢复通知"""
