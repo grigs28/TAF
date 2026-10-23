@@ -1358,6 +1358,7 @@ class VerifyActionHandler(ActionHandler):
             # 随后系统重启可能重演读卷标签失败的问题。
             if not was_already_mounted and mount_point and mount_point.is_mount():
                 try:
+                    logger.info("[磁带验证] 开始卸载 LTFS 并 offline 磁带...")
                     await tape_handler.unmount_ltfs(eject=True)
                     logger.info("[磁带验证] 已卸载 LTFS 并离线磁带")
                 except Exception as e:

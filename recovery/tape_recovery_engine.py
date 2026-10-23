@@ -1564,18 +1564,22 @@ class TapeRecoveryEngine:
     async def _offline_after_recovery(self, reason: str = '恢复任务结束'):
         """恢复结束后卸载 LTFS 并 offline：避免带子带加载状态被掉电影响。"""
         try:
+            logger.info(f"[磁带恢复] {reason}：准备卸载 LTFS 并 offline 磁带")
             th = getattr(self, 'tape_handler', None)
             if th:
                 if getattr(th, '_ltfs_mounted', False):
+                    logger.info("[磁带恢复] LTFS 已挂载，开始卸载（含 mt offline）...")
                     ok = await th.unmount_ltfs(eject=True)
-                    logger.info(f"[磁带恢复] {reason}：已卸载 LTFS 并离线磁带（{ok}）")
+                    logger.info(f"[磁带恢复] {reason}：卸载并 offline 完成（结果={ok}）")
                 else:
+                    logger.info("[磁带恢复] LTFS 未挂载，检查带子是否仍加载并 offline...")
                     try:
                         await th.offline_tape()
-                    except Exception:
-                        pass
+                    except Exception as _oe:
+                        logger.warning(f"[磁带恢复] offline_tape 异常: {_oe}")
             else:
                 await self.eject_tape()
+                logger.info(f"[磁带恢复] {reason}：已通过 eject_tape 卸载并 offline")
         except Exception as e:
             logger.warning(f"[磁带恢复] {reason}：离线磁带失败（非致命）: {e}")
 

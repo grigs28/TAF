@@ -305,20 +305,24 @@ class BackupEngine:
         自身 LOAD 重新加载。
         """
         try:
-            # 延迟 20 秒：等写带收尾、文件系统缓存、残留操作完全结束再卸载
-            await asyncio.sleep(20)
             th = getattr(self, 'tape_handler', None)
             if not th:
+                logger.info(f"[备份引擎] {reason}：无 tape_handler，跳过卸载/offline")
                 return
+            # 延迟 20 秒：等写带收尾、文件系统缓存、残留操作完全结束再卸载
+            logger.info(f"[备份引擎] {reason}：20 秒后卸载 LTFS 并 offline 磁带")
+            await asyncio.sleep(20)
             if getattr(th, '_ltfs_mounted', False):
+                logger.info("[备份引擎] LTFS 已挂载，开始卸载（fusermount → 等索引写入 → mt offline）...")
                 ok = await th.unmount_ltfs(eject=True)
-                logger.info(f"[备份引擎] {reason}：已卸载 LTFS 并离线磁带（{ok}）")
+                logger.info(f"[备份引擎] {reason}：卸载并 offline 完成（结果={ok}）")
             else:
-                # 未挂载但带子可能仍加载（任务早期失败等）
+                logger.info("[备份引擎] LTFS 未挂载，检查带子是否仍加载并 offline...")
                 try:
                     await th.offline_tape()
-                except Exception:
-                    pass
+                except Exception as _oe:
+                    logger.warning(f"[备份引擎] offline_tape 异常: {_oe}")
+                logger.info(f"[备份引擎] {reason}：offline 检查完成")
         except Exception as e:
             logger.warning(f"[备份引擎] {reason}：离线磁带失败（非致命）: {e}")
 
