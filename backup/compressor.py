@@ -809,7 +809,7 @@ class Compressor:
             # 异步启动压缩操作：zstd 走独立工作进程（spawn，彻底绕开 GIL），
             # 其他压缩方法保留线程池（老路径不可 pickle，行为不变）
             loop = asyncio.get_event_loop()
-            logger.warning(f"[压缩] 异步启动压缩任务，立即返回，不等待完成")
+            logger.info(f"[压缩] 异步启动压缩任务，立即返回，不等待完成")
             payload = None
             if compression_method == 'zstd':
                 payload = {
@@ -845,7 +845,7 @@ class Compressor:
                         CompressionProcessPool.get_instance().unregister_group_progress(payload.get('progress_key'))
                     except Exception:
                         pass
-            logger.warning(f"[压缩] 压缩任务已完成")
+            logger.info(f"[压缩] 压缩任务已完成")
 
             # 进程池（zstd CLI）路径：子进程在返回值里带回成功/失败清单，
             # 必须合并进 compress_result，否则成功后文件数恒为 0、失败清单永远为空
