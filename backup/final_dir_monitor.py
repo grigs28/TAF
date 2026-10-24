@@ -87,6 +87,9 @@ class FinalDirMonitor:
             self._starvation_seconds = 0.0
             self._starve_start = None
             self._has_written_once = False
+            # 任务期间 SSD 剩余的最小值：__init__ 必须初始化（监控线程随
+            # start() 立即运行，早于引擎对 reset_starvation_stats 的首次调用）
+            self._min_free_bytes = None
             self._running = True
             self._worker_thread = threading.Thread(
                 target=self._monitor_loop,
