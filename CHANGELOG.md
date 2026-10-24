@@ -1,5 +1,22 @@
 # 更新日志
 
+## [1.9.65] - 2026-10-25
+
+### 新增
+
+- **Vegas 信号源 nas_api 接入 TAF**（bench 两轮 1588GB 同源验证：v2 误判 5→0、
+  产出 +8%、拐点定位与阶梯结论互证）：
+  - 新增 backup/vegas_nas.py：NasSignalSampler（10s 采样线程，环形缓冲 48 样本）
+    + VegasNasController（v2 状态机：360s read 中位数、probe_base 配对判定、
+    增量确认 +3%/过载 -10%+util 佐证/无增量 plateau×2/漂移检测重置基准/
+    STABLE 8 周期重探/快速保护 util≥98+await≥15ms）
+  - compression_worker 3b 段信号源分支：GROUP_VEGAS_SIGNAL_SOURCE=nas_api
+    （默认 internal 不变）；API 失联自动回退 internal；热切换停旧采样线程
+  - 配置页 Vegas 区块新增"信号源"下拉；nas_api 时 α/β/降并发比例/下限四项
+    联动置灰、推荐值标注不适用；校验 nas_api 需先配 NAS_API_URL
+- bench_vegas.py 升级方案 C v2（配对判定+漂移检测）；两轮验证决策 CSV
+  （vegas_decisions_c1/c2.csv）入仓；v3 候选：STABLE 期 read 回升 >15% 提前重探
+
 ## [1.9.64] - 2026-10-24
 
 ### 工具

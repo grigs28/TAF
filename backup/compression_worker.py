@@ -72,6 +72,12 @@ class CompressionWorker:
         self.compression_started_at: Optional[float] = None
         # ===== 自适应并发（计划05，Vegas 变体，信号=组级聚合读取速率） =====
         self._vegas_enabled = bool(getattr(settings, 'GROUP_VEGAS_ENABLED', True))
+        # 信号源：internal=组级读取速率（默认，保守）；nas_api=79 disk_api 的
+        # md2_read_mbps（bench 两轮 1588GB 验证：误判 5→0、产出 +8%，1.9.65）
+        self._vegas_signal = str(getattr(settings, 'GROUP_VEGAS_SIGNAL_SOURCE',
+                                         'internal') or 'internal').strip().lower()
+        self._vegas_nas = None          # VegasNasController（nas_api 模式惰性创建）
+        self._vegas_nas_sampler = None  # NasSignalSampler（任务级共享，见 _ensure_vegas_nas）
         self._vegas_alpha = float(getattr(settings, 'GROUP_VEGAS_ALPHA', 1.0) or 1.0)
         self._vegas_beta = float(getattr(settings, 'GROUP_VEGAS_BETA', 3.0) or 3.0)
         self._vegas_decay = float(getattr(settings, 'GROUP_VEGAS_DECAY', 0.7) or 0.7)
@@ -309,6 +315,21 @@ class CompressionWorker:
                         getattr(fresh_settings, 'GROUP_VEGAS_DECAY', self._vegas_decay) or self._vegas_decay)
                     _vm = int(getattr(fresh_settings, 'GROUP_VEGAS_MIN_BATCHES', self._vegas_min) or self._vegas_min)
                     self._vegas_min = max(1, _vm)
+                    _was_sig = self._vegas_signal
+                    self._vegas_signal = str(
+                        getattr(fresh_settings, 'GROUP_VEGAS_SIGNAL_SOURCE',
+                                self._vegas_signal) or self._vegas_signal).strip().lower()
+                    if _was_sig != self._vegas_signal:
+                        # 信号源热切换：停旧采样线程、清控制器，下轮 _ensure 重建
+                        logger.info(f"[压缩配置] Vegas 信号源切换: {_was_sig} -> {self._vegas_signal}")
+                        if self._vegas_nas_sampler is not None:
+                            try:
+                                self._vegas_nas_sampler.stop()
+                            except Exception:
+                                pass
+                        self._vegas_nas_sampler = None
+                        self._vegas_nas = None
+                        self._vegas_limit = 0
                 except Exception:
                     pass
 
@@ -398,11 +419,24 @@ class CompressionWorker:
                 self._disk_critical = False
 
             # 3b. 自适应并发（计划05 Vegas 变体）：NAS 拥塞感知，
-            #     采样组级聚合读取速率并 clamp 到 desired 之下（SSD 水位优先级更高）
+            #     信号源二选一：nas_api（79 read，v2 状态机）/ internal（组级速率 deficit）
+            #     SSD 水位优先级更高（两者都只 clamp 到 desired 之下）
             if self._vegas_enabled and self.use_prefetcher:
-                self._update_vegas()
-                if self._vegas_limit > 0 and desired_batches > self._vegas_limit:
-                    desired_batches = self._vegas_limit
+                if self._vegas_signal == 'nas_api':
+                    ctrl = self._ensure_vegas_nas()
+                    if ctrl is not None:
+                        nas_limit = ctrl.tick(len(self.running_compression_futures))
+                        if nas_limit > 0 and desired_batches > nas_limit:
+                            desired_batches = nas_limit
+                    else:
+                        # NAS 信号不可用 → 回退内部信号（不因 API 挂掉停摆）
+                        self._update_vegas()
+                        if self._vegas_limit > 0 and desired_batches > self._vegas_limit:
+                            desired_batches = self._vegas_limit
+                else:
+                    self._update_vegas()
+                    if self._vegas_limit > 0 and desired_batches > self._vegas_limit:
+                        desired_batches = self._vegas_limit
 
             # 3. 应用并记录变化（避免每轮重复刷日志）
             if desired_batches != self.parallel_batches:
@@ -433,6 +467,37 @@ class CompressionWorker:
         if defer_below > 0 and file_count < defer_below:
             return 'buffer'
         return 'small' if file_count >= thr else 'large'
+
+    def _ensure_vegas_nas(self):
+        """nas_api 信号源惰性初始化（URL 为空/导入失败 → 返回 None 回退 internal）"""
+        if self._vegas_nas is not None:
+            return self._vegas_nas
+        try:
+            from config.settings import get_settings
+            from backup.vegas_nas import NasSignalSampler, VegasNasController
+            s = get_settings()
+            url = str(getattr(s, 'NAS_API_URL', '') or '').strip()
+            key = str(getattr(s, 'NAS_API_KEY', '') or '').strip()
+            if not url:
+                logger.warning("[VegasNAS] NAS_API_URL 未配置，回退内部信号")
+                return None
+            base = max(1, self.base_parallel_batches)
+            sampler = NasSignalSampler(url, key)
+            sampler.start()
+            self._vegas_nas_sampler = sampler
+            self._vegas_nas = VegasNasController(
+                sampler,
+                start_n=base,                 # 从配置并发起步自主调节
+                min_n=max(2, self._vegas_min),
+                max_n=max(base, 8),           # bench 标定：两形态区最优 5~6，8 封顶
+                log=lambda m: logger.info(m),
+            )
+            logger.info(f"[VegasNAS] 启用 nas_api 信号源: {url[:48]}… "
+                        f"(start={base}, min={self._vegas_nas.min_n}, max={self._vegas_nas.max_n})")
+            return self._vegas_nas
+        except Exception as e:
+            logger.warning(f"[VegasNAS] 初始化失败，回退内部信号: {e}")
+            return None
 
     def _update_vegas(self) -> None:
         """自适应并发（Vegas 变体，分类型基准）：组级聚合读取速率 → 积压 → 调并发。

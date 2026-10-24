@@ -668,10 +668,21 @@ function vegasRecommend(N) {
 function updateVegasRecommend() {
     const nEl = document.getElementById('compressionParallelBatches');
     const r = vegasRecommend(nEl ? parseInt(nEl.value, 10) : 6);
+    // nas_api 信号源下 α/β/decay/min 全部不生效（v2 状态机用自标定阈值），
+    // 推荐值一并标注不适用，避免误导调参
+    const sigEl = document.getElementById('vegasSignalSource');
+    const nasMode = sigEl && sigEl.value === 'nas_api';
     const setText = (id, text) => {
         const el = document.getElementById(id);
         if (el) el.textContent = text;
     };
+    if (nasMode) {
+        setText('vegasBetaRecommend', '—（NAS API 模式不适用）');
+        setText('vegasAlphaRecommend', '—（NAS API 模式不适用）');
+        setText('vegasDecayRecommend', '—（NAS API 模式不适用）');
+        setText('vegasMinRecommend', '—（NAS API 模式不适用）');
+        return;
+    }
     const betaEl = document.getElementById('vegasBetaRecommend');
     if (betaEl) {
         betaEl.textContent = String(r.beta);
@@ -687,12 +698,27 @@ function updateVegasRecommend() {
     setText('vegasMinRecommend', String(r.minB));
 }
 
+// 信号源联动：nas_api 时 α/β/decay/min 置灰（数值保留、不再生效）
+function applyVegasSignalEditability() {
+    const sigEl = document.getElementById('vegasSignalSource');
+    const nasMode = sigEl && sigEl.value === 'nas_api';
+    ['vegasAlpha', 'vegasBeta', 'vegasDecay', 'vegasMinBatches'].forEach(function (id) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = !!nasMode;
+    });
+    const applyBtn = document.getElementById('applyVegasRecommend');
+    if (applyBtn) applyBtn.disabled = !!nasMode;
+    updateVegasRecommend();
+}
+
 document.addEventListener('DOMContentLoaded', function () {
     const nEl = document.getElementById('compressionParallelBatches');
     if (nEl) {
         nEl.addEventListener('change', updateVegasRecommend);
         nEl.addEventListener('input', updateVegasRecommend);
     }
+    const sigSel = document.getElementById('vegasSignalSource');
+    if (sigSel) sigSel.addEventListener('change', applyVegasSignalEditability);
     const applyBtn = document.getElementById('applyVegasRecommend');
     if (applyBtn) {
         applyBtn.addEventListener('click', function () {
@@ -896,6 +922,10 @@ async function loadAllSystemConfig() {
                     ? !!config.group_vegas_enabled
                     : true;
             }
+            const vs = document.getElementById('vegasSignalSource');
+            if (vs) vs.value = (config.group_vegas_signal_source === 'nas_api')
+                ? 'nas_api' : 'internal';
+            applyVegasSignalEditability();
             const vb = document.getElementById('vegasBeta');
             if (vb) vb.value = (config.group_vegas_beta !== undefined && config.group_vegas_beta !== null)
                 ? config.group_vegas_beta : 3.0;
@@ -1084,6 +1114,10 @@ async function saveEnvConfigSection() {
             group_vegas_enabled: (() => {
                 const sw = document.getElementById('vegasEnabled');
                 return sw ? !!sw.checked : null;
+            })(),
+            group_vegas_signal_source: (() => {
+                const sel = document.getElementById('vegasSignalSource');
+                return sel ? sel.value : null;
             })(),
             group_vegas_beta: (() => {
                 const input = document.getElementById('vegasBeta');

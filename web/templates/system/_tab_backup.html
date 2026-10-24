@@ -196,6 +196,17 @@
                         </small>
                     </div>
                     <div class="mb-3">
+                        <label class="form-label">信号源</label>
+                        <select class="form-select" id="vegasSignalSource">
+                            <option value="internal">内部组级速率（默认，α/β 框架）</option>
+                            <option value="nas_api">NAS 压力 API（79 read，v2 状态机）</option>
+                        </select>
+                        <small class="form-text text-secondary">
+                            NAS API 模式按 79 磁盘实际读取带宽决策（两轮 1588GB 验证：误判归零、产出 +8%），
+                            需先在下方配置 NAS 压力 API 地址；选中后 α/β/降并发比例/下限四项不再生效。
+                        </small>
+                    </div>
+                    <div class="mb-3">
                         <label class="form-label">上探阈值 α</label>
                         <input type="number" class="form-control" id="vegasAlpha" value="1.0" min="0.1" max="10" step="0.1">
                         <small class="form-text text-secondary">deficit 低于此值时并发 +1 缓慢恢复；越小越保守（默认 1.0）</small>

@@ -76,6 +76,7 @@ class SystemEnvConfig(BaseModel):
     group_scan_defer_below: Optional[int] = Field(None, description="大组保护阈值：全程不消费文件数低于此值的大文件组（默认 5000，0=禁用）；写带喂不饱时放出")
     group_prefetch_lead_seconds: Optional[int] = Field(None, description="预分组比压缩提前启动的秒数（默认 30；0=同时启动；需小于扫描等待超时）")
     group_vegas_enabled: Optional[bool] = Field(None, description="自适应并发（Vegas）开关：关闭后并发严格按配置/磁盘水位执行，不再按 NAS 读取速率增减")
+    group_vegas_signal_source: Optional[str] = Field(None, description="Vegas 信号源：internal=组级读取速率（deficit 框架）；nas_api=NAS 压力 API 的 read 信号（v2 状态机，需配置 NAS_API_URL）")
     group_vegas_beta: Optional[float] = Field(None, description="降并发阈值 β（默认 3.0，越小越敏感）：deficit 超过它时并发乘性下降")
     group_vegas_alpha: Optional[float] = Field(None, description="上探阈值 α（默认 1.0）：deficit 低于它时并发 +1 缓慢恢复")
     group_vegas_decay: Optional[float] = Field(None, description="每次降并发比例（默认 0.7，范围 0.3-0.95）")
@@ -182,6 +183,8 @@ async def get_env_config():
             "group_scan_defer_below": parse_int(env_vars.get("GROUP_SCAN_DEFER_BELOW"), 5000),
             "group_prefetch_lead_seconds": parse_int(env_vars.get("GROUP_PREFETCH_LEAD_SECONDS"), 30),
             "group_vegas_enabled": parse_bool(env_vars.get("GROUP_VEGAS_ENABLED"), True),
+            "group_vegas_signal_source": (env_vars.get("GROUP_VEGAS_SIGNAL_SOURCE", "internal")
+                                          or "internal").strip().lower(),
             "group_vegas_beta": float(env_vars.get("GROUP_VEGAS_BETA", 3.0) or 3.0),
             "group_vegas_alpha": float(env_vars.get("GROUP_VEGAS_ALPHA", 1.0) or 1.0),
             "group_vegas_decay": float(env_vars.get("GROUP_VEGAS_DECAY", 0.7) or 0.7),
@@ -365,6 +368,14 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             updates["GROUP_PREFETCH_LEAD_SECONDS"] = str(config.group_prefetch_lead_seconds)
         if config.group_vegas_enabled is not None:
             updates["GROUP_VEGAS_ENABLED"] = "true" if config.group_vegas_enabled else "false"
+        if config.group_vegas_signal_source is not None:
+            _sig = str(config.group_vegas_signal_source).strip().lower()
+            if _sig not in ('internal', 'nas_api'):
+                raise ValueError("Vegas 信号源只支持 internal 或 nas_api")
+            if _sig == 'nas_api' and not (env_vars.get("NAS_API_URL") or "").strip() \
+                    and not (updates.get("NAS_API_URL") or "").strip():
+                raise ValueError("nas_api 信号源需要先配置 NAS 压力 API 地址（NAS_API_URL）")
+            updates["GROUP_VEGAS_SIGNAL_SOURCE"] = _sig
         if config.group_vegas_beta is not None:
             if config.group_vegas_beta < 1.0 or config.group_vegas_beta > 20.0:
                 raise ValueError("降并发阈值 β 必须在 1.0-20.0 之间")

@@ -122,6 +122,7 @@ class Settings(BaseSettings):
     GROUP_PREFETCH_LEAD_SECONDS: int = 30  # 预分组比压缩提前启动的秒数（0=同时启动；需小于扫描等待超时）
     # 自适应并发（计划05，Vegas 变体，信号=组级聚合读取速率）
     GROUP_VEGAS_ENABLED: bool = True    # 总开关：关闭则并发完全由配置/磁盘水位决定
+    GROUP_VEGAS_SIGNAL_SOURCE: str = "internal"  # 信号源：internal=组级读取速率(deficit)；nas_api=79 disk_api read(v2状态机)
     GROUP_VEGAS_ALPHA: float = 1.0      # deficit < α → 并发 +1（缓慢上探）
     GROUP_VEGAS_BETA: float = 3.0       # deficit > β → 并发 ×DECAY（乘性下降）；> 2β 触发快速闸（暂停发新组一个窗口）
     GROUP_VEGAS_DECAY: float = 0.7      # 乘性下降因子

@@ -189,98 +189,129 @@ def sampler():
         time.sleep(POLL)
 
 
-# ================= Vegas 状态机 =================
+# ================= Vegas 状态机（方案C v2：79 物理信号 + 配对判定）=================
+# v1 教训（31 周期实测）：真过载跌幅 >20%（-21%/-27%/快速保护），噪声带 ±3~10%，
+# 误判全部来自"滚动 last_read 点对点比较"（形态漂移途中/冷却后基准错位）。
+# v2 改配对判定：上探前记 probe_base，上探后用 probe_base 对比，与滚动值无关。
+# read 用 360s 滑窗中位数（覆盖 ≥3 个组周转，压平组间速率差 ±30%）。
 def vegas_loop():
     global desired_n
     state = 'PROBING'          # PROBING / STABLE（COOLDOWN 只是倒计时，扣完回 PROBING）
     cooldown = 0
     stable_since = None
-    last_P = None
-    ewma_P = None              # 产出 EWMA（平滑小文件区"周期<组耗时"的量化抖动）
-    stable_P = deque(maxlen=3)   # 稳定期产出参考
+    probe_base = None          # 本次上探前的 read 基线（配对判定的锚点）
+    plateau = 0                # 上探后"无增量"连续计数
+    no_gain = 0                # 上探后"确认增量"计数
+    drift_reads = []           # 近 3 周期 read（单调下滑检测）
+    api_fail = 0
     t_next = time.time() + PERIOD
+    win_span = 360 + POLL      # 360s 滑窗（+POLL 余量）
     while not all_done.is_set():
         time.sleep(2)
         if time.time() < t_next:
             continue
         t_next = time.time() + PERIOD
         with lock:
-            raw_P = period_src_bytes[0] / PERIOD / 1048576   # MB/s（本周期原始产出）
-            period_src_bytes[0] = 0
+            done_gb = done_src_bytes[0] / 1024 ** 3
             n = len(worker_seqs) or desired_n
             left = len(groups_left)
-        # EWMA 平滑：小文件区单组耗时(~186s) > 周期(120s)，raw_P 是完成组数的
-        # 整数函数（±80% 阶梯跳变），直接用会误触发回退；0.6 历史 / 0.4 本周期
-        P = raw_P if ewma_P is None else ewma_P * 0.6 + raw_P * 0.4
-        ewma_P = P
-        # 本周期 79 均值
         now = time.time()
-        win = [s for s in nas_samples if now - s['ts'] <= PERIOD + POLL]
+        win = [s for s in nas_samples if now - s['ts'] <= win_span]
+
+        def med(k):
+            v = sorted(s.get(k, 0) for s in win if isinstance(s.get(k), (int, float)))
+            return round(v[len(v) // 2], 1) if v else 0
+
         def avg(k):
             v = [s.get(k, 0) for s in win if isinstance(s.get(k), (int, float))]
-            return round(sum(v)/len(v), 1) if v else 0
-        U, A, I, R = avg('md2_util'), avg('md2_await_ms'), avg('md2_iops'), avg('md2_read_mbps')
+            return round(sum(v) / len(v), 1) if v else 0
 
-        act, why = 'hold', ''
-        if left == 0 and not win:
-            break
-        if cooldown > 0:
-            cooldown -= 1
-            act, why = 'hold', f'冷却{cooldown}'
-            if cooldown == 0:
-                state = 'PROBING'   # 修复：冷却结束回 PROBING（否则死悬在 COOLDOWN）
-        elif state == 'PROBING':
-            if n >= MAX_N:
-                state, act, why = 'STABLE', 'hold', '到上限'
+        # 决策值：360s 中位数；辅助值（日志/CSV）
+        U, A = med('md2_util'), med('md2_await_ms')
+        R, I = med('md2_read_mbps'), med('md2_iops')
+        R_avg, I_avg = avg('md2_read_mbps'), avg('md2_iops')
+
+        if len(win) < 6:
+            api_fail += 1
+            act, why = 'hold', f'79API样本不足({len(win)})连续{api_fail}'
+        else:
+            api_fail = 0
+            act, why = 'hold', ''
+            if left == 0:
+                break
+            # 漂移检测（优先于一切回退判定）：近 3 周期 read 单调下滑
+            # → 组序列形态漂移（非过载），重置基准按当前 n 继续
+            drift_reads.append(R)
+            if len(drift_reads) > 3:
+                drift_reads.pop(0)
+            drifting = (len(drift_reads) == 3 and
+                        drift_reads[0] > drift_reads[1] > drift_reads[2])
+            if cooldown > 0:
+                cooldown -= 1
+                act, why = 'hold', f'冷却{cooldown}'
+                if cooldown == 0:
+                    state = 'PROBING'
+                    plateau = no_gain = 0
+            elif drifting and state != 'STABLE':
+                state, act, why = 'STABLE', 'hold', \
+                    f'漂移中(read {drift_reads[0]:.0f}→{R:.0f},重置基准)'
                 stable_since = time.time()
-            elif last_P is None:
-                act, why = '+1', '首周期上探'
-            elif last_P > 0 and P < last_P * 0.88:
-                state = 'COOLDOWN'; cooldown = COOLDOWN_PERIODS
-                act, why = '-1', f'产出降({P:.0f}<-12%于{last_P:.0f})'
-            elif abs(P - (last_P or 0)) <= (last_P or 1) * 0.05 and U >= 95:
-                state = 'COOLDOWN'; cooldown = COOLDOWN_PERIODS
-                act, why = '-1', f'到顶(util={U})'
-            else:
-                act, why = '+1', f'产出稳/升({P:.0f}vs{last_P:.0f},util={U})'
-        elif state == 'STABLE':
-            stable_P.append(P)
-            ref = sum(stable_P) / max(1, len(stable_P))
-            if len(stable_P) >= 2 and ref > 0 and P < ref * 0.85:
-                state = 'PROBING'
-                act, why = '-1', f'产出掉{P:.0f}vs均{ref:.0f}(形态变化)'
-            elif (time.time() - (stable_since or time.time())) > REPROBE_PERIODS * PERIOD \
-                    and n < MAX_N:
-                state = 'PROBING'
-                act, why = '+1', f'周期重探'
-            else:
-                act, why = 'hold', f'稳定(P={P:.0f})'
-        # 快速保护（任何状态）——await 阈值按实测下调：79 打满时 await<11ms，
-        # 25ms 永远够不着；15ms 才能在 IOPS 排队恶化时触发
-        if U >= 98 and A >= 15 and n > MIN_N and act not in ('-1',):
-            state = 'COOLDOWN'; cooldown = 1
-            act, why = '-1', f'快速保护(util={U},await={A})'
+                probe_base = R
+            elif state == 'PROBING':
+                if n >= MAX_N:
+                    state, act, why = 'STABLE', 'hold', '到上限'
+                    stable_since = time.time()
+                    probe_base = R
+                elif probe_base is None:
+                    probe_base = R
+                    act, why = '+1', '首周期上探'
+                elif R >= probe_base * 1.03:
+                    no_gain = 0
+                    act, why = '+1', f'增量确认({R:.0f}≥基线{probe_base:.0f}+3%)'
+                    probe_base = R
+                elif R < probe_base * 0.90 and U >= 95:
+                    state = 'COOLDOWN'; cooldown = COOLDOWN_PERIODS
+                    act, why = '-1', f'过载({R:.0f}<-10%于基线{probe_base:.0f},util={U})'
+                else:
+                    plateau += 1
+                    if plateau >= 2:
+                        state = 'COOLDOWN'; cooldown = COOLDOWN_PERIODS
+                        act, why = '-1', f'无增量x{plateau}({R:.0f}vs基线{probe_base:.0f})'
+                    else:
+                        act, why = 'hold', f'观察中({R:.0f}vs基线{probe_base:.0f})'
+            elif state == 'STABLE':
+                if (time.time() - (stable_since or time.time())) > REPROBE_PERIODS * PERIOD \
+                        and n < MAX_N:
+                    state = 'PROBING'
+                    probe_base = R
+                    plateau = no_gain = 0
+                    act, why = '+1', '周期重探(重置基线)'
+                else:
+                    act, why = 'hold', f'稳定(read={R:.0f})'
+            # 快速保护（任何状态）：util 打满且排队恶化（v1 实战验证有效）
+            if U >= 98 and A >= 15 and n > MIN_N and act not in ('-1',):
+                state = 'COOLDOWN'; cooldown = 1
+                act, why = '-1', f'快速保护(util={U},await={A})'
 
         with lock:
             if act == '+1' and n < MAX_N:
                 desired_n = n + 1
             elif act == '-1' and n > MIN_N:
                 desired_n = n - 1        # worker 完成组后自行退出
-        # spawn_worker 内部也要拿 lock，必须在锁外调用，
-        # 否则同一线程二次 acquire 不可重入的 Lock → 死锁（首次+1上探即卡死）
+        # spawn_worker 必须锁外调用（同线程二次 acquire 不可重入 Lock → 死锁）
         if act == '+1' and n < MAX_N:
             spawn_worker()
         if state == 'STABLE':
             stable_since = stable_since or time.time()
 
         decisions.append({'time': time.strftime('%H:%M:%S'), 'state': state,
-                          'n': n, 'P_mbps': round(P, 1), 'raw_P': round(raw_P, 1),
-                          'last_P': last_P,
-                          'util': U, 'await': A, 'iops': I, 'read': R,
-                          'act': act, 'why': why, 'groups_left': left})
-        log(f'[Vegas] n={n} P={P:.0f}MB/s util={U}% await={A}ms iops={I} '
-            f'→ {act} ({why}) 剩{left}组')
-        last_P = P
+                          'n': n, 'read': R, 'iops': I, 'util': U, 'await': A,
+                          'read_avg': R_avg, 'iops_avg': I_avg,
+                          'probe_base': probe_base, 'drift': drifting,
+                          'act': act, 'why': why,
+                          'groups_left': left, 'done_gb': round(done_gb, 1)})
+        log(f'[Vegas] n={n} read={R:.0f}MB/s iops={I:.0f} util={U}% await={A}ms '
+            f'基线{probe_base or 0:.0f} 累计{done_gb:.0f}GB → {act} ({why}) 剩{left}组')
         if left == 0:
             break
 
@@ -312,11 +343,13 @@ def main():
         time.sleep(5)
     # 落盘
     with open(os.path.join(BENCH, 'vegas_decisions.csv'), 'w') as f:
-        f.write('time,state,n,P_mbps,raw_P,last_P,util,await,iops,read,act,why,groups_left\n')
+        f.write('time,state,n,read,iops,util,await,read_avg,iops_avg,'
+                'probe_base,drift,act,why,groups_left,done_gb\n')
         for d in decisions:
-            f.write(f"{d['time']},{d['state']},{d['n']},{d['P_mbps']},{d['raw_P']},{d['last_P']},"
-                    f"{d['util']},{d['await']},{d['iops']},{d['read']},"
-                    f"{d['act']},\"{d['why']}\",{d['groups_left']}\n")
+            f.write(f"{d['time']},{d['state']},{d['n']},{d['read']},{d['iops']},"
+                    f"{d['util']},{d['await']},{d['read_avg']},{d['iops_avg']},"
+                    f"{d['probe_base']},{d['drift']},"
+                    f"{d['act']},\"{d['why']}\",{d['groups_left']},{d['done_gb']}\n")
     with open(os.path.join(BENCH, 'groups_result.json'), 'w') as f:
         json.dump(group_log, f, ensure_ascii=False)
     log(f'完成: {len(group_log)} 组 / {done_src_bytes[0]/1024**3:.1f} GB / '
