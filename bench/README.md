@@ -11,7 +11,7 @@
 
 | 文件 | 作用 | 入仓 |
 |------|------|------|
-| `bench_vegas.py` | 测试脚本本体（与 `scripts/bench_vegas.py` 同步） | 仓库版在 `scripts/`，此处不入 |
+| `bench_vegas.py` | 测试脚本本体（与 `scripts/bench_vegas.py` 保持同步，16 上运行的即此版） | 是 |
 | `scan.json` | 扫描结果：全部待压文件 `[路径,大小]` 列表 + 总字节 | **否**（~100MB，超 GitHub 单文件上限） |
 | `groups.json` | 预分组结果：136 组（12G×95% 贪心 + 超大文件独立成组） | **否**（~100MB，同上） |
 | `vegas_decisions.csv` | Vegas 每周期决策日志：n/P/util/await/iops/act/why —— **调参核心依据** | 是（测试完成后复制） |

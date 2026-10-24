@@ -1,5 +1,15 @@
 # 更新日志
 
+## [1.9.62] - 2026-10-24
+
+### 工具
+
+- **bench/bench_vegas.py 入仓**：16 上运行的测试脚本（与 scripts/ 版同步，
+  死锁修复+79 API key 支持）；产出结果文件不入仓（见 bench/README.md）
+- 已知待修（测试中发现的 bench 脚本 bug，不影响主程序）：vegas 状态机
+  `state='COOLDOWN'` 冷却扣完后不回 PROBING/STABLE → 死 hold（18:29 起 n=5
+  冻结）；小文件区单组耗时(200s)超决策周期(120s)致 P 抖动，待加 EWMA 平滑
+
 ## [1.9.61] - 2026-10-24
 
 ### 新增
