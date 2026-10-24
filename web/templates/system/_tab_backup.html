@@ -231,7 +231,12 @@
                     </div>
                     <div class="mb-3">
                         <label class="form-label">NAS API 鉴权 Key</label>
-                        <input type="password" class="form-control" id="nasApiKey" placeholder="未启用鉴权时留空" autocomplete="new-password">
+                        <div class="input-group">
+                            <input type="password" class="form-control" id="nasApiKey" placeholder="未启用鉴权时留空" autocomplete="new-password">
+                            <button class="btn btn-outline-secondary" type="button" id="nasApiKeyToggle" tabindex="-1" title="显示/隐藏 Key">
+                                <i class="bi bi-eye"></i>
+                            </button>
+                        </div>
                         <small class="form-text text-secondary">调用时通过 X-API-Key 请求头携带；NAS 端未启用鉴权则留空</small>
                     </div>
 

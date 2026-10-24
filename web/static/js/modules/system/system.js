@@ -232,6 +232,20 @@ document.addEventListener('DOMContentLoaded', function() {
 
 // ===== 通知配置JavaScript =====
 document.addEventListener('DOMContentLoaded', function() {
+    // NAS API Key 显示/隐藏切换（眼睛图标）
+    const nasApiKeyToggle = document.getElementById('nasApiKeyToggle');
+    if (nasApiKeyToggle) {
+        nasApiKeyToggle.addEventListener('click', function() {
+            const input = document.getElementById('nasApiKey');
+            const icon = this.querySelector('i');
+            if (!input || !icon) return;
+            const show = input.type === 'password';
+            input.type = show ? 'text' : 'password';
+            icon.classList.toggle('bi-eye', !show);
+            icon.classList.toggle('bi-eye-slash', show);
+        });
+    }
+
     // 加载通知配置
     loadNotificationConfig();
     
