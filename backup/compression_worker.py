@@ -78,6 +78,7 @@ class CompressionWorker:
                                          'internal') or 'internal').strip().lower()
         self._vegas_nas = None          # VegasNasController（nas_api 模式惰性创建）
         self._vegas_nas_sampler = None  # NasSignalSampler（任务级共享，见 _ensure_vegas_nas）
+        self._vegas_nas_lost_logged = False  # API 失联回退日志只打一次
         self._vegas_alpha = float(getattr(settings, 'GROUP_VEGAS_ALPHA', 1.0) or 1.0)
         self._vegas_beta = float(getattr(settings, 'GROUP_VEGAS_BETA', 3.0) or 3.0)
         self._vegas_decay = float(getattr(settings, 'GROUP_VEGAS_DECAY', 0.7) or 0.7)
@@ -195,6 +196,15 @@ class CompressionWorker:
 
         logger.info("收到停止信号，正在停止压缩处理...")
         self._running = False
+
+        # 停 Vegas NAS 采样线程（否则每个任务结束会遗留一个 10s 轮询线程累积）
+        if self._vegas_nas_sampler is not None:
+            try:
+                self._vegas_nas_sampler.stop()
+            except Exception:
+                pass
+            self._vegas_nas_sampler = None
+            self._vegas_nas = None
 
         # 取消所有正在运行的压缩任务
         if self.running_compression_futures:
@@ -424,12 +434,16 @@ class CompressionWorker:
             if self._vegas_enabled and self.use_prefetcher:
                 if self._vegas_signal == 'nas_api':
                     ctrl = self._ensure_vegas_nas()
-                    if ctrl is not None:
+                    if ctrl is not None and not ctrl.signal_lost:
+                        self._vegas_nas_lost_logged = False
                         nas_limit = ctrl.tick(len(self.running_compression_futures))
                         if nas_limit > 0 and desired_batches > nas_limit:
                             desired_batches = nas_limit
                     else:
-                        # NAS 信号不可用 → 回退内部信号（不因 API 挂掉停摆）
+                        # NAS 信号不可用/已失联 → 回退内部信号（不因 API 挂掉停摆）
+                        if ctrl is not None and not getattr(self, '_vegas_nas_lost_logged', False):
+                            logger.warning("[VegasNAS] API 连续失联，回退内部组级速率信号")
+                            self._vegas_nas_lost_logged = True
                         self._update_vegas()
                         if self._vegas_limit > 0 and desired_batches > self._vegas_limit:
                             desired_batches = self._vegas_limit
@@ -472,6 +486,13 @@ class CompressionWorker:
         """nas_api 信号源惰性初始化（URL 为空/导入失败 → 返回 None 回退 internal）"""
         if self._vegas_nas is not None:
             return self._vegas_nas
+        # 上次初始化中断留下的采样线程先收掉，避免重复累积
+        if self._vegas_nas_sampler is not None:
+            try:
+                self._vegas_nas_sampler.stop()
+            except Exception:
+                pass
+            self._vegas_nas_sampler = None
         try:
             from config.settings import get_settings
             from backup.vegas_nas import NasSignalSampler, VegasNasController

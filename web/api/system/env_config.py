@@ -372,9 +372,19 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             _sig = str(config.group_vegas_signal_source).strip().lower()
             if _sig not in ('internal', 'nas_api'):
                 raise ValueError("Vegas 信号源只支持 internal 或 nas_api")
-            if _sig == 'nas_api' and not (env_vars.get("NAS_API_URL") or "").strip() \
-                    and not (updates.get("NAS_API_URL") or "").strip():
-                raise ValueError("nas_api 信号源需要先配置 NAS 压力 API 地址（NAS_API_URL）")
+            if _sig == 'nas_api':
+                # 校验依赖 NAS API 地址：优先用本次请求携带的新值，否则读现有 .env
+                _url = (updates.get("NAS_API_URL") or "").strip()
+                if not _url and config.nas_api_url is not None:
+                    _url = str(config.nas_api_url).strip()
+                if not _url:
+                    try:
+                        _cur = env_manager.read_env_file(include_defaults=True)
+                        _url = str(_cur.get("NAS_API_URL", "") or "").strip()
+                    except Exception:
+                        _url = ""
+                if not _url:
+                    raise ValueError("nas_api 信号源需要先配置 NAS 压力 API 地址（NAS_API_URL）")
             updates["GROUP_VEGAS_SIGNAL_SOURCE"] = _sig
         if config.group_vegas_beta is not None:
             if config.group_vegas_beta < 1.0 or config.group_vegas_beta > 20.0:

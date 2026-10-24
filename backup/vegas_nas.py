@@ -149,6 +149,7 @@ class VegasNasController:
         I = self._med(win, 'md2_iops')
         act, why = 'hold', ''
         fed = active_batches >= self.n     # 并发是否已喂满
+        prev_n = self.n                    # 日志展示"决策前→后"
 
         # 漂移检测（优先于一切回退）
         self._drift_reads.append(R)
@@ -223,8 +224,10 @@ class VegasNasController:
             'probe_base': self._probe_base, 'drift': drifting,
             'act': act, 'why': why,
         }
-        if act != 'hold' or self.state == 'PROBING':
-            self.log(f"[VegasNAS] n={self.n} read={R:.0f}MB/s util={U}% "
+        # 日志：动作/探测期/形态漂移/到上限 均需可见（运维判断依据）
+        if act != 'hold' or self.state == 'PROBING' or '漂移' in why or '到上限' in why \
+                or '快速保护' in why:
+            self.log(f"[VegasNAS] n={prev_n}→{self.n} read={R:.0f}MB/s util={U}% "
                      f"await={A}ms 基线{self._probe_base or 0:.0f} "
                      f"→ {act} ({why})")
         return self.n
@@ -233,3 +236,12 @@ class VegasNasController:
     def available(self) -> bool:
         """信号源健康（采样 ok 且决策已在跑）"""
         return self.sampler.ok and self._probe_base is not None
+
+    @property
+    def signal_lost(self) -> bool:
+        """API 已失联（连续 3 次采样失败 = 30s）——调用方应回退内部信号。
+
+        注意：刚启动时 fail_count=0（尚未采到样本），不算失联，
+        此时控制器只会 hold（样本不足），不会误调并发。
+        """
+        return self.sampler.fail_count >= 3
