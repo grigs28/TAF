@@ -778,9 +778,17 @@ async def run_scheduled_task(
         
         try:
             success = await scheduler.run_task(task_id, run_options=run_options)
-            
+
             if not success:
-                raise HTTPException(status_code=404, detail="计划任务不存在")
+                # run_task 返回 False 有多种原因：任务不存在 / 任务锁被占用
+                # （任务正在执行中）。不能一律报"计划任务不存在"——
+                # 2026-10-24 09:25 就因锁冲突被误报成 404，排查方向被带偏。
+                _exists = await scheduler.get_task(task_id)
+                if not _exists:
+                    raise HTTPException(status_code=404, detail="计划任务不存在")
+                raise HTTPException(
+                    status_code=409,
+                    detail="任务正在执行中（任务锁被占用），请等待当前执行结束后再试")
         except RuntimeError as e:
             # 捕获任务锁获取失败的错误
             if "任务已在执行中" in str(e):
