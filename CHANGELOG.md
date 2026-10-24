@@ -1,5 +1,21 @@
 # 更新日志
 
+## [1.9.63] - 2026-10-24
+
+### 工具
+
+- **测试脚本统一入 bench/**（部署源）：bench_vegas.py/bench_vegas.md 从 scripts/
+  迁入，新增 bench_ladder_small.py（小文件组 4000~5500 文件/组，4→8 档位阶梯，
+  **每档 2 轮 × n 组**双轮独立统计）；scripts/ 不再放测试脚本
+- **bench_vegas 全程测试完成并入仓结果**（135 组 / 1588.4GB / 30 决策周期）：
+  vegas_decisions.csv + groups_result.json 入 bench/。关键结论：
+  - 大文件区拐点=5（6 并发产出 -11% 坍塌，状态机自动回退验证成功）
+  - 小文件区 P 量化抖动（单组 186s>周期 120s → P 按完成组数×97.3MB/s 阶梯跳变），
+    接入 TAF 前必须给 P 加 EWMA/滑动均值
+  - 发现状态机 bug：COOLDOWN 冷却扣完不回 PROBING/STABLE → 死 hold（冻结 50 分钟），
+    修复方案已记录于 bench/README.md
+- 版本升至 1.9.63
+
 ## [1.9.62] - 2026-10-24
 
 ### 工具
