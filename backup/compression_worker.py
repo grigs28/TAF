@@ -436,7 +436,8 @@ class CompressionWorker:
                     ctrl = self._ensure_vegas_nas()
                     if ctrl is not None and not ctrl.signal_lost:
                         self._vegas_nas_lost_logged = False
-                        nas_limit = ctrl.tick(len(self.running_compression_futures))
+                        nas_limit = ctrl.tick(
+                            len(self.running_compression_futures), desired_batches)
                         if nas_limit > 0 and desired_batches > nas_limit:
                             desired_batches = nas_limit
                     else:

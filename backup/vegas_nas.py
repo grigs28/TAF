@@ -124,12 +124,27 @@ class VegasNasController:
         return round(v[len(v) // 2], 1) if v else 0.0
 
     # ---- 状态机（每 PERIOD 秒一拍） ----
-    def tick(self, active_batches: int) -> int:
+    def tick(self, active_batches: int, desired_batches: int = None) -> int:
         """由压缩主循环调用（自带节流）。返回当前并发上限。
 
         active_batches: 调用时的在途压缩组数（低于 n 时不做 +1 决策，
         避免没喂满就把"没喂满"当"无增量"——bench 里 worker 池恒满无此问题）
+        desired_batches: 外部已算出的目标并发（含扫描减批/磁盘限流/守卫）。
+        外部限制比 Vegas 更严时，本控制器**对齐**到该值并重置基准：
+        否则 fed 永远为假 → 扫描与压缩并发期间 Vegas 全程不决策（生产必现）。
         """
+        # 外部限制对齐（优先级高于 Vegas 自身判断）
+        ext_cap = None
+        if desired_batches is not None:
+            ext_cap = max(self.min_n, min(int(desired_batches), self.max_n))
+            if ext_cap < self.n:
+                self.n = ext_cap
+                self._probe_base = None      # 并发变了，旧基准失效
+                self._plateau = 0
+                self._drift_reads = []
+                self.last_decision = {'act': 'hold', 'why': f'外部限并发→{ext_cap}'}
+                return self.n
+
         now = time.time()
         if now < self._t_next:
             return self.n
@@ -162,7 +177,10 @@ class VegasNasController:
             self._cooldown -= 1
             act, why = 'hold', f'冷却{self._cooldown}'
             if self._cooldown == 0:
-                self.state = 'PROBING'
+                # 仅过载（state=COOLDOWN）冷却后回探测；无增量回退设为 STABLE，
+                # 需保持稳定观察，不能被冷却结束逻辑覆盖
+                if self.state == 'COOLDOWN':
+                    self.state = 'PROBING'
                 self._plateau = 0
         elif drifting and self.state != 'STABLE':
             self.state = 'STABLE'
@@ -170,21 +188,23 @@ class VegasNasController:
             self._stable_since = now
             why = f'漂移中(read {self._drift_reads[0]:.0f}→{R:.0f},重置基准)'
         elif self.state == 'PROBING':
+            # 上探同时受外部上限约束（扫描减批/磁盘限流压得比 Vegas 低时不上探）
+            can_up = self.n < self.max_n and (ext_cap is None or self.n < ext_cap)
             if self._probe_base is None:
                 self._probe_base = R
-                if fed and self.n < self.max_n:
+                if fed and can_up:
                     act, why = '+1', '首周期上探'
             elif not fed:
                 act, why = 'hold', '未喂满'
             elif R >= self._probe_base * GAIN:
                 self._plateau = 0
-                if self.n < self.max_n:
+                if can_up:
                     act, why = '+1', f'增量确认({R:.0f}≥{self._probe_base:.0f}+3%)'
                     self._probe_base = R
                 else:
                     self.state = 'STABLE'
                     self._stable_since = now
-                    why = '到上限'
+                    why = '到上限' if self.n >= self.max_n else '受外部限并发'
             elif R < self._probe_base * OVERLOAD and U >= 95:
                 self.state = 'COOLDOWN'
                 self._cooldown = 2
@@ -192,13 +212,19 @@ class VegasNasController:
             else:
                 self._plateau += 1
                 if self._plateau >= PLATEAU_MAX:
-                    self.state = 'COOLDOWN'
-                    self._cooldown = 2
+                    # 无增量回退后转 STABLE（不连续下探）：若 NAS 已饱和、
+                    # read 与并发无关，连续"无增量"会把并发一路压到下限；
+                    # 转 STABLE 后由 8 周期定时重探验证是否需要再降。
+                    self.state = 'STABLE'
+                    self._cooldown = 1
+                    self._stable_since = None
                     act, why = '-1', f'无增量x{self._plateau}({R:.0f}vs{self._probe_base:.0f})'
                 else:
                     act, why = 'hold', f'观察中({R:.0f}vs{self._probe_base:.0f})'
         elif self.state == 'STABLE':
-            if (now - (self._stable_since or now)) > REPROBE_PERIODS * PERIOD \
+            if self._stable_since is None:
+                self._stable_since = now      # 冷却结束首次进入，开始计时
+            if (now - self._stable_since) > REPROBE_PERIODS * PERIOD \
                     and self.n < self.max_n and fed:
                 self.state = 'PROBING'
                 self._probe_base = R
