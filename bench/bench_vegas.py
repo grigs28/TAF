@@ -192,10 +192,11 @@ def sampler():
 # ================= Vegas 状态机 =================
 def vegas_loop():
     global desired_n
-    state = 'PROBING'          # PROBING / STABLE / COOLDOWN
+    state = 'PROBING'          # PROBING / STABLE（COOLDOWN 只是倒计时，扣完回 PROBING）
     cooldown = 0
     stable_since = None
     last_P = None
+    ewma_P = None              # 产出 EWMA（平滑小文件区"周期<组耗时"的量化抖动）
     stable_P = deque(maxlen=3)   # 稳定期产出参考
     t_next = time.time() + PERIOD
     while not all_done.is_set():
@@ -204,10 +205,14 @@ def vegas_loop():
             continue
         t_next = time.time() + PERIOD
         with lock:
-            P = period_src_bytes[0] / PERIOD / 1048576   # MB/s（本周期产出）
+            raw_P = period_src_bytes[0] / PERIOD / 1048576   # MB/s（本周期原始产出）
             period_src_bytes[0] = 0
             n = len(worker_seqs) or desired_n
             left = len(groups_left)
+        # EWMA 平滑：小文件区单组耗时(~186s) > 周期(120s)，raw_P 是完成组数的
+        # 整数函数（±80% 阶梯跳变），直接用会误触发回退；0.6 历史 / 0.4 本周期
+        P = raw_P if ewma_P is None else ewma_P * 0.6 + raw_P * 0.4
+        ewma_P = P
         # 本周期 79 均值
         now = time.time()
         win = [s for s in nas_samples if now - s['ts'] <= PERIOD + POLL]
@@ -222,15 +227,17 @@ def vegas_loop():
         if cooldown > 0:
             cooldown -= 1
             act, why = 'hold', f'冷却{cooldown}'
+            if cooldown == 0:
+                state = 'PROBING'   # 修复：冷却结束回 PROBING（否则死悬在 COOLDOWN）
         elif state == 'PROBING':
             if n >= MAX_N:
                 state, act, why = 'STABLE', 'hold', '到上限'
                 stable_since = time.time()
             elif last_P is None:
                 act, why = '+1', '首周期上探'
-            elif last_P > 0 and P < last_P * 0.95:
+            elif last_P > 0 and P < last_P * 0.88:
                 state = 'COOLDOWN'; cooldown = COOLDOWN_PERIODS
-                act, why = '-1', f'产出降({P:.0f}<-5%于{last_P:.0f})'
+                act, why = '-1', f'产出降({P:.0f}<-12%于{last_P:.0f})'
             elif abs(P - (last_P or 0)) <= (last_P or 1) * 0.05 and U >= 95:
                 state = 'COOLDOWN'; cooldown = COOLDOWN_PERIODS
                 act, why = '-1', f'到顶(util={U})'
@@ -239,7 +246,7 @@ def vegas_loop():
         elif state == 'STABLE':
             stable_P.append(P)
             ref = sum(stable_P) / max(1, len(stable_P))
-            if len(stable_P) >= 2 and ref > 0 and P < ref * 0.8:
+            if len(stable_P) >= 2 and ref > 0 and P < ref * 0.85:
                 state = 'PROBING'
                 act, why = '-1', f'产出掉{P:.0f}vs均{ref:.0f}(形态变化)'
             elif (time.time() - (stable_since or time.time())) > REPROBE_PERIODS * PERIOD \
@@ -248,8 +255,9 @@ def vegas_loop():
                 act, why = '+1', f'周期重探'
             else:
                 act, why = 'hold', f'稳定(P={P:.0f})'
-        # 快速保护（任何状态）
-        if U >= 98 and A >= 25 and n > MIN_N and act not in ('-1',):
+        # 快速保护（任何状态）——await 阈值按实测下调：79 打满时 await<11ms，
+        # 25ms 永远够不着；15ms 才能在 IOPS 排队恶化时触发
+        if U >= 98 and A >= 15 and n > MIN_N and act not in ('-1',):
             state = 'COOLDOWN'; cooldown = 1
             act, why = '-1', f'快速保护(util={U},await={A})'
 
@@ -266,7 +274,8 @@ def vegas_loop():
             stable_since = stable_since or time.time()
 
         decisions.append({'time': time.strftime('%H:%M:%S'), 'state': state,
-                          'n': n, 'P_mbps': round(P, 1), 'last_P': last_P,
+                          'n': n, 'P_mbps': round(P, 1), 'raw_P': round(raw_P, 1),
+                          'last_P': last_P,
                           'util': U, 'await': A, 'iops': I, 'read': R,
                           'act': act, 'why': why, 'groups_left': left})
         log(f'[Vegas] n={n} P={P:.0f}MB/s util={U}% await={A}ms iops={I} '
@@ -303,9 +312,9 @@ def main():
         time.sleep(5)
     # 落盘
     with open(os.path.join(BENCH, 'vegas_decisions.csv'), 'w') as f:
-        f.write('time,state,n,P_mbps,last_P,util,await,iops,read,act,why,groups_left\n')
+        f.write('time,state,n,P_mbps,raw_P,last_P,util,await,iops,read,act,why,groups_left\n')
         for d in decisions:
-            f.write(f"{d['time']},{d['state']},{d['n']},{d['P_mbps']},{d['last_P']},"
+            f.write(f"{d['time']},{d['state']},{d['n']},{d['P_mbps']},{d['raw_P']},{d['last_P']},"
                     f"{d['util']},{d['await']},{d['iops']},{d['read']},"
                     f"{d['act']},\"{d['why']}\",{d['groups_left']}\n")
     with open(os.path.join(BENCH, 'groups_result.json'), 'w') as f:
