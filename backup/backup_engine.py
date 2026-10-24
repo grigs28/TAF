@@ -1084,6 +1084,13 @@ class BackupEngine:
                         'quarantined_files': len(_fin.get('quarantined') or []),
                         'quarantined_bytes': int(_fin.get('quarantined_bytes') or 0),
                     }
+                # 任务期间 SSD 剩余的最小值（FinalDirMonitor 每 5 秒采样）：
+                # 反映本任务对压缩盘的占用峰值，供完成卡片统计
+                if self.final_dir_monitor is not None:
+                    _min_free = getattr(self.final_dir_monitor, '_min_free_bytes', None)
+                    if _min_free is not None:
+                        _final_extra['ssd_min_free_gb'] = round(
+                            int(_min_free) / (1024 ** 3), 1)
             except Exception:
                 _final_extra = {}
 
@@ -1180,8 +1187,11 @@ class BackupEngine:
                             f"平均速度 {_avg_mbps:.1f} MB/s"
                         )
                     _cw = getattr(self, '_current_compression_worker', None)
-                    _comp_started = (float(getattr(_cw, 'compression_started_at', 0) or 0)
-                                     if _cw else 0.0)
+                    # 优先用 _perform_backup finally 里留的快照（worker 引用那时已置空）
+                    _comp_started = float(
+                        getattr(backup_task, 'compression_started_at_snapshot', 0) or 0)
+                    if not _comp_started and _cw:
+                        _comp_started = float(getattr(_cw, 'compression_started_at', 0) or 0)
                     _starve_seconds = float(
                         getattr(self.final_dir_monitor, '_starvation_seconds', 0.0) or 0.0)
                     await self.backup_db.save_task_starvation(
@@ -1899,6 +1909,14 @@ class BackupEngine:
                 try:
                     backup_task.error_logs_cache = list(
                         getattr(compression_worker, 'error_logs', []) or [])
+                except Exception:
+                    pass
+                # 压缩开始时间快照：worker 引用随后置空，execute 层统计
+                # compression_started_at 时拿到的永远是 None（压缩速度恒显示"—"，
+                # 任务 148/149/151 均如此）。快照挂到 backup_task 上传递。
+                try:
+                    backup_task.compression_started_at_snapshot = float(
+                        getattr(compression_worker, 'compression_started_at', 0) or 0)
                 except Exception:
                     pass
                 # 清除压缩工作线程引用

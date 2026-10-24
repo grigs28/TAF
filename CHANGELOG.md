@@ -1,5 +1,31 @@
 # 更新日志
 
+## [1.9.58] - 2026-10-24
+
+### 修复
+
+- **任务统计落库丢失根治（任务 148/149/151 统计消失的根因）**：
+  `psycopg3_compat` 的事务状态枚举写错——psycopg3 实际枚举是
+  IDLE=0/ACTIVE=1/INTRANS=2，代码判断 `==1`（ACTIVE）当 INTRANS、
+  `==0`（IDLE）当"需要提交"，条件永远不成立：
+  - `execute` 写完从不提交 → UPDATE 落进未提交事务
+  - `fetch/fetchrow/fetchval` 的 SELECT 事务从不提交 → 连接归还后
+    服务端挂着 idle in transaction（僵尸事务，已观察到 10-22 起两个）
+  - 借到僵尸事务连接的写入最终被回滚 → 统计消失
+  四处判断全部改为 `==2`（INTRANS 即提交），executemany 的状态判断同步修正
+- `save_task_starvation` UPDATE 后显式 commit（双保险）
+- **压缩速度恒显示"—"**：`_current_compression_worker` 在
+  `_perform_backup` 的 finally 中被置 None（早于 execute 层统计），
+  `compression_started_at` 恒为 0。改为 finally 清空前把开始时间快照
+  挂到 `backup_task.compression_started_at_snapshot`
+
+### 功能
+
+- **完成卡片新增"SSD 剩余最小"统计**：FinalDirMonitor 每 5 秒采样
+  压缩盘剩余空间，记录任务期间的最小值（占用峰值时刻），任务结束写入
+  `result_summary.ssd_min_free_gb`，完成卡片显示
+- 版本升至 1.9.58
+
 ## [1.9.57] - 2026-10-24
 
 ### 修复

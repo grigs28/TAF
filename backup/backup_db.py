@@ -3854,6 +3854,14 @@ class BackupDB:
                     "UPDATE backup_tasks SET result_summary = $1::jsonb, updated_at = now() "
                     "WHERE id = $2",
                     json.dumps(summary, ensure_ascii=False), task_id)
+                # 双保险显式提交：任务 148/149/151 的统计曾因 UPDATE 落进
+                # 未提交事务被回滚而丢失（compat 层枚举误判 + 归还路径漏洞）
+                actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                if hasattr(actual_conn, 'commit'):
+                    try:
+                        await actual_conn.commit()
+                    except Exception:
+                        pass
         except Exception as e:
             logger.warning(f"[备份数据库] 保存等待压缩统计失败 (task_id={task_id}): {e}")
 

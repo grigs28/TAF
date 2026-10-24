@@ -939,6 +939,7 @@ async function loadAllSystemConfig() {
             }
 
 
+
             // SSO 单点登录配置
             if (config.yz_login_url) {
                 const yzLoginInput = document.getElementById('yzLoginUrl');
@@ -1115,6 +1116,7 @@ async function saveEnvConfigSection() {
                 const parsed = parseFloat(input.value);
                 return isNaN(parsed) ? null : parsed;
             })(),
+
             disk_check_interval: (() => {
                 const input = document.getElementById('diskCheckInterval');
                 if (!input || input.value === '') return null;

@@ -1200,6 +1200,7 @@ class Compressor:
                     _ag = None
             required_free = _compute_required_free_bytes(_live_settings, _ag) or (max_file_size * 3)
 
+
         detail = {
             'active_groups': active_groups,
             'active_src_total': active_src_total,

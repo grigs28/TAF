@@ -122,6 +122,9 @@ class FinalDirMonitor:
             self._starve_start = None
             self._has_written_once = False
             self.error_logs = []
+            # 任务期间 SSD 剩余的最小值（占用峰值时刻），供完成卡片统计；
+            # None=尚未观测，首个采样后为具体字节数
+            self._min_free_bytes = None
             # 新任务开始：清空上一任务的处理记录。监控线程常驻，集合若不清空
             # 会跨任务累积——同一天重跑同一 set_id 时同名文件会被永久跳过，
             # 且内存随文件数增长。
@@ -454,6 +457,15 @@ class FinalDirMonitor:
                         logger.debug(f"[Final监控] final目录不存在: {final_dir}，等待 {self._scan_interval} 秒后重试")
                         time.sleep(self._scan_interval)
                         continue
+
+                    # 顺手记录任务期间 SSD 剩余的最小值（每轮一次，开销可忽略）
+                    try:
+                        _free = shutil.disk_usage(str(final_dir)).free
+                        if (self._min_free_bytes is None
+                                or _free < self._min_free_bytes):
+                            self._min_free_bytes = _free
+                    except OSError:
+                        pass
                     
                     # 递归扫描所有子目录，查找压缩文件
                     # 稳定性判定交给“扫描时记大小 + 写带前对比”：

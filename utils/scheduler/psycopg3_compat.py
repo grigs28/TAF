@@ -53,16 +53,16 @@ class AsyncPGCompatConnection:
         # 直接执行 SQL，不创建事务上下文管理器（让调用者管理事务，或使用 autocommit）
         async with self._conn.cursor() as cur:
             await cur.execute(converted_query, args)
-            # psycopg3 默认 autocommit=False，如果不在事务中（IDLE），需要显式提交
-            # 如果已经在事务中（INTRANS），让调用者管理事务
+            # psycopg3 枚举：IDLE=0, ACTIVE=1, INTRANS=2, INERROR=3。
+            # autocommit=False 时执行后必为 INTRANS(2)（此前误判 0=IDLE 才提交，
+            # 条件永远不成立 → UPDATE 落进未提交事务，归还时若 reset 失败即回滚
+            # —— 任务 148/149/151 的统计丢失根因）。写完立即提交。
             transaction_status = self._conn.info.transaction_status
-            if transaction_status == 0:  # IDLE = 0 (不在事务中，需要提交)
+            if transaction_status == 2:  # INTRANS：语句已执行，提交
                 try:
                     await self._conn.commit()
                 except Exception as commit_error:
-                    # 如果提交失败（可能已经自动提交），记录但不抛出异常
-                    logger.debug(f"execute: 提交失败（可能已自动提交）: {str(commit_error)}")
-            # transaction_status == 1 (INTRANS) 表示在事务中，不提交，让调用者管理
+                    logger.warning(f"execute: 提交失败: {str(commit_error)}")
             return cur.rowcount
     
     async def fetch(self, query: str, *args) -> List[Dict[str, Any]]:
@@ -84,7 +84,7 @@ class AsyncPGCompatConnection:
         
         # 查询完成后，如果连接处于 INTRANS 状态，提交事务（只读查询应该自动提交）
         transaction_status = self._conn.info.transaction_status
-        if transaction_status == 1:  # INTRANS: 在事务中
+        if transaction_status == 2:  # INTRANS=2（此前误写 1，SELECT 事务从不提交→僵尸事务）
             try:
                 await self._conn.commit()
                 logger.debug("fetch: 只读查询后已提交事务")
@@ -113,7 +113,7 @@ class AsyncPGCompatConnection:
         
         # 查询完成后，如果连接处于 INTRANS 状态，提交事务（只读查询应该自动提交）
         transaction_status = self._conn.info.transaction_status
-        if transaction_status == 1:  # INTRANS: 在事务中
+        if transaction_status == 2:  # INTRANS=2（同 fetch，此前误写 1）
             try:
                 await self._conn.commit()
                 logger.debug("fetchrow: 只读查询后已提交事务")
@@ -141,7 +141,7 @@ class AsyncPGCompatConnection:
         
         # 查询完成后，如果连接处于 INTRANS 状态，提交事务（只读查询应该自动提交）
         transaction_status = self._conn.info.transaction_status
-        if transaction_status == 1:  # INTRANS: 在事务中
+        if transaction_status == 2:  # INTRANS=2（同 fetch，此前误写 1）
             try:
                 await self._conn.commit()
                 logger.debug("fetchval: 只读查询后已提交事务")
@@ -207,7 +207,7 @@ class AsyncPGCompatConnection:
             transaction_status = self._conn.info.transaction_status
             if transaction_status == 0:  # IDLE: 不在事务中，已提交
                 logger.info(f"[psycopg3_compat] ✅ {rowcount} 行，耗时={commit_time:.3f}秒，事务状态=IDLE")
-            elif transaction_status == 1:  # INTRANS: 仍在事务中，提交失败
+            elif transaction_status == 2:  # INTRANS=2: 仍在事务中，提交失败
                 logger.error(f"[psycopg3_compat] ❌ executemany commit() 调用后事务状态仍为 INTRANS！这可能导致数据被回滚！")
                 # 尝试再次提交
                 try:

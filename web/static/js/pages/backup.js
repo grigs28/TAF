@@ -1746,6 +1746,16 @@
                     + `<small class="text-muted" title="平均写带速度（按实际写带耗时，不含 final 空等）">${
                         _tapeAvg > 0 ? _tapeAvg.toFixed(1) + ' MB/s' : '—'}</small>`;
                 body.appendChild(tapeRow);
+
+                // 任务期间 SSD 剩余的最小值（占用峰值时刻）
+                const _minFree = Number(task.ssd_min_free_gb) || 0;
+                if (_minFree > 0) {
+                    const minFreeRow = document.createElement('div');
+                    minFreeRow.className = 'd-flex justify-content-between';
+                    minFreeRow.innerHTML = `<small class="text-muted">SSD 剩余最小:</small>`
+                        + `<small class="text-muted" title="任务期间压缩盘剩余空间的最低点（占用峰值时刻）">${_minFree.toFixed(1)} GB</small>`;
+                    body.appendChild(minFreeRow);
+                }
             }
         }
 
