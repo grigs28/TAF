@@ -1,5 +1,29 @@
 # 更新日志
 
+## [1.9.60] - 2026-10-24
+
+### 新增
+
+- **NAS 压力 API 配置入配置页面**：系统配置 → 备份策略 → 自适应并发（Vegas）区块
+  新增「NAS 压力 API 地址」「NAS API 鉴权 Key」两项（`NAS_API_URL`/`NAS_API_KEY`，
+  调用时带 `X-API-Key` 头）；地址校验 http/https 前缀；两项均随"保存配置"写入 .env
+- **79 disk_api 鉴权与开机自启**（群晖侧，未入仓）：`disk_api.py` 支持
+  `X-API-Key` 头 / `?key=` 参数鉴权（key 放脚本同目录 `disk_api.key`，不存在则
+  不鉴权；`/health` 永远免鉴权）；自管理 PID 文件；开机自启
+  `/usr/local/etc/rc.d/diskapi.sh`（start/stop/status）
+- **bench/ 目录 README**： Vegas 调试工作目录的文件作用说明（scan.json/groups.json
+  ~100MB 超 GitHub 上限不入仓、重跑再生成方法、状态机与阶梯测试结论）
+
+### 修复
+
+- **bench_vegas.py 嵌套锁死锁**：vegas_loop 持 lock 时调 `spawn_worker()`
+  （内部又拿同一把锁），`threading.Lock` 不可重入 → 首个决策周期"+1 上探"必触发
+  死锁（16 上实测 17:54 卡死：vegas 卡住持锁不放、worker 卡在统计、main 卡在 join）。
+  spawn_worker 调用移出锁块；AST 全扫确认无同类嵌套
+- bench_vegas.py 支持 79 API 鉴权：key 优先读环境变量 `NAS_API_KEY`，其次
+  bench 目录 `nas_api.key` 文件（key 不入仓）
+- 版本升至 1.9.60
+
 ## [1.9.59] - 2026-10-24
 
 ### 工具

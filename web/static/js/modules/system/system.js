@@ -894,6 +894,10 @@ async function loadAllSystemConfig() {
             const vm = document.getElementById('vegasMinBatches');
             if (vm) vm.value = (config.group_vegas_min_batches !== undefined && config.group_vegas_min_batches !== null)
                 ? config.group_vegas_min_batches : 2;
+            const nu = document.getElementById('nasApiUrl');
+            if (nu) nu.value = config.nas_api_url || '';
+            const nk = document.getElementById('nasApiKey');
+            if (nk) nk.value = config.nas_api_key || '';
             // 按当前并发刷新 Vegas 参数推荐值
             updateVegasRecommend();
             // 空间守卫开关（默认启用；老数据无该字段时按启用处理）
@@ -1090,6 +1094,14 @@ async function saveEnvConfigSection() {
                 if (!input || input.value === '') return null;
                 const parsed = parseInt(input.value, 10);
                 return isNaN(parsed) ? null : parsed;
+            })(),
+            nas_api_url: (() => {
+                const input = document.getElementById('nasApiUrl');
+                return input ? input.value.trim() : null;
+            })(),
+            nas_api_key: (() => {
+                const input = document.getElementById('nasApiKey');
+                return input ? input.value.trim() : null;
             })(),
             disk_throttle_high_percent: (() => {
                 const input = document.getElementById('diskThrottleHighPercent');

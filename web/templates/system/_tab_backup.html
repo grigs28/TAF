@@ -224,6 +224,16 @@
                             </button>
                         </div>
                     </div>
+                    <div class="mb-3">
+                        <label class="form-label">NAS 压力 API 地址</label>
+                        <input type="url" class="form-control" id="nasApiUrl" placeholder="http://192.168.0.79:8090/api/disk-stats?simple=1">
+                        <small class="form-text text-secondary">NAS（群晖）磁盘压力指标 API，Vegas 的外部信号源（util/await/IOPS）；留空 = 不采集</small>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">NAS API 鉴权 Key</label>
+                        <input type="password" class="form-control" id="nasApiKey" placeholder="未启用鉴权时留空" autocomplete="new-password">
+                        <small class="form-text text-secondary">调用时通过 X-API-Key 请求头携带；NAS 端未启用鉴权则留空</small>
+                    </div>
 
                     <!-- ── 磁盘限流 ── -->
                     <h6 class="text-secondary border-bottom pb-2 mb-3 mt-4">磁盘限流</h6>

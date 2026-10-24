@@ -20,7 +20,16 @@ SOURCES = ['/mnt/79-fs', '/mnt/79-yzbak']
 SCAN_LIMIT_PER_SRC = 800 * 1024 ** 3     # 每源最多扫 800GB（控制总时长 ~2h）
 BENCH = '/mnt/SSD/bench'
 OUT_DIR = os.path.join(BENCH, 'out')
-NAS = 'http://192.168.0.79:8090/api/disk-stats?simple=1'
+NAS_BASE = 'http://192.168.0.79:8090/api/disk-stats?simple=1'
+# key 不入仓：优先环境变量 NAS_API_KEY，其次 BENCH 目录 nas_api.key 文件
+_NK = os.environ.get('NAS_API_KEY', '')
+if not _NK:
+    try:
+        with open(os.path.join(BENCH, 'nas_api.key')) as _f:
+            _NK = _f.read().strip()
+    except OSError:
+        pass
+NAS = NAS_BASE + ('&key=' + _NK if _NK else '')
 
 MAX_FILE = 12 * 1024 ** 3
 MIN_GROUP = MAX_FILE * 0.95              # 11.4GB
@@ -182,6 +191,7 @@ def sampler():
 
 # ================= Vegas 状态机 =================
 def vegas_loop():
+    global desired_n
     state = 'PROBING'          # PROBING / STABLE / COOLDOWN
     cooldown = 0
     stable_since = None
@@ -246,9 +256,12 @@ def vegas_loop():
         with lock:
             if act == '+1' and n < MAX_N:
                 desired_n = n + 1
-                spawn_worker()
             elif act == '-1' and n > MIN_N:
                 desired_n = n - 1        # worker 完成组后自行退出
+        # spawn_worker 内部也要拿 lock，必须在锁外调用，
+        # 否则同一线程二次 acquire 不可重入的 Lock → 死锁（首次+1上探即卡死）
+        if act == '+1' and n < MAX_N:
+            spawn_worker()
         if state == 'STABLE':
             stable_since = stable_since or time.time()
 

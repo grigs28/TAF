@@ -127,6 +127,9 @@ class Settings(BaseSettings):
     GROUP_VEGAS_DECAY: float = 0.7      # 乘性下降因子
     GROUP_VEGAS_MIN_BATCHES: int = 2    # 自适应并发下限
     GROUP_VEGAS_BASE_RESET_SEC: int = 600  # 速率基准重置周期（秒）：base = max(base×0.9, ewma)
+    # NAS 磁盘压力 API（如群晖 disk_api.py :8090）——Vegas 的外部压力信号源
+    NAS_API_URL: str = ""               # 完整地址（如 http://192.168.0.79:8090/api/disk-stats?simple=1），空=不采集
+    NAS_API_KEY: str = ""               # 鉴权 key（请求带 X-API-Key 头；服务端未启用鉴权时留空）
     # 守卫状态切换防抖跟随 DISK_CHECK_INTERVAL（空间不足检查间隔），不再单独配置
     DISK_CHECK_INTERVAL: int = 30  # 磁盘空间检查间隔（秒）
     DISK_CHECK_MAX_WAIT_MINUTES: int = 120  # 磁盘空间不足时暂停压缩的最大等待分钟数（超时抛错）

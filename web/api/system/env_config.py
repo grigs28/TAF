@@ -80,6 +80,8 @@ class SystemEnvConfig(BaseModel):
     group_vegas_alpha: Optional[float] = Field(None, description="上探阈值 α（默认 1.0）：deficit 低于它时并发 +1 缓慢恢复")
     group_vegas_decay: Optional[float] = Field(None, description="每次降并发比例（默认 0.7，范围 0.3-0.95）")
     group_vegas_min_batches: Optional[int] = Field(None, description="自适应并发下限（默认 2）")
+    nas_api_url: Optional[str] = Field(None, description="NAS 磁盘压力 API 地址（如 http://192.168.0.79:8090/api/disk-stats?simple=1），Vegas 外部压力信号源；空=不采集")
+    nas_api_key: Optional[str] = Field(None, description="NAS API 鉴权 key（请求头 X-API-Key；服务端未启用鉴权时留空）")
 
     # 日志配置
     log_level: Optional[str] = Field(None, description="日志级别")
@@ -184,6 +186,8 @@ async def get_env_config():
             "group_vegas_alpha": float(env_vars.get("GROUP_VEGAS_ALPHA", 1.0) or 1.0),
             "group_vegas_decay": float(env_vars.get("GROUP_VEGAS_DECAY", 0.7) or 0.7),
             "group_vegas_min_batches": parse_int(env_vars.get("GROUP_VEGAS_MIN_BATCHES"), 2),
+            "nas_api_url": env_vars.get("NAS_API_URL", ""),
+            "nas_api_key": env_vars.get("NAS_API_KEY", ""),
             "disk_guard_safety_factor": float(env_vars.get("DISK_GUARD_SAFETY_FACTOR", 1.2) or 1.2),
 
             # 日志配置
@@ -377,6 +381,13 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             if config.group_vegas_min_batches < 1 or config.group_vegas_min_batches > 64:
                 raise ValueError("自适应并发下限必须在 1-64 之间")
             updates["GROUP_VEGAS_MIN_BATCHES"] = str(config.group_vegas_min_batches)
+        if config.nas_api_url is not None:
+            _u = str(config.nas_api_url).strip()
+            if _u and not (_u.startswith('http://') or _u.startswith('https://')):
+                raise ValueError("NAS API 地址必须以 http:// 或 https:// 开头")
+            updates["NAS_API_URL"] = _u
+        if config.nas_api_key is not None:
+            updates["NAS_API_KEY"] = str(config.nas_api_key).strip()
 
         # 互斥校验：磁盘限流与空间守卫**至少保留一个**——两者同时关闭等于放弃全部磁盘保护，
         # SSD 可能被在途压缩产出写满。部分更新时需与 .env 中的现有值合并后再判断。
