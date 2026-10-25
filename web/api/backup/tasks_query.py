@@ -564,6 +564,12 @@ async def get_backup_tasks(
                         progress_percent_value = float(row["progress_percent"])
                     # 如果 total_files 为 0，说明扫描刚开始，进度为 0% 是正常的，但仍需要返回 0.0 而不是 None
 
+                    # 实时累加字段（写带/等待）只对运行中任务返回：任务结束后
+                    # engine._current_task 与 FinalDirMonitor 的计时仍在走动，
+                    # 会让完成卡片上的"等待压缩"持续增长（2026-10-25 实测）
+                    _is_running_task = str(status_value or '').lower() in (
+                        'running', 'pending', 'paused', 'interrupted')
+
                     tasks.append({
                         "task_id": row["id"],
                         "task_name": row["task_name"],
@@ -640,26 +646,26 @@ async def get_backup_tasks(
                         # 预分组封组阈值（MAX_FILE_SIZE 设置值）：hover 显示参考
                         "max_file_size": max_file_size,
                         # 磁带实时写入（无写入进行时为 None/0；仅当前写入所属任务可见）
-                        "tape_writing_file": tape_writing_file if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else None,
-                        "tape_write_bytes": tape_write_bytes if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
-                        "tape_write_total": tape_write_total if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
-                        "tape_write_speed_mbps": round(tape_write_speed_mbps, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
+                        "tape_writing_file": tape_writing_file if (_is_running_task and tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else None,
+                        "tape_write_bytes": tape_write_bytes if (_is_running_task and tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
+                        "tape_write_total": tape_write_total if (_is_running_task and tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
+                        "tape_write_speed_mbps": round(tape_write_speed_mbps, 1) if (_is_running_task and tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         "tape_write_avg_speed_mbps": (
                             round(tape_write_avg_speed_mbps, 1)
-                            if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id))
+                            if (_is_running_task and tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id))
                             else round(float(result_summary_dict.get('tape_write_avg_speed_mbps') or 0), 1)
                         ),
                         # 本任务累计已完成写带的字节数（hover 显示"本任务累计已完成"）
-                        "tape_write_cum_bytes": tape_write_cum_bytes if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
+                        "tape_write_cum_bytes": tape_write_cum_bytes if (_is_running_task and tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         # 写带忙闲统计：busy=实际复制累计秒数，idle=从首次写带起算的空档秒数
-                        "tape_write_busy_seconds": round(tape_write_busy_seconds, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
-                        "tape_write_idle_seconds": round(tape_write_idle_seconds, 1) if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
+                        "tape_write_busy_seconds": round(tape_write_busy_seconds, 1) if (_is_running_task and tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
+                        "tape_write_idle_seconds": round(tape_write_idle_seconds, 1) if (_is_running_task and tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id)) else 0,
                         # 任务期间 SSD 剩余的最小值（占用峰值时刻），完成卡片统计
                         "ssd_min_free_gb": round(float(result_summary_dict.get('ssd_min_free_gb') or 0), 1),
                         # 压缩喂不饱写带的累计等待（运行中实时值；完成任务从 result_summary 读取）
                         "tape_starvation_seconds": (
                             round(tape_starvation_seconds, 1)
-                            if (tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id))
+                            if (_is_running_task and tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id))
                             else round(float(result_summary_dict.get('tape_starvation_seconds') or 0), 1)
                         ),
                         # final 目录待写磁带的压缩文件数（卡片写带行显示）

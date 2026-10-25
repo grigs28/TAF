@@ -1,5 +1,18 @@
 # 更新日志
 
+## [1.9.71] - 2026-10-25
+
+### 修复
+
+- **任务完成后"等待压缩"仍在增长**：API 对实时累加字段（tape_starvation_seconds /
+  tape_write_* ）只按 `engine._current_task.id == task_id` 判断，任务结束后
+  `_current_task` 与 FinalDirMonitor 的计时仍在走动 → 卡片数值随刷新持续增加
+  （实测 DB 里已是固定 5.0s，界面显示 4m32s 并继续涨）。
+  修复：新增 `_is_running_task`（running/pending/paused/interrupted），9 处
+  实时字段一律要求运行态，完成后统一读 result_summary 或返回 0
+- **完成卡片重复显示等待时间**：同一数值同时出现在"等待压缩 4m32s"徽章与
+  "压缩等待: 5 分钟"统计行，且格式不一致。删除统计行，统一用 xhymzs 格式
+
 ## [1.9.70] - 2026-10-25
 
 ### 修复

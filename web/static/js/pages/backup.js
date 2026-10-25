@@ -1697,7 +1697,6 @@
                 const _totalB = Number(task.total_bytes) || 0;
                 const _srcB = _procB > 0 ? _procB : _totalB;
                 const _compB = Number(task.compressed_bytes) || 0;
-                const _starve = Number(task.tape_starvation_seconds) || 0;
                 const _ratioVal = _srcB > 0 ? (_compB / _srcB) : 0;
                 const _ratio = _srcB > 0 ? (_ratioVal * 100).toFixed(1) + '%' : '-';
                 // 压缩率着色：≥80% 黄色（压缩效果差），<80% 绿色
@@ -1732,11 +1731,9 @@
                         _compSpeed > 0 ? _compSpeed.toFixed(1) + ' MB/s' : '—'}</small>`;
                 body.appendChild(speedRow);
 
-                const waitRow = document.createElement('div');
-                waitRow.className = 'd-flex justify-content-between';
-                waitRow.innerHTML = `<small class="text-muted">压缩等待:</small>`
-                    + `<small class="text-muted" title="磁带端 final 目录为空、等待压缩产出的累计时间">${formatEta(_starve) || '0 秒'}</small>`;
-                body.appendChild(waitRow);
+                // 压缩等待只在上方"等待压缩"徽章显示（xhymzs 格式），此处不再重复一行：
+                // 原先两处同时显示（"等待压缩 4m32s" 与 "压缩等待: 5 分钟"），
+                // 格式还不一致（2026-10-25 用户反馈）
 
                 // 平均写带速度（任务完成后从 result_summary 读取）
                 const _tapeAvg = Number(task.tape_write_avg_speed_mbps) || 0;
