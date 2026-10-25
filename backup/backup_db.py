@@ -3975,8 +3975,60 @@ class BackupDB:
                     logger.info(f"[更新任务状态] 验证: 任务ID={verify_row['id']}, 状态={verify_row['status']}, is_template={verify_row['is_template']}")
                 else:
                     logger.info(f"[更新任务状态] 验证失败: 找不到任务ID={backup_task.id}")
+
+            # 任务完成时把统计同步到 backup_sets：
+            # 恢复界面（recovery_engine.search_backup_sets）直接读该表的
+            # total_files / total_bytes / compressed_bytes / compression_ratio，
+            # 而 finalize_backup_set 已无调用点 → 长期全为 0，恢复列表显示
+            # "0 个文件 / 0 B"（2026-10-25 核对任务 159 时发现）
+            if status == BackupTaskStatus.COMPLETED:
+                try:
+                    await self.sync_backup_set_stats(backup_task)
+                except Exception as sync_err:
+                    logger.warning(f"[备份集统计] 同步失败（不影响主流程）: {sync_err}")
         except Exception as e:
             logger.error(f"更新任务状态失败: {str(e)}")
+
+    async def sync_backup_set_stats(self, backup_task: BackupTask):
+        """把任务最终统计写回 backup_sets（恢复界面按备份集展示用）"""
+        sid = getattr(backup_task, 'backup_set_id', None)
+        if not sid:
+            logger.debug("[备份集统计] 任务无 backup_set_id，跳过")
+            return
+        total_files = int(getattr(backup_task, 'total_files', 0) or 0)
+        total_bytes = int(getattr(backup_task, 'processed_bytes', 0)
+                          or getattr(backup_task, 'total_bytes', 0) or 0)
+        compressed = int(getattr(backup_task, 'compressed_bytes', 0) or 0)
+        # 压缩率口径与卡片一致：压缩后 / 原始（0.82 表示压到 82%）
+        ratio = round(compressed / total_bytes, 4) if total_bytes > 0 else None
+        # 归档数（chunk_count）：按写带归档数，无则保持原值
+        chunk_count = getattr(backup_task, 'archive_count', None)
+        from utils.scheduler.db_utils import get_opengauss_connection
+        async with get_opengauss_connection() as conn:
+            if chunk_count:
+                await conn.execute(
+                    """UPDATE backup_sets
+                       SET total_files=$1, total_bytes=$2, compressed_bytes=$3,
+                           compression_ratio=$4, chunk_count=$5, updated_at=$6
+                       WHERE id=$7""",
+                    total_files, total_bytes, compressed, ratio,
+                    int(chunk_count), datetime.now(), sid)
+            else:
+                await conn.execute(
+                    """UPDATE backup_sets
+                       SET total_files=$1, total_bytes=$2, compressed_bytes=$3,
+                           compression_ratio=$4, updated_at=$5
+                       WHERE id=$6""",
+                    total_files, total_bytes, compressed, ratio,
+                    datetime.now(), sid)
+            try:
+                actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                await actual_conn.commit()
+            except Exception:
+                pass
+        logger.info(f"[备份集统计] 已同步 set_id={sid}: 文件 {total_files:,}, "
+                    f"原始 {total_bytes/1024**3:.1f}GB, 压缩后 {compressed/1024**3:.1f}GB, "
+                    f"压缩率 {ratio}")
     
     async def update_task_stage_async(self, backup_task: BackupTask, stage_code: str, description: str = None):
         """更新任务的操作阶段（异步方法）

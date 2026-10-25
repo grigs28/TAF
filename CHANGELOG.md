@@ -1,5 +1,20 @@
 # 更新日志
 
+## [1.9.70] - 2026-10-25
+
+### 修复
+
+- **恢复界面备份集统计长期为 0**：`finalize_backup_set` 已无调用点，`backup_sets`
+  的 `total_files/total_bytes/compressed_bytes/compression_ratio/chunk_count`
+  从未写入；而恢复检索（`recovery_engine.search_backup_sets`）直接读这些字段
+  → 恢复列表显示"0 个文件 / 0 B"。
+  修复：任务完成时新增 `sync_backup_set_stats()` 把任务最终统计写回备份集
+  （文件数/原始字节/压缩后字节/压缩率口径与卡片一致）
+- 已手动回填任务 159 的备份集（set_id=137：635,892 文件 / 1020.1GB / 836.4GB / 0.8199）
+- **DB 落库核对结论**（任务 159）：任务级统计全部正确（progress 100%、文件数
+  635,892 与扫描一致、processed/compressed 字节、result_summary 11 个键完整、
+  error_logs 0 条）；`backup_files` 分表为空属纯内存扫描设计的既定行为
+
 ## [1.9.69] - 2026-10-25
 
 ### 修复
