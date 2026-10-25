@@ -128,6 +128,7 @@ class VegasNasController:
         self._verify_blocked_n = None   # 已验证"降并发有害"的并发值，不再重复验证
         self._verify_samples = []       # 验证期原始 read 样本
         self._rebuild_base = False      # 降档后重建基线标志（不上探）
+        self._pressure_skip_until = 0.0 # 物理盘饱和判据的跳过期（防滞后指标连降）
         self._t_next = 0.0          # 下次决策时刻（tick 节流）
         self.last_decision = None   # 供日志/诊断
 
@@ -321,13 +322,16 @@ class VegasNasController:
         #    await≥20 或队列≥20）。阵列缓存会掩盖物理盘延迟，只看 md2 会漏
         #    （2026-10-25 实测：md2 await 仅 9~25ms，而 sata await 26~128ms、
         #    util 88~100%）。窗口内过半采样饱和才降，避免单点尖峰误触发。
-        if act not in ('-1',) and self.n > self.min_n:
+        #    降档后 pressure 是 360s 窗口的**滞后指标**，须跳过 2 个周期再判，
+        #    否则窗口内残留的饱和样本会让 Vegas 一路连降（2026-10-26 实测 7→6→5）。
+        if act not in ('-1',) and self.n > self.min_n and now >= self._pressure_skip_until:
             _press = [s.get('pressure') for s in win if s.get('pressure')]
             if _press:
                 _sat = _press.count('saturated')
                 if _sat * 2 >= len(_press):      # ≥50% 采样为 saturated
                     self.state = 'COOLDOWN'
                     self._cooldown = 1
+                    self._pressure_skip_until = now + 2 * PERIOD
                     act, why = '-1', (f'物理盘饱和(pressure saturated '
                                       f'{_sat}/{len(_press)})')
 
