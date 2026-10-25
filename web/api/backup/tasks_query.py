@@ -330,6 +330,7 @@ async def get_backup_tasks(
                     vegas_health = None          # NAS读取健康度（%，ewma/base；None=无基准/未启用）
                     vegas_rate_mbps = None       # 当前每组平均读取速率（MB/s/组）
                     vegas_base_mbps = None       # 历史最好速率基准（MB/s/组）
+                    vegas_limit = None           # Vegas 当前生效的并发上限（运行时 parallel_batches）
                     task_status = None
 
                     if status_value == 'running':
@@ -417,6 +418,14 @@ async def get_backup_tasks(
                                                     getattr(compression_worker, '_vegas_enabled', False))
                                             except Exception:
                                                 vegas_enabled = None
+                                            try:
+                                                # 运行时生效并发（Vegas clamp 后的 parallel_batches），
+                                                # 与配置值并列展示：在途 / Vegas上限 / 配置上限
+                                                _vl = int(getattr(compression_worker, 'parallel_batches', 0) or 0)
+                                                if _vl > 0:
+                                                    vegas_limit = _vl
+                                            except Exception:
+                                                pass
                                             try:
                                                 if getattr(compression_worker, '_vegas_enabled', False):
                                                     _ewma = float(getattr(compression_worker, '_vegas_rate_ewma', 0.0) or 0.0)
@@ -643,6 +652,8 @@ async def get_backup_tasks(
                         "vegas_health": vegas_health,
                         "vegas_rate_mbps": vegas_rate_mbps,
                         "vegas_base_mbps": vegas_base_mbps,
+                        # Vegas 当前生效并发上限（运行时）；完成后回落到配置值
+                        "vegas_limit": int(vegas_limit or parallel_batches),
                         # 预分组封组阈值（MAX_FILE_SIZE 设置值）：hover 显示参考
                         "max_file_size": max_file_size,
                         # 磁带实时写入（无写入进行时为 None/0；仅当前写入所属任务可见）

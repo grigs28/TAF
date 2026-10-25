@@ -1330,6 +1330,8 @@
                 const _compProg = task.current_compression_progress || {};
                 const runningCount = parseInt(_compProg.running_count, 10) || 0;
                 const totalSlots = parseInt(task.parallel_batches, 10) || 8;
+                // Vegas 当前生效的并发上限（运行时 clamp 后的值）；未返回时回落到配置值
+                const _vegasLimit = parseInt(task.vegas_limit, 10) || totalSlots;
                 const _groupList = Array.isArray(_compProg.task_progress_list)
                     ? _compProg.task_progress_list : [];
 
@@ -1404,7 +1406,8 @@
                             + (_hasB ? '/' + _numColored(_queueBuffer, _cB) : '')
                           : '')
                       + '）' : '';
-                const _lsTitle = `压缩组: 正在压缩 ${runningCount} 组 / 上限 ${totalSlots} 组\n`
+                const _lsTitle = `压缩组: 在途 ${runningCount} / Vegas并发上限 ${_vegasLimit} / 设置并发上限 ${totalSlots}\n`
+                    + `三段数字 = 在途数 / 并发上限数（Vegas 动态调整）/ 设置的并发上限数\n`
                     + `括号内两段: 在途 L/S/B · 队列 L/S/B（B=保护区）`
                     + (_hasLs
                         ? `\n在途: 大文件组 ${task.active_large_groups}`
@@ -1433,7 +1436,7 @@
                 batchProgressHtml = normalizeCardHtml(`
                     <div class="d-flex justify-content-between align-items-center mb-1">
                         <small class="text-muted" title="${_lsTitle}">压缩组:</small>
-                        <small class="text-muted" title="${_lsTitle}">${_cells}<span class="fw-semibold ms-1">${runningCount}/${totalSlots}</span><span class="ms-1" style="font-size:.85em;opacity:.8" title="并发上限由 Vegas 自适应调整（可能低于配置值）">并发上限</span>${_lsText}</small>
+                        <small class="text-muted" title="${_lsTitle}">${_cells}<span class="fw-semibold ms-1">${runningCount}/${_vegasLimit}/${totalSlots}</span>${_lsText}</small>
                     </div>
                 `);
             }
