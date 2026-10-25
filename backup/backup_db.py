@@ -3990,11 +3990,21 @@ class BackupDB:
             logger.error(f"更新任务状态失败: {str(e)}")
 
     async def sync_backup_set_stats(self, backup_task: BackupTask):
-        """把任务最终统计写回 backup_sets（恢复界面按备份集展示用）"""
+        """把任务最终统计写回 backup_sets（恢复界面按备份集展示用）
+
+        注意 backup_task.backup_set_id 在不同路径下可能是：
+          · 整数主键（DB 字段 backup_set_id）
+          · set_id 字符串（如 "2026-10_000160"，内存对象）
+        两种都要兼容，否则报 invalid input syntax for integer。
+        """
         sid = getattr(backup_task, 'backup_set_id', None)
-        if not sid:
+        if sid is None or sid == '':
             logger.debug("[备份集统计] 任务无 backup_set_id，跳过")
             return
+        if isinstance(sid, int) or (isinstance(sid, str) and sid.strip().isdigit()):
+            where_col, where_val = 'id', int(sid)
+        else:
+            where_col, where_val = 'set_id', str(sid)
         total_files = int(getattr(backup_task, 'total_files', 0) or 0)
         total_bytes = int(getattr(backup_task, 'processed_bytes', 0)
                           or getattr(backup_task, 'total_bytes', 0) or 0)
@@ -4007,26 +4017,26 @@ class BackupDB:
         async with get_opengauss_connection() as conn:
             if chunk_count:
                 await conn.execute(
-                    """UPDATE backup_sets
+                    f"""UPDATE backup_sets
                        SET total_files=$1, total_bytes=$2, compressed_bytes=$3,
                            compression_ratio=$4, chunk_count=$5, updated_at=$6
-                       WHERE id=$7""",
+                       WHERE {where_col}=$7""",
                     total_files, total_bytes, compressed, ratio,
-                    int(chunk_count), datetime.now(), sid)
+                    int(chunk_count), datetime.now(), where_val)
             else:
                 await conn.execute(
-                    """UPDATE backup_sets
+                    f"""UPDATE backup_sets
                        SET total_files=$1, total_bytes=$2, compressed_bytes=$3,
                            compression_ratio=$4, updated_at=$5
-                       WHERE id=$6""",
+                       WHERE {where_col}=$6""",
                     total_files, total_bytes, compressed, ratio,
-                    datetime.now(), sid)
+                    datetime.now(), where_val)
             try:
                 actual_conn = conn._conn if hasattr(conn, '_conn') else conn
                 await actual_conn.commit()
             except Exception:
                 pass
-        logger.info(f"[备份集统计] 已同步 set_id={sid}: 文件 {total_files:,}, "
+        logger.info(f"[备份集统计] 已同步 {where_col}={where_val}: 文件 {total_files:,}, "
                     f"原始 {total_bytes/1024**3:.1f}GB, 压缩后 {compressed/1024**3:.1f}GB, "
                     f"压缩率 {ratio}")
     
