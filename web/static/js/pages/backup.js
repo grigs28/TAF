@@ -1335,29 +1335,35 @@
                 const _groupList = Array.isArray(_compProg.task_progress_list)
                     ? _compProg.task_progress_list : [];
 
-                // 每个槽位一格（共 totalSlots 格，横排一行）；**格内按组内真实进度连续填充**：
-                // 直接使用 percent（不再按 25% 四档取整），渐变高度随进度平滑变化。
-                // 用 linear-gradient 做硬边填充（从底往上），无需额外 DOM 层级。
-                // 空格位（无对应组）保持全暗；悬停显示精确百分比与组内文件数。
+                // 每个槽位一格；**格子数按在途组数**（running_count），而不是配置并发——
+                // 配置 10 但在途只有 6~7 组时，按配置画会出现无意义的"空闲格"
+                // （2026-10-25 实测：显示 10/10/10 但有 3~4 格空白）
+                const _cellCount = Math.max(runningCount, _groupList.length) || totalSlots;
                 let _cells = '';
-                for (let i = 0; i < totalSlots; i++) {
+                for (let i = 0; i < _cellCount; i++) {
                     const _g = _groupList[i];
                     const _pct = _g ? Math.max(0, Math.min(100, Number(_g.percent) || 0)) : 0;
                     // 组类型着色（同色系）：大文件组 L = 主蓝，小文件组 S = 浅蓝
                     const _isSmall = _g && _g.group_type === 'small';
                     const _isBuffer = _g && _g.group_type === 'buffer';
+                    // 刚启动（尚未处理第一个文件）：淡蓝占位，与"空闲"区分
+                    const _isStarting = _g && _g.starting === true;
                     const _fillColor = _isBuffer ? 'var(--warning)'
                         : (_isSmall ? 'var(--primary-light)' : 'var(--primary)');
-                    const _bg = _pct <= 0
-                        ? 'rgba(255,255,255,.18)'
-                        : (_pct >= 100
-                            ? _fillColor
-                            : `linear-gradient(to top, ${_fillColor} 0 ${_pct}%, rgba(255,255,255,.18) ${_pct}% 100%)`);
+                    const _bg = _isStarting
+                        ? 'rgba(120,202,242,.30)'
+                        : (_pct <= 0
+                            ? 'rgba(255,255,255,.18)'
+                            : (_pct >= 100
+                                ? _fillColor
+                                : `linear-gradient(to top, ${_fillColor} 0 ${_pct}%, rgba(255,255,255,.18) ${_pct}% 100%)`));
                     const _typeTag = _g ? (_isBuffer ? '保' : (_isSmall ? '小' : '大')) : '';
                     const _title = _g
-                        ? ('组' + (i + 1) + '[' + _typeTag + ']: ' + _pct.toFixed(1) + '%'
-                            + (typeof _g.current === 'number' && typeof _g.total === 'number'
-                                ? `（${_g.current}/${_g.total} 文件）` : ''))
+                        ? ('组' + (i + 1) + '[' + _typeTag + ']: '
+                            + (_isStarting ? '启动中（等待首个文件进度）'
+                                : _pct.toFixed(1) + '%'
+                                  + (typeof _g.current === 'number' && typeof _g.total === 'number'
+                                      ? `（${_g.current}/${_g.total} 文件）` : '')))
                         : '空闲';
                     _cells += '<span title="' + _title
                         + '" style="display:inline-block;width:7px;height:16px;margin-right:2px;'

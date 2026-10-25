@@ -1173,10 +1173,24 @@ class CompressionWorker:
                 total_files_in_group = compress_progress.get('total_files_in_group', 0)
                 group_size_bytes = progress_info.get('group_size_bytes', 0)
 
-                # 仅展示已实际开始压缩的组：等待磁盘守卫放行的组尚无任何进度事件
-                # （current=0 且无 processed_bytes），以 0% 占位会误导 UI
+                # 刚启动、尚未处理第一个文件的组：不参与进度累加（避免总量统计被 0 拉低），
+                # 但要放进列表并标记 starting——否则 task_progress_list 比 running_count 短，
+                # 卡片格子数按在途数画时会出现"空闲格"（2026-10-25 实测 10/10/10 却空 3~4 格）
                 _processed = compress_progress.get('processed_bytes')
                 if current_file_index <= 0 and (_processed is None or _processed <= 0):
+                    _tfg = (compress_progress.get('total_files_in_group', 0)
+                            or progress_info.get('total_files', 0) or 0)
+                    task_progress_list.append({
+                        'percent': 0.0,
+                        'current': 0,
+                        'total': int(_tfg),
+                        'group_type': (self._group_type_of(int(_tfg)) if _tfg > 0 else 'large'),
+                        'group_size_bytes': progress_info.get('group_size_bytes', 0),
+                        'processed_bytes': 0,
+                        'current_dir': None,
+                        'archive_name': progress_info.get('archive_name'),
+                        'starting': True,      # 供前端区分"启动中"与"空闲"
+                    })
                     continue
 
                 logger.debug(
