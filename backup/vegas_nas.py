@@ -127,6 +127,7 @@ class VegasNasController:
         self._verify_from_n = None
         self._verify_blocked_n = None   # 已验证"降并发有害"的并发值，不再重复验证
         self._verify_samples = []       # 验证期原始 read 样本
+        self._rebuild_base = False      # 降档后重建基线标志（不上探）
         self._t_next = 0.0          # 下次决策时刻（tick 节流）
         self.last_decision = None   # 供日志/诊断
 
@@ -207,6 +208,11 @@ class VegasNasController:
                 # 需保持稳定观察，不能被冷却结束逻辑覆盖
                 if self.state == 'COOLDOWN':
                     self.state = 'PROBING'
+                    # 关键：并发已降低，旧基线是降档前的 read（必然更高），
+                    # 不重置会导致"read 天然低于旧基线 → 再过载 → 再降"的连降
+                    # 直到下限（2026-10-25 月度任务实测 7→6→5 连续误判）
+                    self._probe_base = None
+                    self._rebuild_base = True   # 重建基线时不上探（避免降档后立即回弹）
                 self._plateau = 0
         elif drifting and self.state not in ('STABLE', 'VERIFY'):
             self.state = 'STABLE'
@@ -218,7 +224,11 @@ class VegasNasController:
             can_up = self.n < self.max_n and (ext_cap is None or self.n < ext_cap)
             if self._probe_base is None:
                 self._probe_base = R
-                if fed and can_up:
+                if self._rebuild_base:
+                    # 降档后重建基线：本拍只记录基线，不上探
+                    self._rebuild_base = False
+                    act, why = 'hold', f'降档后建基线({R:.0f})'
+                elif fed and can_up:
                     act, why = '+1', '首周期上探'
             elif not fed:
                 act, why = 'hold', '未喂满'
