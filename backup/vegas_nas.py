@@ -311,11 +311,25 @@ class VegasNasController:
                     act, why = 'hold', (f'验证:降并发无损(原始中位{_med:.0f}≈{_ref:.0f}),'
                                         f'保持 {self.n}')
         # 快速保护（任何状态）
+        # ① 阵列层：util 打满且排队恶化（bench 实战验证有效）
         if U >= FASTP_UTIL and A >= FASTP_AWAIT and self.n > self.min_n \
                 and act not in ('-1',):
             self.state = 'COOLDOWN'
             self._cooldown = 1
             act, why = '-1', f'快速保护(util={U},await={A})'
+        # ② 物理盘层：disk_api 的 pressure 判定为 saturated（sata util≥95 且
+        #    await≥20 或队列≥20）。阵列缓存会掩盖物理盘延迟，只看 md2 会漏
+        #    （2026-10-25 实测：md2 await 仅 9~25ms，而 sata await 26~128ms、
+        #    util 88~100%）。窗口内过半采样饱和才降，避免单点尖峰误触发。
+        if act not in ('-1',) and self.n > self.min_n:
+            _press = [s.get('pressure') for s in win if s.get('pressure')]
+            if _press:
+                _sat = _press.count('saturated')
+                if _sat * 2 >= len(_press):      # ≥50% 采样为 saturated
+                    self.state = 'COOLDOWN'
+                    self._cooldown = 1
+                    act, why = '-1', (f'物理盘饱和(pressure saturated '
+                                      f'{_sat}/{len(_press)})')
 
         if act == '+1':
             self.n += 1
