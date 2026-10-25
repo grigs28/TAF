@@ -116,6 +116,34 @@
                         <input class="form-check-input" type="checkbox" id="autoEraseExpired">
                         <label class="form-check-label" for="autoEraseExpired">自动擦除过期磁带</label>
                     </div>
+
+                    <!-- ── 磁盘限流 ── -->
+                    <h6 class="text-secondary border-bottom pb-2 mb-3 mt-4">磁盘限流</h6>
+                    <div class="mb-3">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" role="switch" id="diskThrottleEnabled" checked>
+                            <label class="form-check-label" for="diskThrottleEnabled">启用磁盘限流</label>
+                        </div>
+                        <small class="form-text text-secondary">
+                            关闭后批次不再因磁盘使用率或剩余空间而减少，下方三项随之置灰（数值保留）。
+                            空间守卫不受影响，始终生效。
+                        </small>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">磁盘限流上限（%）</label>
+                        <input type="number" class="form-control" id="diskThrottleHighPercent" value="75" min="0" max="100" step="1">
+                        <small class="form-text text-secondary">使用率超过此值时，压缩并行批次减半</small>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">磁盘限流恢复阈值（%）</label>
+                        <input type="number" class="form-control" id="diskThrottleLowPercent" value="30" min="0" max="100" step="1">
+                        <small class="form-text text-secondary">使用率回落到此值以下时直接恢复，须小于限流上限形成迟滞区间</small>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">空间危急时压缩批次数</label>
+                        <input type="number" class="form-control" id="diskCriticalBatches" value="1" min="0" max="64" step="1">
+                        <small class="form-text text-secondary">剩余空间低于空间守卫线时，并行批次强制降至此值（与守卫同口径）</small>
+                    </div>
                 </div>
             </div>
         </div>
@@ -251,33 +279,6 @@
                         <small class="form-text text-secondary">调用时通过 X-API-Key 请求头携带；NAS 端未启用鉴权则留空</small>
                     </div>
 
-                    <!-- ── 磁盘限流 ── -->
-                    <h6 class="text-secondary border-bottom pb-2 mb-3 mt-4">磁盘限流</h6>
-                    <div class="mb-3">
-                        <div class="form-check form-switch">
-                            <input class="form-check-input" type="checkbox" role="switch" id="diskThrottleEnabled" checked>
-                            <label class="form-check-label" for="diskThrottleEnabled">启用磁盘限流</label>
-                        </div>
-                        <small class="form-text text-secondary">
-                            关闭后批次不再因磁盘使用率或剩余空间而减少，下方三项随之置灰（数值保留）。
-                            空间守卫不受影响，始终生效。
-                        </small>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">磁盘限流上限（%）</label>
-                        <input type="number" class="form-control" id="diskThrottleHighPercent" value="75" min="0" max="100" step="1">
-                        <small class="form-text text-secondary">使用率超过此值时，压缩并行批次减半</small>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">磁盘限流恢复阈值（%）</label>
-                        <input type="number" class="form-control" id="diskThrottleLowPercent" value="30" min="0" max="100" step="1">
-                        <small class="form-text text-secondary">使用率回落到此值以下时直接恢复，须小于限流上限形成迟滞区间</small>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">空间危急时压缩批次数</label>
-                        <input type="number" class="form-control" id="diskCriticalBatches" value="1" min="0" max="64" step="1">
-                        <small class="form-text text-secondary">剩余空间低于空间守卫线时，并行批次强制降至此值（与守卫同口径）</small>
-                    </div>
 
                 </div>
             </div>
