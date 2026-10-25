@@ -39,6 +39,12 @@ REPROBE_PERIODS = 8       # STABLE 定时重探周期数
 FASTP_UTIL = 98           # 快速保护：util%
 FASTP_AWAIT = 15          # 快速保护：await ms
 SAMPLES_MIN = 6           # 周期内最少样本数（不足则 hold）
+READ_EWMA_ALPHA = 0.35    # read 平滑权重（新值占比）
+
+# 生产实测（2026-10-25）：360s 中位数 read 仍受组形态混合影响，噪声达 ±10%
+# （320~356），与判决阈值 +3%/-10% 重叠 → 每次上探 2~6 分钟即回退，形成 9↔10
+# 振荡。给 read 加 EWMA（0.35 新值）后单周期噪声压到 ±3% 内，阈值保持
+# bench 标定值不变。
 
 
 class NasSignalSampler:
@@ -113,6 +119,8 @@ class VegasNasController:
         self._probe_base = None
         self._plateau = 0
         self._drift_reads = []
+        self._read_ewma = None      # read 平滑值（降噪，见 READ_EWMA_ALPHA）
+        self._ewma_lock = threading.Lock()
         self._t_next = 0.0          # 下次决策时刻（tick 节流）
         self.last_decision = None   # 供日志/诊断
 
@@ -161,7 +169,14 @@ class VegasNasController:
             self.log(f"[VegasNAS] 采样异常 fail={self.sampler.fail_count} 样本={len(win)}，本周期不决策")
             return self.n
 
-        R = self._med(win, 'md2_read_mbps')
+        R_raw = self._med(win, 'md2_read_mbps')
+        # EWMA 降噪：生产 read 单周期噪声 ±10%（组形态混合），判决阈值仅 3%~10%，
+        # 不平滑会每次上探即回退（9↔10 振荡）。平滑后单周期噪声压到 ±3% 内。
+        with self._ewma_lock:
+            self._read_ewma = (R_raw if self._read_ewma is None
+                               else self._read_ewma * (1 - READ_EWMA_ALPHA)
+                               + R_raw * READ_EWMA_ALPHA)
+            R = round(self._read_ewma, 1)
         U = self._med(win, 'md2_util')
         A = self._med(win, 'md2_await_ms')
         I = self._med(win, 'md2_iops')
@@ -258,8 +273,8 @@ class VegasNasController:
         # 日志：动作/探测期/形态漂移/到上限 均需可见（运维判断依据）
         if act != 'hold' or self.state == 'PROBING' or '漂移' in why or '到上限' in why \
                 or '快速保护' in why:
-            self.log(f"[VegasNAS] n={prev_n}→{self.n} read={R:.0f}MB/s util={U}% "
-                     f"await={A}ms 基线{self._probe_base or 0:.0f} "
+            self.log(f"[VegasNAS] n={prev_n}→{self.n} read={R:.0f}(原始{R_raw:.0f})MB/s "
+                     f"util={U}% await={A}ms 基线{self._probe_base or 0:.0f} "
                      f"→ {act} ({why})")
         return self.n
 
