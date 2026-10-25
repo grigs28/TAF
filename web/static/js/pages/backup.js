@@ -1433,7 +1433,7 @@
                 batchProgressHtml = normalizeCardHtml(`
                     <div class="d-flex justify-content-between align-items-center mb-1">
                         <small class="text-muted" title="${_lsTitle}">压缩组:</small>
-                        <small class="text-muted" title="${_lsTitle}">${_cells}<span class="fw-semibold ms-1">${runningCount}/${totalSlots}</span>${_lsText}</small>
+                        <small class="text-muted" title="${_lsTitle}">${_cells}<span class="fw-semibold ms-1">${runningCount}/${totalSlots}</span><span class="ms-1" style="font-size:.85em;opacity:.8" title="并发上限由 Vegas 自适应调整（可能低于配置值）">并发上限</span>${_lsText}</small>
                     </div>
                 `);
             }

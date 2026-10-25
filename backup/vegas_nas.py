@@ -143,6 +143,7 @@ class VegasNasController:
                 self._plateau = 0
                 self._drift_reads = []
                 self.last_decision = {'act': 'hold', 'why': f'外部限并发→{ext_cap}'}
+                self.log(f"[VegasNAS] 外部限并发 {self.n}（desired={desired_batches}），待下次决策")
                 return self.n
 
         now = time.time()
@@ -153,9 +154,11 @@ class VegasNasController:
         win = self.sampler.window(WIN_SPAN)
         if len(win) < SAMPLES_MIN:
             self.last_decision = {'act': 'hold', 'why': f'样本不足({len(win)})'}
+            self.log(f"[VegasNAS] 采样不足 {len(win)}/{SAMPLES_MIN}（fail={self.sampler.fail_count}），本周期不决策")
             return self.n
         if not self.sampler.ok:
             self.last_decision = {'act': 'hold', 'why': 'API失联'}
+            self.log(f"[VegasNAS] 采样异常 fail={self.sampler.fail_count} 样本={len(win)}，本周期不决策")
             return self.n
 
         R = self._med(win, 'md2_read_mbps')
@@ -163,7 +166,9 @@ class VegasNasController:
         A = self._med(win, 'md2_await_ms')
         I = self._med(win, 'md2_iops')
         act, why = 'hold', ''
-        fed = active_batches >= self.n     # 并发是否已喂满
+        # 喂满判据：允许差 1（生产主循环在组完成→补位之间有间隙，实测常驻 7/8；
+        # 若要求 active>=n，则永远不会决策——2026-10-25 生产实测）
+        fed = active_batches >= max(1, self.n - 1)
         prev_n = self.n                    # 日志展示"决策前→后"
 
         # 漂移检测（优先于一切回退）

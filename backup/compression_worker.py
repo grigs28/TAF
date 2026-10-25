@@ -298,6 +298,17 @@ class CompressionWorker:
         每次调用时重新读取 settings，以支持运行时动态修改配置
         """
         try:
+            # 诊断心跳（每 120 秒一条，无条件）：确认函数被调用及 Vegas 关键状态
+            _hb_now = time.time()
+            if _hb_now - getattr(self, '_vegas_hb_at', 0.0) >= 120:
+                self._vegas_hb_at = _hb_now
+                # 用 WARNING 级：压缩线程专属日志 handler 吞掉本模块 INFO，
+                # 决策过程必须可见（每 120 秒一条，不会刷屏）
+                logger.warning(
+                    f"[Vegas诊断] 调整并发被调用: 信号源={self._vegas_signal} "
+                    f"启用={self._vegas_enabled} 预取={self.use_prefetcher} "
+                    f"当前并发={self.parallel_batches} 在途={len(self.running_compression_futures)} "
+                    f"控制器={'已建' if self._vegas_nas is not None else '未建'}")
             # 重新读取 settings，支持运行时动态修改（立即生效）
             fresh_settings = get_settings()
             if self.use_prefetcher:
@@ -331,7 +342,7 @@ class CompressionWorker:
                                 self._vegas_signal) or self._vegas_signal).strip().lower()
                     if _was_sig != self._vegas_signal:
                         # 信号源热切换：停旧采样线程、清控制器，下轮 _ensure 重建
-                        logger.info(f"[压缩配置] Vegas 信号源切换: {_was_sig} -> {self._vegas_signal}")
+                        logger.warning(f"[压缩配置] Vegas 信号源切换: {_was_sig} -> {self._vegas_signal}")
                         if self._vegas_nas_sampler is not None:
                             try:
                                 self._vegas_nas_sampler.stop()
@@ -436,6 +447,17 @@ class CompressionWorker:
                     ctrl = self._ensure_vegas_nas()
                     if ctrl is not None and not ctrl.signal_lost:
                         self._vegas_nas_lost_logged = False
+                        # 并发范围热更新：UI 改 COMPRESSION_PARALLEL_BATCHES 后
+                        # 控制器的 max_n 需跟随，否则永远上探不到新上限
+                        _new_max = max(self.base_parallel_batches, 8)
+                        _new_min = max(2, self._vegas_min)
+                        if ctrl.max_n != _new_max or ctrl.min_n != _new_min:
+                            ctrl.max_n = _new_max
+                            ctrl.min_n = _new_min
+                            ctrl.n = min(max(ctrl.n, _new_min), _new_max)
+                            logger.warning(
+                                f"[VegasNAS] 并发范围热更新: {_new_min}~{_new_max} "
+                                f"(当前 n={ctrl.n})")
                         nas_limit = ctrl.tick(
                             len(self.running_compression_futures), desired_batches)
                         if nas_limit > 0 and desired_batches > nas_limit:
@@ -468,7 +490,14 @@ class CompressionWorker:
                 self.parallel_batches = desired_batches
         except Exception as e:
             # 即使无法获取 scan_status，也不影响压缩主流程
-            logger.debug(f"[压缩配置] 获取 scan_status 时出错，使用默认配置: {e}")
+            # 2026-10-25：原为 debug 级，导致 Vegas 不生效时无从排查；改为首次 warning
+            if not getattr(self, '_adjust_err_logged', False):
+                logger.warning(
+                    f"[压缩配置] 调整并发时出错（后续同类错误静默）: {type(e).__name__}: {e}",
+                    exc_info=True)
+                self._adjust_err_logged = True
+            else:
+                logger.debug(f"[压缩配置] 获取 scan_status 时出错，使用默认配置: {e}")
 
     def _group_type_of(self, file_count: int) -> str:
         """按组内文件数三分：B（保护区）/ L（大文件组）/ S（小文件组），热读配置"""
@@ -512,9 +541,9 @@ class CompressionWorker:
                 start_n=base,                 # 从配置并发起步自主调节
                 min_n=max(2, self._vegas_min),
                 max_n=max(base, 8),           # bench 标定：两形态区最优 5~6，8 封顶
-                log=lambda m: logger.info(m),
+                log=lambda m: logger.warning(m),
             )
-            logger.info(f"[VegasNAS] 启用 nas_api 信号源: {url[:48]}… "
+            logger.warning(f"[VegasNAS] 启用 nas_api 信号源: {url[:48]}… "
                         f"(start={base}, min={self._vegas_nas.min_n}, max={self._vegas_nas.max_n})")
             return self._vegas_nas
         except Exception as e:
