@@ -200,15 +200,31 @@ class TapeHandler:
             (是否加载成功, 信息)
         """
         logger.info("[LTFS] 磁带在驱动器内但未加载，执行 mt load...")
-        try:
-            result = await self._run_command(['mt', '-f', tape_device, 'load'], timeout=180)
-            if result.returncode != 0:
+        # 2026-10-25 生产故障：mt load 偶发 Device busy（另一操作占用设备）
+        # 或超时，但**驱动器仍会在后台继续加载**（实测：mt load 被超时杀掉后
+        # dd 能直接读到卷标、rewind 瞬间完成）。因此：
+        #   ① busy 时重试 2 次
+        #   ② 无论 mt load 返回值如何，都继续轮询 status 等 ONLINE
+        from utils.tape_device_lock import is_tape_busy_error
+        load_err = ''
+        for attempt in range(1, 4):
+            try:
+                result = await self._run_command(['mt', '-f', tape_device, 'load'], timeout=180)
                 msg = (result.stderr or result.stdout or '').strip()
-                logger.warning(f"[LTFS] mt load 失败: {msg}")
-                return False, f"mt load 失败: {msg[:200]}"
-        except Exception as e:
-            logger.warning(f"[LTFS] mt load 异常: {e}")
-            return False, f"mt load 异常: {e}"
+                if result.returncode == 0:
+                    load_err = ''
+                    break
+                load_err = msg
+                if is_tape_busy_error(msg) and attempt < 3:
+                    logger.warning(f"[LTFS] mt load 设备忙（第 {attempt} 次），{5 * attempt} 秒后重试")
+                    await asyncio.sleep(5 * attempt)
+                    continue
+                logger.warning(f"[LTFS] mt load 返回失败（继续等待 ONLINE）: {msg[:120]}")
+                break
+            except Exception as e:
+                load_err = str(e)
+                logger.warning(f"[LTFS] mt load 异常（第 {attempt} 次，继续等待 ONLINE）: {e}")
+                await asyncio.sleep(3)
 
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -570,15 +586,18 @@ class TapeHandler:
             (是否成功, 信息)
         """
         # 检查磁带是否在驱动器
-        in_drive, status = await self.check_tape_in_drive()
-        if not in_drive:
-            return False, f"磁带未就绪: {status}"
+        # 与读标签/挂载互斥：否则读标签的 rewind 阻塞期间点格式化会 Device busy
+        from utils.tape_device_lock import async_tape_device_lock
+        async with async_tape_device_lock('format', timeout=600):
+            in_drive, status = await self.check_tape_in_drive()
+            if not in_drive:
+                return False, f"磁带未就绪: {status}"
 
-        # 重置设备
-        await self.reset_tape_device()
+            # 重置设备
+            await self.reset_tape_device()
 
-        # 格式化
-        return await self.format_as_ltfs(volume_name, serial)
+            # 格式化
+            return await self.format_as_ltfs(volume_name, serial)
 
     async def check_if_mounted(self) -> bool:
         """检查 LTFS 是否已挂载

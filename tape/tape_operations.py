@@ -351,6 +351,18 @@ class TapeOperations:
     async def _read_tape_label(self) -> Optional[Dict[str, Any]]:
         """读取磁带卷标（Linux模式）"""
         logger.info("========== 开始读取磁带卷标 ==========")
+        from utils.tape_device_lock import async_tape_device_lock
+        # 与格式化/挂载互斥：读标签的 rewind 在磁带未加载时会阻塞数十秒，
+        # 若此时用户点"格式化"，mkltfs 会撞 Device busy（2026-10-25 生产故障）
+        try:
+            async with async_tape_device_lock('read_label', timeout=180):
+                return await self._read_tape_label_locked()
+        except TimeoutError:
+            logger.warning("[Linux磁带] 磁带正在被其他操作占用（格式化/挂载），读标签已跳过")
+            return None
+
+    async def _read_tape_label_locked(self) -> Optional[Dict[str, Any]]:
+        """读取磁带卷标的实际实现（调用方须已持有磁带设备锁）"""
         try:
             import platform
             import subprocess
@@ -387,13 +399,50 @@ class TapeOperations:
                     logger.info(f"[Linux磁带] mt status 返回码: {returncode}")
 
                     # 尝试读取磁带第一个文件的标签
+                    # 2026-10-25：磁带未加载时 rewind 会阻塞满超时（实测 60 秒），
+                    # 期间设备被独占、用户点格式化即 Device busy。故先确认 ONLINE，
+                    # 未加载则先 load（load 耗时可达数十秒，但比盲等 rewind 超时可靠），
+                    # 且 rewind 超时降到 30 秒快速失败。
+                    def _status_online() -> bool:
+                        try:
+                            r = subprocess.run(
+                                ['mt', '-f', tape_device, 'status'],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+                            out = (r.stdout or b'').decode('utf-8', errors='ignore') + \
+                                  (r.stderr or b'').decode('utf-8', errors='ignore')
+                            return 'ONLINE' in out
+                        except Exception:
+                            return False
+
+                    if not await asyncio.to_thread(_status_online):
+                        logger.info("[Linux磁带] 磁带未加载，先执行 mt load 再读标签")
+                        def _load():
+                            try:
+                                r = subprocess.run(
+                                    ['mt', '-f', tape_device, 'load'],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180)
+                                return r.returncode, (r.stderr or b'').decode('utf-8', errors='ignore')
+                            except Exception as e:
+                                return -1, str(e)
+                        rc, err = await asyncio.to_thread(_load)
+                        if rc != 0:
+                            logger.warning(f"[Linux磁带] mt load 未成功（继续等待加载）: {err[:120]}")
+                        # 无论 load 返回什么，等驱动器就绪（可能仍在后台加载）
+                        for _ in range(20):
+                            await asyncio.sleep(3)
+                            if await asyncio.to_thread(_status_online):
+                                logger.info("[Linux磁带] 加载完成（ONLINE）")
+                                break
+                        else:
+                            logger.warning("[Linux磁带] 等待 ONLINE 超时，仍尝试读取")
+
                     def run_mt_rewind():
                         try:
                             result = subprocess.run(
                                 ['mt', '-f', tape_device, 'rewind'],
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE,
-                                timeout=60
+                                timeout=30
                             )
                             return result.returncode == 0
                         except Exception as e:
