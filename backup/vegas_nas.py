@@ -121,6 +121,12 @@ class VegasNasController:
         self._drift_reads = []
         self._read_ewma = None      # read 平滑值（降噪，见 READ_EWMA_ALPHA）
         self._ewma_lock = threading.Lock()
+        # 下探验证（STABLE 期降 1 档确认当前并发是否过高）
+        self._verify_since = None
+        self._verify_read = 0.0
+        self._verify_from_n = None
+        self._verify_blocked_n = None   # 已验证"降并发有害"的并发值，不再重复验证
+        self._verify_samples = []       # 验证期原始 read 样本
         self._t_next = 0.0          # 下次决策时刻（tick 节流）
         self.last_decision = None   # 供日志/诊断
 
@@ -202,7 +208,7 @@ class VegasNasController:
                 if self.state == 'COOLDOWN':
                     self.state = 'PROBING'
                 self._plateau = 0
-        elif drifting and self.state != 'STABLE':
+        elif drifting and self.state not in ('STABLE', 'VERIFY'):
             self.state = 'STABLE'
             self._probe_base = R
             self._stable_since = now
@@ -244,14 +250,56 @@ class VegasNasController:
         elif self.state == 'STABLE':
             if self._stable_since is None:
                 self._stable_since = now      # 冷却结束首次进入，开始计时
-            if (now - self._stable_since) > REPROBE_PERIODS * PERIOD \
-                    and self.n < self.max_n and fed:
+            _due = (now - self._stable_since) > REPROBE_PERIODS * PERIOD and fed
+            if _due and self.n < self.max_n:
+                # 上探验证：还有空间，+1 看重探后 read 是否回升
                 self.state = 'PROBING'
                 self._probe_base = R
                 self._plateau = 0
                 act, why = '+1', '周期重探(重置基线)'
+            elif _due and self.n > self.min_n and self._verify_blocked_n != self.n:
+                # 下探验证：已在 max_n（无上探空间），降 1 档看 read 是否受损。
+                # 目的：发现"当前并发其实过高"（bench：大文件区最优 6，配置 10 时
+                # 原逻辑永远停在 10 无法验证）。降并发后若 read 明显下降 → 恢复。
+                self._verify_from_n = self.n
+                self._verify_read = R
+                self._verify_since = now
+                self._verify_samples = []      # 收集原始 read（EWMA 会掩盖降幅）
+                self.state = 'VERIFY'
+                act, why = '-1', f'下探验证({self.n}→{self.n-1},基线{R:.0f})'
             else:
-                act, why = 'hold', f'稳定(read={R:.0f})'
+                if self.n >= self.max_n:
+                    act, why = 'hold', f'稳定(read={R:.0f},已在并发上限)'
+                else:
+                    act, why = 'hold', f'稳定(read={R:.0f})'
+        elif self.state == 'VERIFY':
+            # 下探验证观察期：收集 3 个周期的**原始** read（EWMA 平滑会把
+            # 真实降幅从 -10% 掩盖成 -3%，单用平滑值会误判"无损"），取中位数判读
+            self._verify_samples.append(R_raw)
+            if len(self._verify_samples) < 3:
+                # 每拍 120 秒，3 拍≈6 分钟足够新并发稳定
+                act, why = 'hold', (f'下探观察({self.n},原读{self._verify_read:.0f},'
+                                    f'样本{len(self._verify_samples)}/3)')
+            else:
+                _ref = self._verify_read or 0
+                _med = sorted(self._verify_samples)[len(self._verify_samples) // 2]
+                _drop = (_ref - _med) / _ref if _ref > 0 else 0.0
+                if _drop > 0.05:
+                    # 降并发导致 read 明显下降 → 原并发更优，恢复并锁定不再验证该值
+                    self._verify_blocked_n = self._verify_from_n
+                    self.state = 'PROBING'
+                    self._probe_base = R
+                    self._plateau = 0
+                    act, why = '+1', (f'验证:降并发有害(原始中位{_med:.0f}比{_ref:.0f}低'
+                                      f'{_drop*100:.0f}%),恢复{self._verify_from_n}')
+                else:
+                    # 降并发 read 无明显损失 → 保持更低并发，延长稳定期后再验证
+                    self._verify_blocked_n = None
+                    self.state = 'STABLE'
+                    self._stable_since = now
+                    self._probe_base = R
+                    act, why = 'hold', (f'验证:降并发无损(原始中位{_med:.0f}≈{_ref:.0f}),'
+                                        f'保持 {self.n}')
         # 快速保护（任何状态）
         if U >= FASTP_UTIL and A >= FASTP_AWAIT and self.n > self.min_n \
                 and act not in ('-1',):
@@ -272,7 +320,7 @@ class VegasNasController:
         }
         # 日志：动作/探测期/形态漂移/到上限 均需可见（运维判断依据）
         if act != 'hold' or self.state == 'PROBING' or '漂移' in why or '到上限' in why \
-                or '快速保护' in why:
+                or '快速保护' in why or '验证' in why:
             self.log(f"[VegasNAS] n={prev_n}→{self.n} read={R:.0f}(原始{R_raw:.0f})MB/s "
                      f"util={U}% await={A}ms 基线{self._probe_base or 0:.0f} "
                      f"→ {act} ({why})")
