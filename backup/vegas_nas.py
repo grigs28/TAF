@@ -232,9 +232,14 @@ class VegasNasController:
         prev_n = self.n                    # 日志展示"决策前→后"
 
         # 漂移检测（优先于一切回退）
-        self._drift_reads.append(R)
-        if len(self._drift_reads) > DRIFT_N:
-            self._drift_reads.pop(0)
+        # F5：冷却期间不累积漂移样本（保护/过载善后的 read 连降是 370s 滑窗
+        # 滞后造成的，非形态变化；累积会让冷却结束的漂移判定误清验证锁）
+        if self._cooldown > 0:
+            self._drift_reads = []
+        else:
+            self._drift_reads.append(R)
+            if len(self._drift_reads) > DRIFT_N:
+                self._drift_reads.pop(0)
         drifting = (len(self._drift_reads) == DRIFT_N and
                     self._drift_reads[0] > self._drift_reads[1] > self._drift_reads[2])
 
@@ -287,6 +292,9 @@ class VegasNasController:
             elif R < self._probe_base * OVERLOAD and U >= 95:
                 self.state = 'COOLDOWN'
                 self._cooldown = 2
+                # F4：过载同样纳入共享跳过期——否则冷却拍 act=='hold' 会被
+                # fastp/pressure 追加一刀（同一饱和事件 4 分钟内连降 2 档）
+                self._skip_protections(now)
                 act, why = '-1', f'过载({R:.0f}<-10%于{self._probe_base:.0f},util={U})'
             else:
                 # P2/R1：仅"外部限制真实生效"（ext_cap 严格小于内部上限 max_n，
@@ -445,7 +453,13 @@ class VegasNasController:
                                       f'{_sat}/{len(_press)}){why_note}')
 
         if act == '+1':
-            self.n += 1
+            # F6：恢复到 from_n 时不得越过当前 max_n（热更新可能在验证期间
+            # 把上限降到 from_n 之下）；下限/上限范围内的锁同步钳制
+            self.n = min(self.n + 1, self.max_n)
+            if self._min_good_n is not None and self._min_good_n > self.max_n:
+                self._min_good_n = self.max_n
+            if self._verify_blocked_n is not None and self._verify_blocked_n > self.max_n:
+                self._verify_blocked_n = self.max_n
         elif act == '-1' and self.n > self.min_n:
             self.n -= 1     # 收敛式：调用方按完成即不补实现平滑缩容
 
