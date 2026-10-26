@@ -351,6 +351,9 @@ class CompressionWorker:
                         self._vegas_nas_sampler = None
                         self._vegas_nas = None
                         self._vegas_limit = 0
+                        # P7：告警缓存随切换重置（新配置下允许再次告警）
+                        self._vegas_nas_no_url_logged = None
+                        self._vegas_nas_fail_logged = False
                 except Exception:
                     pass
 
@@ -450,14 +453,22 @@ class CompressionWorker:
                         # 并发范围热更新：UI 改 COMPRESSION_PARALLEL_BATCHES 后
                         # 控制器的 max_n 需跟随，否则永远上探不到新上限
                         _new_max = max(self.base_parallel_batches, 8)
-                        _new_min = max(2, min(
+                        # P10：下限地板与 UI 校验对齐（允许 1）
+                        _new_min = max(1, min(
                             self._vegas_min,
                             max(1, self.base_parallel_batches
                                 - int(self.batches_reduction or 0))))
                         if ctrl.max_n != _new_max or ctrl.min_n != _new_min:
+                            _prev_n = ctrl.n
                             ctrl.max_n = _new_max
                             ctrl.min_n = _new_min
                             ctrl.n = min(max(ctrl.n, _new_min), _new_max)
+                            # P8：并发范围变了基线必须失效（旧基线来自旧并发，
+                            # 不重置会误判过载/假增量）
+                            if ctrl.n != _prev_n:
+                                ctrl._probe_base = None
+                                ctrl._rebuild_base = True
+                                ctrl._plateau = 0
                             logger.warning(
                                 f"[VegasNAS] 并发范围热更新: {_new_min}~{_new_max} "
                                 f"(当前 n={ctrl.n})")
@@ -465,6 +476,11 @@ class CompressionWorker:
                             len(self.running_compression_futures), desired_batches)
                         if nas_limit > 0 and desired_batches > nas_limit:
                             desired_batches = nas_limit
+                        # P9：nas_api 模式下把控制器的展示字段同步给卡片
+                        # （internal 的 _vegas_rate_ewma/_vegas_base 在此模式下不更新，
+                        # 不同步则卡片健康度恒为"—"，无法区分 Vegas 工作/失效）
+                        self._vegas_rate_ewma = ctrl.display_rate_mbps
+                        self._vegas_base = ctrl.display_base_mbps
                     else:
                         # NAS 信号不可用/已失联 → 回退内部信号（不因 API 挂掉停摆）
                         if ctrl is not None and not getattr(self, '_vegas_nas_lost_logged', False):
@@ -533,7 +549,11 @@ class CompressionWorker:
             url = str(getattr(s, 'NAS_API_URL', '') or '').strip()
             key = str(getattr(s, 'NAS_API_KEY', '') or '').strip()
             if not url:
-                logger.warning("[VegasNAS] NAS_API_URL 未配置，回退内部信号")
+                # P7：URL 缺失时只告警一次（每 10s 调用方会反复进这里，
+                # 否则整个任务期间告警刷屏数千条）；URL 后续配置变化时重置
+                if getattr(self, '_vegas_nas_no_url_logged', None) != 'empty':
+                    logger.warning("[VegasNAS] NAS_API_URL 未配置，回退内部信号")
+                    self._vegas_nas_no_url_logged = 'empty'
                 return None
             base = max(1, self.base_parallel_batches)
             sampler = NasSignalSampler(url, key)
@@ -543,7 +563,9 @@ class CompressionWorker:
             # 扫描期的 desired 就是这个值，下限更高会让 Vegas 的 min_n 高于
             # 实际可用并发，对齐逻辑失真（2026-10-26 核实）。
             _cap_by_scan = max(1, base - int(self.batches_reduction or 0))
-            _eff_min = max(2, min(self._vegas_min, _cap_by_scan))
+            # P10：下限地板与 UI 校验范围对齐（env_config 允许 1-64），
+            # 不再用 max(2,...) 静默抬高用户配置的 1
+            _eff_min = max(1, min(self._vegas_min, _cap_by_scan))
             self._vegas_nas = VegasNasController(
                 sampler,
                 start_n=base,                 # 从配置并发起步自主调节
@@ -559,7 +581,10 @@ class CompressionWorker:
                         f"(start={base}, min={self._vegas_nas.min_n}, max={self._vegas_nas.max_n})")
             return self._vegas_nas
         except Exception as e:
-            logger.warning(f"[VegasNAS] 初始化失败，回退内部信号: {e}")
+            # P7：初始化失败也只告警一次，直到配置变化
+            if not getattr(self, '_vegas_nas_fail_logged', False):
+                logger.warning(f"[VegasNAS] 初始化失败，回退内部信号: {e}")
+                self._vegas_nas_fail_logged = True
             return None
 
     def _update_vegas(self) -> None:

@@ -129,11 +129,12 @@ class VegasNasController:
         self._verify_samples = []       # 验证期原始 read 样本
         self._rebuild_base = False      # 降档后重建基线标志（不上探）
         self._pressure_skip_until = 0.0 # 物理盘饱和判据的跳过期（防滞后指标连降）
+        self._fastp_skip_until = 0.0    # md2 快速保护的跳过期（同 pressure，见 P1）
         # 无增量回退验证（防小文件区噪声导致误降）
         self._rollback_from_n = None
         self._rollback_read = 0.0
         self._rollback_samples = []
-        self._min_good_n = None         # 已验证的最小可用并发（不得再降到其下）
+        self._min_good_n = None         # 已验证的最小可用并发（不得再降到其下；形态漂移时失效）
         self._t_next = 0.0          # 下次决策时刻（tick 节流）
         self.last_decision = None   # 供日志/诊断
 
@@ -163,6 +164,16 @@ class VegasNasController:
                 self._probe_base = None      # 并发变了，旧基准失效
                 self._plateau = 0
                 self._drift_reads = []
+                # P3：外部对齐打断在飞验证——样本跨并发污染、verdict 的 +1 只恢复
+                # 一档到不了 from_n、还会设永久锁。直接作废本次验证，不设任何锁。
+                if self.state in ('VERIFY', 'POST_ROLLBACK'):
+                    self._verify_samples = []
+                    self._rollback_samples = []
+                    self._verify_from_n = None
+                    self._rollback_from_n = None
+                    self.state = 'STABLE'
+                    self._stable_since = time.time()
+                    self.log(f"[VegasNAS] 外部限并发 {self.n}，在飞验证作废（不设锁）")
                 self.last_decision = {'act': 'hold', 'why': f'外部限并发→{ext_cap}'}
                 self.log(f"[VegasNAS] 外部限并发 {self.n}（desired={desired_batches}），待下次决策")
                 return self.n
@@ -226,7 +237,10 @@ class VegasNasController:
             self.state = 'STABLE'
             self._probe_base = R
             self._stable_since = now
-            why = f'漂移中(read {self._drift_reads[0]:.0f}→{R:.0f},重置基准)'
+            # P6：形态变了，此前验证的"最小可用并发"与"已验证有害并发"都失效
+            self._min_good_n = None
+            self._verify_blocked_n = None
+            why = f'漂移中(read {self._drift_reads[0]:.0f}→{R:.0f},重置基准,清验证锁)'
         elif self.state == 'PROBING':
             # 上探同时受外部上限约束（扫描减批/磁盘限流压得比 Vegas 低时不上探）
             can_up = self.n < self.max_n and (ext_cap is None or self.n < ext_cap)
@@ -254,35 +268,43 @@ class VegasNasController:
                 self._cooldown = 2
                 act, why = '-1', f'过载({R:.0f}<-10%于{self._probe_base:.0f},util={U})'
             else:
-                self._plateau += 1
-                if self._plateau >= PLATEAU_MAX:
-                    # 无增量回退后转 POST_ROLLBACK 观察 2 周期：小文件区 read 噪声大，
-                    # "无增量"可能误判（实测 5→4 后 read 从 195 掉到 120，-38%）。
-                    # 2 周期后若 read 明显下降 → 降错了，恢复原并发并锁定。
-                    if self._min_good_n is not None and (self.n - 1) < self._min_good_n:
-                        # 该并发已验证不可降（降了会掉吞吐），保持
-                        self.state = 'STABLE'
-                        self._stable_since = now
-                        self._probe_base = R
-                        act, why = 'hold', (f'无增量但已锁定下限({self._min_good_n})，'
-                                            f'保持 {self.n}')
-                        self._plateau = 0
-                    else:
-                        self.state = 'POST_ROLLBACK'
-                        self._cooldown = 1
-                        self._stable_since = None
-                        self._rollback_from_n = self.n
-                        self._rollback_read = R
-                        self._rollback_samples = []
-                        act, why = '-1', f'无增量x{self._plateau}({R:.0f}vs{self._probe_base:.0f})'
+                # P2：外部限并发（n 已被对齐到 ext_cap、无上探空间）时，
+                # "无增量"是结构性的（不可能产生增量），不能当"无余量"降并发——
+                # 否则扫描期并发在 ext_cap-1↔ext_cap 振荡（实测扫描期损失 1/3）
+                if not can_up:
+                    self._plateau = 0
+                    act, why = 'hold', f'受外部限并发({self.n}={ext_cap}，不计无增量)'
                 else:
-                    act, why = 'hold', f'观察中({R:.0f}vs{self._probe_base:.0f})'
+                    self._plateau += 1
+                    if self._plateau >= PLATEAU_MAX:
+                        # 无增量回退后转 POST_ROLLBACK 观察 3 周期：小文件区 read 噪声大，
+                        # "无增量"可能误判（实测 5→4 后 read 从 195 掉到 120，-38%）。
+                        # 3 周期后若 read 明显下降 → 降错了，恢复原并发并锁定。
+                        if self._min_good_n is not None and (self.n - 1) < self._min_good_n:
+                            # 该并发已验证不可降（降了会掉吞吐），保持
+                            self.state = 'STABLE'
+                            self._stable_since = now
+                            self._probe_base = R
+                            act, why = 'hold', (f'无增量但已锁定下限({self._min_good_n})，'
+                                                f'保持 {self.n}')
+                            self._plateau = 0
+                        else:
+                            self.state = 'POST_ROLLBACK'
+                            self._cooldown = 1
+                            self._stable_since = None
+                            self._rollback_from_n = self.n
+                            self._rollback_read = R_raw   # P5：参考值用原始值，与样本同口径
+                            self._rollback_samples = []
+                            act, why = '-1', f'无增量x{self._plateau}({R:.0f}vs{self._probe_base:.0f})'
+                    else:
+                        act, why = 'hold', f'观察中({R:.0f}vs{self._probe_base:.0f})'
         elif self.state == 'POST_ROLLBACK':
-            # 回退验证：收集 2 个周期的原始 read，判断降档是否损害吞吐
+            # 回退验证：收集 3 个周期的原始 read 取真中位（P4：2 样本取索引1=较大值，
+            # 噪声下系统性高估 _med、误判"无损"；与 VERIFY 路径一致用 3 样本）
             self._rollback_samples.append(R_raw)
-            if len(self._rollback_samples) < 2:
+            if len(self._rollback_samples) < 3:
                 act, why = 'hold', (f'回退观察({self.n},原读{self._rollback_read:.0f},'
-                                    f'样本{len(self._rollback_samples)}/2)')
+                                    f'样本{len(self._rollback_samples)}/3)')
             else:
                 _ref = self._rollback_read or 0
                 _med = sorted(self._rollback_samples)[len(self._rollback_samples) // 2]
@@ -316,7 +338,7 @@ class VegasNasController:
                 # 目的：发现"当前并发其实过高"（bench：大文件区最优 6，配置 10 时
                 # 原逻辑永远停在 10 无法验证）。降并发后若 read 明显下降 → 恢复。
                 self._verify_from_n = self.n
-                self._verify_read = R
+                self._verify_read = R_raw      # P5：参考值用原始值，与样本同口径
                 self._verify_since = now
                 self._verify_samples = []      # 收集原始 read（EWMA 会掩盖降幅）
                 self.state = 'VERIFY'
@@ -355,11 +377,14 @@ class VegasNasController:
                     act, why = 'hold', (f'验证:降并发无损(原始中位{_med:.0f}≈{_ref:.0f}),'
                                         f'保持 {self.n}')
         # 快速保护（任何状态）
-        # ① 阵列层：util 打满且排队恶化（bench 实战验证有效）
+        # ① 阵列层：util 打满且排队恶化（bench 实战验证有效）。
+        #    与 pressure 判据一样加跳过期：U/A 是 370s 滑窗中位数（滞后指标），
+        #    不跳会一次饱和事件连降 3~4 档（P1，与 pressure 连降同类缺陷）
         if U >= FASTP_UTIL and A >= FASTP_AWAIT and self.n > self.min_n \
-                and act not in ('-1',):
+                and act not in ('-1',) and now >= self._fastp_skip_until:
             self.state = 'COOLDOWN'
             self._cooldown = 1
+            self._fastp_skip_until = now + 2 * PERIOD
             act, why = '-1', f'快速保护(util={U},await={A})'
         # ② 物理盘层：disk_api 的 pressure 判定为 saturated（sata util≥95 且
         #    await≥20 或队列≥20）。阵列缓存会掩盖物理盘延迟，只看 md2 会漏
@@ -410,3 +435,15 @@ class VegasNasController:
         此时控制器只会 hold（样本不足），不会误调并发。
         """
         return self.sampler.fail_count >= 3
+
+    # ---- 展示字段（P9：nas_api 模式下任务卡片的 Vegas 健康度/速率） ----
+    @property
+    def display_rate_mbps(self) -> float:
+        """当前 read 平滑值（MB/s），供卡片显示"""
+        with self._ewma_lock:
+            return round(self._read_ewma or 0.0, 1)
+
+    @property
+    def display_base_mbps(self) -> float:
+        """当前基线（MB/s），供卡片健康度 = rate/base 计算"""
+        return round(self._probe_base or 0.0, 1)
