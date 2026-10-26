@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """1.9.86 第四轮修复回归（F1 稳态 tick / F4 过载跳过期 / F5 冷却不清漂移 / F6 恢复钳上限）"""
+import os
 import time
 import sys
-sys.path.insert(0, '/opt/TAF')
+# 从 __file__ 推仓库根（可移植，克隆到任意目录都能跑）
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, ROOT)
 from backup.vegas_nas import VegasNasController
 
 
@@ -24,7 +27,7 @@ def check(name, cond, info=''):
 
 
 # ---- F1 结构性验证：稳态下 tick 在范围不变时也被调用（worker 层缩进回归） ----
-src = open('/opt/TAF/backup/compression_worker.py').read()
+src = open(os.path.join(ROOT, 'backup', 'compression_worker.py')).read()
 tick_line = next(l for l in src.split('\n') if 'nas_limit = ctrl.tick(' in l)
 check('F1 tick 调用不在范围热更新 if 内（缩进 24）',
       tick_line.startswith(' ' * 24) and not tick_line.startswith(' ' * 28),

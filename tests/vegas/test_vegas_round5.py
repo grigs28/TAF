@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """1.9.87 第五轮修复回归（G1 teardown 可调用 / G2 锁钳制收敛 / G3 from 字段时效 /
 G4 构造局部化 / 前几轮复测）"""
+import os
 import time
 import sys
-sys.path.insert(0, '/opt/TAF')
+# 从 __file__ 推仓库根（可移植，克隆到任意目录都能跑）
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, ROOT)
 from backup.vegas_nas import VegasNasController
 
 
@@ -26,7 +29,7 @@ def check(name, cond, info=''):
 
 # ---- G1：teardown 可调用不抛错（上轮测试盲区：从不调用 teardown） ----
 import backup.compression_worker as cw
-src = open('/opt/TAF/backup/compression_worker.py').read()
+src = open(os.path.join(ROOT, 'backup', 'compression_worker.py')).read()
 assert 'if reset_alerts' not in src.split('def _teardown_vegas_nas')[1].split('def _ensure_vegas_nas')[0]
 check('G1 teardown 无 reset_alerts 残留引用', True)
 

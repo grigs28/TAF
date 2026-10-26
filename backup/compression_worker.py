@@ -465,6 +465,10 @@ class CompressionWorker:
                             ctrl.max_n = _new_max
                             ctrl.min_n = _new_min
                             ctrl.n = min(max(ctrl.n, _new_min), _new_max)
+                            # H1：范围变了就无条件钳锁（原只在"n 已钳制"或
+                            # "验证目标越界"两个子分支钳；无在飞验证时 max_n 降低
+                            # 会让 _min_good_n>max_n 残留 → 回退/下探永久冻结）
+                            ctrl.clamp_locks()
                             # P8/R2/R3：并发范围变了基线与漂移历史必须失效
                             # （旧基线/旧 EWMA/旧 drift 样本来自旧并发，残留会
                             # 误判过载/假增量/假漂移并误清验证锁）
@@ -474,9 +478,6 @@ class CompressionWorker:
                                 ctrl._plateau = 0
                                 ctrl._drift_reads = []
                                 ctrl._read_ewma = None
-                                # G2：钳制 n 的分支也钳锁（F6b 只覆盖 n 未变，
-                                # 锁钳制收敛到 ctrl.clamp_locks() 三路共用）
-                                ctrl.clamp_locks()
                                 if ctrl.state in ('VERIFY', 'POST_ROLLBACK'):
                                     ctrl._abort_verification()
                                     ctrl.state = 'STABLE'

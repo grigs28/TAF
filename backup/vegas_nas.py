@@ -349,13 +349,14 @@ class VegasNasController:
                 _med = sorted(self._rollback_samples)[len(self._rollback_samples) // 2]
                 if _ref > 0 and _med < _ref * 0.90:
                     # 降档后 read 下降 >10% → 回退错误，恢复原并发并锁定该值
-                    self._min_good_n = self._rollback_from_n
-                    self._rollback_from_n = None   # G3：verdict 完成后清 from 字段
+                    _from_n = self._rollback_from_n        # H2：先存局部再清，
+                    self._min_good_n = _from_n              #    否则日志输出"恢复None"
+                    self._rollback_from_n = None            # G3：verdict 完成后清 from 字段
                     self.state = 'STABLE'
                     self._stable_since = now
                     self._probe_base = R
                     act, why = '+1', (f'回退验证:降档有害(原始中位{_med:.0f}比{_ref:.0f}低'
-                                      f'{(1-_med/_ref)*100:.0f}%),恢复{self._rollback_from_n}')
+                                      f'{(1-_med/_ref)*100:.0f}%),恢复{_from_n}')
                 else:
                     # 降档无损 → 保持更低并发
                     self._rollback_from_n = None   # G3
@@ -406,13 +407,14 @@ class VegasNasController:
                 _drop = (_ref - _med) / _ref if _ref > 0 else 0.0
                 if _drop > 0.05:
                     # 降并发导致 read 明显下降 → 原并发更优，恢复并锁定不再验证该值
-                    self._verify_blocked_n = self._verify_from_n
-                    self._verify_from_n = None     # G3
+                    _from_n = self._verify_from_n          # H3：先存局部再清
+                    self._verify_blocked_n = _from_n
+                    self._verify_from_n = None             # G3
                     self.state = 'PROBING'
                     self._probe_base = R
                     self._plateau = 0
                     act, why = '+1', (f'验证:降并发有害(原始中位{_med:.0f}比{_ref:.0f}低'
-                                      f'{_drop*100:.0f}%),恢复{self._verify_from_n}')
+                                      f'{_drop*100:.0f}%),恢复{_from_n}')
                 else:
                     # 降并发 read 无明显损失 → 保持更低并发，延长稳定期后再验证
                     self._verify_blocked_n = None

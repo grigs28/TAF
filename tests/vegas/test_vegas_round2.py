@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """1.9.83 修复回归测试（vegas_nas 审查 10 项）"""
+import os
 import time
 import sys
-sys.path.insert(0, '/opt/TAF')
+# 从 __file__ 推仓库根（可移植，克隆到任意目录都能跑）
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, ROOT)
 from backup.vegas_nas import VegasNasController, PERIOD
 
 

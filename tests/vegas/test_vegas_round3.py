@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """1.9.84 复审修复回归测试（R1~R7 中可由控制器层验证的部分）"""
+import os
 import time
 import sys
-sys.path.insert(0, '/opt/TAF')
+# 从 __file__ 推仓库根（可移植，克隆到任意目录都能跑）
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, ROOT)
 from backup.vegas_nas import VegasNasController
 
 
