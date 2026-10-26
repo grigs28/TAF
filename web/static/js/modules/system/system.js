@@ -612,6 +612,9 @@ function recommendedGroupThresholds() {
     return {
         large: roundStep(groupMB / 1, 500),      // 平均 1 MB
         protect: roundStep(groupMB / 10, 100),   // 平均 10 MB
+        // 文件数上限：按"极端小文件 250KB/文件"换算组内文件数，再取整到万位
+        // （12GB 配置 → 11.4GB/0.25MB ≈ 45,600 → 50,000）
+        maxFiles: roundStep(groupMB / 0.25, 10000),
     };
 }
 
@@ -622,11 +625,15 @@ function updateGroupThresholdHints(apply) {
     const h2 = document.getElementById('groupScanDeferRecommend');
     if (h1) h1.textContent = r.large.toLocaleString();
     if (h2) h2.textContent = r.protect.toLocaleString();
+    const h3 = document.getElementById('groupMaxFilesRecommend');
+    if (h3) h3.textContent = r.maxFiles.toLocaleString();
     if (apply) {
         const e1 = document.getElementById('groupLargeThreshold');
         const e2 = document.getElementById('groupScanDeferBelow');
         if (e1) e1.value = r.large;
         if (e2) e2.value = r.protect;
+        const e3 = document.getElementById('groupMaxFilesPerGroup');
+        if (e3) e3.value = r.maxFiles;
     }
 }
 
@@ -953,6 +960,9 @@ async function loadAllSystemConfig() {
             const glt = document.getElementById('groupLargeThreshold');
             if (glt) glt.value = (config.group_large_threshold !== undefined && config.group_large_threshold !== null)
                 ? config.group_large_threshold : 20000;
+            const gmf = document.getElementById('groupMaxFilesPerGroup');
+            if (gmf) gmf.value = (config.group_max_files_per_group !== undefined && config.group_max_files_per_group !== null)
+                ? config.group_max_files_per_group : 50000;
             const gsd = document.getElementById('groupScanDeferBelow');
             if (gsd) gsd.value = (config.group_scan_defer_below !== undefined && config.group_scan_defer_below !== null)
                 ? config.group_scan_defer_below : 5000;
@@ -1144,6 +1154,12 @@ async function saveEnvConfigSection() {
             })(),
             group_scan_defer_below: (() => {
                 const input = document.getElementById('groupScanDeferBelow');
+                if (!input || input.value === '') return null;
+                const parsed = parseInt(input.value, 10);
+                return isNaN(parsed) ? null : parsed;
+            })(),
+            group_max_files_per_group: (() => {
+                const input = document.getElementById('groupMaxFilesPerGroup');
                 if (!input || input.value === '') return null;
                 const parsed = parseInt(input.value, 10);
                 return isNaN(parsed) ? null : parsed;

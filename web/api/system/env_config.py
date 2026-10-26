@@ -74,6 +74,7 @@ class SystemEnvConfig(BaseModel):
     group_sched_ratio: Optional[str] = Field(None, description="全程配额（大:小），如 2:1、3:1、1:1")
     group_large_threshold: Optional[int] = Field(None, description="大/小文件组分界：组内文件数低于此值为大文件组（默认 20000）")
     group_scan_defer_below: Optional[int] = Field(None, description="大组保护阈值：全程不消费文件数低于此值的大文件组（默认 5000，0=禁用）；写带喂不饱时放出")
+    group_max_files_per_group: Optional[int] = Field(None, description="组内文件数上限（默认 50000，0=禁用）：与大小上限同时生效，谁先到就封组")
     group_prefetch_lead_seconds: Optional[int] = Field(None, description="预分组比压缩提前启动的秒数（默认 30；0=同时启动；需小于扫描等待超时）")
     group_vegas_enabled: Optional[bool] = Field(None, description="自适应并发（Vegas）开关：关闭后并发严格按配置/磁盘水位执行，不再按 NAS 读取速率增减")
     group_vegas_signal_source: Optional[str] = Field(None, description="Vegas 信号源：internal=组级读取速率（deficit 框架）；nas_api=NAS 压力 API 的 read 信号（v2 状态机，需配置 NAS_API_URL）")
@@ -181,6 +182,7 @@ async def get_env_config():
             "group_sched_ratio": env_vars.get("GROUP_SCHED_NORMAL_RATIO", "2:1") or "2:1",
             "group_large_threshold": parse_int(env_vars.get("GROUP_LARGE_FILE_COUNT_THRESHOLD"), 20000),
             "group_scan_defer_below": parse_int(env_vars.get("GROUP_SCAN_DEFER_BELOW"), 5000),
+            "group_max_files_per_group": parse_int(env_vars.get("GROUP_MAX_FILES_PER_GROUP"), 50000),
             "group_prefetch_lead_seconds": parse_int(env_vars.get("GROUP_PREFETCH_LEAD_SECONDS"), 30),
             "group_vegas_enabled": parse_bool(env_vars.get("GROUP_VEGAS_ENABLED"), True),
             "group_vegas_signal_source": (env_vars.get("GROUP_VEGAS_SIGNAL_SOURCE", "internal")
@@ -362,6 +364,10 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             if config.group_scan_defer_below < 0:
                 raise ValueError("大组保护阈值必须 ≥ 0（0=禁用）")
             updates["GROUP_SCAN_DEFER_BELOW"] = str(config.group_scan_defer_below)
+        if config.group_max_files_per_group is not None:
+            if config.group_max_files_per_group < 0 or config.group_max_files_per_group > 1000000:
+                raise ValueError("组内文件数上限必须在 0-1000000 之间（0=禁用）")
+            updates["GROUP_MAX_FILES_PER_GROUP"] = str(config.group_max_files_per_group)
         if config.group_prefetch_lead_seconds is not None:
             if config.group_prefetch_lead_seconds < 0 or config.group_prefetch_lead_seconds > 3600:
                 raise ValueError("预分组提前秒数必须在 0-3600 之间（0=同时启动）")

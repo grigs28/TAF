@@ -214,6 +214,16 @@
                         <small class="form-text text-secondary">✓ 推荐 <b id="groupScanDeferRecommend">—</b>（平均约 10 MB）</small>
                     </div>
                     <div class="mb-3">
+                        <label class="form-label">组内文件数上限</label>
+                        <input type="number" class="form-control" id="groupMaxFilesPerGroup" value="50000" min="0" max="1000000" step="1000">
+                        <small class="form-text text-secondary">
+                            与「最大文件大小」同时生效，谁先到就封组（0 = 禁用）。
+                            防止海量小文件目录形成超大组（如 20 万文件/组 → 单组压缩 15~25 分钟、
+                            长期占用并发槽位、进度长时间不动）。
+                        </small>
+                        <small class="form-text text-secondary">✓ 推荐 <b id="groupMaxFilesRecommend">—</b>（按最大文件大小换算，约 250KB/文件）</small>
+                    </div>
+                    <div class="mb-3">
                         <div class="form-check form-switch">
                             <input class="form-check-input" type="checkbox" role="switch" id="vegasEnabled" checked>
                             <label class="form-check-label" for="vegasEnabled">自适应并发（Vegas）</label>

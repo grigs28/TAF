@@ -629,6 +629,12 @@ class FileGroupPrefetcher:
 
         batch_size = max(3000, min(int(max_file_size / (1024 * 1024) * 0.5 * 1000), 50000))
 
+        # 组内文件数上限（0=禁用）：防止"海量小文件目录"形成 20 万文件的巨组
+        # （单组 tar 打包 15~25 分钟，长期占用并发槽位、进度长时间不动）。
+        # 与大小上限同时生效，谁先到就封组。实时读取，UI 改完立即生效。
+        _max_files_per_group = int(
+            self._live_setting('GROUP_MAX_FILES_PER_GROUP', 50000) or 0)
+
         # 跨轮累积：上一轮未凑够半组、未能成组的头部文件。
         # 它们仍留在内存库头部（未删除），下一轮按偏移跳过、只读新文件，
         # 与新文件一起继续累积 —— 否则每轮重复读同一批 5 万文件、永远不够
@@ -686,11 +692,13 @@ class FileGroupPrefetcher:
                         grouped_paths.append(file_path or '')
                         continue
 
-                    # 第二层：贪心累积
+                    # 第二层：贪心累积（大小上限 或 文件数上限，谁先到就封组）
                     current_group.append(file_info)
                     current_size += file_size
 
-                    if current_size >= min_group_size:
+                    if current_size >= min_group_size or (
+                            _max_files_per_group > 0
+                            and len(current_group) >= _max_files_per_group):
                         groups_to_queue.append(current_group)
                         grouped_paths.extend(f.get('path', '') for f in current_group)
                         current_group = []
