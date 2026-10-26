@@ -110,7 +110,15 @@ class VegasNasController:
         self.sampler = sampler
         self.log = log or (lambda msg: None)
         self.min_n = max(1, min_n)
-        self.max_n = max(self.min_n + 1, max_n)
+        # R7：上限不得高于下限；此前静默 max(min_n+1, max_n) 会把 8 封顶抬到 9，
+        # 越过 bench 标定而无日志。现在显式告警。
+        if max_n <= self.min_n:
+            self.max_n = self.min_n + 1
+            if log:
+                log(f"[VegasNAS] 上限 {max_n} 不高于下限 {self.min_n}，"
+                    f"自动抬到 {self.max_n}（Vegas 仅剩 1 档调节空间）")
+        else:
+            self.max_n = max_n
         # 并发值：从 start_n 开始自主调节
         self.n = min(max(start_n, self.min_n), self.max_n)
         self.state = 'PROBING'
@@ -145,6 +153,16 @@ class VegasNasController:
                    if isinstance(s.get(key), (int, float)))
         return round(v[len(v) // 2], 1) if v else 0.0
 
+    def _abort_verification(self):
+        """作废在飞的 VERIFY/POST_ROLLBACK（外部对齐/保护触发/热更新钳制时调用）。
+
+        清样本与簿记，**不设任何锁**（_min_good_n/_verify_blocked_n 保持原值，
+        由调用方决定是否保留历史结论）。所有改 n 的路径共用，保持清理一致。"""
+        self._verify_samples = []
+        self._rollback_samples = []
+        self._verify_from_n = None
+        self._rollback_from_n = None
+
     # ---- 状态机（每 PERIOD 秒一拍） ----
     def tick(self, active_batches: int, desired_batches: int = None) -> int:
         """由压缩主循环调用（自带节流）。返回当前并发上限。
@@ -167,10 +185,7 @@ class VegasNasController:
                 # P3：外部对齐打断在飞验证——样本跨并发污染、verdict 的 +1 只恢复
                 # 一档到不了 from_n、还会设永久锁。直接作废本次验证，不设任何锁。
                 if self.state in ('VERIFY', 'POST_ROLLBACK'):
-                    self._verify_samples = []
-                    self._rollback_samples = []
-                    self._verify_from_n = None
-                    self._rollback_from_n = None
+                    self._abort_verification()
                     self.state = 'STABLE'
                     self._stable_since = time.time()
                     self.log(f"[VegasNAS] 外部限并发 {self.n}，在飞验证作废（不设锁）")
@@ -268,12 +283,14 @@ class VegasNasController:
                 self._cooldown = 2
                 act, why = '-1', f'过载({R:.0f}<-10%于{self._probe_base:.0f},util={U})'
             else:
-                # P2：外部限并发（n 已被对齐到 ext_cap、无上探空间）时，
-                # "无增量"是结构性的（不可能产生增量），不能当"无余量"降并发——
-                # 否则扫描期并发在 ext_cap-1↔ext_cap 振荡（实测扫描期损失 1/3）
-                if not can_up:
+                # P2/R1：仅"外部限制真实生效"（ext_cap 严格小于内部上限 max_n，
+                # 即扫描减批/磁盘限流把并发压在内部上限之下）时不计 plateau——
+                # 此时无增量是结构性的。
+                # 到内部上限 max_n（ext_cap >= max_n 或无限流）时 plateau 照常累积，
+                # 否则"配置并发高于最优、read 持平"的场景永远无法降档验证（R1）。
+                if not can_up and ext_cap is not None and ext_cap < self.max_n:
                     self._plateau = 0
-                    act, why = 'hold', f'受外部限并发({self.n}={ext_cap}，不计无增量)'
+                    act, why = 'hold', f'受外部限并发({self.n}≥{ext_cap}，不计无增量)'
                 else:
                     self._plateau += 1
                     if self._plateau >= PLATEAU_MAX:
@@ -290,7 +307,8 @@ class VegasNasController:
                             self._plateau = 0
                         else:
                             self.state = 'POST_ROLLBACK'
-                            self._cooldown = 1
+                            # R5：不再设 cooldown——首观察拍被冷却吃掉不采样，
+                            # 3 样本实际要 4 拍（约 8 分钟），与注释不符且拖长恢复
                             self._stable_since = None
                             self._rollback_from_n = self.n
                             self._rollback_read = R_raw   # P5：参考值用原始值，与样本同口径
@@ -382,10 +400,17 @@ class VegasNasController:
         #    不跳会一次饱和事件连降 3~4 档（P1，与 pressure 连降同类缺陷）
         if U >= FASTP_UTIL and A >= FASTP_AWAIT and self.n > self.min_n \
                 and act not in ('-1',) and now >= self._fastp_skip_until:
+            if self.state in ('VERIFY', 'POST_ROLLBACK'):
+                # R4：在飞验证被保护打断必须显式作废（否则降档既无 verdict
+                # 也无锁，同一档位的误判会原样再来一次）
+                self._abort_verification()
+                why_note = '（在飞验证作废）'
+            else:
+                why_note = ''
             self.state = 'COOLDOWN'
             self._cooldown = 1
             self._fastp_skip_until = now + 2 * PERIOD
-            act, why = '-1', f'快速保护(util={U},await={A})'
+            act, why = '-1', f'快速保护(util={U},await={A}){why_note}'
         # ② 物理盘层：disk_api 的 pressure 判定为 saturated（sata util≥95 且
         #    await≥20 或队列≥20）。阵列缓存会掩盖物理盘延迟，只看 md2 会漏
         #    （2026-10-25 实测：md2 await 仅 9~25ms，而 sata await 26~128ms、
@@ -397,11 +422,16 @@ class VegasNasController:
             if _press:
                 _sat = _press.count('saturated')
                 if _sat * 2 >= len(_press):      # ≥50% 采样为 saturated
+                    if self.state in ('VERIFY', 'POST_ROLLBACK'):
+                        self._abort_verification()
+                        why_note = '（在飞验证作废）'
+                    else:
+                        why_note = ''
                     self.state = 'COOLDOWN'
                     self._cooldown = 1
                     self._pressure_skip_until = now + 2 * PERIOD
                     act, why = '-1', (f'物理盘饱和(pressure saturated '
-                                      f'{_sat}/{len(_press)})')
+                                      f'{_sat}/{len(_press)}){why_note}')
 
         if act == '+1':
             self.n += 1

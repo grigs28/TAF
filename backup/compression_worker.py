@@ -458,29 +458,74 @@ class CompressionWorker:
                             self._vegas_min,
                             max(1, self.base_parallel_batches
                                 - int(self.batches_reduction or 0))))
-                        if ctrl.max_n != _new_max or ctrl.min_n != _new_min:
-                            _prev_n = ctrl.n
-                            ctrl.max_n = _new_max
-                            ctrl.min_n = _new_min
-                            ctrl.n = min(max(ctrl.n, _new_min), _new_max)
-                            # P8：并发范围变了基线必须失效（旧基线来自旧并发，
-                            # 不重置会误判过载/假增量）
-                            if ctrl.n != _prev_n:
-                                ctrl._probe_base = None
-                                ctrl._rebuild_base = True
-                                ctrl._plateau = 0
+                        # R7：下限不得吞掉上限（min==max 时 Vegas 冻结成摆设），
+                        # 至少留 1 档调节空间
+                        if _new_min >= _new_max:
+                            _new_min = max(1, _new_max - 1)
                             logger.warning(
-                                f"[VegasNAS] 并发范围热更新: {_new_min}~{_new_max} "
-                                f"(当前 n={ctrl.n})")
-                        nas_limit = ctrl.tick(
-                            len(self.running_compression_futures), desired_batches)
-                        if nas_limit > 0 and desired_batches > nas_limit:
-                            desired_batches = nas_limit
-                        # P9：nas_api 模式下把控制器的展示字段同步给卡片
-                        # （internal 的 _vegas_rate_ewma/_vegas_base 在此模式下不更新，
-                        # 不同步则卡片健康度恒为"—"，无法区分 Vegas 工作/失效）
-                        self._vegas_rate_ewma = ctrl.display_rate_mbps
-                        self._vegas_base = ctrl.display_base_mbps
+                                f"[VegasNAS] 下限 {_new_min + 1} 不低于上限 {_new_max}，"
+                                f"已压到 {_new_min} 保留调节空间")
+                        # R6：URL 热修改检测——已建控制器的采样器不会拾取新 URL，
+                        # 变化时拆除重建，并重置告警缓存
+                        _cur_url = str(getattr(fresh_settings, 'NAS_API_URL', '') or '').strip()
+                        _old_url = getattr(self._vegas_nas_sampler, '_url', None) \
+                            if self._vegas_nas_sampler is not None else None
+                        if _old_url is not None and _cur_url != _old_url:
+                            logger.warning(f"[VegasNAS] NAS_API_URL 变更，重建控制器: "
+                                           f"{_old_url[:40]}… → {_cur_url[:40]}…")
+                            try:
+                                self._vegas_nas_sampler.stop()
+                            except Exception:
+                                pass
+                            self._vegas_nas_sampler = None
+                            self._vegas_nas = None
+                            self._vegas_nas_no_url_logged = None
+                            self._vegas_nas_fail_logged = False
+                            ctrl = self._ensure_vegas_nas()
+                            if ctrl is None or ctrl.signal_lost:
+                                # 重建失败/失联 → 本轮回退内部信号
+                                if not getattr(self, '_vegas_nas_lost_logged', False):
+                                    logger.warning("[VegasNAS] URL 变更后重建失败/失联，"
+                                                   "回退内部组级速率信号")
+                                    self._vegas_nas_lost_logged = True
+                                self._update_vegas()
+                                if self._vegas_limit > 0 and desired_batches > self._vegas_limit:
+                                    desired_batches = self._vegas_limit
+                                # 直接结束 nas_api 分支，交给后续的统一应用段
+                                ctrl = None
+                        if ctrl is not None:
+                            if ctrl.max_n != _new_max or ctrl.min_n != _new_min:
+                                _prev_n = ctrl.n
+                                ctrl.max_n = _new_max
+                                ctrl.min_n = _new_min
+                                ctrl.n = min(max(ctrl.n, _new_min), _new_max)
+                                # P8/R2/R3：并发范围变了基线与漂移历史必须失效
+                                # （旧基线/旧 EWMA/旧 drift 样本来自旧并发，残留会
+                                # 误判过载/假增量/假漂移并误清验证锁）
+                                if ctrl.n != _prev_n:
+                                    ctrl._probe_base = None
+                                    ctrl._rebuild_base = True
+                                    ctrl._plateau = 0
+                                    ctrl._drift_reads = []
+                                    ctrl._read_ewma = None
+                                    if ctrl.state in ('VERIFY', 'POST_ROLLBACK'):
+                                        ctrl._abort_verification()
+                                        ctrl.state = 'STABLE'
+                                        ctrl._stable_since = time.time()
+                                        logger.warning("[VegasNAS] 范围热更新钳制 n，"
+                                                       "在飞验证作废（不设锁）")
+                                logger.warning(
+                                    f"[VegasNAS] 并发范围热更新: {_new_min}~{_new_max} "
+                                    f"(当前 n={ctrl.n})")
+                            nas_limit = ctrl.tick(
+                                len(self.running_compression_futures), desired_batches)
+                            if nas_limit > 0 and desired_batches > nas_limit:
+                                desired_batches = nas_limit
+                            # P9：nas_api 模式下把控制器的展示字段同步给卡片
+                            # （internal 的 _vegas_rate_ewma/_vegas_base 在此模式下不更新，
+                            # 不同步则卡片健康度恒为"—"，无法区分 Vegas 工作/失效）
+                            self._vegas_rate_ewma = ctrl.display_rate_mbps
+                            self._vegas_base = ctrl.display_base_mbps
                     else:
                         # NAS 信号不可用/已失联 → 回退内部信号（不因 API 挂掉停摆）
                         if ctrl is not None and not getattr(self, '_vegas_nas_lost_logged', False):
