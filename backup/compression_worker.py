@@ -199,12 +199,7 @@ class CompressionWorker:
 
         # 停 Vegas NAS 采样线程（否则每个任务结束会遗留一个 10s 轮询线程累积）
         if self._vegas_nas_sampler is not None:
-            try:
-                self._vegas_nas_sampler.stop()
-            except Exception:
-                pass
-            self._vegas_nas_sampler = None
-            self._vegas_nas = None
+            self._teardown_vegas_nas()
 
         # 取消所有正在运行的压缩任务
         if self.running_compression_futures:
@@ -343,17 +338,8 @@ class CompressionWorker:
                     if _was_sig != self._vegas_signal:
                         # 信号源热切换：停旧采样线程、清控制器，下轮 _ensure 重建
                         logger.warning(f"[压缩配置] Vegas 信号源切换: {_was_sig} -> {self._vegas_signal}")
-                        if self._vegas_nas_sampler is not None:
-                            try:
-                                self._vegas_nas_sampler.stop()
-                            except Exception:
-                                pass
-                        self._vegas_nas_sampler = None
-                        self._vegas_nas = None
+                        self._teardown_vegas_nas()
                         self._vegas_limit = 0
-                        # P7：告警缓存随切换重置（新配置下允许再次告警）
-                        self._vegas_nas_no_url_logged = None
-                        self._vegas_nas_fail_logged = False
                 except Exception:
                     pass
 
@@ -448,6 +434,17 @@ class CompressionWorker:
             if self._vegas_enabled and self.use_prefetcher:
                 if self._vegas_signal == 'nas_api':
                     ctrl = self._ensure_vegas_nas()
+                    # T2/T6：URL 热修改检测前置（无论失联与否都执行——失联场景
+                    # 下用户改正 URL 必须能恢复，此前检测在健康分支内失联时够不着）
+                    if ctrl is not None and self._vegas_nas_sampler is not None:
+                        _cur_url = str(getattr(fresh_settings, 'NAS_API_URL', '') or '').strip()
+                        _old_url = getattr(self._vegas_nas_sampler, '_url', None)
+                        if _old_url is not None and _cur_url != _old_url:
+                            logger.warning(f"[VegasNAS] NAS_API_URL 变更，重建控制器: "
+                                           f"{str(_old_url)[:40]}… → {_cur_url[:40]}…")
+                            self._teardown_vegas_nas()
+                            ctrl = self._ensure_vegas_nas()
+                            # T9：新控制器 fail_count=0 恒不失联，不再查 signal_lost
                     if ctrl is not None and not ctrl.signal_lost:
                         self._vegas_nas_lost_logged = False
                         # 并发范围热更新：UI 改 COMPRESSION_PARALLEL_BATCHES 后
@@ -465,67 +462,39 @@ class CompressionWorker:
                             logger.warning(
                                 f"[VegasNAS] 下限 {_new_min + 1} 不低于上限 {_new_max}，"
                                 f"已压到 {_new_min} 保留调节空间")
-                        # R6：URL 热修改检测——已建控制器的采样器不会拾取新 URL，
-                        # 变化时拆除重建，并重置告警缓存
-                        _cur_url = str(getattr(fresh_settings, 'NAS_API_URL', '') or '').strip()
-                        _old_url = getattr(self._vegas_nas_sampler, '_url', None) \
-                            if self._vegas_nas_sampler is not None else None
-                        if _old_url is not None and _cur_url != _old_url:
-                            logger.warning(f"[VegasNAS] NAS_API_URL 变更，重建控制器: "
-                                           f"{_old_url[:40]}… → {_cur_url[:40]}…")
-                            try:
-                                self._vegas_nas_sampler.stop()
-                            except Exception:
-                                pass
-                            self._vegas_nas_sampler = None
-                            self._vegas_nas = None
-                            self._vegas_nas_no_url_logged = None
-                            self._vegas_nas_fail_logged = False
-                            ctrl = self._ensure_vegas_nas()
-                            if ctrl is None or ctrl.signal_lost:
-                                # 重建失败/失联 → 本轮回退内部信号
-                                if not getattr(self, '_vegas_nas_lost_logged', False):
-                                    logger.warning("[VegasNAS] URL 变更后重建失败/失联，"
-                                                   "回退内部组级速率信号")
-                                    self._vegas_nas_lost_logged = True
-                                self._update_vegas()
-                                if self._vegas_limit > 0 and desired_batches > self._vegas_limit:
-                                    desired_batches = self._vegas_limit
-                                # 直接结束 nas_api 分支，交给后续的统一应用段
-                                ctrl = None
-                        if ctrl is not None:
-                            if ctrl.max_n != _new_max or ctrl.min_n != _new_min:
-                                _prev_n = ctrl.n
-                                ctrl.max_n = _new_max
-                                ctrl.min_n = _new_min
-                                ctrl.n = min(max(ctrl.n, _new_min), _new_max)
-                                # P8/R2/R3：并发范围变了基线与漂移历史必须失效
-                                # （旧基线/旧 EWMA/旧 drift 样本来自旧并发，残留会
-                                # 误判过载/假增量/假漂移并误清验证锁）
-                                if ctrl.n != _prev_n:
-                                    ctrl._probe_base = None
-                                    ctrl._rebuild_base = True
-                                    ctrl._plateau = 0
-                                    ctrl._drift_reads = []
-                                    ctrl._read_ewma = None
-                                    if ctrl.state in ('VERIFY', 'POST_ROLLBACK'):
-                                        ctrl._abort_verification()
-                                        ctrl.state = 'STABLE'
-                                        ctrl._stable_since = time.time()
-                                        logger.warning("[VegasNAS] 范围热更新钳制 n，"
-                                                       "在飞验证作废（不设锁）")
-                                logger.warning(
-                                    f"[VegasNAS] 并发范围热更新: {_new_min}~{_new_max} "
-                                    f"(当前 n={ctrl.n})")
+                        if ctrl.max_n != _new_max or ctrl.min_n != _new_min:
+                            _prev_n = ctrl.n
+                            ctrl.max_n = _new_max
+                            ctrl.min_n = _new_min
+                            ctrl.n = min(max(ctrl.n, _new_min), _new_max)
+                            # P8/R2/R3：并发范围变了基线与漂移历史必须失效
+                            # （旧基线/旧 EWMA/旧 drift 样本来自旧并发，残留会
+                            # 误判过载/假增量/假漂移并误清验证锁）
+                            if ctrl.n != _prev_n:
+                                ctrl._probe_base = None
+                                ctrl._rebuild_base = True
+                                ctrl._plateau = 0
+                                ctrl._drift_reads = []
+                                ctrl._read_ewma = None
+                                if ctrl.state in ('VERIFY', 'POST_ROLLBACK'):
+                                    ctrl._abort_verification()
+                                    ctrl.state = 'STABLE'
+                                    ctrl._stable_since = time.time()
+                                    logger.warning("[VegasNAS] 范围热更新钳制 n，"
+                                                   "在飞验证作废（不设锁）")
+                            logger.warning(
+                                f"[VegasNAS] 并发范围热更新: {_new_min}~{_new_max} "
+                                f"(当前 n={ctrl.n})")
                             nas_limit = ctrl.tick(
                                 len(self.running_compression_futures), desired_batches)
                             if nas_limit > 0 and desired_batches > nas_limit:
                                 desired_batches = nas_limit
-                            # P9：nas_api 模式下把控制器的展示字段同步给卡片
-                            # （internal 的 _vegas_rate_ewma/_vegas_base 在此模式下不更新，
-                            # 不同步则卡片健康度恒为"—"，无法区分 Vegas 工作/失效）
-                            self._vegas_rate_ewma = ctrl.display_rate_mbps
-                            self._vegas_base = ctrl.display_base_mbps
+                            # P9/T6：nas_api 模式下同步展示字段。注意口径：
+                            # display_rate 是整 NAS 聚合读（MB/s），卡片字段语义为
+                            # "MB/s/组"，故除以当前并发近似每组值；base 同理
+                            _groups = max(1, ctrl.n)
+                            self._vegas_rate_ewma = round(ctrl.display_rate_mbps / _groups, 1)
+                            self._vegas_base = round(ctrl.display_base_mbps / _groups, 1)
                     else:
                         # NAS 信号不可用/已失联 → 回退内部信号（不因 API 挂掉停摆）
                         if ctrl is not None and not getattr(self, '_vegas_nas_lost_logged', False):
@@ -576,17 +545,31 @@ class CompressionWorker:
             return 'buffer'
         return 'small' if file_count >= thr else 'large'
 
+    def _teardown_vegas_nas(self, reset_alerts: bool = True):
+        """拆除 nas_api 信号源（停采样线程、清控制器）。
+
+        T8：信号源切换/URL 重建/任务结束/ensure 收尾四处共用，
+        拆除与告警缓存重置语义统一（reset_alerts=False 用于任务结束等
+        "下一个任务要重新告警"的场景语义不变——同样走本函数）。"""
+        if self._vegas_nas_sampler is not None:
+            try:
+                self._vegas_nas_sampler.stop()
+            except Exception:
+                pass
+        self._vegas_nas_sampler = None
+        self._vegas_nas = None
+        if reset_alerts:
+            self._vegas_nas_no_url_logged = None
+            self._vegas_nas_fail_logged = False
+            self._vegas_nas_lost_logged = False
+
     def _ensure_vegas_nas(self):
         """nas_api 信号源惰性初始化（URL 为空/导入失败 → 返回 None 回退 internal）"""
         if self._vegas_nas is not None:
             return self._vegas_nas
         # 上次初始化中断留下的采样线程先收掉，避免重复累积
         if self._vegas_nas_sampler is not None:
-            try:
-                self._vegas_nas_sampler.stop()
-            except Exception:
-                pass
-            self._vegas_nas_sampler = None
+            self._teardown_vegas_nas()
         try:
             from config.settings import get_settings
             from backup.vegas_nas import NasSignalSampler, VegasNasController
@@ -611,11 +594,19 @@ class CompressionWorker:
             # P10：下限地板与 UI 校验范围对齐（env_config 允许 1-64），
             # 不再用 max(2,...) 静默抬高用户配置的 1
             _eff_min = max(1, min(self._vegas_min, _cap_by_scan))
+            # T5：下限/上限的规范化只在 worker 做（构造器只校验）。
+            # 下限吞掉上限会让 Vegas 冻结；至少留 1 档调节空间
+            _eff_max = max(base, 8)           # bench 标定：两形态区最优 5~6，8 封顶
+            if _eff_min >= _eff_max:
+                _eff_min = max(1, _eff_max - 1)
+                logger.warning(
+                    f"[VegasNAS] 下限 {_eff_max} 不低于上限 {_eff_max}，"
+                    f"已压到 {_eff_min} 保留调节空间")
             self._vegas_nas = VegasNasController(
                 sampler,
                 start_n=base,                 # 从配置并发起步自主调节
                 min_n=_eff_min,
-                max_n=max(base, 8),           # bench 标定：两形态区最优 5~6，8 封顶
+                max_n=_eff_max,
                 log=lambda m: logger.warning(m),
             )
             if _eff_min != self._vegas_min:

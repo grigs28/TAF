@@ -110,15 +110,11 @@ class VegasNasController:
         self.sampler = sampler
         self.log = log or (lambda msg: None)
         self.min_n = max(1, min_n)
-        # R7：上限不得高于下限；此前静默 max(min_n+1, max_n) 会把 8 封顶抬到 9，
-        # 越过 bench 标定而无日志。现在显式告警。
+        # R7/T5：规范化只在 worker（创建/热更新两处）做；构造器只校验，
+        # 不再静默抬上限（原 max(min_n+1, max_n) 会越过 bench 封顶 8 且无感知）
         if max_n <= self.min_n:
-            self.max_n = self.min_n + 1
-            if log:
-                log(f"[VegasNAS] 上限 {max_n} 不高于下限 {self.min_n}，"
-                    f"自动抬到 {self.max_n}（Vegas 仅剩 1 档调节空间）")
-        else:
-            self.max_n = max_n
+            raise ValueError(f"max_n({max_n}) 必须大于 min_n({self.min_n})")
+        self.max_n = max_n
         # 并发值：从 start_n 开始自主调节
         self.n = min(max(start_n, self.min_n), self.max_n)
         self.state = 'PROBING'
@@ -130,7 +126,6 @@ class VegasNasController:
         self._read_ewma = None      # read 平滑值（降噪，见 READ_EWMA_ALPHA）
         self._ewma_lock = threading.Lock()
         # 下探验证（STABLE 期降 1 档确认当前并发是否过高）
-        self._verify_since = None
         self._verify_read = 0.0
         self._verify_from_n = None
         self._verify_blocked_n = None   # 已验证"降并发有害"的并发值，不再重复验证
@@ -163,6 +158,13 @@ class VegasNasController:
         self._verify_from_n = None
         self._rollback_from_n = None
 
+    def _skip_protections(self, now: float):
+        """任一保护触发时同时跳过期生效（T1）：
+        fastp/pressure 两个保护的跳过期若各自独立，一次真实饱和事件会被两个
+        保护器交替放行连降 3 档（10-26 复审）。统一设置。"""
+        self._fastp_skip_until = now + 2 * PERIOD
+        self._pressure_skip_until = now + 2 * PERIOD
+
     # ---- 状态机（每 PERIOD 秒一拍） ----
     def tick(self, active_batches: int, desired_batches: int = None) -> int:
         """由压缩主循环调用（自带节流）。返回当前并发上限。
@@ -182,6 +184,10 @@ class VegasNasController:
                 self._probe_base = None      # 并发变了，旧基准失效
                 self._plateau = 0
                 self._drift_reads = []
+                # T7：EWMA 同样失效（旧值掺着旧并发的读速；R2/R3 热更新已清，
+                # 此路径漏了同项清理，基线会偏高推迟上探 2~4 拍）
+                with self._ewma_lock:
+                    self._read_ewma = None
                 # P3：外部对齐打断在飞验证——样本跨并发污染、verdict 的 +1 只恢复
                 # 一档到不了 from_n、还会设永久锁。直接作废本次验证，不设任何锁。
                 if self.state in ('VERIFY', 'POST_ROLLBACK'):
@@ -351,13 +357,16 @@ class VegasNasController:
                 self._probe_base = R
                 self._plateau = 0
                 act, why = '+1', '周期重探(重置基线)'
-            elif _due and self.n > self.min_n and self._verify_blocked_n != self.n:
+            elif _due and self.n > self.min_n and self._verify_blocked_n != self.n \
+                    and not (self._min_good_n is not None
+                             and (self.n - 1) < self._min_good_n):
                 # 下探验证：已在 max_n（无上探空间），降 1 档看 read 是否受损。
                 # 目的：发现"当前并发其实过高"（bench：大文件区最优 6，配置 10 时
                 # 原逻辑永远停在 10 无法验证）。降并发后若 read 明显下降 → 恢复。
+                # T4：目标档已被回退验证判有害（_min_good_n）时不重复验证——
+                # R1 打通 max_n plateau 后，否则每次漂移清锁都会白验证一轮
                 self._verify_from_n = self.n
                 self._verify_read = R_raw      # P5：参考值用原始值，与样本同口径
-                self._verify_since = now
                 self._verify_samples = []      # 收集原始 read（EWMA 会掩盖降幅）
                 self.state = 'VERIFY'
                 act, why = '-1', f'下探验证({self.n}→{self.n-1},基线{R:.0f})'
@@ -396,10 +405,12 @@ class VegasNasController:
                                         f'保持 {self.n}')
         # 快速保护（任何状态）
         # ① 阵列层：util 打满且排队恶化（bench 实战验证有效）。
-        #    与 pressure 判据一样加跳过期：U/A 是 370s 滑窗中位数（滞后指标），
-        #    不跳会一次饱和事件连降 3~4 档（P1，与 pressure 连降同类缺陷）
+        #    T1：两个保护共享跳过期（任一触发两个都跳），否则一次真实饱和事件
+        #    被 fastp/pressure 交替放行连降 3 档（三轮复审）
+        #    T3：只在 act=='hold' 时触发——不能覆盖 '+1' 恢复判定（否则
+        #    验证判有害设了锁、n 却被保护反降一档，锁不变量当场破坏）
         if U >= FASTP_UTIL and A >= FASTP_AWAIT and self.n > self.min_n \
-                and act not in ('-1',) and now >= self._fastp_skip_until:
+                and act == 'hold' and now >= self._fastp_skip_until:
             if self.state in ('VERIFY', 'POST_ROLLBACK'):
                 # R4：在飞验证被保护打断必须显式作废（否则降档既无 verdict
                 # 也无锁，同一档位的误判会原样再来一次）
@@ -409,7 +420,7 @@ class VegasNasController:
                 why_note = ''
             self.state = 'COOLDOWN'
             self._cooldown = 1
-            self._fastp_skip_until = now + 2 * PERIOD
+            self._skip_protections(now)
             act, why = '-1', f'快速保护(util={U},await={A}){why_note}'
         # ② 物理盘层：disk_api 的 pressure 判定为 saturated（sata util≥95 且
         #    await≥20 或队列≥20）。阵列缓存会掩盖物理盘延迟，只看 md2 会漏
@@ -417,7 +428,7 @@ class VegasNasController:
         #    util 88~100%）。窗口内过半采样饱和才降，避免单点尖峰误触发。
         #    降档后 pressure 是 360s 窗口的**滞后指标**，须跳过 2 个周期再判，
         #    否则窗口内残留的饱和样本会让 Vegas 一路连降（2026-10-26 实测 7→6→5）。
-        if act not in ('-1',) and self.n > self.min_n and now >= self._pressure_skip_until:
+        if act == 'hold' and self.n > self.min_n and now >= self._pressure_skip_until:
             _press = [s.get('pressure') for s in win if s.get('pressure')]
             if _press:
                 _sat = _press.count('saturated')
@@ -429,7 +440,7 @@ class VegasNasController:
                         why_note = ''
                     self.state = 'COOLDOWN'
                     self._cooldown = 1
-                    self._pressure_skip_until = now + 2 * PERIOD
+                    self._skip_protections(now)
                     act, why = '-1', (f'物理盘饱和(pressure saturated '
                                       f'{_sat}/{len(_press)}){why_note}')
 
