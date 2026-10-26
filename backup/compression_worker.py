@@ -450,7 +450,9 @@ class CompressionWorker:
                         # 并发范围热更新：UI 改 COMPRESSION_PARALLEL_BATCHES 后
                         # 控制器的 max_n 需跟随，否则永远上探不到新上限
                         _new_max = max(self.base_parallel_batches, 8)
-                        _new_min = max(2, self._vegas_min)
+                        _new_min = max(2, self._vegas_min,
+                                       max(1, self.base_parallel_batches
+                                           - int(self.batches_reduction or 0)))
                         if ctrl.max_n != _new_max or ctrl.min_n != _new_min:
                             ctrl.max_n = _new_max
                             ctrl.min_n = _new_min
@@ -536,13 +538,23 @@ class CompressionWorker:
             sampler = NasSignalSampler(url, key)
             sampler.start()
             self._vegas_nas_sampler = sampler
+            # 下限兜底：不得低于"扫描期实际并发"（并行批次 - 扫描减批）。
+            # UI 已做同样校验，这里再兜一层——老 .env 里可能仍是旧的低值（4），
+            # 不兜底会让 Vegas 把并发压到扫描配额以下（2026-10-26 实测 5→4 后
+            # read -38%）。
+            _floor_by_scan = max(1, base - int(self.batches_reduction or 0))
+            _eff_min = max(2, self._vegas_min, _floor_by_scan)
             self._vegas_nas = VegasNasController(
                 sampler,
                 start_n=base,                 # 从配置并发起步自主调节
-                min_n=max(2, self._vegas_min),
+                min_n=_eff_min,
                 max_n=max(base, 8),           # bench 标定：两形态区最优 5~6，8 封顶
                 log=lambda m: logger.warning(m),
             )
+            if _eff_min != self._vegas_min:
+                logger.warning(
+                    f"[VegasNAS] 自适应下限由配置 {self._vegas_min} 提升为 {_eff_min}"
+                    f"（= 并行批次 {base} - 扫描减批 {self.batches_reduction}）")
             logger.warning(f"[VegasNAS] 启用 nas_api 信号源: {url[:48]}… "
                         f"(start={base}, min={self._vegas_nas.min_n}, max={self._vegas_nas.max_n})")
             return self._vegas_nas

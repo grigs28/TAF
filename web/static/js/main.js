@@ -351,3 +351,17 @@ function initLogoutButton() {
         });
     }
 }
+/**
+ * 禁用 number 输入框的滚轮调值（全站）
+ *
+ * 浏览器默认行为：number 输入框聚焦时滚动鼠标滚轮会改变数值。
+ * 配置页表单很长，用户滚动页面时容易误改参数（且不易察觉）。
+ * 处理：滚轮事件发生时若当前焦点在 number 输入框，直接失焦，
+ * 让滚轮恢复为正常的页面滚动。
+ */
+document.addEventListener('wheel', function () {
+    const el = document.activeElement;
+    if (el && el.tagName === 'INPUT' && el.type === 'number') {
+        el.blur();
+    }
+}, { passive: true });

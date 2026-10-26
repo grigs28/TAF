@@ -647,9 +647,14 @@ document.addEventListener('DOMContentLoaded', function () {
 //   β    —— 约 N/3，限 [2,5]，且保证快速闸 2β < N（否则快速闸永远不触发）
 //   decay—— 约 3 档从 N 降到下限：decay = (min/N)^(1/3)
 //   min  —— 约 N/4（1~4），并发很低时允许降到 1
-function vegasRecommend(N) {
+function vegasRecommend(N, reduction) {
     N = Math.max(1, parseInt(N, 10) || 6);
-    let minB = Math.min(N, Math.max(1, Math.min(4, Math.round(N / 4))));
+    const red = Math.max(0, parseInt(reduction, 10) || 0);
+    // 下限不得低于"扫描期实际并发"（并行批次 - 扫描减批）：否则扫描与压缩
+    // 并发期间 Vegas 会把并发压到扫描期配额以下，压缩过慢拖垮写带
+    const floorByScan = Math.max(1, N - red);
+    let minB = Math.max(floorByScan,
+                        Math.min(N, Math.max(1, Math.min(4, Math.round(N / 4)))));
     let beta = Math.min(5, Math.max(2, Math.round((N / 3) * 2) / 2));
     if (N <= 3) {
         beta = 1;
@@ -662,12 +667,16 @@ function vegasRecommend(N) {
     // α 约为 β/3（保持“维持区”宽度），限 [0.5, 2.0]
     let alpha = Math.round((beta / 3) * 10) / 10;
     alpha = Math.max(0.5, Math.min(2.0, alpha));
-    return { beta: beta, alpha: alpha, decay: decay, minB: minB, concurrency: N };
+    return { beta: beta, alpha: alpha, decay: decay, minB: minB,
+             concurrency: N, floorByScan: floorByScan };
 }
 
 function updateVegasRecommend() {
     const nEl = document.getElementById('compressionParallelBatches');
-    const r = vegasRecommend(nEl ? parseInt(nEl.value, 10) : 6);
+    const redEl = document.getElementById('compressionBatchesReduction');
+    const _N = nEl ? parseInt(nEl.value, 10) : 6;
+    const _red = redEl ? parseInt(redEl.value, 10) : 0;
+    const r = vegasRecommend(_N, _red);
     // nas_api 信号源下 α/β/decay/min 全部不生效（v2 状态机用自标定阈值），
     // 推荐值一并标注不适用，避免误导调参
     const sigEl = document.getElementById('vegasSignalSource');
@@ -677,10 +686,12 @@ function updateVegasRecommend() {
         if (el) el.textContent = text;
     };
     if (nasMode) {
+        // nas_api 模式下 α/β/decay 由状态机自标定、不生效；但**下限仍生效**，
+        // 用于限制 Vega 最低并发（不得低于扫描期实际并发）
         setText('vegasBetaRecommend', '—（NAS API 模式不适用）');
         setText('vegasAlphaRecommend', '—（NAS API 模式不适用）');
         setText('vegasDecayRecommend', '—（NAS API 模式不适用）');
-        setText('vegasMinRecommend', '—（NAS API 模式不适用）');
+        setText('vegasMinRecommend', String(r.minB));
         return;
     }
     const betaEl = document.getElementById('vegasBetaRecommend');
@@ -698,17 +709,41 @@ function updateVegasRecommend() {
     setText('vegasMinRecommend', String(r.minB));
 }
 
-// 信号源联动：nas_api 时 α/β/decay/min 置灰（数值保留、不再生效）
+// 信号源联动：nas_api 时 α/β/decay 置灰（仅 internal 信号生效），
+// 但"自适应并发下限"在两种模式下都生效（nas_api 用它控制 Vegas 最低并发）
 function applyVegasSignalEditability() {
     const sigEl = document.getElementById('vegasSignalSource');
     const nasMode = sigEl && sigEl.value === 'nas_api';
-    ['vegasAlpha', 'vegasBeta', 'vegasDecay', 'vegasMinBatches'].forEach(function (id) {
+    ['vegasAlpha', 'vegasBeta', 'vegasDecay'].forEach(function (id) {
         const el = document.getElementById(id);
         if (el) el.disabled = !!nasMode;
     });
+    // 下限始终可编辑
+    const minEl = document.getElementById('vegasMinBatches');
+    if (minEl) minEl.disabled = false;
     const applyBtn = document.getElementById('applyVegasRecommend');
     if (applyBtn) applyBtn.disabled = !!nasMode;
     updateVegasRecommend();
+}
+
+// 校验：自适应并发下限 >= 并行批次 - 扫描减批（扫描期实际并发）
+function validateVegasMin() {
+    const nEl = document.getElementById('compressionParallelBatches');
+    const redEl = document.getElementById('compressionBatchesReduction');
+    const minEl = document.getElementById('vegasMinBatches');
+    if (!minEl) return true;
+    const N = parseInt(nEl ? nEl.value : 10, 10) || 10;
+    const red = parseInt(redEl ? redEl.value : 0, 10) || 0;
+    const floor = Math.max(1, N - red);
+    const v = parseInt(minEl.value, 10) || 0;
+    if (v < floor) {
+        alert(`自适应并发下限不能低于 ${floor}（并行批次 ${N} - 扫描减批 ${red}）\n`
+              + `否则扫描与压缩并发期间，Vegas 会把并发压到扫描期配额以下，压缩过慢拖垮写带。`);
+        minEl.value = floor;
+        updateVegasRecommend();
+        return false;
+    }
+    return true;
 }
 
 document.addEventListener('DOMContentLoaded', function () {
@@ -717,13 +752,20 @@ document.addEventListener('DOMContentLoaded', function () {
         nEl.addEventListener('change', updateVegasRecommend);
         nEl.addEventListener('input', updateVegasRecommend);
     }
+    const redEl = document.getElementById('compressionBatchesReduction');
+    if (redEl) {
+        redEl.addEventListener('change', updateVegasRecommend);
+        redEl.addEventListener('input', updateVegasRecommend);
+    }
     const sigSel = document.getElementById('vegasSignalSource');
     if (sigSel) sigSel.addEventListener('change', applyVegasSignalEditability);
     const applyBtn = document.getElementById('applyVegasRecommend');
     if (applyBtn) {
         applyBtn.addEventListener('click', function () {
             const nEl2 = document.getElementById('compressionParallelBatches');
-            const r = vegasRecommend(nEl2 ? parseInt(nEl2.value, 10) : 6);
+            const redEl2 = document.getElementById('compressionBatchesReduction');
+            const r = vegasRecommend(nEl2 ? parseInt(nEl2.value, 10) : 6,
+                                     redEl2 ? parseInt(redEl2.value, 10) : 0);
             const setVal = (id, v) => {
                 const el = document.getElementById(id);
                 if (el) el.value = v;
@@ -1229,6 +1271,10 @@ async function saveEnvConfigSection() {
 
 async function saveAllSystemConfig() {
     try {
+        // 保存前校验：自适应并发下限 >= 并行批次 - 扫描减批
+        if (typeof validateVegasMin === 'function' && !validateVegasMin()) {
+            throw new Error('自适应并发下限不合法，已修正为最小值，请确认后重新保存');
+        }
         await saveEnvConfigSection();
         await saveDatabaseConfigSection();
         await saveNotificationSection();
