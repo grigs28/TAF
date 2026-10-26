@@ -158,6 +158,13 @@ class VegasNasController:
         self._verify_from_n = None
         self._rollback_from_n = None
 
+    def clamp_locks(self):
+        """把验证锁钳制到当前上限内（G2：范围变化/恢复判定三路共用）"""
+        if self._min_good_n is not None and self._min_good_n > self.max_n:
+            self._min_good_n = self.max_n
+        if self._verify_blocked_n is not None and self._verify_blocked_n > self.max_n:
+            self._verify_blocked_n = self.max_n
+
     def _skip_protections(self, now: float):
         """任一保护触发时同时跳过期生效（T1）：
         fastp/pressure 两个保护的跳过期若各自独立，一次真实饱和事件会被两个
@@ -343,6 +350,7 @@ class VegasNasController:
                 if _ref > 0 and _med < _ref * 0.90:
                     # 降档后 read 下降 >10% → 回退错误，恢复原并发并锁定该值
                     self._min_good_n = self._rollback_from_n
+                    self._rollback_from_n = None   # G3：verdict 完成后清 from 字段
                     self.state = 'STABLE'
                     self._stable_since = now
                     self._probe_base = R
@@ -350,6 +358,7 @@ class VegasNasController:
                                       f'{(1-_med/_ref)*100:.0f}%),恢复{self._rollback_from_n}')
                 else:
                     # 降档无损 → 保持更低并发
+                    self._rollback_from_n = None   # G3
                     self.state = 'STABLE'
                     self._stable_since = now
                     self._probe_base = R
@@ -398,6 +407,7 @@ class VegasNasController:
                 if _drop > 0.05:
                     # 降并发导致 read 明显下降 → 原并发更优，恢复并锁定不再验证该值
                     self._verify_blocked_n = self._verify_from_n
+                    self._verify_from_n = None     # G3
                     self.state = 'PROBING'
                     self._probe_base = R
                     self._plateau = 0
@@ -406,6 +416,7 @@ class VegasNasController:
                 else:
                     # 降并发 read 无明显损失 → 保持更低并发，延长稳定期后再验证
                     self._verify_blocked_n = None
+                    self._verify_from_n = None     # G3
                     self.state = 'STABLE'
                     self._stable_since = now
                     self._probe_base = R
@@ -453,13 +464,10 @@ class VegasNasController:
                                       f'{_sat}/{len(_press)}){why_note}')
 
         if act == '+1':
-            # F6：恢复到 from_n 时不得越过当前 max_n（热更新可能在验证期间
-            # 把上限降到 from_n 之下）；下限/上限范围内的锁同步钳制
+            # F6/G2：恢复到 from_n 时不得越过当前 max_n（热更新可能在验证期间
+            # 把上限降到 from_n 之下）；锁统一走 clamp_locks()
             self.n = min(self.n + 1, self.max_n)
-            if self._min_good_n is not None and self._min_good_n > self.max_n:
-                self._min_good_n = self.max_n
-            if self._verify_blocked_n is not None and self._verify_blocked_n > self.max_n:
-                self._verify_blocked_n = self.max_n
+            self.clamp_locks()
         elif act == '-1' and self.n > self.min_n:
             self.n -= 1     # 收敛式：调用方按完成即不补实现平滑缩容
 

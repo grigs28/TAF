@@ -79,6 +79,7 @@ class CompressionWorker:
         self._vegas_nas = None          # VegasNasController（nas_api 模式惰性创建）
         self._vegas_nas_sampler = None  # NasSignalSampler（任务级共享，见 _ensure_vegas_nas）
         self._vegas_nas_lost_logged = False  # API 失联回退日志只打一次
+        self._vegas_nas_stopped = False      # G5：任务停止后置位；start() 复位
         self._vegas_alpha = float(getattr(settings, 'GROUP_VEGAS_ALPHA', 1.0) or 1.0)
         self._vegas_beta = float(getattr(settings, 'GROUP_VEGAS_BETA', 3.0) or 3.0)
         self._vegas_decay = float(getattr(settings, 'GROUP_VEGAS_DECAY', 0.7) or 0.7)
@@ -169,6 +170,7 @@ class CompressionWorker:
         """启动压缩处理任务"""
         if self._running:
             return
+        self._vegas_nas_stopped = False      # G5：重新开始时允许 nas_api 重建
 
         try:
             # 检查是否有运行中的事件循环
@@ -472,6 +474,9 @@ class CompressionWorker:
                                 ctrl._plateau = 0
                                 ctrl._drift_reads = []
                                 ctrl._read_ewma = None
+                                # G2：钳制 n 的分支也钳锁（F6b 只覆盖 n 未变，
+                                # 锁钳制收敛到 ctrl.clamp_locks() 三路共用）
+                                ctrl.clamp_locks()
                                 if ctrl.state in ('VERIFY', 'POST_ROLLBACK'):
                                     ctrl._abort_verification()
                                     ctrl.state = 'STABLE'
@@ -479,19 +484,17 @@ class CompressionWorker:
                                     logger.warning("[VegasNAS] 范围热更新钳制 n，"
                                                    "在飞验证作废（不设锁）")
                             else:
-                                # F6b：n 未变但新上限降到 from_n 之下时，在飞验证的
-                                # 恢复目标已越界——作废并钳制锁，否则 verdict 会把
-                                # n 恢复到新上限之上且 _min_good_n>max_n 锁死下探
-                                _from = ctrl._verify_from_n or ctrl._rollback_from_n
+                                # F6b/G3：n 未变但新上限降到 from_n 之下时，在飞验证的
+                                # 恢复目标已越界——作废并钳锁；按 state 取对应字段，
+                                # 不用 or（verdict 完成已清 from，or 会读另一只验证的陈旧值）
+                                _from = (ctrl._verify_from_n if ctrl.state == 'VERIFY'
+                                         else ctrl._rollback_from_n)
                                 if ctrl.state in ('VERIFY', 'POST_ROLLBACK') \
                                         and _from is not None and _new_max < _from:
                                     ctrl._abort_verification()
                                     ctrl.state = 'STABLE'
                                     ctrl._stable_since = time.time()
-                                    if ctrl._min_good_n is not None and ctrl._min_good_n > _new_max:
-                                        ctrl._min_good_n = _new_max
-                                    if ctrl._verify_blocked_n is not None and ctrl._verify_blocked_n > _new_max:
-                                        ctrl._verify_blocked_n = _new_max
+                                    ctrl.clamp_locks()                 # G2：共享方法
                                     logger.warning("[VegasNAS] 范围热更新使验证恢复目标越界，"
                                                    "在飞验证作废、锁已钳制")
                             logger.warning(
@@ -570,11 +573,10 @@ class CompressionWorker:
             eff_min = max(1, eff_max - 1)    # 下限不得吞掉上限，至少留 1 档
         return eff_min, eff_max
 
-    def _teardown_vegas_nas(self):           # F9：reset_alerts 死参数已删
-        """拆除 nas_api 信号源（停采样线程、清控制器）。
+    def _teardown_vegas_nas(self):
+        """拆除 nas_api 信号源（停采样线程、清控制器、重置告警缓存）。
 
-        T8：信号源切换/URL 重建/任务结束/ensure 收尾四处共用，
-        拆除与告警缓存重置语义统一。"""
+        T8/G1：信号源切换/URL 重建/任务结束/ensure 收尾四处共用。"""
         if self._vegas_nas_sampler is not None:
             try:
                 self._vegas_nas_sampler.stop()
@@ -582,10 +584,9 @@ class CompressionWorker:
                 pass
         self._vegas_nas_sampler = None
         self._vegas_nas = None
-        if reset_alerts:
-            self._vegas_nas_no_url_logged = None
-            self._vegas_nas_fail_logged = False
-            self._vegas_nas_lost_logged = False
+        self._vegas_nas_no_url_logged = None
+        self._vegas_nas_fail_logged = False
+        self._vegas_nas_lost_logged = False
 
     def _ensure_vegas_nas(self):
         """nas_api 信号源惰性初始化（URL 为空/导入失败 → 返回 None 回退 internal）"""
@@ -612,13 +613,14 @@ class CompressionWorker:
             base = max(1, self.base_parallel_batches)
             sampler = NasSignalSampler(url, key)
             sampler._api_key = key        # F3：记录 key 供热修改检测
-            # F7：先构造控制器（抛错不留运行中的采样线程），成功后再启动线程
-            self._vegas_nas = None
             # 下限兜底：**不得超过**"扫描期目标并发"（并行批次 - 扫描减批）。
             # 扫描期的 desired 就是这个值，下限更高会让 Vegas 的 min_n 高于
             # 实际可用并发，对齐逻辑失真（2026-10-26 核实）。
             _eff_min, _eff_max = self._vegas_nas_range()   # F8：共享公式
-            self._vegas_nas = VegasNasController(
+            # G4：先局部构造控制器，再启动线程，最后才挂到 self——
+            # start() 抛错时 except 只告警返回 None，控制器引用不会残留
+            # （否则下轮提前返回半成品：无线程、永不失联、冻结且静默）
+            _ctrl = VegasNasController(
                 sampler,
                 start_n=base,                 # 从配置并发起步自主调节
                 min_n=_eff_min,
@@ -626,6 +628,7 @@ class CompressionWorker:
                 log=lambda m: logger.warning(m),
             )
             sampler.start()
+            self._vegas_nas = _ctrl
             self._vegas_nas_sampler = sampler
             if _eff_min != self._vegas_min:
                 logger.warning(

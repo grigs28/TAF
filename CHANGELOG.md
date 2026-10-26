@@ -1,5 +1,29 @@
 # 更新日志
 
+## [1.9.87] - 2026-10-26
+
+### 修复（第五轮审查 6 项；含上轮修复引入的运行时崩溃）
+
+- **G1（致命）** `_teardown_vegas_nas` 引用已删的 `reset_alerts` 参数 → 每次拆除
+  必抛 NameError，且从引擎 finally 传播会跳过取消压缩任务/db_updater 停止/
+  杀孤儿进程等清理（残留孤儿 tar/zstd 继续读写）。删除残留引用
+- **G2** 锁钳制收敛到 `clamp_locks()` 三路共用（控制器恢复判定 / 热更新钳制 n /
+  热更新验证目标越界）——原第三处不钳锁，max_n 从 12 降到 8 后锁仍是 12，
+  plateau 回退与下探验证永久冻结
+- **G3** verdict 完成路径清 from 字段（原只有 abort 清，F6b 的 or 会读到另一只
+  验证的陈旧值）；F6b 改为按 state 取对应字段
+- **G4** _ensure 先局部构造控制器、启动线程，成功后才挂到 self——start() 失败
+  不再留半成品（原会冻结 nas_api 且永不回退、全程静默）
+- **G5** `_vegas_nas_stopped` 在 __init__ 初始化、start() 复位（stop→start 复用
+  worker 时 nas_api 不再无声消失）
+- **G6** 删除 F7 遗留死赋值 `self._vegas_nas = None`
+
+### 工具
+
+- **回归测试入仓**：`tests/vegas/test_vegas_round2~5.py` + `run_all.sh`
+  （逐轮修复的回归套件；G1 教训：此前测试从未调用 teardown 才漏掉崩溃，
+  本轮起拆除路径也有覆盖）
+
 ## [1.9.86] - 2026-10-26
 
 ### 修复（第四轮审查 10 项；含一项上轮修复引入的致命缩进回归）
