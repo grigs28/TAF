@@ -650,10 +650,10 @@ document.addEventListener('DOMContentLoaded', function () {
 function vegasRecommend(N, reduction) {
     N = Math.max(1, parseInt(N, 10) || 6);
     const red = Math.max(0, parseInt(reduction, 10) || 0);
-    // 下限不得低于"扫描期实际并发"（并行批次 - 扫描减批）：否则扫描与压缩
-    // 并发期间 Vegas 会把并发压到扫描期配额以下，压缩过慢拖垮写带
-    const floorByScan = Math.max(1, N - red);
-    let minB = Math.max(floorByScan,
+    // 下限**不能大于**"扫描期实际并发"（并行批次 - 扫描减批）：扫描期目标并发
+    // 就是这个值，若下限更高，Vegas 的 min_n 会高于实际可用并发，对齐逻辑失真
+    const capByScan = Math.max(1, N - red);
+    let minB = Math.min(capByScan,
                         Math.min(N, Math.max(1, Math.min(4, Math.round(N / 4)))));
     let beta = Math.min(5, Math.max(2, Math.round((N / 3) * 2) / 2));
     if (N <= 3) {
@@ -668,7 +668,7 @@ function vegasRecommend(N, reduction) {
     let alpha = Math.round((beta / 3) * 10) / 10;
     alpha = Math.max(0.5, Math.min(2.0, alpha));
     return { beta: beta, alpha: alpha, decay: decay, minB: minB,
-             concurrency: N, floorByScan: floorByScan };
+             concurrency: N, capByScan: capByScan };
 }
 
 function updateVegasRecommend() {
@@ -726,7 +726,7 @@ function applyVegasSignalEditability() {
     updateVegasRecommend();
 }
 
-// 校验：自适应并发下限 >= 并行批次 - 扫描减批（扫描期实际并发）
+// 校验：自适应并发下限不能大于并行批次 - 扫描减批（扫描期实际并发）
 function validateVegasMin() {
     const nEl = document.getElementById('compressionParallelBatches');
     const redEl = document.getElementById('compressionBatchesReduction');
@@ -734,12 +734,13 @@ function validateVegasMin() {
     if (!minEl) return true;
     const N = parseInt(nEl ? nEl.value : 10, 10) || 10;
     const red = parseInt(redEl ? redEl.value : 0, 10) || 0;
-    const floor = Math.max(1, N - red);
+    const cap = Math.max(1, N - red);
     const v = parseInt(minEl.value, 10) || 0;
-    if (v < floor) {
-        alert(`自适应并发下限不能低于 ${floor}（并行批次 ${N} - 扫描减批 ${red}）\n`
-              + `否则扫描与压缩并发期间，Vegas 会把并发压到扫描期配额以下，压缩过慢拖垮写带。`);
-        minEl.value = floor;
+    if (v > cap) {
+        alert(`自适应并发下限不能大于 ${cap}（并行批次 ${N} - 扫描减批 ${red}）\n`
+              + `扫描期的目标并发就是 ${cap}，下限更高会导致 Vegas 的并发下限`
+              + `高于实际可用并发。`);
+        minEl.value = cap;
         updateVegasRecommend();
         return false;
     }
@@ -1271,9 +1272,9 @@ async function saveEnvConfigSection() {
 
 async function saveAllSystemConfig() {
     try {
-        // 保存前校验：自适应并发下限 >= 并行批次 - 扫描减批
+        // 保存前校验：自适应并发下限 <= 并行批次 - 扫描减批
         if (typeof validateVegasMin === 'function' && !validateVegasMin()) {
-            throw new Error('自适应并发下限不合法，已修正为最小值，请确认后重新保存');
+            throw new Error('自适应并发下限不合法，已修正为上限值，请确认后重新保存');
         }
         await saveEnvConfigSection();
         await saveDatabaseConfigSection();

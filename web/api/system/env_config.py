@@ -401,17 +401,17 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
         if config.group_vegas_min_batches is not None:
             if config.group_vegas_min_batches < 1 or config.group_vegas_min_batches > 64:
                 raise ValueError("自适应并发下限必须在 1-64 之间")
-            # 下限不得低于"扫描期实际并发"（并行批次 - 扫描减批）：
-            # 否则扫描与压缩并发期间 Vegas 会把并发压到扫描配额以下，
-            # 压缩过慢拖垮写带（2026-10-26 任务 166 实测降到 4 后 read -38%）
+            # 下限**不能大于**"扫描期目标并发"（并行批次 - 扫描减批）：
+            # 扫描期的 desired 就是这个值；下限更高会让 Vegas 的 min_n
+            # 高于实际可用并发，对齐逻辑失真（2026-10-26 生产核实）
             _base = int(updates.get("COMPRESSION_PARALLEL_BATCHES")
                         or env_vars.get("COMPRESSION_PARALLEL_BATCHES", 10) or 10)
             _red = int(updates.get("COMPRESSION_BATCHES_REDUCTION")
                        or env_vars.get("COMPRESSION_BATCHES_REDUCTION", 0) or 0)
-            _floor = max(1, _base - _red)
-            if config.group_vegas_min_batches < _floor:
+            _cap = max(1, _base - _red)
+            if config.group_vegas_min_batches > _cap:
                 raise ValueError(
-                    f"自适应并发下限不能低于 {_floor}"
+                    f"自适应并发下限不能大于 {_cap}"
                     f"（并行批次 {_base} - 扫描减批 {_red}）")
             updates["GROUP_VEGAS_MIN_BATCHES"] = str(config.group_vegas_min_batches)
         if config.nas_api_url is not None:
