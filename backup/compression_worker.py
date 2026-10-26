@@ -329,6 +329,12 @@ class CompressionWorker:
                         # 展示值重置：重开前卡片显示“无基准”，避免旧健康度误导
                         self._vegas_rate_ewma = 0.0
                         self._vegas_base = 0.0
+                        # I1：nas_api 模式下关闭也必须拆除采样线程与控制器——
+                        # 否则线程每 10s 空转到任务结束；且控制器基线/EWMA/
+                        # 稳定计时冻结，重开瞬间用陈旧状态决策（启用即出现
+                        # 1~2 次无依据的 ±1）。拆除后重开由 _ensure 全新重建。
+                        if self._vegas_signal == 'nas_api':
+                            self._teardown_vegas_nas()
                     self._vegas_beta = float(
                         getattr(fresh_settings, 'GROUP_VEGAS_BETA', self._vegas_beta) or self._vegas_beta)
                     self._vegas_alpha = float(
@@ -458,46 +464,11 @@ class CompressionWorker:
                         self._vegas_nas_lost_logged = False
                         # 并发范围热更新：UI 改 COMPRESSION_PARALLEL_BATCHES 后
                         # 控制器的 max_n 需跟随，否则永远上探不到新上限
-                        # F8：范围规范化共享 _vegas_nas_range()（与 _ensure 同一份公式）
+                        # I3：并发范围热更新收敛为控制器方法（原 worker 开放编码
+                        # 改写 8+ 私有字段，F6b/G2/H1 三轮都在补这块的遗漏）
                         _new_min, _new_max = self._vegas_nas_range()
                         if ctrl.max_n != _new_max or ctrl.min_n != _new_min:
-                            _prev_n = ctrl.n
-                            ctrl.max_n = _new_max
-                            ctrl.min_n = _new_min
-                            ctrl.n = min(max(ctrl.n, _new_min), _new_max)
-                            # H1：范围变了就无条件钳锁（原只在"n 已钳制"或
-                            # "验证目标越界"两个子分支钳；无在飞验证时 max_n 降低
-                            # 会让 _min_good_n>max_n 残留 → 回退/下探永久冻结）
-                            ctrl.clamp_locks()
-                            # P8/R2/R3：并发范围变了基线与漂移历史必须失效
-                            # （旧基线/旧 EWMA/旧 drift 样本来自旧并发，残留会
-                            # 误判过载/假增量/假漂移并误清验证锁）
-                            if ctrl.n != _prev_n:
-                                ctrl._probe_base = None
-                                ctrl._rebuild_base = True
-                                ctrl._plateau = 0
-                                ctrl._drift_reads = []
-                                ctrl._read_ewma = None
-                                if ctrl.state in ('VERIFY', 'POST_ROLLBACK'):
-                                    ctrl._abort_verification()
-                                    ctrl.state = 'STABLE'
-                                    ctrl._stable_since = time.time()
-                                    logger.warning("[VegasNAS] 范围热更新钳制 n，"
-                                                   "在飞验证作废（不设锁）")
-                            else:
-                                # F6b/G3：n 未变但新上限降到 from_n 之下时，在飞验证的
-                                # 恢复目标已越界——作废并钳锁；按 state 取对应字段，
-                                # 不用 or（verdict 完成已清 from，or 会读另一只验证的陈旧值）
-                                _from = (ctrl._verify_from_n if ctrl.state == 'VERIFY'
-                                         else ctrl._rollback_from_n)
-                                if ctrl.state in ('VERIFY', 'POST_ROLLBACK') \
-                                        and _from is not None and _new_max < _from:
-                                    ctrl._abort_verification()
-                                    ctrl.state = 'STABLE'
-                                    ctrl._stable_since = time.time()
-                                    ctrl.clamp_locks()                 # G2：共享方法
-                                    logger.warning("[VegasNAS] 范围热更新使验证恢复目标越界，"
-                                                   "在飞验证作废、锁已钳制")
+                            ctrl.update_range(_new_min, _new_max)
                             logger.warning(
                                 f"[VegasNAS] 并发范围热更新: {_new_min}~{_new_max} "
                                 f"(当前 n={ctrl.n})")

@@ -158,6 +158,38 @@ class VegasNasController:
         self._verify_from_n = None
         self._rollback_from_n = None
 
+    def update_range(self, min_n: int, max_n: int) -> bool:
+        """热更新并发范围（I3：worker 侧对 8+ 私有字段的开放编码改写收敛于此，
+        新增内部字段不会再出现"worker 热更新块漏清"的 H1 式残留）。
+
+        返回 n 是否被钳制变化（供调用方决定日志文案）。
+        规则：钳 n → 无条件钳锁 → n 变了则基线/漂移/EWMA 失效并作废在飞验证；
+        n 未变但在飞验证的恢复目标越界（from_n > 新上限）→ 同样作废。"""
+        min_n = max(1, min_n)
+        if max_n <= min_n:
+            max_n = min_n + 1        # 构造器不变量（调用方应已规范化，这里兜底）
+        if self.min_n == min_n and self.max_n == max_n:
+            return False
+        prev_n = self.n
+        self.min_n = min_n
+        self.max_n = max_n
+        self.n = min(max(self.n, min_n), max_n)
+        self.clamp_locks()           # H1：范围变了无条件钳锁
+        if self.n != prev_n:
+            self._probe_base = None
+            self._rebuild_base = True
+            self._plateau = 0
+            self._drift_reads = []
+            with self._ewma_lock:
+                self._read_ewma = None
+        if self.state in ('VERIFY', 'POST_ROLLBACK'):
+            _from = self._verify_from_n if self.state == 'VERIFY' else self._rollback_from_n
+            if self.n != prev_n or (_from is not None and max_n < _from):
+                self._abort_verification()
+                self.state = 'STABLE'
+                self._stable_since = time.time()
+        return self.n != prev_n
+
     def clamp_locks(self):
         """把验证锁钳制到当前上限内（G2：范围变化/恢复判定三路共用）"""
         if self._min_good_n is not None and self._min_good_n > self.max_n:
@@ -325,6 +357,16 @@ class VegasNasController:
                             self._probe_base = R
                             act, why = 'hold', (f'无增量但已锁定下限({self._min_good_n})，'
                                                 f'保持 {self.n}')
+                            self._plateau = 0
+                        elif self.n <= self.min_n:
+                            # I2：已到下限——回退不会实际降档（末尾 min_n 守卫挡住），
+                            # 但验证会在同一并发上采样，噪声判"有害"后 +1 会把并发
+                            # 抬到 from_n+1（超过回退前），日志还声称"恢复from_n"。
+                            # 下限处直接保持，不进验证（与 VERIFY 的 n>min_n 守卫一致）
+                            self.state = 'STABLE'
+                            self._stable_since = now
+                            self._probe_base = R
+                            act, why = 'hold', f'无增量但已到并发下限({self.min_n})，保持'
                             self._plateau = 0
                         else:
                             self.state = 'POST_ROLLBACK'
