@@ -129,6 +129,11 @@ class VegasNasController:
         self._verify_samples = []       # 验证期原始 read 样本
         self._rebuild_base = False      # 降档后重建基线标志（不上探）
         self._pressure_skip_until = 0.0 # 物理盘饱和判据的跳过期（防滞后指标连降）
+        # 无增量回退验证（防小文件区噪声导致误降）
+        self._rollback_from_n = None
+        self._rollback_read = 0.0
+        self._rollback_samples = []
+        self._min_good_n = None         # 已验证的最小可用并发（不得再降到其下）
         self._t_next = 0.0          # 下次决策时刻（tick 节流）
         self.last_decision = None   # 供日志/诊断
 
@@ -215,7 +220,9 @@ class VegasNasController:
                     self._probe_base = None
                     self._rebuild_base = True   # 重建基线时不上探（避免降档后立即回弹）
                 self._plateau = 0
-        elif drifting and self.state not in ('STABLE', 'VERIFY'):
+        elif drifting and self.state not in ('STABLE', 'VERIFY', 'POST_ROLLBACK'):
+            # 注意：POST_ROLLBACK 必须豁免——降档后 read 下降正是要验证的信号，
+            # 被漂移检测抢走会导致回退验证失效（实测场景1）
             self.state = 'STABLE'
             self._probe_base = R
             self._stable_since = now
@@ -249,15 +256,51 @@ class VegasNasController:
             else:
                 self._plateau += 1
                 if self._plateau >= PLATEAU_MAX:
-                    # 无增量回退后转 STABLE（不连续下探）：若 NAS 已饱和、
-                    # read 与并发无关，连续"无增量"会把并发一路压到下限；
-                    # 转 STABLE 后由 8 周期定时重探验证是否需要再降。
-                    self.state = 'STABLE'
-                    self._cooldown = 1
-                    self._stable_since = None
-                    act, why = '-1', f'无增量x{self._plateau}({R:.0f}vs{self._probe_base:.0f})'
+                    # 无增量回退后转 POST_ROLLBACK 观察 2 周期：小文件区 read 噪声大，
+                    # "无增量"可能误判（实测 5→4 后 read 从 195 掉到 120，-38%）。
+                    # 2 周期后若 read 明显下降 → 降错了，恢复原并发并锁定。
+                    if self._min_good_n is not None and (self.n - 1) < self._min_good_n:
+                        # 该并发已验证不可降（降了会掉吞吐），保持
+                        self.state = 'STABLE'
+                        self._stable_since = now
+                        self._probe_base = R
+                        act, why = 'hold', (f'无增量但已锁定下限({self._min_good_n})，'
+                                            f'保持 {self.n}')
+                        self._plateau = 0
+                    else:
+                        self.state = 'POST_ROLLBACK'
+                        self._cooldown = 1
+                        self._stable_since = None
+                        self._rollback_from_n = self.n
+                        self._rollback_read = R
+                        self._rollback_samples = []
+                        act, why = '-1', f'无增量x{self._plateau}({R:.0f}vs{self._probe_base:.0f})'
                 else:
                     act, why = 'hold', f'观察中({R:.0f}vs{self._probe_base:.0f})'
+        elif self.state == 'POST_ROLLBACK':
+            # 回退验证：收集 2 个周期的原始 read，判断降档是否损害吞吐
+            self._rollback_samples.append(R_raw)
+            if len(self._rollback_samples) < 2:
+                act, why = 'hold', (f'回退观察({self.n},原读{self._rollback_read:.0f},'
+                                    f'样本{len(self._rollback_samples)}/2)')
+            else:
+                _ref = self._rollback_read or 0
+                _med = sorted(self._rollback_samples)[len(self._rollback_samples) // 2]
+                if _ref > 0 and _med < _ref * 0.90:
+                    # 降档后 read 下降 >10% → 回退错误，恢复原并发并锁定该值
+                    self._min_good_n = self._rollback_from_n
+                    self.state = 'STABLE'
+                    self._stable_since = now
+                    self._probe_base = R
+                    act, why = '+1', (f'回退验证:降档有害(原始中位{_med:.0f}比{_ref:.0f}低'
+                                      f'{(1-_med/_ref)*100:.0f}%),恢复{self._rollback_from_n}')
+                else:
+                    # 降档无损 → 保持更低并发
+                    self.state = 'STABLE'
+                    self._stable_since = now
+                    self._probe_base = R
+                    act, why = 'hold', (f'回退验证:降档无损(原始中位{_med:.0f}≈{_ref:.0f}),'
+                                        f'保持 {self.n}')
         elif self.state == 'STABLE':
             if self._stable_since is None:
                 self._stable_since = now      # 冷却结束首次进入，开始计时
@@ -348,7 +391,7 @@ class VegasNasController:
         }
         # 日志：动作/探测期/形态漂移/到上限 均需可见（运维判断依据）
         if act != 'hold' or self.state == 'PROBING' or '漂移' in why or '到上限' in why \
-                or '快速保护' in why or '验证' in why:
+                or '快速保护' in why or '验证' in why or '回退' in why:
             self.log(f"[VegasNAS] n={prev_n}→{self.n} read={R:.0f}(原始{R_raw:.0f})MB/s "
                      f"util={U}% await={A}ms 基线{self._probe_base or 0:.0f} "
                      f"→ {act} ({why})")
