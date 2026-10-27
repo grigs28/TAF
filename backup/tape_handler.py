@@ -795,23 +795,43 @@ class TapeHandler:
             return False
 
     async def _wait_index_ready(self, mount_point: Path, timeout: float = 300.0) -> bool:
-        """等待 LTFS 索引加载完成（.LTFS 元数据目录出现）。
+        """等待 LTFS 挂载真正可用（多信号探活）。
 
-        `mount_point.is_mount()` 只代表 FUSE 挂载完成，索引是后台读的：
-        9TB 带子（1169 个归档）读索引要 1~3 分钟，这期间目录是空的。
-        若此时就返回"挂载成功"，上层立刻统计归档会得到 0 个，
-        进而误报"磁带上未发现归档文件（请确认装载的磁带是否正确）"
-        （2026-10-26 19:03 实测：第 2 次重试 4 秒就 is_mount()，
-        挂载点连 .LTFS 都没有）。
+        就绪判定（满足全部）：
+          ① 挂载点仍挂载（is_mount）
+          ② 根目录 readdir 不抛异常——LTFS 的目录列表由内存索引直接服务，
+             能列目录即索引已加载；守护进程死亡会抛 OSError
+             （Transport endpoint is not connected），立即判失败
+          ③ df 容量 > 0（守护进程应答证明；失败不阻塞，仅记录）
+
+        为什么不能等 .LTFS 目录：LTFS 把它隐藏了，永不出现
+        （2026-10-27 实测：健康挂载等满 300s 被误判失败）。
+        为什么不能以内容有无论成败：空带 ls 返回空是合法状态。
+        另注：LTFS 是索引加载完成后才把 FUSE 挂上来的，is_mount() 变 True
+        时索引已在内存——这里的 readdir 是响应性确认，不是等加载。
         """
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                if (Path(mount_point) / '.LTFS').exists():
-                    return True
+                if not mount_point.is_mount():
+                    return False
+                # readdir 探活（放线程避免阻塞事件循环）
+                await asyncio.to_thread(lambda: list(mount_point.iterdir()))
+                # df 辅助确认（statfs 由守护进程应答）
+                try:
+                    usage = await asyncio.to_thread(shutil.disk_usage, str(mount_point))
+                    if usage.total <= 0:
+                        logger.warning("[挂载重试] df 容量为 0（守护进程应答异常），继续等待")
+                        await asyncio.sleep(2)
+                        continue
+                except Exception:
+                    pass  # df 失败不阻塞：readdir 已过即可用
+                return True
             except OSError:
-                pass
-            await asyncio.sleep(2)
+                # FUSE 接管初瞬间可能瞬断，短暂重试；持续抛错则超时失败
+                await asyncio.sleep(2)
+            except Exception:
+                await asyncio.sleep(2)
         return False
 
     async def mount_with_retry(self, backup_task=None, max_retries: int = 3, retry_interval: int = 30) -> Tuple[bool, str]:

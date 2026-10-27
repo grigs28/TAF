@@ -48,12 +48,22 @@ OP_STAGE_KEYWORDS = [
     ("验证", "verify"),
 ]
 
-# 验证任务阶段流程（两阶段）
+# 验证任务阶段流程（四阶段：装带→挂载→扫描→验证）
 VERIFY_STAGE_FLOW_DEFINITION = [
+    ("load_tape", "加载磁带"),
+    ("mount_tape", "挂载磁带"),
+    ("scan", "扫描文件"),
+    ("verify", "验证完整性"),
+]
+# 目录验证阶段流程（三阶段：解析路径→扫描→验证；无磁带环节）
+DIR_VERIFY_STAGE_FLOW_DEFINITION = [
+    ("resolve", "解析路径"),
     ("scan", "扫描文件"),
     ("verify", "验证完整性"),
 ]
 VERIFY_STAGE_LABELS = {
+    "load_tape": "加载磁带",
+    "mount_tape": "挂载磁带",
     "scan": "扫描文件",
     "verify": "验证完整性",
     "waiting": "等待开始",
@@ -61,6 +71,9 @@ VERIFY_STAGE_LABELS = {
     "failed": "任务失败",
 }
 VERIFY_OP_STAGE_KEYWORDS = [
+    ("加载磁带", "load_tape"),
+    ("挂载磁带", "mount_tape"),
+    ("挂载", "mount_tape"),
     ("扫描", "scan"),
     ("验证", "verify"),
     ("完成", "verify"),
@@ -87,7 +100,7 @@ def _normalize_status_value(value: Any) -> str:
     return str(value).lower()
 
 
-def _build_stage_info(description: Optional[str], scan_status: Optional[str], status_value: str, operation_stage: Optional[str] = None, current_compression_progress: Optional[Dict[str, Any]] = None, final_dir_has_files: Optional[bool] = None, prefetch_done: bool = False, compression_completed: Optional[bool] = None, task_type: Optional[str] = None, prefetch_started: bool = False) -> Dict[str, Any]:
+def _build_stage_info(description: Optional[str], scan_status: Optional[str], status_value: str, operation_stage: Optional[str] = None, current_compression_progress: Optional[Dict[str, Any]] = None, final_dir_has_files: Optional[bool] = None, prefetch_done: bool = False, compression_completed: Optional[bool] = None, task_type: Optional[str] = None, prefetch_started: bool = False, verify_type: Optional[str] = None) -> Dict[str, Any]:
     """构建阶段信息
 
     Args:
@@ -195,37 +208,61 @@ def _build_stage_info(description: Optional[str], scan_status: Optional[str], st
     compress_done_flag = scan_done and prefetch_done_flag and bool(compression_completed)
     # copy_done: final_dir 无文件 + 上游全部完成（由任务完成逻辑判定，这里只判断显示状态）
 
-    # 验证任务使用两阶段流（扫描→验证）
+    # 验证任务使用四阶段流（装带→挂载→扫描→验证）
     is_verify = (task_type or "").lower() == "verify"
 
     if is_verify:
-        # 验证任务的两阶段流程
-        for code, label in VERIFY_STAGE_FLOW_DEFINITION:
-            if code == "scan":
-                if is_success or scan_done:
-                    label = "扫描完成"
-                    step_status = "completed"
-                elif is_failed:
-                    step_status = "completed" if scan_done else "failed"
-                elif is_running:
-                    label = "扫描文件"
-                    step_status = "active"
-                else:
-                    step_status = "pending"
-            elif code == "verify":
-                if is_success:
+        # 磁带验证四阶段（装带→挂载→扫描→验证）；目录验证三阶段（解析→扫描→验证）。
+        # 以 operation_stage 定位当前阶段（验证处理器逐阶段写库）；
+        # 之前的阶段视为已完成，之后为 pending。
+        is_tape_verify = (verify_type or "").lower() == "tape"
+        flow_def = VERIFY_STAGE_FLOW_DEFINITION if is_tape_verify else DIR_VERIFY_STAGE_FLOW_DEFINITION
+        flow_codes = [c for c, _ in flow_def]
+        cur_stage = (operation_stage or "").lower()
+        # 目录验证不写装带/挂载阶段；磁带验证不写 resolve。
+        # 若 operation_stage 落在另一条流的阶段上（历史任务/类型不明），回退到通用映射
+        if cur_stage in flow_codes:
+            cur_idx = flow_codes.index(cur_stage)
+        else:
+            cur_idx = {'load_tape': 0, 'mount_tape': 1, 'resolve': 0,
+                       'scan': flow_codes.index('scan'), 'verify': flow_codes.index('verify')
+                       }.get(cur_stage, -1)
+
+        for idx, (code, label) in enumerate(flow_def):
+            if is_success:
+                step_status = "completed"
+                if code == "verify":
                     label = "验证完成"
+            elif is_failed:
+                if cur_idx >= 0 and idx < cur_idx:
                     step_status = "completed"
-                elif is_failed:
-                    label = "验证失败"
+                elif idx == cur_idx:
                     step_status = "failed"
-                elif is_running and scan_done:
-                    label = "验证文件中"
-                    step_status = "active"
-                elif is_running:
-                    step_status = "pending"
+                    if code == "verify":
+                        label = "验证失败"
                 else:
-                    step_status = "pending"
+                    # 失败时若无法定位当前阶段，按 scan_done 兜底
+                    step_status = "failed" if (cur_idx < 0 and idx == 0) else "pending"
+            elif is_running:
+                if cur_idx >= 0:
+                    if idx < cur_idx:
+                        step_status = "completed"
+                        if code == "scan":
+                            label = "扫描完成"
+                    elif idx == cur_idx:
+                        step_status = "active"
+                        label = {
+                            "load_tape": "加载磁带中",
+                            "mount_tape": "挂载磁带中",
+                            "resolve": "解析路径中",
+                            "scan": "扫描文件中",
+                            "verify": "验证文件中",
+                        }.get(code, label)
+                    else:
+                        step_status = "pending"
+                else:
+                    # 还没写 operation_stage（刚创建）：第一格 active
+                    step_status = "active" if idx == 0 else "pending"
             else:
                 step_status = "pending"
 

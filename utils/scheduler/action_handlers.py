@@ -895,6 +895,8 @@ class VerifyActionHandler(ActionHandler):
         source_paths = config.get('source_paths', [])
         task_name = config.get('task_name') or f"验证任务-{format_datetime(now(), '%Y%m%d_%H%M%S')}"
         description = f"[扫描文件中...] 验证类型: {verify_type}"
+        # 初始阶段：磁带验证从装带开始（四阶段流第一格），目录验证直接进扫描
+        initial_stage = 'load_tape' if verify_type == 'tape' else 'scan'
         # 运行参数随任务落库（抽样比等），供卡片与历史查询使用
         verify_params_json = json.dumps(self._verify_params_from_config(config), ensure_ascii=False)
 
@@ -912,7 +914,7 @@ class VerifyActionHandler(ActionHandler):
                     FALSE, FALSE, 0,
                     $4, NULL, 'running'::backuptaskstatus, FALSE,
                     'scheduled_task', $5, $6, $7, 'running',
-                    'scan', $8::jsonb
+                    $8, $9::jsonb
                 ) RETURNING id
                 """,
                 task_name,
@@ -920,6 +922,7 @@ class VerifyActionHandler(ActionHandler):
                 json.dumps(config.get('exclude_patterns', [])) or None,
                 description,
                 now(), now(), now(),
+                initial_stage,
                 verify_params_json
             )
             actual_conn = conn._conn if hasattr(conn, '_conn') else conn
@@ -964,10 +967,11 @@ class VerifyActionHandler(ActionHandler):
         任务取消后的清理不能被第二次取消打断（停止按钮可连点）。
         """
         try:
+            # 不写 operation_stage：取消时保留实际所处阶段（装带/挂载/扫描/验证），
+            # 卡片才能显示"在哪一格被停的"，而不是一律显示到验证格
             await self._update_verify_progress(
                 task_id,
                 status='cancelled',
-                operation_stage='verify',
                 scan_status='completed',
                 description='[已取消] 任务被手动停止',
                 completed_at=now(),
@@ -1034,6 +1038,10 @@ class VerifyActionHandler(ActionHandler):
                 result = await self._verify_tape(config, task_id)
             else:
                 # 先在 async 中挂载 UNC 路径，再开线程跑验证
+                if task_id:
+                    await self._update_verify_progress(
+                        task_id, operation_stage='resolve',
+                        description='[解析路径中...] 挂载网络共享/解析源路径')
                 resolved_paths = await self._resolve_source_paths(source_paths)
                 if not resolved_paths:
                     raise ValueError("所有源路径均无效（SMB 挂载失败或路径不存在）")
@@ -1090,6 +1098,9 @@ class VerifyActionHandler(ActionHandler):
             # 用户停任务后 backup_tasks 记录会永远停在 running（实测任务 167），
             # 后续"有任务在运行"的判断会误判。这里显式落库为 cancelled。
             # 用独立任务 + shield：停止按钮可能连点，第二次取消会打断 await。
+            _sys_v = self.system_instance
+            if _sys_v is not None:
+                _sys_v._verify_live = None    # 清除卡片实时进度
             _mark = asyncio.ensure_future(self._mark_verify_cancelled(task_id))
             try:
                 await asyncio.shield(_mark)
@@ -1101,12 +1112,14 @@ class VerifyActionHandler(ActionHandler):
             raise
 
         except Exception as e:
+            _sys_v = self.system_instance
+            if _sys_v is not None:
+                _sys_v._verify_live = None    # 清除卡片实时进度
             try:
                 await self._update_verify_progress(
                     task_id,
                     status='failed',
                     error_message=str(e),
-                    operation_stage='verify',
                     scan_status='completed',
                     completed_at=now()
                 )
@@ -1182,17 +1195,32 @@ class VerifyActionHandler(ActionHandler):
                 logger.warning(f"[磁带验证] 读取磁带标签失败，跳过身份校验: {_id_err}")
 
         try:
+            # 阶段提示：装带 → 挂载 → 扫描归档 → 验证（卡片徽章逐格推进）
+            if task_id:
+                await self._update_verify_progress(
+                    task_id, operation_stage='load_tape',
+                    description='[加载磁带中...] 检查驱动器并加载介质')
+
             # 检查是否已挂载
             mount_point = Path(tape_handler._get_ltfs_mount_point())
             if mount_point.exists() and mount_point.is_mount():
                 was_already_mounted = True
                 logger.info("[磁带验证] LTFS 已挂载，直接使用")
             else:
+                if task_id:
+                    await self._update_verify_progress(
+                        task_id, operation_stage='mount_tape',
+                        description='[挂载磁带中...] 挂载 LTFS 文件系统')
                 logger.info("[磁带验证] 挂载 LTFS...")
                 success, msg = await tape_handler.mount_with_retry(max_retries=2, retry_interval=15)
                 if not success:
                     return {"status": "failed", "message": f"挂载 LTFS 失败: {msg}"}
                 logger.info("[磁带验证] LTFS 挂载成功")
+
+            if task_id:
+                await self._update_verify_progress(
+                    task_id, operation_stage='scan',
+                    description='[扫描归档中...] 收集磁带上的归档文件')
 
             # 3. 收集所有归档文件（跳过正在写入的：mtime 过新）
             # 当前磁带卷标（写入清单缓存时的键）
@@ -1280,6 +1308,11 @@ class VerifyActionHandler(ActionHandler):
             _last_progress_at = 0.0
 
             try:
+                # 进入验证阶段（循环内首个进度更新最多滞后一个归档周期，这里先落库）
+                if task_id:
+                    await self._update_verify_progress(
+                        task_id, operation_stage='verify',
+                        description=f'[验证完整性中...] 抽样 0/{sample_count}')
                 for i, archive_path in enumerate(sampled):
                     logger.info(f"[磁带验证] 验证归档 {i+1}/{sample_count}: {archive_path.name}")
                     # 实时进度：卡片显示"正在验证 xxx — 3.2/7.5GB (43%) ~180MB/s"。
@@ -1543,6 +1576,16 @@ class VerifyActionHandler(ActionHandler):
         settings = get_settings()
         verify_temp = Path(settings.VERIFY_TEMP_DIR) / str(uuid.uuid4())[:8]
 
+        # 实时进度：卡片显示"扫描中： 已扫描 N / 验证中： 文件名 (X/Y MB)"。
+        # 挂在 system 实例上供任务查询接口读取（同磁带验证的 _verify_live 模式）。
+        # 本方法整体跑在 executor 线程里，只写 int/str 字段（CPython 原子赋值）。
+        _live = {'kind': 'directory', 'phase': 'scan', 'name': '',
+                 'done': 0, 'total': 0, 'scanned': 0, 'sampled': 0,
+                 'passed': 0, 'failed': 0, 'started': time.time()}
+        _sys_live = self.system_instance
+        if _sys_live is not None:
+            _sys_live._verify_live = _live
+
         # 获取事件循环（必须从调用方传入，线程内无法 get_event_loop）
         loop = config.get('_event_loop')
 
@@ -1599,10 +1642,14 @@ class VerifyActionHandler(ActionHandler):
                     continue
                 total_scanned += 1
                 sampled_list = [src_path]
-                p, f, s, e = self._verify_batch_sync(sampled_list, verify_enabled, verify_temp)
+                p, f, s, e = self._verify_batch_sync(sampled_list, verify_enabled, verify_temp, _live)
                 passed += p
                 failed += f
                 total_sampled += s
+                _live['scanned'] = total_scanned
+                _live['sampled'] = total_sampled
+                _live['passed'] = passed
+                _live['failed'] = failed
                 for err_msg in e:
                     logger.warning(f"[目录验证] 验证失败: {err_msg}")
                 _add_errors(e)
@@ -1621,15 +1668,19 @@ class VerifyActionHandler(ActionHandler):
                             continue
                         batch.append(file_path)
                         total_scanned += 1
+                        _live['scanned'] = total_scanned
                         # 每10秒更新扫描进度（即使未满一批）
                         _try_db_update('scan', 'running', '扫描文件中...')
                         if len(batch) >= BATCH_SIZE:
                             sample_count = max(1, math.ceil(len(batch) * verify_percent / 100))
                             sampled_list = random.sample(batch, min(sample_count, len(batch)))
-                            p, f, s, e = self._verify_batch_sync(sampled_list, verify_enabled, verify_temp)
+                            p, f, s, e = self._verify_batch_sync(sampled_list, verify_enabled, verify_temp, _live)
                             passed += p
                             failed += f
                             total_sampled += s
+                            _live['sampled'] = total_sampled
+                            _live['passed'] = passed
+                            _live['failed'] = failed
                             for err_msg in e:
                                 logger.warning(f"[目录验证] 验证失败: {err_msg}")
                             _add_errors(e)
@@ -1645,14 +1696,21 @@ class VerifyActionHandler(ActionHandler):
                 if batch:
                     sample_count = max(1, math.ceil(len(batch) * verify_percent / 100))
                     sampled_list = random.sample(batch, min(sample_count, len(batch)))
-                    p, f, s, e = self._verify_batch_sync(sampled_list, verify_enabled, verify_temp)
+                    p, f, s, e = self._verify_batch_sync(sampled_list, verify_enabled, verify_temp, _live)
                     passed += p
                     failed += f
                     total_sampled += s
+                    _live['sampled'] = total_sampled
+                    _live['passed'] = passed
+                    _live['failed'] = failed
                     for err_msg in e:
                         logger.warning(f"[目录验证] 验证失败: {err_msg}")
                     _add_errors(e)
                     _try_db_update('verify', 'completed', '验证文件中...', force=True)
+
+        # 清除卡片实时进度（含异常/取消路径外的正常收尾）
+        if _sys_live is not None:
+            _sys_live._verify_live = None
 
         # 清理临时目录
         try:
@@ -1690,17 +1748,30 @@ class VerifyActionHandler(ActionHandler):
             result["errors"] = errors[:20]
         return result
 
-    def _verify_batch_sync(self, sampled: list, verify_enabled: bool, verify_temp: Path) -> tuple:
-        """同步验证一批文件，返回 (passed, failed, sampled_count, errors)"""
+    def _verify_batch_sync(self, sampled: list, verify_enabled: bool, verify_temp: Path,
+                           live: Optional[dict] = None) -> tuple:
+        """同步验证一批文件，返回 (passed, failed, sampled_count, errors)
+
+        live: 传入字典时逐文件更新当前验证对象与已读字节（卡片实时进度）
+        """
         passed = 0
         failed = 0
         errors = []
 
         for file_path in sampled:
+            if live is not None:
+                live['phase'] = 'verify'
+                live['name'] = file_path.name
+                live['done'] = 0
+                try:
+                    live['total'] = file_path.stat().st_size
+                except OSError:
+                    live['total'] = 0
             try:
                 if file_path.name.endswith(('.tar.zst', '.tar.gz', '.tgz', '.tar', '.7z', '.zip')) and verify_enabled:
                     verify_temp.mkdir(parents=True, exist_ok=True)
-                    valid, detail = self._verify_archive_extract(file_path, verify_temp)
+                    valid, detail = self._verify_archive_extract(file_path, verify_temp,
+                                                                 None, live)
                     # 清理临时文件
                     if verify_temp.exists():
                         for item in verify_temp.iterdir():
@@ -1735,6 +1806,8 @@ class VerifyActionHandler(ActionHandler):
                                 if not chunk:
                                     break
                                 read_total += len(chunk)
+                                if live is not None:
+                                    live['done'] = read_total
                     except FileNotFoundError:
                         logger.warning(
                             f"[目录验证] 文件读取前已消失，跳过: {file_path}")

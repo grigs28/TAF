@@ -194,19 +194,25 @@ async def get_backup_tasks(
                     _ct = getattr(_engine, '_current_task', None) if _engine else None
                     if _ct is not None:
                         tape_writing_task_id = getattr(_ct, 'id', None)
-                    # 磁带验证实时进度：由 VerifyActionHandler 挂在 system 上
-                    # （当前归档名/已读字节/总字节/成员数/开始时间）
+                    # 磁带/目录验证实时进度：由 VerifyActionHandler 挂在 system 上
+                    # （磁带：当前归档名/已读字节；目录：当前文件/已扫已抽样计数）
                     _vl = getattr(_sys, '_verify_live', None) if _sys else None
-                    if isinstance(_vl, dict) and _vl.get('name'):
+                    if isinstance(_vl, dict) and (_vl.get('name') or _vl.get('scanned') is not None):
                         _v_done = int(_vl.get('done') or 0)
                         _v_total = int(_vl.get('total') or 0)
                         _v_started = float(_vl.get('started') or 0)
                         _v_elapsed = max(0.001, time.time() - _v_started) if _v_started else 0
                         verify_live = {
-                            'name': str(_vl.get('name')),
+                            'kind': str(_vl.get('kind') or 'tape'),
+                            'phase': str(_vl.get('phase') or 'verify'),
+                            'name': str(_vl.get('name') or ''),
                             'done_bytes': _v_done,
                             'total_bytes': _v_total,
                             'members': int(_vl.get('members') or 0),
+                            'scanned': int(_vl.get('scanned') or 0),
+                            'sampled': int(_vl.get('sampled') or 0),
+                            'passed': int(_vl.get('passed') or 0),
+                            'failed': int(_vl.get('failed') or 0),
                             'percent': round(_v_done / _v_total * 100, 1) if _v_total > 0 else 0,
                             'speed_mbps': round(_v_done / _v_elapsed / 1048576, 1) if _v_elapsed else 0,
                         }
@@ -568,8 +574,9 @@ async def get_backup_tasks(
                         final_dir_has_files,  # 传入 final 目录状态
                         prefetch_done,  # 传入预取器是否完成
                         in_memory_compression_completed,  # 传入压缩是否完成
-                        task_type=row.get("task_type"),  # 传入任务类型，验证任务使用两阶段流
-                        prefetch_started=prefetch_started  # 预取器是否已启动（扫描等待期内未启动时徽章灰色）
+                        task_type=row.get("task_type"),  # 传入任务类型，验证任务使用验证阶段流
+                        prefetch_started=prefetch_started,  # 预取器是否已启动（扫描等待期内未启动时徽章灰色）
+                        verify_type=result_summary_dict.get('verify_type') if isinstance(result_summary_dict, dict) else None  # 磁带/目录验证选不同阶段流
                     )
 
                     # 所有统计字段：优先使用内存中的实时统计，其次回退到数据库字段

@@ -1000,11 +1000,24 @@
         const isVerify = (task.task_type || '').toLowerCase() === 'verify';
         let stageOrder, stageLabels;
         if (isVerify) {
-            stageOrder = ['scan', 'verify'];
-            stageLabels = {
-                'scan': '扫描文件',
-                'verify': '验证完整性'
-            };
+            // 磁带验证四阶段（装带→挂载→扫描→验证）；目录验证三阶段（解析→扫描→验证）
+            const _vType = resolveVerifyType(task);
+            if (_vType === 'tape') {
+                stageOrder = ['load_tape', 'mount_tape', 'scan', 'verify'];
+                stageLabels = {
+                    'load_tape': '加载磁带',
+                    'mount_tape': '挂载磁带',
+                    'scan': '扫描文件',
+                    'verify': '验证完整性'
+                };
+            } else {
+                stageOrder = ['resolve', 'scan', 'verify'];
+                stageLabels = {
+                    'resolve': '解析路径',
+                    'scan': '扫描文件',
+                    'verify': '验证完整性'
+                };
+            }
         } else {
             stageOrder = ['scan', 'prefetch', 'compress', 'copy', 'finalize'];
             stageLabels = {
@@ -1607,12 +1620,38 @@
                     ? (_ratioVal >= 0.8 ? 'text-warning' : 'text-success')
                     : 'text-muted';
 
-                // 磁带验证：当前归档实时进度（解压读带进度，与"复制进度"同模式）
+                // 验证实时进度（与"复制进度"同模式）：
+                //   磁带：当前归档解压读带进度（字节粒度 + 速率）
+                //   目录：扫描中显示已扫描数；验证中显示当前文件 + 字节进度
                 let verifyLiveHtml = '';
-                if (isVerifyTask && task.verify_live && task.verify_live.name) {
+                if (isVerifyTask && task.verify_live && task.verify_live.name !== undefined) {
                     const vl = task.verify_live;
                     const _vp = Number(vl.percent) || 0;
-                    verifyLiveHtml = `
+                    if (vl.kind === 'directory') {
+                        if (vl.phase === 'scan') {
+                            verifyLiveHtml = `
+                    <div class="d-flex align-items-center mt-1">
+                        <small class="text-muted">扫描中:</small>
+                        <small class="text-muted ms-auto">已扫描 ${vl.scanned} 个文件</small>
+                    </div>`;
+                        } else {
+                            const _vName = vl.name || '准备中';
+                            verifyLiveHtml = `
+                    <div class="d-flex align-items-center mt-1">
+                        <small class="text-muted text-truncate" style="max-width:55%;" title="${vl.name}">验证中: ${_vName}</small>
+                        <small class="text-muted ms-auto">已抽样 ${vl.sampled}（通过 ${vl.passed} / 失败 ${vl.failed}）</small>
+                    </div>
+                    ${vl.total_bytes > 0 ? `
+                    <div class="d-flex align-items-center">
+                        <small class="text-muted">当前文件:</small>
+                        <small class="text-muted ms-auto">${formatBytes(vl.done_bytes)} / ${formatBytes(vl.total_bytes)} (${_vp}%)${vl.speed_mbps ? ' ~' + vl.speed_mbps + 'MB/s' : ''}</small>
+                    </div>
+                    <div class="progress" style="height:4px;">
+                        <div class="progress-bar bg-info" role="progressbar" style="width:${_vp}%"></div>
+                    </div>` : ''}`;
+                        }
+                    } else {
+                        verifyLiveHtml = `
                     <div class="d-flex align-items-center mt-1">
                         <small class="text-muted text-truncate" style="max-width:55%;" title="${vl.name}">验证中: ${vl.name}</small>
                         <small class="text-muted ms-auto">${formatBytes(vl.done_bytes)} / ${formatBytes(vl.total_bytes)} (${_vp}%)${vl.speed_mbps ? ' ~' + vl.speed_mbps + 'MB/s' : ''}</small>
@@ -1620,6 +1659,7 @@
                     <div class="progress" style="height:4px;">
                         <div class="progress-bar bg-info" role="progressbar" style="width:${_vp}%"></div>
                     </div>`;
+                    }
                 }
 
                 progressSection.innerHTML = normalizeCardHtml(`
