@@ -739,7 +739,17 @@ class TapeHandler:
             eject: 是否在卸载后弹出磁带（默认 False，仅卸载不弹出）
         """
         if not self._ltfs_mounted:
-            return True
+            # 标志可能没来得及置位（挂载过程中被中断、跨实例调用等），
+            # 但实际挂载仍存在时必须清理，否则留下僵尸挂载 + 占着设备的
+            # LTFS 进程（2026-10-26 19:17 实测，后续 ltfsck 报 EBUSY）
+            fallback = self._ltfs_mount_point or Path(self._get_ltfs_mount_point())
+            try:
+                if not Path(fallback).is_mount():
+                    return True
+            except Exception:
+                return True
+            logger.warning(f"[LTFS] 挂载标志缺失但 {fallback} 仍挂载，执行清理")
+            self._ltfs_mount_point = Path(fallback)
 
         mount_point = self._ltfs_mount_point
         if not mount_point:
@@ -784,6 +794,26 @@ class TapeHandler:
             logger.warning(f"[LTFS] 卸载失败: {e}")
             return False
 
+    async def _wait_index_ready(self, mount_point: Path, timeout: float = 300.0) -> bool:
+        """等待 LTFS 索引加载完成（.LTFS 元数据目录出现）。
+
+        `mount_point.is_mount()` 只代表 FUSE 挂载完成，索引是后台读的：
+        9TB 带子（1169 个归档）读索引要 1~3 分钟，这期间目录是空的。
+        若此时就返回"挂载成功"，上层立刻统计归档会得到 0 个，
+        进而误报"磁带上未发现归档文件（请确认装载的磁带是否正确）"
+        （2026-10-26 19:03 实测：第 2 次重试 4 秒就 is_mount()，
+        挂载点连 .LTFS 都没有）。
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                if (Path(mount_point) / '.LTFS').exists():
+                    return True
+            except OSError:
+                pass
+            await asyncio.sleep(2)
+        return False
+
     async def mount_with_retry(self, backup_task=None, max_retries: int = 3, retry_interval: int = 30) -> Tuple[bool, str]:
         """尝试挂载磁带，重试多次
 
@@ -816,6 +846,19 @@ class TapeHandler:
         for attempt in range(1, max_retries + 1):
             logger.info(f"[挂载重试] 第 {attempt}/{max_retries} 次尝试挂载磁带...")
 
+            # 先确认介质在驱动器并已加载到读写通路。
+            # 漏了这步会一直卡死：带子被 eject 后 LTFS 打开设备拿不到介质，
+            # 进程原地等设备、挂载点始终为空（2026-10-26 19:07 实测卡 5 分钟）。
+            # check_tape_in_drive 内部含 mt load 兜底。
+            in_drive, drive_msg = await self.check_tape_in_drive()
+            if not in_drive:
+                logger.warning(f"[挂载重试] 第 {attempt} 次：磁带未就绪 - {drive_msg}")
+                if attempt == max_retries:
+                    await _send_failure_notification(f"磁带未就绪（已尝试 {max_retries} 次）: {drive_msg}")
+                    return False, f"磁带未就绪: {drive_msg}"
+                await asyncio.sleep(retry_interval)
+                continue
+
             # 清理旧挂载
             try:
                 await self.unmount_ltfs()
@@ -842,13 +885,25 @@ class TapeHandler:
                     stderr=asyncio.subprocess.PIPE
                 )
 
-                # LTO磁带需要时间挂载，等待检查
-                for wait_time in range(30):
+                # LTO磁带需要时间挂载，等待检查。
+                # 90 秒：之前 30 秒判超时，而实测大盘带（9TB/1169 归档）
+                # 装带+定位+挂载 FUSE 经常超过 60 秒（19:51 实测挂载成功
+                # 却已被判超时，留下无人管理的挂载）。
+                for wait_time in range(90):
                     await asyncio.sleep(1)
                     if mount_point.is_mount():
+                        # 先登记挂载状态再做索引等待：等待期间任务可能被停止，
+                        # unmount_ltfs() 靠 _ltfs_mounted 判断是否需要清理，
+                        # 不先置位会被当成"没挂载"直接跳过 → 留下僵尸挂载
+                        # 和占着 /dev/sg1 的 LTFS 进程（2026-10-26 19:17 实测）
                         self._ltfs_mounted = True
                         self._ltfs_mount_point = mount_point
                         self._ltfs_process = process
+                        # FUSE 挂上了不代表索引读完，必须等 .LTFS 出现
+                        if not await self._wait_index_ready(mount_point):
+                            logger.warning(
+                                f"[挂载重试] 第 {attempt} 次：挂载点已挂载但索引未就绪，视为失败")
+                            break
                         logger.info(f"[挂载重试] 第 {attempt} 次挂载成功")
                         # 记录挂载成功到数据库
                         try:
@@ -868,9 +923,14 @@ class TapeHandler:
                     # LTFS进程已退出，检查是否daemon化挂载成功（returncode==0 说明成功)
                     if process.returncode is not None:
                         if process.returncode == 0 and mount_point.is_mount():
+                            # 先登记挂载状态（同即时检测分支，保证中断时能清理）
                             self._ltfs_mounted = True
                             self._ltfs_mount_point = mount_point
                             self._ltfs_process = process
+                            if not await self._wait_index_ready(mount_point):
+                                logger.warning(
+                                    f"[挂载重试] 第 {attempt} 次：daemon 化退出但索引未就绪，视为失败")
+                                break
                             logger.info(f"[挂载重试] 第 {attempt} 次挂载成功（LTFS daemon化退出）")
                             try:
                                 from utils.log_utils import log_operation
@@ -892,13 +952,15 @@ class TapeHandler:
                 if process.returncode is not None:
                     pass
                 else:
-                    # 等待30秒后再次检查（LTO磁带可能需要更长时间）
-                    await asyncio.sleep(30)
+                    # 再给 60 秒（大盘带装带后定位/读索引可能更久）
+                    await asyncio.sleep(60)
 
                 if mount_point.is_mount():
+                    # 先登记挂载状态（中断时能清理），再等索引就绪
                     self._ltfs_mounted = True
                     self._ltfs_mount_point = mount_point
                     self._ltfs_process = process
+                if mount_point.is_mount() and await self._wait_index_ready(mount_point):
                     logger.info(f"[挂载重试] 第 {attempt} 次挂载成功（延迟检测）")
                     # 记录延迟检测挂载成功到数据库
                     try:

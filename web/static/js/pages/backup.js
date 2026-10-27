@@ -1607,6 +1607,21 @@
                     ? (_ratioVal >= 0.8 ? 'text-warning' : 'text-success')
                     : 'text-muted';
 
+                // 磁带验证：当前归档实时进度（解压读带进度，与"复制进度"同模式）
+                let verifyLiveHtml = '';
+                if (isVerifyTask && task.verify_live && task.verify_live.name) {
+                    const vl = task.verify_live;
+                    const _vp = Number(vl.percent) || 0;
+                    verifyLiveHtml = `
+                    <div class="d-flex align-items-center mt-1">
+                        <small class="text-muted text-truncate" style="max-width:55%;" title="${vl.name}">验证中: ${vl.name}</small>
+                        <small class="text-muted ms-auto">${formatBytes(vl.done_bytes)} / ${formatBytes(vl.total_bytes)} (${_vp}%)${vl.speed_mbps ? ' ~' + vl.speed_mbps + 'MB/s' : ''}</small>
+                    </div>
+                    <div class="progress" style="height:4px;">
+                        <div class="progress-bar bg-info" role="progressbar" style="width:${_vp}%"></div>
+                    </div>`;
+                }
+
                 progressSection.innerHTML = normalizeCardHtml(`
                     ${batchProgressHtml}
                     ${diskLine}
@@ -1618,6 +1633,7 @@
                     <div class="progress" style="height:6px;">
                         <div class="progress-bar bg-primary" role="progressbar" style="width:${progressInfo.percent}%"></div>
                     </div>
+                    ${verifyLiveHtml}
                     <div class="d-flex justify-content-between">
                         <small class="text-muted">文件进度:</small>
                         <small class="text-muted" title="${_fileProgressTitle}">${_fileProgressHtml}</small>

@@ -397,6 +397,34 @@ def create_task_executor(
             # finally 块会在 raise 之前执行
             raise
 
+        except asyncio.CancelledError:
+            # 手动停止走的是 task.cancel()，抛出的是 CancelledError（继承
+            # BaseException），下面那个 except Exception 接不住：
+            # scheduled_tasks.status 会永远停在 'running'，UI 的"停止"按钮
+            # 一直可点（点第二次还会打断正在收尾的磁带 offline）。
+            end_time = datetime.now()
+            logger.warning(f"[任务执行器] 任务被取消 - ID: {scheduled_task.id}, "
+                           f"名称: {scheduled_task.task_name}")
+            try:
+                async with get_opengauss_connection() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE scheduled_tasks
+                        SET status = $1::scheduledtaskstatus,
+                            last_error = $2
+                        WHERE id = $3
+                        """,
+                        'paused', '任务被手动停止', scheduled_task.id
+                    )
+                    actual_conn = conn._conn if hasattr(conn, '_conn') else conn
+                    try:
+                        await actual_conn.commit()
+                    except Exception as commit_err:
+                        logger.warning(f"提交任务取消状态事务失败（可能已自动提交）: {commit_err}")
+            except Exception as update_error:
+                logger.error(f"更新任务取消状态失败（忽略继续）: {str(update_error)}")
+            raise
+
         except Exception as e:
             end_time = datetime.now()
             duration = int((end_time - start_time).total_seconds() * 1000)  # 转换为毫秒

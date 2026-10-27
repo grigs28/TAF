@@ -502,7 +502,7 @@ function renderStorageTrend(trend, retentionMonths) {
     for (var i = 11; i >= 0; i--) {
         var m = new Date(now.getFullYear(), now.getMonth() - i, 1);
         var key = m.getFullYear() + '-' + String(m.getMonth() + 1).padStart(2, '0');
-        months.push({ key: key, idx: m.getMonth(), bytes: bytesMap[key] || 0 });
+        months.push({ key: key, idx: m.getMonth(), bytes: bytesMap[key] || 0, monthsAgo: i });
     }
 
     var maxBytes = Math.max.apply(null, months.map(function(m) { return m.bytes; }));
@@ -514,7 +514,10 @@ function renderStorageTrend(trend, retentionMonths) {
     months.forEach(function(m) {
         var barHeight = Math.max((m.bytes / maxBytes * maxBarHeight), m.bytes > 0 ? 4 : 2);
         var isMax = m.bytes === maxBytes && m.bytes > 0;
-        var isExpired = i >= retentionMonths;
+        // 超期月份置灰：用 monthsAgo（距当前月数）判断。
+        // 曾经写成 i（for 循环泄漏出的变量，循环结束为 -1），条件恒为 false，
+        // 灰度从未生效。保留期 N 个月 = 最近 N 个月（monthsAgo 0..N-1）。
+        var isExpired = m.monthsAgo >= retentionMonths;
 
         var col = document.createElement('div');
         col.className = 'flex-fill d-flex flex-column align-items-center justify-content-end';

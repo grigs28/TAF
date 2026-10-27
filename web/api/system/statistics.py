@@ -240,20 +240,43 @@ async def _get_recent_backups(limit: int = 5) -> List[Dict[str, Any]]:
 
 
 async def _get_storage_trend(days: int = 365) -> List[Dict[str, Any]]:
-    """获取存储使用趋势（按月统计备份量）"""
+    """获取存储使用趋势（按月统计备份量，按**全量/原始大小**）。
+
+    口径是"每月备份了多少数据"，不是压缩后的占用。
+    历史的 backup_sets.total_bytes 没有回写（旧月份全 0），
+    所以以 backup_tasks.total_bytes 为主，backup_sets 仅作该月缺失时的兜底。
+    """
     try:
         async with get_opengauss_connection() as conn:
             start_date = datetime.now() - timedelta(days=days)
 
-            # 优先从 backup_sets 统计（不限status，按月汇总压缩后大小）
-            rows = await conn.fetch(
+            # 主数据源：各月全量大小
+            task_rows = await conn.fetch(
+                """
+                SELECT
+                    DATE_TRUNC('month', started_at)::date as backup_month,
+                    SUM(total_bytes) as monthly_bytes
+                FROM backup_tasks
+                WHERE is_template = FALSE
+                  AND started_at >= $1
+                  AND total_bytes > 0
+                  AND LOWER(status::text) NOT IN ('cancelled', 'interrupted')
+                GROUP BY DATE_TRUNC('month', started_at)
+                ORDER BY backup_month ASC
+                """,
+                start_date
+            )
+
+            # 兜底：backup_tasks 该月没有记录时用备份集的全量大小
+            set_rows = await conn.fetch(
                 """
                 SELECT
                     DATE_TRUNC('month', s.backup_time)::date as backup_month,
-                    SUM(s.compressed_bytes) as monthly_bytes
+                    SUM(s.total_bytes) as monthly_bytes
                 FROM backup_sets s
                 LEFT JOIN backup_tasks t ON s.backup_task_id = t.id
                 WHERE s.backup_time >= $1
+                  AND s.total_bytes > 0
                   AND (t.status IS NULL OR LOWER(t.status::text) NOT IN ('cancelled', 'interrupted'))
                 GROUP BY DATE_TRUNC('month', s.backup_time)
                 ORDER BY backup_month ASC
@@ -261,32 +284,16 @@ async def _get_storage_trend(days: int = 365) -> List[Dict[str, Any]]:
                 start_date
             )
 
-            # 如果 backup_sets 没有数据，从 backup_tasks 统计
-            if not rows or all((r['monthly_bytes'] or 0) == 0 for r in rows):
-                rows = await conn.fetch(
-                    """
-                    SELECT
-                        DATE_TRUNC('month', started_at)::date as backup_month,
-                        SUM(total_bytes) as monthly_bytes
-                    FROM backup_tasks
-                    WHERE is_template = FALSE
-                      AND started_at >= $1
-                      AND total_bytes > 0
-                      AND LOWER(status::text) NOT IN ('cancelled', 'interrupted')
-                    GROUP BY DATE_TRUNC('month', started_at)
-                    ORDER BY backup_month ASC
-                    """,
-                    start_date
-                )
+            def _key(v):
+                return v.isoformat() if isinstance(v, datetime) else str(v)
 
-            trend = []
-            for row in rows:
-                trend.append({
-                    "date": row['backup_month'].isoformat() if isinstance(row['backup_month'], datetime) else str(row['backup_month']),
-                    "bytes": row['monthly_bytes'] or 0
-                })
+            merged: Dict[str, int] = {}
+            for row in set_rows:           # 先铺底：备份集全量
+                merged[_key(row['backup_month'])] = int(row['monthly_bytes'] or 0)
+            for row in task_rows:          # 任务表为准（同一份数据的源头）
+                merged[_key(row['backup_month'])] = int(row['monthly_bytes'] or 0)
 
-            return trend
+            return [{"date": k, "bytes": merged[k]} for k in sorted(merged)]
     except Exception as e:
         logger.error(f"获取存储使用趋势失败: {str(e)}")
         return []

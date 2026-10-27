@@ -5,12 +5,17 @@
 Backup Utility Functions Module
 """
 
+import logging
 import re
 import hashlib
 from typing import Optional, Dict
 from pathlib import Path
 
-logger = None  # 将在模块导入时设置
+# 曾经是 `logger = None  # 将在模块导入时设置`，但从未真的设置过：
+# kill_compression_processes() 在"无残留进程"这条正常路径上必走 logger.debug，
+# 直接抛 AttributeError: 'NoneType' object has no attribute 'debug'，
+# 被上层 except 捕获后误报成"终止压缩进程失败"（每次停任务都出现）。
+logger = logging.getLogger(__name__)
 
 
 def normalize_volume_label(label: Optional[str], year: int, month: int) -> str:

@@ -3617,7 +3617,14 @@ class BackupDB:
         try:
             if not backup_task or not backup_task.id:
                 return
-            
+
+            # progress_percent 并非所有 BackupTask 实现都有（data_classes 有，
+            # 某些动态构造/代理对象没有），缺属性会让整次进度更新失败：
+            # "'BackupTask' object has no attribute 'progress_percent'"（生产出现过）。
+            # 取不到时用 None，SQL 侧 COALESCE($1, progress_percent) 保留原值，
+            # 不能用 0.0 —— 那会把已有进度清零。
+            progress_percent = getattr(backup_task, 'progress_percent', None)
+
             normalized_status = operation_status.strip() if isinstance(operation_status, str) else operation_status
             if normalized_status:
                 # 注意：不再调用 _log_operation_stage_event，避免进度更新时重复记录关键阶段日志
@@ -3692,7 +3699,7 @@ class BackupDB:
                         await conn.execute(
                             """
                             UPDATE backup_tasks
-                            SET progress_percent = $1,
+                            SET progress_percent = COALESCE($1, progress_percent),
                                 processed_files = $2,
                                 total_files = $3,
                                 processed_bytes = $4,
@@ -3702,14 +3709,22 @@ class BackupDB:
                                 --  压缩开始时间 / error_logs）由
                                 -- save_task_starvation 写入，若这里用旧快照
                                 -- 整块覆盖会把它们冲掉（任务 148 已发生）。
-                                -- COALESCE 防护：$6 为 NULL 时保留原值而不是清空
-                                result_summary = COALESCE(result_summary, '{}'::jsonb)
-                                    || COALESCE($6::jsonb, '{}'::jsonb),
+                                -- COALESCE 防护：jsonb 参数为 NULL 时保留原值而不是清空。
+                                -- 该参数只能出现一次：psycopg3_compat 把占位符按
+                                -- 出现顺序换成 %s，重复引用同一编号会多出 %s，
+                                -- 报 "the query has 10 placeholders but 9 parameters
+                                -- were passed"（任务 166 进度一直为 0 的根因）。
+                                -- 连注释里的占位符写法也会被替换，故此处不写编号。
+                                -- 故先用 COALESCE 合成一个表达式再兜底。
+                                result_summary = COALESCE(
+                                    COALESCE(result_summary, '{}'::jsonb) || $6::jsonb,
+                                    result_summary
+                                ),
                                 description = $7,
                                 updated_at = $8
                             WHERE id = $9
                             """,
-                            backup_task.progress_percent,
+                            progress_percent,
                             scanned_count,  # processed_files: 已处理文件数
                             total_files_value,  # total_files: 压缩包数量
                             processed_bytes,  # processed_bytes: 已处理字节数
@@ -3780,7 +3795,7 @@ class BackupDB:
                         await conn.execute(
                             """
                             UPDATE backup_tasks
-                            SET progress_percent = $1,
+                            SET progress_percent = COALESCE($1, progress_percent),
                                 processed_files = $2,
                                 total_files = $3,
                                 processed_bytes = $4,
@@ -3789,7 +3804,7 @@ class BackupDB:
                                 updated_at = $7
                             WHERE id = $8
                             """,
-                            backup_task.progress_percent,
+                            progress_percent,
                             scanned_count,  # processed_files: 已处理文件数
                             total_files_value,  # total_files: 总文件数（从数据库读取，保持不变）
                             processed_bytes,  # processed_bytes: 已处理字节数

@@ -7,6 +7,7 @@ Task Action Handlers
 
 import logging
 import asyncio
+import math
 import os
 import random
 import shutil
@@ -938,11 +939,14 @@ class VerifyActionHandler(ActionHandler):
         try:
             async with get_opengauss_connection() as conn:
                 await conn.execute(
+                    # 占位符必须按出现顺序编号：psycopg3_compat 按出现顺序把
+                    # $N 转成 %s，若 $2 出现在 $1 前会绑错参数
+                    # （曾导致 result_summary 收到 smallint → cannot cast to jsonb）
                     "UPDATE backup_tasks SET result_summary = "
-                    "COALESCE(result_summary, '{}'::jsonb) || $2::jsonb, updated_at = now() "
-                    "WHERE id = $1",
-                    task_id,
+                    "COALESCE(result_summary, '{}'::jsonb) || $1::jsonb, updated_at = now() "
+                    "WHERE id = $2",
                     json.dumps(summary, ensure_ascii=False),
+                    task_id,
                 )
                 actual_conn = conn._conn if hasattr(conn, '_conn') else conn
                 if hasattr(actual_conn, 'commit'):
@@ -952,6 +956,24 @@ class VerifyActionHandler(ActionHandler):
                         pass
         except Exception as e:
             logger.warning(f"[验证任务] 写入结果统计失败 (task_id={task_id}): {e}")
+
+    async def _mark_verify_cancelled(self, task_id: int) -> None:
+        """任务被取消时把 backup_tasks 记录落库为 cancelled。
+
+        独立成方法，便于在 shield 包裹的独立任务里跑完：
+        任务取消后的清理不能被第二次取消打断（停止按钮可连点）。
+        """
+        try:
+            await self._update_verify_progress(
+                task_id,
+                status='cancelled',
+                operation_stage='verify',
+                scan_status='completed',
+                description='[已取消] 任务被手动停止',
+                completed_at=now(),
+            )
+        except Exception as e:
+            logger.warning(f"[验证任务] 写入取消状态失败 (task_id={task_id}): {e}")
 
     async def _update_verify_progress(self, task_id: int, **kwargs):
         """更新验证任务进度到 backup_tasks 表"""
@@ -1063,8 +1085,22 @@ class VerifyActionHandler(ActionHandler):
             result['backup_task_id'] = task_id
             return result
 
+        except asyncio.CancelledError:
+            # CancelledError 继承 BaseException，下面那个 except Exception 接不住：
+            # 用户停任务后 backup_tasks 记录会永远停在 running（实测任务 167），
+            # 后续"有任务在运行"的判断会误判。这里显式落库为 cancelled。
+            # 用独立任务 + shield：停止按钮可能连点，第二次取消会打断 await。
+            _mark = asyncio.ensure_future(self._mark_verify_cancelled(task_id))
+            try:
+                await asyncio.shield(_mark)
+            except asyncio.CancelledError:
+                logger.warning(
+                    f"[验证任务] 取消状态写入继续在后台执行 (task_id={task_id})")
+            except Exception as _me:
+                logger.warning(f"[验证任务] 取消状态写入失败 (task_id={task_id}): {_me}")
+            raise
+
         except Exception as e:
-            # 更新为失败状态
             try:
                 await self._update_verify_progress(
                     task_id,
@@ -1212,8 +1248,10 @@ class VerifyActionHandler(ActionHandler):
                     "failed": 0, "corrupt": 0, "verify_errors": 0,
                 }
 
-            # 4. 按百分比抽样
-            sample_count = max(1, int(len(archives) * verify_percent / 100))
+            # 4. 按百分比抽样：向上取整，最少 1 个
+            # int() 是截断（1169×10% → 116，少抽一个）；改用 ceil：
+            # 1169 → 117，11 → 2，3 → 1（不足 1 个也抽 1 个）
+            sample_count = max(1, math.ceil(len(archives) * verify_percent / 100))
             sample_count = min(sample_count, len(archives))
             sampled = random.sample(archives, sample_count)
 
@@ -1244,12 +1282,25 @@ class VerifyActionHandler(ActionHandler):
             try:
                 for i, archive_path in enumerate(sampled):
                     logger.info(f"[磁带验证] 验证归档 {i+1}/{sample_count}: {archive_path.name}")
+                    # 实时进度：卡片显示"正在验证 xxx — 3.2/7.5GB (43%) ~180MB/s"。
+                    # 挂到 system_instance 上供任务查询接口读取（同 tape_write 模式），
+                    # 解压在线程里跑，只写 int/str 字段（CPython 原子赋值，无需锁）。
+                    _live = {'name': archive_path.name, 'total': 0, 'done': 0,
+                             'members': 0, 'started': time.time()}
+                    try:
+                        _live['total'] = archive_path.stat().st_size
+                    except OSError:
+                        pass
+                    _sys_live = self.system_instance
+                    if _sys_live is not None:
+                        _sys_live._verify_live = _live
                     try:
                         # 单个归档上限 30 分钟：磁带/FUSE 卡死时不能无限挂住
                         _entries = []
                         valid, detail = await asyncio.wait_for(
                             asyncio.to_thread(
-                                self._verify_archive_extract, archive_path, verify_temp, _entries),
+                                self._verify_archive_extract, archive_path, verify_temp,
+                                _entries, _live),
                             timeout=1800)
                         if valid:
                             passed += 1
@@ -1306,6 +1357,10 @@ class VerifyActionHandler(ActionHandler):
                             description=f"[磁带验证中...] 归档 {i+1}/{sample_count}, 通过 {passed}, 失败 {failed}"
                         )
             finally:
+                # 清除卡片实时进度（任务取消/异常时也不能留旧数据）
+                _sys_live = self.system_instance
+                if _sys_live is not None:
+                    _sys_live._verify_live = None
                 # 6. 清理临时目录
                 try:
                     shutil.rmtree(str(verify_temp), ignore_errors=True)
@@ -1356,13 +1411,28 @@ class VerifyActionHandler(ActionHandler):
             # 如果是我们自己挂载的，验证完后卸载并 offline：
             # 只卸载不 offline 会让带子带着"加载状态+索引分区末尾"留在驱动器里，
             # 随后系统重启可能重演读卷标签失败的问题。
+            # 用独立任务 + shield：停止按钮连点会再发一次取消，
+            # 直接 await 会被打断，磁带停在已加载未 offline 的状态。
             if not was_already_mounted and mount_point and mount_point.is_mount():
+                logger.info("[磁带验证] 开始卸载 LTFS 并 offline 磁带...")
+                _unmount = asyncio.ensure_future(self._unmount_tape_after_verify(tape_handler))
                 try:
-                    logger.info("[磁带验证] 开始卸载 LTFS 并 offline 磁带...")
-                    await tape_handler.unmount_ltfs(eject=True)
+                    await asyncio.shield(_unmount)
                     logger.info("[磁带验证] 已卸载 LTFS 并离线磁带")
+                except asyncio.CancelledError:
+                    # 不在此处 raise：finally 中没有活动异常时 raise 会抛
+                    # RuntimeError。原取消异常在 finally 结束后自动继续传播。
+                    logger.warning(
+                        "[磁带验证] 任务被取消，卸载/离线继续在后台执行")
                 except Exception as e:
                     logger.warning(f"[磁带验证] 卸载 LTFS 失败: {e}")
+
+    async def _unmount_tape_after_verify(self, tape_handler) -> None:
+        """验证结束后卸载 LTFS 并 offline 磁带（独立任务，不受任务取消影响）。"""
+        try:
+            await tape_handler.unmount_ltfs(eject=True)
+        except Exception as e:
+            logger.warning(f"[磁带验证] 卸载 LTFS 失败: {e}")
 
     async def _cache_verified_archive(self, tape_label: str, archive_path: Path,
                                       entries: list) -> None:
@@ -1554,7 +1624,7 @@ class VerifyActionHandler(ActionHandler):
                         # 每10秒更新扫描进度（即使未满一批）
                         _try_db_update('scan', 'running', '扫描文件中...')
                         if len(batch) >= BATCH_SIZE:
-                            sample_count = max(1, int(len(batch) * verify_percent / 100))
+                            sample_count = max(1, math.ceil(len(batch) * verify_percent / 100))
                             sampled_list = random.sample(batch, min(sample_count, len(batch)))
                             p, f, s, e = self._verify_batch_sync(sampled_list, verify_enabled, verify_temp)
                             passed += p
@@ -1573,7 +1643,7 @@ class VerifyActionHandler(ActionHandler):
                                 last_progress_log = now_ts
                 # 处理剩余的文件
                 if batch:
-                    sample_count = max(1, int(len(batch) * verify_percent / 100))
+                    sample_count = max(1, math.ceil(len(batch) * verify_percent / 100))
                     sampled_list = random.sample(batch, min(sample_count, len(batch)))
                     p, f, s, e = self._verify_batch_sync(sampled_list, verify_enabled, verify_temp)
                     passed += p
@@ -1695,7 +1765,7 @@ class VerifyActionHandler(ActionHandler):
 
     async def _verify_batch(self, batch: list, verify_percent: float, verify_enabled: bool, verify_temp: Path) -> tuple:
         """验证一批文件，返回 (passed, failed, sampled_count, errors)"""
-        sample_count = max(1, int(len(batch) * verify_percent / 100))
+        sample_count = max(1, math.ceil(len(batch) * verify_percent / 100))
         sample_count = min(sample_count, len(batch))
         sampled = random.sample(batch, sample_count)
         passed = 0
@@ -1787,12 +1857,15 @@ class VerifyActionHandler(ActionHandler):
 
     @staticmethod
     def _verify_archive_extract(archive_path: Path, temp_dir: Path,
-                                entries_out: Optional[list] = None) -> tuple:
+                                entries_out: Optional[list] = None,
+                                progress: Optional[dict] = None) -> tuple:
         """解压验证归档文件完整性（用于磁带验证，解压到临时目录后删除）
 
         Args:
             entries_out: 传入列表时，解压过程中收集归档内文件清单
                 [{name,size,is_dir,modified_time}]，供写入 DB 缓存使用
+            progress: 传入字典时实时更新 {'done': 已读压缩字节, 'members': 成员数}，
+                供卡片进度条显示（仅 .tar.zst 的 zstandard 路径支持）
 
         Returns:
             (is_valid: bool, detail: str)
@@ -1804,7 +1877,7 @@ class VerifyActionHandler(ActionHandler):
         try:
             if name.endswith('.tar.zst'):
                 return VerifyActionHandler._extract_tar_zst(
-                    archive_path, temp_dir, size_mb, entries_out)
+                    archive_path, temp_dir, size_mb, entries_out, progress)
             elif name.endswith(('.tar.gz', '.tgz')):
                 return VerifyActionHandler._extract_tar(
                     archive_path, temp_dir, 'r:gz', size_mb, entries_out)
@@ -1824,8 +1897,10 @@ class VerifyActionHandler(ActionHandler):
 
     @staticmethod
     def _extract_tar_zst(archive_path: Path, temp_dir: Path, size_mb: float,
-                         entries_out: Optional[list] = None) -> tuple:
-        """解压验证 .tar.zst（entries_out 非 None 时收集文件清单）"""
+                         entries_out: Optional[list] = None,
+                         progress: Optional[dict] = None) -> tuple:
+        """解压验证 .tar.zst（entries_out 非 None 时收集文件清单；
+        progress 非 None 时每成员更新已读字节数，供卡片进度条显示）"""
         def _collect(member):
             if entries_out is not None:
                 try:
@@ -1848,6 +1923,13 @@ class VerifyActionHandler(ActionHandler):
                     with tarfile.open(fileobj=reader, mode='r|') as tar:
                         for member in tar:
                             member_count += 1
+                            if progress is not None:
+                                # fh.tell() = 已读压缩字节（含缓冲预读，近似即可）
+                                try:
+                                    progress['done'] = fh.tell()
+                                    progress['members'] = member_count
+                                except Exception:
+                                    pass
                             _collect(member)
             return True, f"解压验证通过 ({size_mb:.1f}MB, {member_count} 个文件)"
         except ImportError:

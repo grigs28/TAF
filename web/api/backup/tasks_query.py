@@ -185,6 +185,7 @@ async def get_backup_tasks(
                 tape_write_busy_seconds = 0.0   # 实际复制耗时（成功文件累计）
                 tape_write_idle_seconds = 0.0   # 从第一次写带起算的空档时间
                 tape_starvation_seconds = 0.0   # 压缩喂不饱写带的累计等待
+                verify_live = None              # 磁带验证：当前归档实时进度（卡片进度条）
                 try:
                     _sys = getattr(getattr(http_request, 'app', None), 'state', None)
                     _sys = getattr(_sys, 'system', None) if _sys else None
@@ -193,6 +194,22 @@ async def get_backup_tasks(
                     _ct = getattr(_engine, '_current_task', None) if _engine else None
                     if _ct is not None:
                         tape_writing_task_id = getattr(_ct, 'id', None)
+                    # 磁带验证实时进度：由 VerifyActionHandler 挂在 system 上
+                    # （当前归档名/已读字节/总字节/成员数/开始时间）
+                    _vl = getattr(_sys, '_verify_live', None) if _sys else None
+                    if isinstance(_vl, dict) and _vl.get('name'):
+                        _v_done = int(_vl.get('done') or 0)
+                        _v_total = int(_vl.get('total') or 0)
+                        _v_started = float(_vl.get('started') or 0)
+                        _v_elapsed = max(0.001, time.time() - _v_started) if _v_started else 0
+                        verify_live = {
+                            'name': str(_vl.get('name')),
+                            'done_bytes': _v_done,
+                            'total_bytes': _v_total,
+                            'members': int(_vl.get('members') or 0),
+                            'percent': round(_v_done / _v_total * 100, 1) if _v_total > 0 else 0,
+                            'speed_mbps': round(_v_done / _v_elapsed / 1048576, 1) if _v_elapsed else 0,
+                        }
                     # 压缩喂不饱写带：FinalDirMonitor 累计的 final 空等时间
                     try:
                         _fdm = getattr(_engine, 'final_dir_monitor', None) if _engine else None
@@ -678,6 +695,13 @@ async def get_backup_tasks(
                             round(tape_starvation_seconds, 1)
                             if (_is_running_task and tape_writing_task_id is not None and str(task_id) == str(tape_writing_task_id))
                             else round(float(result_summary_dict.get('tape_starvation_seconds') or 0), 1)
+                        ),
+                        # 磁带验证实时进度（仅运行中的验证任务可见；同一时刻只有一个验证在跑）
+                        "verify_live": (
+                            verify_live
+                            if (_is_running_task and
+                                str(row["task_type"].value if hasattr(row["task_type"], "value") else row["task_type"]).lower() == 'verify')
+                            else None
                         ),
                         # final 目录待写磁带的压缩文件数（卡片写带行显示）
                         "final_pending_files": final_pending_files,

@@ -778,15 +778,53 @@ const SchedulerManager = {
      * 停止任务（运行中的计划任务）
      */
     async stopTask(taskId) {
+        if (!confirm('确定要停止正在运行的计划任务吗？')) {
+            return;
+        }
+        // 点击后立刻冻结整组操作按钮：停止请求要等任务收尾（可能几分钟，
+        // 磁带卸载/写索引期间尤其久）。期间若还能点：
+        //   - 再点"停止"→ 第二次取消，打断正在收尾的磁带 offline（实测发生过）
+        //   - 点"立即运行"→ 与收尾中的旧执行冲突
+        // 所以整组（停止/运行/编辑/解锁/删除/禁用）一起置灰，收尾结束再恢复。
+        const btn = document.querySelector(`.btn-action-stop[data-task-id="${taskId}"]`);
+        const group = btn ? btn.closest('.btn-group') : null;
+        const frozen = group ? Array.from(group.querySelectorAll('button')) : (btn ? [btn] : []);
+        const snapshot = frozen.map(b => ({
+            b, disabled: b.disabled, opacity: b.style.opacity,
+            pe: b.style.pointerEvents, title: b.title, html: b.innerHTML,
+            hadDisabledClass: b.classList.contains('disabled'),
+        }));
+        frozen.forEach(b => {
+            b.disabled = true;
+            b.classList.add('disabled');
+            b.style.opacity = '0.45';
+            b.style.pointerEvents = 'none';
+        });
+        if (btn) {
+            btn.title = '正在停止…';
+            btn.innerHTML = '<i class="bi bi-hourglass-split"></i>';
+        }
         try {
-            if (!confirm('确定要停止正在运行的计划任务吗？')) {
-                return;
-            }
             await SchedulerAPI.stopTask(taskId);
             await this.loadTasks();
-            // SchedulerAPI.stopTask 已经显示 alert，这里不需要重复
         } catch (error) {
             console.error('停止任务失败:', error);
+            // SchedulerAPI.stopTask 已经 alert，这里不重复
+        } finally {
+            // 成功路径原本只靠 loadTasks() 重绘表格把按钮换掉；
+            // 但 loadTasks() 自己会吞异常（列表接口失败/渲染出错时静默返回），
+            // 按钮就会永远停在置灰状态，用户再也点不了。
+            // 这里兜底：重绘过（按钮已脱离 DOM）就什么都不做，
+            // 没重绘就恢复原状，允许重试。
+            snapshot.forEach(s => {
+                if (!s.b.isConnected) return;
+                s.b.disabled = s.disabled;
+                s.b.style.opacity = s.opacity;
+                s.b.style.pointerEvents = s.pe;
+                s.b.title = s.title;
+                s.b.innerHTML = s.html;
+                if (!s.hadDisabledClass) s.b.classList.remove('disabled');
+            });
         }
     },
 

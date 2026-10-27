@@ -1,5 +1,81 @@
 # 更新日志
 
+## [1.9.91] - 2026-10-27
+
+### 新增
+- **磁带验证卡片实时进度条**：验证中显示当前归档名 + 已读/总字节 + 百分比 +
+  实时速率（`正在验证 xxx.tar.zst — 3.2/7.5GB (43%) ~180MB/s`，蓝色细条）。
+  数据链路与写带"复制进度"同模式：解压循环里按成员更新 `fh.tell()`
+  （零额外 IO）→ 挂在 system 实例上 → 任务查询接口透出 `verify_live` →
+  前端仅对 running 的验证任务渲染。任务结束/取消时实时状态自动清除。
+
+### 修复
+- **点「停止」后按钮永久卡在置灰沙漏**：`stopTask()` 点击时会把按钮置灰（防止
+  收尾期间重复取消打断磁带 offline），但只有 `catch` 分支恢复；成功路径完全依赖
+  `loadTasks()` 重绘表格把按钮换掉，而 `loadTasks()` 自己吞异常（列表接口失败/
+  渲染出错时静默返回）——按钮就永远点不了。改为 `finally` 兜底：重绘过（节点已
+  脱离 DOM）不动，没重绘就恢复原状，允许重试。
+- **停止期间整组按钮仍可点**：只置灰"停止"时，"立即运行"/"编辑"/"删除"仍可点，
+  点"停止"会再发一次取消、点"运行"会与收尾中的旧执行冲突。改为冻结整组，收尾
+  结束（`loadTasks()` 重绘）后自动恢复。
+- **计划任务停止后状态卡在 running**：`task_executor` 的 `except Exception`
+  接不住 `task.cancel()` 抛出的 `CancelledError`（继承 `BaseException`），
+  `scheduled_tasks.status` 永远是 running → UI 一直显示"运行中"且停止按钮可点。
+  补 `except asyncio.CancelledError`，回写为 paused。
+- **抽样向下取整**：`int(len×百分比/100)` 截断，1169×10% 只抽 116。改为
+  `math.ceil`：1169→117、11→2、3→1（不足 1 个也抽 1 个），磁带验证与目录
+  验证共 4 处统一。
+- **`kill_compression_processes` 每次必报错**：`backup/utils.py` 里
+  `logger = None  # 将在模块导入时设置` 从未被设置，"无残留进程"这条正常路径
+  走 `logger.debug` 必抛 `AttributeError: 'NoneType' object has no attribute
+  'debug'`，被上层捕获后误报"终止压缩进程失败"。改为 `logging.getLogger(__name__)`。
+- **存储趋势"超期月份置灰"从未生效**：前端用 `i >= retentionMonths`，而 `i`
+  是上方 for 循环泄漏出的变量，循环结束为 `-1`，条件恒 false。改为在月份数据里
+  存 `monthsAgo`（距当前月数）再判断。
+- **磁带挂载"假成功"导致验证误报"未发现归档"**：`mount_point.is_mount()` 只代表
+  FUSE 挂上，索引仍在后台读（9TB 带子 1~3 分钟），此间目录为空。新增
+  `_wait_index_ready()`，以 `.LTFS` 出现作为索引就绪标志，三处挂载成功判定都要
+  等它；`mount_with_retry` 补装带检查（`check_tape_in_drive`，另一条挂载路径
+  有、这条没有，带子被 eject 后 LTFS 只会原地等设备）。
+- **挂载等待窗口过短**：轮询 30 秒 + 延迟 30 秒判超时，而大盘带实测超过 60 秒
+  才挂上（19:51 挂载成功时已被判超时，留下无人管理的挂载）。改为 90 秒 + 60 秒。
+- **中断时卸载被跳过**：`unmount_ltfs()` 靠 `_ltfs_mounted` 判断是否需要清理，
+  而等索引期间该标志尚未置位 → 点停止后卸载直接返回 True，留下僵尸挂载和占着
+  `/dev/sg1` 的 LTFS 进程（后续 ltfsck 报 EBUSY）。改为挂载一成立就先登记状态，
+  且 `unmount_ltfs` 增加"标志缺失但实际仍挂载"的兜底清理。
+
+## [1.9.90] - 2026-10-26
+
+### 修复（月度磁带验证实测发现的 3 项 + 存储趋势 1 项）
+
+- **验证统计写不进卡片**：`_save_verify_summary` 的 SQL 写成 `$2` 在 `$1` 前，
+  而 `psycopg3_compat` 把 `$N` 一律替换成 `%s` 后按**出现顺序**绑参，
+  jsonb 位置收到 task_id（smallint）→ `cannot cast type smallint to jsonb`。
+  改为 `$1`（jsonb）/`$2`（id）顺序编号。
+- **任务进度永远 0%**：`update_scan_progress` 的 SQL 里 `$6` 被引用两次
+  （`COALESCE($6::jsonb,'{}')` 与 `COALESCE(result_summary,'{}') || ...`），
+  换成 `%s` 后共 10 个占位符但只传 9 个参数 →
+  `the query has 10 placeholders but 9 parameters were passed`，异常被吞。
+  任务 166 的 `processed_files`/`progress_percent` 一直是 0 即因此。
+  改为合成单个表达式 `COALESCE(COALESCE(rs,'{}'::jsonb) || $6::jsonb, rs)`。
+  另注：SQL 注释里的占位符写法同样会被替换，注释中不得出现 `$N`。
+- **进度更新整次中断**：部分 `BackupTask` 对象没有 `progress_percent` 属性
+  （`'BackupTask' object has no attribute 'progress_percent'`），
+  改为 `getattr(..., None)` + SQL 侧 `COALESCE($1, progress_percent)`，
+  取不到时保留原值（不能用 0.0，否则清零）。
+- **存储使用趋势只剩最近一月**：历史月份 `backup_sets.compressed_bytes`
+  未回写（全 0），原兜底条件是"所有月都为 0"才改用 `backup_tasks`，
+  最近月有值时不再触发。改为逐月合并，口径为**全量（原始大小）**：
+  以 `backup_tasks.total_bytes` 为主，`backup_sets.total_bytes` 仅作缺失兜底。
+- **停止验证任务后状态卡在 running**：`CancelledError` 继承 `BaseException`，
+  `except Exception` 接不住，`backup_tasks` 记录永远停在 running
+  （实测任务 167），后续"有任务在运行"的判断会误判。
+  补 `except asyncio.CancelledError` 落库为 cancelled。
+- **连点停止会打断磁带 offline**：验证结束的 `finally` 里直接 `await`
+  卸载协程，第二次取消会把它打断，磁带停在"已加载未 offline"
+  （实测 18:24 发生，需手工 `mt offline` 收尾）。
+  卸载与取消状态写入改为独立任务 + `asyncio.shield`，二次取消下仍能完成。
+
 ## [1.9.89] - 2026-10-26
 
 ### 修复（第七轮审查 6 项）
