@@ -1140,6 +1140,13 @@ class VerifyActionHandler(ActionHandler):
         """磁带验证：挂载 LTFS，抽样 .tar.zst 归档验证完整性"""
         verify_percent = float(config.get('verify_percent', 1))
 
+        # 全程占用标记：磁带验证持有驱动器（挂载+读带），期间恢复/检索要拒绝。
+        # 只查 backup_engine._current_task 查不到验证任务（它不经备份引擎），
+        # 靠 _verify_live 又只能覆盖逐归档阶段（挂载/扫描期没有），
+        # 所以单独挂一个覆盖全程的标志。
+        if self.system_instance is not None:
+            self.system_instance._verify_tape_running = True
+
         # 1. 检查是否有正在运行的备份任务
         if self.system_instance and hasattr(self.system_instance, 'backup_engine'):
             backup_engine = self.system_instance.backup_engine
@@ -1315,11 +1322,16 @@ class VerifyActionHandler(ActionHandler):
                         description=f'[验证完整性中...] 抽样 0/{sample_count}')
                 for i, archive_path in enumerate(sampled):
                     logger.info(f"[磁带验证] 验证归档 {i+1}/{sample_count}: {archive_path.name}")
-                    # 实时进度：卡片显示"正在验证 xxx — 3.2/7.5GB (43%) ~180MB/s"。
+                    # 实时进度：卡片显示"磁带验证中: 归档 6/12/1,185 通过 6 失败 0"
+                    # + "正在验证 xxx — 3.2/7.5GB (43%) ~180MB/s"。
                     # 挂到 system_instance 上供任务查询接口读取（同 tape_write 模式），
                     # 解压在线程里跑，只写 int/str 字段（CPython 原子赋值，无需锁）。
-                    _live = {'name': archive_path.name, 'total': 0, 'done': 0,
-                             'members': 0, 'started': time.time()}
+                    _live = {'kind': 'tape', 'name': archive_path.name, 'total': 0,
+                             'done': 0, 'members': 0, 'started': time.time(),
+                             'device': str(tape_handler._get_ltfs_device()),
+                             'index': i + 1, 'sampled_total': sample_count,
+                             'archives_total': len(archives),
+                             'passed': passed, 'failed': failed}
                     try:
                         _live['total'] = archive_path.stat().st_size
                     except OSError:
@@ -1328,6 +1340,7 @@ class VerifyActionHandler(ActionHandler):
                     if _sys_live is not None:
                         _sys_live._verify_live = _live
                     try:
+                        _err_before = len(errors)   # 失败明细增量快照（见循环末尾）
                         # 单个归档上限 30 分钟：磁带/FUSE 卡死时不能无限挂住
                         _entries = []
                         valid, detail = await asyncio.wait_for(
@@ -1373,6 +1386,14 @@ class VerifyActionHandler(ActionHandler):
                         verify_errors += 1
                         errors.append(f"[验证异常] {archive_path}: {str(e)}")
                         logger.error(f"[磁带验证] ✗ {archive_path.name}: {e}")
+                    # 判定后同步卡片计数（下一组循环会重建 _live，这里保当前组的最终结果）
+                    _live['passed'] = passed
+                    _live['failed'] = failed
+                    # 失败明细进实时通道（hover"失败数"可见）：
+                    # 按 errors 增量取（覆盖判坏/超时/异常三个分支，不引用可能未绑定的变量）
+                    if len(errors) > _err_before:
+                        _live['errors'] = (list(_live.get('errors') or [])
+                                           + errors[_err_before:])[-5:]
                     # 更新数据库进度：每 5 秒最多一次，最后一个必写（避免频繁 UPDATE）
                     _now_p = time.time()
                     if task_id and (_now_p - _last_progress_at >= 5
@@ -1415,7 +1436,10 @@ class VerifyActionHandler(ActionHandler):
             )
 
             result = {
-                "status": "success" if failed == 0 else "failed",
+                # 文件/归档级失败不再判任务失败（2026-10-28 用户决策）：
+                # 任务跑完即 success，失败计数与明细进卡片"失败明细"列表。
+                # 否则 86 万抽样里 3 个权限拒绝就把整轮验证标红，信噪比不可接受。
+                "status": "success",
                 "message": f"磁带验证完成: 抽样 {sample_count}/{len(archives)}, 通过 {passed}, 失败 {failed}"
                            + (f"（损坏 {corrupt}, 异常 {verify_errors}）" if failed else ""),
                 "total": len(archives),
@@ -1441,6 +1465,8 @@ class VerifyActionHandler(ActionHandler):
             return result
 
         finally:
+            if self.system_instance is not None:
+                self.system_instance._verify_tape_running = False
             # 如果是我们自己挂载的，验证完后卸载并 offline：
             # 只卸载不 offline 会让带子带着"加载状态+索引分区末尾"留在驱动器里，
             # 随后系统重启可能重演读卷标签失败的问题。
@@ -1725,7 +1751,8 @@ class VerifyActionHandler(ActionHandler):
         logger.info(f"[目录验证] 完成: 扫描 {total_scanned} 个文件 (排除 {excluded_count} 个), 抽样 {total_sampled}, 通过 {passed}, 失败 {failed}")
 
         result = {
-            "status": "success" if failed == 0 else "failed",
+            # 同磁带验证：文件级失败不判任务失败，明细进卡片列表
+            "status": "success",
             "message": f"目录验证完成: 扫描 {total_scanned}, 抽样 {total_sampled}, 通过 {passed}, 失败 {failed}",
             "total": total_scanned,
             "sampled": total_sampled,
@@ -1834,6 +1861,9 @@ class VerifyActionHandler(ActionHandler):
                 if len(errors) < 200:
                     errors.append(f"{file_path}: {str(e)}")
 
+        # 失败明细进实时通道（滚动保留最近 5 条；卡片 hover"失败数"可见）
+        if live is not None and errors:
+            live['errors'] = (list(live.get('errors') or []) + errors)[-5:]
         return passed, failed, len(sampled), errors
 
     async def _verify_batch(self, batch: list, verify_percent: float, verify_enabled: bool, verify_temp: Path) -> tuple:

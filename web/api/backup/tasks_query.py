@@ -206,15 +206,21 @@ async def get_backup_tasks(
                             'kind': str(_vl.get('kind') or 'tape'),
                             'phase': str(_vl.get('phase') or 'verify'),
                             'name': str(_vl.get('name') or ''),
+                            'device': str(_vl.get('device') or ''),
+                            'index': int(_vl.get('index') or 0),
+                            'sampled_total': int(_vl.get('sampled_total') or 0),
+                            'archives_total': int(_vl.get('archives_total') or 0),
+                            'passed': int(_vl.get('passed') or 0),
+                            'failed': int(_vl.get('failed') or 0),
                             'done_bytes': _v_done,
                             'total_bytes': _v_total,
                             'members': int(_vl.get('members') or 0),
                             'scanned': int(_vl.get('scanned') or 0),
                             'sampled': int(_vl.get('sampled') or 0),
-                            'passed': int(_vl.get('passed') or 0),
-                            'failed': int(_vl.get('failed') or 0),
                             'percent': round(_v_done / _v_total * 100, 1) if _v_total > 0 else 0,
                             'speed_mbps': round(_v_done / _v_elapsed / 1048576, 1) if _v_elapsed else 0,
+                            # 最近失败明细（滚动 5 条，卡片 hover"失败数"显示）
+                            'errors': [str(x) for x in (_vl.get('errors') or [])][-5:],
                         }
                     # 压缩喂不饱写带：FinalDirMonitor 累计的 final 空等时间
                     try:
@@ -634,6 +640,9 @@ async def get_backup_tasks(
                                           if isinstance(result_summary_dict, dict) else None),
                         "verify_failed": (result_summary_dict.get('verify_failed')
                                           if isinstance(result_summary_dict, dict) else None),
+                        # 验证失败明细（文件/归档级，前 20 条；卡片"失败明细"列表）
+                        "verify_error_details": (result_summary_dict.get('errors')
+                                                 if isinstance(result_summary_dict, dict) else None),
                         "created_at": row["created_at"],
                         "started_at": row["started_at"],
                         "completed_at": row["completed_at"],

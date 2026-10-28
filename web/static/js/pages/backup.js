@@ -1621,25 +1621,62 @@
                     : 'text-muted';
 
                 // 验证实时进度（与"复制进度"同模式）：
-                //   磁带：当前归档解压读带进度（字节粒度 + 速率）
+                //   磁带：状态行（归档 x/抽样/总数 + 通过绿/失败红）+ 目标/抽样信息行
+                //         + 当前归档字节进度条
                 //   目录：扫描中显示已扫描数；验证中显示当前文件 + 字节进度
                 let verifyLiveHtml = '';
+                if (isVerifyTask) {
+                    const vl = task.verify_live;
+                    const _fmtN = (n) => (Number(n) || 0).toLocaleString('zh-CN');
+                    // 目标与抽样信息行（整个验证期间可见；数据来自任务参数/实时对象）
+                    const _vTotal = (vl && vl.archives_total) || Number(task.verify_total_archives) || 0;
+                    const _vPct = task.verify_percent !== null && task.verify_percent !== undefined
+                        ? task.verify_percent : null;
+                    const _vDevice = (vl && vl.device) || '';
+                    const _isTapeV = resolveVerifyType(task) === 'tape' || (vl && vl.kind === 'tape');
+                    const _vTarget = _isTapeV
+                        ? `自动选择${_vDevice ? ' (' + _vDevice + ')' : ''}`
+                        : '源路径';
+                    if (_vTotal > 0 || _vPct !== null) {
+                        verifyLiveHtml += `
+                    <div class="d-flex align-items-center mt-1">
+                        <small class="text-muted">目标: ${_vTarget}</small>
+                        <small class="text-muted ms-auto">抽样比例: ${_vPct !== null ? _vPct + '%' : '-'}${_vTotal > 0 ? '　归档总数: ' + _fmtN(_vTotal) : ''}</small>
+                    </div>`;
+                    }
+                    if (vl && vl.kind === 'tape' && vl.index > 0) {
+                        // 状态行：归档进度 + 通过（绿）/失败（红，hover 显示失败明细）
+                        const _passCls = vl.passed > 0 ? 'text-success' : 'text-muted';
+                        const _failCls = vl.failed > 0 ? 'text-danger' : 'text-muted';
+                        const _failTip = (vl.failed > 0 && Array.isArray(vl.errors) && vl.errors.length)
+                            ? vl.errors.join('\n').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;')
+                            : '';
+                        verifyLiveHtml += `
+                    <div class="d-flex align-items-center mt-1">
+                        <small class="text-muted">磁带验证中: 归档 ${vl.index}/${vl.sampled_total}/${_fmtN(vl.archives_total)}</small>
+                        <small class="ms-auto"><span class="${_passCls}">通过 ${vl.passed}</span>　<span class="${_failCls}"${_failTip ? ` title="${_failTip}" style="cursor:help;"` : ''}>失败 ${vl.failed}</span></small>
+                    </div>`;
+                    }
+                }
                 if (isVerifyTask && task.verify_live && task.verify_live.name !== undefined) {
                     const vl = task.verify_live;
                     const _vp = Number(vl.percent) || 0;
                     if (vl.kind === 'directory') {
                         if (vl.phase === 'scan') {
-                            verifyLiveHtml = `
+                            verifyLiveHtml += `
                     <div class="d-flex align-items-center mt-1">
                         <small class="text-muted">扫描中:</small>
                         <small class="text-muted ms-auto">已扫描 ${vl.scanned} 个文件</small>
                     </div>`;
                         } else {
                             const _vName = vl.name || '准备中';
-                            verifyLiveHtml = `
+                            const _dFailTip = (vl.failed > 0 && Array.isArray(vl.errors) && vl.errors.length)
+                                ? vl.errors.join('\n').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;')
+                                : '';
+                            verifyLiveHtml += `
                     <div class="d-flex align-items-center mt-1">
                         <small class="text-muted text-truncate" style="max-width:55%;" title="${vl.name}">验证中: ${_vName}</small>
-                        <small class="text-muted ms-auto">已抽样 ${vl.sampled}（通过 ${vl.passed} / 失败 ${vl.failed}）</small>
+                        <small class="text-muted ms-auto">已抽样 ${vl.sampled}（通过 ${vl.passed} / <span${vl.failed > 0 ? ' class="text-danger"' : ''}${_dFailTip ? ` title="${_dFailTip}" style="cursor:help;"` : ''}>失败 ${vl.failed}</span>）</small>
                     </div>
                     ${vl.total_bytes > 0 ? `
                     <div class="d-flex align-items-center">
@@ -1651,7 +1688,7 @@
                     </div>` : ''}`;
                         }
                     } else {
-                        verifyLiveHtml = `
+                        verifyLiveHtml += `
                     <div class="d-flex align-items-center mt-1">
                         <small class="text-muted text-truncate" style="max-width:55%;" title="${vl.name}">验证中: ${vl.name}</small>
                         <small class="text-muted ms-auto">${formatBytes(vl.done_bytes)} / ${formatBytes(vl.total_bytes)} (${_vp}%)${vl.speed_mbps ? ' ~' + vl.speed_mbps + 'MB/s' : ''}</small>
@@ -1756,7 +1793,30 @@
                 _mkVerifyRow('通过:',
                     `<span class="text-success">${_passed !== null ? Number(_passed).toLocaleString() : '—'}</span>`);
                 _mkVerifyRow('失败数:',
-                    `<span class="${_failed > 0 ? 'text-danger fw-semibold' : ''}">${Number(_failed).toLocaleString()}</span>`);
+                    `<span class="${_failed > 0 ? 'text-danger fw-semibold' : ''}"${(function(){
+                        const el = Array.isArray(task.verify_error_details) ? task.verify_error_details : [];
+                        return (_failed > 0 && el.length)
+                            ? ` title="${el.join('\n').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;')}" style="cursor:help;"`
+                            : '';
+                    })()}>${Number(_failed).toLocaleString()}</span>`);
+
+                // 失败明细（文件/归档级）：任务不因此判失败，但明细必须可见
+                const _errList = Array.isArray(task.verify_error_details)
+                    ? task.verify_error_details : [];
+                if (_errList.length > 0) {
+                    const _detail = document.createElement('div');
+                    _detail.className = 'mt-1';
+                    const _esc = (s) => String(s).replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    const _rows = _errList.slice(0, 8).map(e =>
+                        `<div class="text-danger" style="font-size:0.72rem; word-break:break-all;">· ${_esc(e)}</div>`
+                    ).join('');
+                    _detail.innerHTML = `<small class="text-muted">失败明细:</small>${_rows}`
+                        + (_errList.length > 8
+                            ? `<div class="text-muted" style="font-size:0.72rem;">… 共 ${_errList.length} 条</div>`
+                            : '');
+                    body.appendChild(_detail);
+                }
             } else {
                 const _procB = Number(task.processed_bytes) || 0;
                 const _totalB = Number(task.total_bytes) || 0;

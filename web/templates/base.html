@@ -139,7 +139,8 @@
     <!-- 自定义JS -->
     <script src="{{ url_for('static', path='/js/main.js') }}"></script>
 
-    <!-- 备份运行时禁用“恢复”入口：恢复与备份互斥（后端也会拒绝） -->
+    <!-- 备份/磁带验证运行时禁用"恢复"入口：恢复与它们互斥（后端也会拒绝）。
+         目录验证只读 NFS 源目录、不碰磁带，不阻断恢复。 -->
     <script>
     (function() {
         var _recovCheckTimer = null;
@@ -150,14 +151,20 @@
                     if (!d) return;
                     var tasks = (d && d.tasks) || [];
                     var running = tasks.some(function(t) {
-                        return String((t && t.status) || '').toLowerCase() === 'running';
+                        var st = String((t && t.status) || '').toLowerCase();
+                        if (st !== 'running') return false;
+                        // 目录验证不占磁带驱动器，恢复/检索不受它影响
+                        var tt = String((t && t.task_type) || '').toLowerCase();
+                        var vt = String((t && t.verify_type) || '').toLowerCase();
+                        if (tt === 'verify' && vt === 'directory') return false;
+                        return true;
                     });
                     document.querySelectorAll('a[href="/recovery"]').forEach(function(a) {
                         if (running) {
                             a.style.pointerEvents = 'none';
                             a.style.opacity = '0.45';
                             a.setAttribute('aria-disabled', 'true');
-                            a.title = '备份任务运行中，暂不可恢复/检索';
+                            a.title = '备份/磁带验证任务运行中，暂不可恢复/检索';
                         } else {
                             a.style.pointerEvents = '';
                             a.style.opacity = '';

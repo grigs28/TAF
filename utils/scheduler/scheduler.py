@@ -711,6 +711,13 @@ class TaskScheduler:
             logger.info(f"[手动运行] 创建后台执行任务 - 任务ID: {task_id}, 任务名称: {task.task_name}")
             execution_task = asyncio.create_task(execute_func())
             self._running_executions[task_id] = execution_task
+            # 完成即出表：此前只在下方 0.1 秒窗口内做清理，任务跑完后条目
+            # 永久留在 _running_executions。后果：下次 scheduler.stop()（重启服务）
+            # 会对这些"已完成"的条目逐个 stop_task → 把 status 写成 paused
+            # （2026-10-27 任务1 跑完却显示"已暂停"的根因）。
+            execution_task.add_done_callback(
+                lambda _t, _tid=task_id: self._running_executions.pop(_tid, None)
+            )
 
             # 等待一小段时间，检查任务是否因为获取锁失败而立即退出
             await asyncio.sleep(0.1)
@@ -745,10 +752,21 @@ class TaskScheduler:
             return False
 
     async def stop_task(self, task_id: int) -> bool:
-        """停止正在运行的任务"""
+        """停止正在运行的任务
+
+        已结束的条目（execution_task.done()）只做清理、不写状态：
+        否则会给"跑完了但注册表残留"的任务盖上 paused（任务1 实测）。
+        """
         try:
             if task_id in self._running_executions:
                 execution_task = self._running_executions[task_id]
+
+                # 已完成/已取消的残留条目：只出表，状态由执行器自己落库
+                if execution_task.done():
+                    self._running_executions.pop(task_id, None)
+                    logger.info(f"[停止任务] 任务已结束，仅清理注册项: task_id={task_id}")
+                    return True
+
                 execution_task.cancel()
 
                 try:
@@ -850,9 +868,20 @@ class TaskScheduler:
             except asyncio.CancelledError:
                 pass
 
-        # 停止所有正在运行的任务
+        # 停止所有正在运行的任务（关服收尾：只取消，不改任务状态）
+        # 此前逐个调 stop_task 会把 status 写成 paused——已完成的任务只要
+        # 注册表有残留就会被误标（2026-10-27 任务1 重启后显示"已暂停"）。
         for task_id in list(self._running_executions.keys()):
-            await self.stop_task(task_id)
+            _t = self._running_executions.get(task_id)
+            if _t is not None and not _t.done():
+                _t.cancel()
+                try:
+                    await _t
+                except asyncio.CancelledError:
+                    pass
+                except Exception as _e:
+                    logger.warning(f"[调度器停止] 任务 {task_id} 收尾异常: {_e}")
+            self._running_executions.pop(task_id, None)
 
         logger.info("计划任务调度器已停止")
 

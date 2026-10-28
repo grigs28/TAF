@@ -22,7 +22,10 @@ router = APIRouter()
 
 
 def _reject_if_backup_running(request: Request):
-    """备份任务运行中时拒绝恢复/检索（前端恢复 tab 也会变灰）"""
+    """备份/磁带验证任务运行中时拒绝恢复/检索（前端恢复 tab 也会变灰）。
+
+    目录验证只读 NFS 源目录、不碰磁带驱动器，不拦截。
+    """
     try:
         system = request.app.state.system
         be = getattr(system, 'backup_engine', None) if system else None
@@ -31,6 +34,12 @@ def _reject_if_backup_running(request: Request):
             raise HTTPException(
                 status_code=409,
                 detail="备份任务运行中，暂不可恢复/检索，请等待任务结束")
+        # 磁带验证持有驱动器（挂载+读带），恢复会撞车，同样拒绝。
+        # 磁带验证不经 backup_engine，靠验证处理器挂的全程标志判定。
+        if system is not None and getattr(system, '_verify_tape_running', False):
+            raise HTTPException(
+                status_code=409,
+                detail="磁带验证任务运行中，暂不可恢复/检索，请等待任务结束")
     except HTTPException:
         raise
     except Exception:
