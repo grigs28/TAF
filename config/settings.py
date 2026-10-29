@@ -112,10 +112,15 @@ class Settings(BaseSettings):
     DISK_GUARD_COUNT_PRODUCED: bool = True  # 守卫需求按"剩余待产出"计算：在途组已落地字节从源大小上界中扣除（关闭=纯源大小口径）
 
     # 大小文件组动态调度（计划04 / 计划05）
-    GROUP_SCHED_ENABLED: bool = True  # 总开关：false 回退到原来的单队列 FIFO 顺序
-    GROUP_LARGE_FILE_COUNT_THRESHOLD: int = 20000  # 组内文件数 < 阈值 = 大文件组（带宽主导）
+    GROUP_SCHED_ENABLED: bool = True  # 总开关：false 回退到原来的单队列 FIFO 顺序    GROUP_LARGE_FILE_COUNT_THRESHOLD: int = 20000  # 组内文件数 < 阈值 = 大文件组（带宽主导）
     GROUP_SCHED_SCAN_RATIO: str = "2:1"   # （已弃用，保留兼容）扫描期配额
     GROUP_SCHED_NORMAL_RATIO: str = "2:1"  # 全程大:小 配额（计划05：不再区分扫描期，默认 2:1）
+
+    # 归档清单落库（压缩完成时把"归档 → 文件列表"写入 tape_archive_contents）
+    # 开启后：恢复检索全量秒开、磁带验证跳过解压建缓存；
+    # 代价：每次备份多写约 1 帧 GB 级数据（882 万行/12TB 规模约 1.7GB），
+    # 但写在每组压缩完成后，耗时被压缩时间掩盖，失败不阻断备份。
+    ARCHIVE_MANIFEST_PERSIST: bool = False
     GROUP_SCAN_DEFER_BELOW: int = 5000  # 大组保护阈值：全程不消费"文件数<该值"的组（写带喂不饱时除外），0=禁用
     GROUP_MAX_FILES_PER_GROUP: int = 50000  # 组内文件数上限（0=禁用）：与大小上限同时生效，谁先到就封组
     GROUP_STARVE_RELEASE_SEC: int = 30  # 写带喂不饱（final 为空）持续多少秒后，才放保护区组出来

@@ -709,8 +709,16 @@ class TaskScheduler:
 
             # 在后台执行（不阻塞）
             logger.info(f"[手动运行] 创建后台执行任务 - 任务ID: {task_id}, 任务名称: {task.task_name}")
+            # 已有执行实例在跑时不覆盖注册项：否则本次（会因任务锁立即失败）
+            # 的 done_callback 会把对方条目 pop 掉，之后停止按钮失效
+            _existing = self._running_executions.get(task_id)
+            if _existing is not None and not _existing.done():
+                logger.warning(
+                    f"[手动运行] 该任务已有执行实例在跑，不重复注册 - "
+                    f"任务ID: {task_id}, 任务名称: {task.task_name}")
             execution_task = asyncio.create_task(execute_func())
-            self._running_executions[task_id] = execution_task
+            if _existing is None or _existing.done():
+                self._running_executions[task_id] = execution_task
             # 完成即出表：此前只在下方 0.1 秒窗口内做清理，任务跑完后条目
             # 永久留在 _running_executions。后果：下次 scheduler.stop()（重启服务）
             # 会对这些"已完成"的条目逐个 stop_task → 把 status 写成 paused
@@ -1016,6 +1024,17 @@ class TaskScheduler:
                 )
                 # 注册为可停止的执行任务（此前只有手动运行路径注册，
                 # 导致自动触发的任务 stop_task 永远返回"未在运行"）
+                # 关键：不得覆盖已在跑的注册项。任务锁会让这次执行立即失败返回，
+                # 但它占用的注册项在 finally 里被 pop，会把"真正在跑那次"的条目
+                # 一起删掉 → 之后点停止报"任务未在运行"，任务实际还在跑
+                # （2026-10-29 实测：08:51 自动触发删了 20:58 手动运行的注册项）。
+                _existing = self._running_executions.get(task_id)
+                if _existing is not None and not _existing.done():
+                    logger.warning(
+                        f"[调度器顺序执行] 该任务已有执行实例在跑，跳过本次触发 - "
+                        f"任务ID: {task_id}, 任务名称: {task_name}"
+                    )
+                    continue
                 execution_task = asyncio.create_task(task_info['execute_func']())
                 self._running_executions[task_id] = execution_task
                 try:

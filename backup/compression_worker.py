@@ -11,6 +11,7 @@ import shutil
 import time
 from typing import List, Dict, Optional, Any
 import tempfile
+from pathlib import Path
 
 from utils.scheduler.db_utils import is_opengauss
 from config.settings import get_settings
@@ -45,6 +46,12 @@ class CompressionWorker:
         self.tape_file_mover = tape_file_mover
         self.file_group_prefetcher = file_group_prefetcher
         self.in_memory_store = in_memory_store
+
+        # 归档清单落库（可选，ARCHIVE_MANIFEST_PERSIST）：
+        # 压缩完成时把「归档 → 文件列表」入队，单后台协程串行批量写库。
+        # 串行是为了避免多组并发 INSERT 争索引页；入队非阻塞，不拖慢压缩。
+        self._manifest_queue: Optional[asyncio.Queue] = None
+        self._manifest_task: Optional[asyncio.Task] = None
 
         # 检查是否使用预取模式（openGauss模式且有预取器）
         self.use_prefetcher = is_opengauss() and file_group_prefetcher is not None
@@ -197,6 +204,11 @@ class CompressionWorker:
             return
 
         logger.info("收到停止信号，正在停止压缩处理...")
+        # 归档清单收尾：等队列排空再退出，避免丢尾部已压缩组的清单
+        try:
+            await self.stop_manifest_writer()
+        except Exception as _e:
+            logger.warning(f"[归档清单] 收尾异常（忽略）: {_e}")
         self._running = False
 
         # F2：先置停止标志再拆除——拆除与取消压缩任务之间隔了最长 10s 的
@@ -1572,6 +1584,101 @@ class CompressionWorker:
 
         logger.info("数据库文件组处理完成")
 
+    # ===== 归档清单落库（ARCHIVE_MANIFEST_PERSIST）=====
+    async def _enqueue_manifest(self, file_group: List[Dict], compressed_info: Optional[Dict]) -> None:
+        """把「归档 → 文件列表」放入写库队列（非阻塞）。
+
+        只在压缩成功且拿到归档路径时入队；归档名取压缩结果的最终文件名。
+        队列无上限：积压的是已完成组的清单，本来就得存着。
+        """
+        if not isinstance(compressed_info, dict):
+            return
+        raw_path = compressed_info.get('path') or ''
+        if not raw_path:
+            return
+        archive_name = str(Path(raw_path).name)
+        set_id = getattr(self.backup_set, 'set_id', None) or str(
+            getattr(self, '_manifest_set_id', '') or '')
+        if not set_id:
+            return
+        entries = []
+        for f in (file_group or []):
+            pth = f.get('file_path') or f.get('path')
+            if not pth:
+                continue
+            entries.append({
+                'name': str(pth),
+                'size': int(f.get('size') or f.get('file_size') or 0),
+                'is_dir': False,
+                'modified_time': f.get('modified_time') or f.get('mtime'),
+            })
+        if not entries:
+            return
+        # 懒启动后台写协程
+        if self._manifest_task is None or self._manifest_task.done():
+            self._manifest_queue = asyncio.Queue(maxsize=0)
+            self._manifest_task = asyncio.create_task(self._manifest_writer_loop())
+        await self._manifest_queue.put(
+            (set_id, archive_name, entries,
+             int(compressed_info.get('compressed_size') or 0)))
+
+    async def _manifest_writer_loop(self) -> None:
+        """串行消费归档清单并批量写库。
+
+        串行（单协程）而非并发：多组并发 INSERT 同一张表会争索引页；
+        串行 + 批量把写库压成一次事务，且不阻塞压缩线程。
+        失败只告警——清单只是加速缓存，绝不能影响已完成的备份。
+        """
+        from utils.scheduler.db_utils import get_opengauss_connection
+        while True:
+            item = await self._manifest_queue.get()
+            if item is None:
+                self._manifest_queue.task_done()
+                break
+            set_id, archive_name, entries, archive_size = item
+            try:
+                async with get_opengauss_connection() as conn:
+                    # 去重：同一归档已缓存则跳过（重跑/续写场景）
+                    _exists = await conn.fetchval(
+                        "SELECT COUNT(*) FROM tape_archive_contents "
+                        "WHERE set_id = $1 AND archive_filename = $2",
+                        set_id, archive_name)
+                    if _exists:
+                        logger.debug(f"[归档清单] 已存在，跳过: {archive_name}")
+                    else:
+                        # tape_label 在压缩阶段尚未确定（写带时才有），
+                        # 先写空串；恢复检索按 set_id+archive 命中
+                        _rows = [('', set_id, archive_name, archive_size,
+                                  e['name'], e['size'], False, e['modified_time'])
+                                 for e in entries]
+                        _B = 5000
+                        for _i in range(0, len(_rows), _B):
+                            await conn.executemany(
+                                "INSERT INTO tape_archive_contents "
+                                "(tape_label, set_id, archive_filename, archive_size, "
+                                "file_path, file_size, is_dir, modified_time) "
+                                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                                _rows[_i:_i + _B])
+                        logger.info(f"[归档清单] 已写入 {archive_name}: {len(_rows)} 条")
+            except Exception as e:
+                logger.warning(f"[归档清单] 写入失败（不影响备份）: {archive_name}: {e}")
+            finally:
+                try:
+                    self._manifest_queue.task_done()
+                except Exception:
+                    pass
+
+    async def stop_manifest_writer(self) -> None:
+        """任务收尾：等队列排空后停止写协程（避免丢尾部数据）"""
+        if self._manifest_task is None:
+            return
+        try:
+            if self._manifest_queue is not None:
+                await self._manifest_queue.put(None)
+            await asyncio.wait_for(self._manifest_task, timeout=120)
+        except Exception as e:
+            logger.warning(f"[归档清单] 收尾等待失败（忽略）: {e}")
+
     async def _compress_file_group(self, file_group: List[Dict], group_idx: int, compress_progress: Optional[Dict] = None):
         """压缩单个文件组（内部顺序执行：压缩完成 → 标注完成 → 移动到final → 返回，队列已消费）"""
         # 检查是否应该停止
@@ -1777,6 +1884,15 @@ class CompressionWorker:
                             f"原始大小: {format_bytes(original_size)}, 压缩后: {format_bytes(compressed_size)}, "
                             f"累计: {self.processed_files}/{total_files_to_process} 个文件 ({new_progress_percent:.1f}%)"
                         )
+
+                        # 归档清单入队（配置开启时）：恢复检索/验证缓存都能秒开，
+                        # 不再需要解压磁带。入队即返回，写库由后台协程串行处理。
+                        try:
+                            from config.settings import get_settings as _gs_manifest
+                            if bool(getattr(_gs_manifest(), 'ARCHIVE_MANIFEST_PERSIST', False)):
+                                await self._enqueue_manifest(processed_file_group, compressed_info)
+                        except Exception as _me:
+                            logger.warning(f"[归档清单] 入队失败（不影响压缩）: {_me}")
                     else:
                         # 数据库模式：更新chunk_number和DB进度
                         try:

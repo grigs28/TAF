@@ -71,6 +71,7 @@ class SystemEnvConfig(BaseModel):
     disk_guard_enabled: Optional[bool] = Field(None, description="空间守卫总开关：关闭后不再按守卫线暂停发放新压缩组（与磁盘限流至少保留一个）")
     disk_guard_safety_factor: Optional[float] = Field(None, description="空间守卫安全系数（默认 1.2）：守卫线 = 在途组数 × 最大文件大小 × 本系数")
     group_sched_enabled: Optional[bool] = Field(None, description="大小文件组调度总开关：按组内文件数分大/小文件组、全程按配额取组、守卫拦停时只取小文件组；关闭=原 FIFO 顺序")
+    archive_manifest_persist: Optional[bool] = Field(None, description="压缩完成后把归档文件清单写入数据库：恢复检索/验证缓存秒开；每 12TB 约多写 1.7GB")
     group_sched_ratio: Optional[str] = Field(None, description="全程配额（大:小），如 2:1、3:1、1:1")
     group_large_threshold: Optional[int] = Field(None, description="大/小文件组分界：组内文件数低于此值为大文件组（默认 20000）")
     group_scan_defer_below: Optional[int] = Field(None, description="大组保护阈值：全程不消费文件数低于此值的大文件组（默认 5000，0=禁用）；写带喂不饱时放出")
@@ -179,6 +180,7 @@ async def get_env_config():
             "disk_check_interval": parse_int(env_vars.get("DISK_CHECK_INTERVAL"), 30),
             "disk_guard_enabled": parse_bool(env_vars.get("DISK_GUARD_ENABLED"), True),
             "group_sched_enabled": parse_bool(env_vars.get("GROUP_SCHED_ENABLED"), True),
+            "archive_manifest_persist": parse_bool(env_vars.get("ARCHIVE_MANIFEST_PERSIST"), False),
             "group_sched_ratio": env_vars.get("GROUP_SCHED_NORMAL_RATIO", "2:1") or "2:1",
             "group_large_threshold": parse_int(env_vars.get("GROUP_LARGE_FILE_COUNT_THRESHOLD"), 20000),
             "group_scan_defer_below": parse_int(env_vars.get("GROUP_SCAN_DEFER_BELOW"), 5000),
@@ -345,6 +347,9 @@ async def update_env_config(config: SystemEnvConfig, request: Request):
             updates["DISK_GUARD_ENABLED"] = "true" if config.disk_guard_enabled else "false"
         if config.group_sched_enabled is not None:
             updates["GROUP_SCHED_ENABLED"] = "true" if config.group_sched_enabled else "false"
+        if getattr(config, 'archive_manifest_persist', None) is not None:
+            updates["ARCHIVE_MANIFEST_PERSIST"] = (
+                "true" if config.archive_manifest_persist else "false")
         if config.group_sched_ratio is not None:
             # 格式校验：N:M（正整数），与 _parse_ratio 口径一致
             _r = str(config.group_sched_ratio).strip()

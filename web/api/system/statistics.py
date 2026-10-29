@@ -173,6 +173,7 @@ async def _get_storage_statistics() -> Dict[str, Any]:
                     SELECT COALESCE(SUM(total_bytes), 0) as total_bytes
                     FROM backup_tasks
                     WHERE is_template = FALSE
+                      AND task_type <> 'verify'::backuptasktype
                       AND started_at >= $1
                       AND total_bytes > 0
                       AND LOWER(status::text) = 'completed'
@@ -258,6 +259,9 @@ async def _get_storage_trend(days: int = 365) -> List[Dict[str, Any]]:
                     SUM(total_bytes) as monthly_bytes
                 FROM backup_tasks
                 WHERE is_template = FALSE
+                  -- 只算备份任务：验证任务的 total_bytes 是"磁带归档总量/扫描文件总量"，
+                  -- 混进来会把趋势图翻倍（2026-10-29 实测 10 月显示 20+T）
+                  AND task_type <> 'verify'::backuptasktype
                   AND started_at >= $1
                   AND total_bytes > 0
                   AND LOWER(status::text) NOT IN ('cancelled', 'interrupted')

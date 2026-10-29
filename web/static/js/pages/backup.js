@@ -990,7 +990,13 @@
         } else if (_isRunningTask) {
             tape.title = '当前没有正在进行的磁带写入（压缩中或等待中）';
         }
-        body.appendChild(tape);
+        // 目录验证只读源目录、不写磁带：不显示"目标"行（否则会显示"自动选择"，
+        // 那是磁带语义，容易让人以为要往磁带上写）
+        const _isDirVerify = ((task.task_type || '').toLowerCase() === 'verify'
+            && resolveVerifyType(task) === 'directory');
+        if (!_isDirVerify) {
+            body.appendChild(tape);
+        }
 
         // 优先使用后端返回的 operation_stage 和 stage_steps（这些已经是基于内存变量构建的）
         const operationStage = (task.operation_stage || '').toLowerCase();
@@ -1302,12 +1308,28 @@
                         </div>`;
                     }
                 }
+                // 目录验证运行中：阶段名单独一行，统计拆成两行右对齐
+                // （一行放不下：已扫描/抽样 一行，通过/失败 一行）
+                let _dirStatHtml = '';
+                const _isVerifyTaskNow = (task.task_type || '').toLowerCase() === 'verify';
+                const _vlNow = task.verify_live;
+                if (_isVerifyTaskNow && (task.status || '').toLowerCase() === 'running'
+                        && _vlNow && _vlNow.kind === 'directory') {
+                    const _f = (n) => Number(n || 0).toLocaleString();
+                    // 阶段名去掉后端拼的统计尾巴，只留阶段本身
+                    displayLabel = String(displayLabel || '').replace(/已扫描[\s\S]*$/, '').trim() || '扫描+验证中';
+                    _dirStatHtml = `
+                    <div class="d-flex justify-content-end">
+                        <small class="text-muted" style="font-variant-numeric: tabular-nums; white-space:nowrap;">已扫描 ${_f(_vlNow.scanned)}，抽样 ${_f(_vlNow.sampled)}　通过 <span class="${_vlNow.passed > 0 ? 'text-success' : 'text-muted'}">${_f(_vlNow.passed)}</span>，失败 <span class="${_vlNow.failed > 0 ? 'text-danger' : 'text-muted'}">${_f(_vlNow.failed)}</span></small>
+                    </div>`;
+                }
                 stageSection.innerHTML = normalizeCardHtml(`
                     ${_dirHtml}
                     <div class="d-flex justify-content-between align-items-center">
-                        <small class="text-muted">当前阶段:</small>
-                        <small class="text-muted">${displayLabel}</small>
+                        <small class="text-muted flex-shrink-0">当前阶段:</small>
+                        <small class="text-muted text-end" style="font-variant-numeric: tabular-nums;">${displayLabel}</small>
                     </div>
+                    ${_dirStatHtml}
                     <div class="d-flex flex-wrap gap-1 mt-1 stage-badges">
                         ${stageSteps.map(step => {
                             // copy 步骤状态完全由后端 stage_steps 决定
@@ -1483,6 +1505,20 @@
                     ? '已完成'
                     : ((task.status || '').toLowerCase() === 'failed' ? '失败' : '验证中');
 
+                // 状态行速度：目录验证显示扫描速度（文件/秒）；
+                // 磁带验证显示读带速度（MB/s，来自 verify_live.speed_mbps）
+                let _statusSpeedHtml = '';
+                {
+                    const _vlS = task.verify_live;
+                    if (_vlS && (task.status || '').toLowerCase() === 'running') {
+                        if (_vlS.kind === 'directory' && _vlS.scan_rate > 0) {
+                            _statusSpeedHtml = `速度：${Math.round(_vlS.scan_rate).toLocaleString()} 文件/s`;
+                        } else if (_vlS.speed_mbps > 0) {
+                            _statusSpeedHtml = `速度：${_vlS.speed_mbps} MB/s`;
+                        }
+                    }
+                }
+
                 // 统一“总量”语义：目录验证 total_files=扫描数；磁带验证=归档总数
                 const _total = progressInfo.totalFiles || 0;
                 const _sampled = progressInfo.processedFiles || 0;
@@ -1505,9 +1541,11 @@
                         </div>`;
                 } else {
                     const derivedPct = _total > 0 ? (_sampled * 100 / _total) : null;
-                    const sampleRateText = _pct !== null
-                        ? `（${_pct}%）`
-                        : (derivedPct !== null ? `（${derivedPct.toFixed(2)}%）` : '');
+                    // 「已抽样验证」后面的括号是**实际抽样率**（抽样数/已扫描），
+                    // 保留 2 位小数；配置的「抽样比例」才用整数（见下方 _mkVerifyRow）。
+                    const sampleRateText = derivedPct !== null
+                        ? `（${derivedPct.toFixed(2)}%）`
+                        : (_pct !== null ? `（${Math.round(Number(_pct))}%）` : '');
                     _countHtml = `
                         <div class="d-flex justify-content-between">
                             <small class="text-muted">已扫描文件:</small>
@@ -1522,26 +1560,30 @@
                 progressSection.innerHTML = normalizeCardHtml(`
                     ${batchProgressHtml}
                     <div class="d-flex justify-content-between align-items-center">
-                        <small class="text-muted">状态:</small>
-                        <small class="text-muted">${statusText}</small>
+                        <small class="text-muted flex-shrink-0">状态:</small>
+                        <small class="text-muted text-center flex-fill">${statusText}</small>
+                        <small class="text-muted text-end flex-shrink-0" style="font-variant-numeric: tabular-nums;">${_statusSpeedHtml}</small>
                     </div>
-                    <div class="d-flex justify-content-between">
-                        <small class="text-muted">验证类型:</small>
-                        <small class="text-muted">${_vTypeLabel}</small>
-                    </div>
-                    <div class="d-flex justify-content-between">
-                        <small class="text-muted">抽样比例:</small>
-                        <small class="text-muted">${_pct !== null ? _pct + '%' : '—'}</small>
+                    <div class="d-flex" style="gap:16px;">
+                        <div class="d-flex justify-content-between flex-fill" style="min-width:0;">
+                            <small class="text-muted">验证类型:</small>
+                            <small class="text-muted text-end">${_vTypeLabel}</small>
+                        </div>
+                        <div class="d-flex justify-content-between flex-fill" style="min-width:0;">
+                            <small class="text-muted">抽样比例:</small>
+                            <small class="text-muted text-end">${_pct !== null ? Math.round(Number(_pct)) + '%' : '—'}</small>
+                        </div>
                     </div>
                     ${_countHtml}
-                    ${verifyPassed !== null ? `
-                    <div class="d-flex justify-content-between">
-                        <small class="text-muted">通过:</small>
-                        <small class="text-success">${verifyPassed.toLocaleString()}</small>
-                    </div>` : ''}
-                    <div class="d-flex justify-content-between">
-                        <small class="text-muted">失败数:</small>
-                        <small class="${failedClass}">${verifyFailed === null ? '-' : verifyFailed.toLocaleString()}</small>
+                    <div class="d-flex" style="gap:16px;">
+                        <div class="d-flex justify-content-between flex-fill" style="min-width:0;">
+                            <small class="text-muted">通过:</small>
+                            <small class="text-success text-end">${verifyPassed === null ? '-' : verifyPassed.toLocaleString()}</small>
+                        </div>
+                        <div class="d-flex justify-content-between flex-fill" style="min-width:0;">
+                            <small class="text-muted">失败数:</small>
+                            <small class="${failedClass} text-end">${verifyFailed === null ? '-' : verifyFailed.toLocaleString()}</small>
+                        </div>
                     </div>
                 `);
             } else {
@@ -1634,14 +1676,19 @@
                         ? task.verify_percent : null;
                     const _vDevice = (vl && vl.device) || '';
                     const _isTapeV = resolveVerifyType(task) === 'tape' || (vl && vl.kind === 'tape');
-                    const _vTarget = _isTapeV
-                        ? `自动选择${_vDevice ? ' (' + _vDevice + ')' : ''}`
-                        : '源路径';
-                    if (_vTotal > 0 || _vPct !== null) {
+                    // 目录验证不显示"目标"（自动选择是磁带语义）
+                    const _vTarget = `自动选择${_vDevice ? ' (' + _vDevice + ')' : ''}`;
+                    if (_isTapeV && (_vTotal > 0 || _vPct !== null)) {
                         verifyLiveHtml += `
                     <div class="d-flex align-items-center mt-1">
                         <small class="text-muted">目标: ${_vTarget}</small>
-                        <small class="text-muted ms-auto">抽样比例: ${_vPct !== null ? _vPct + '%' : '-'}${_vTotal > 0 ? '　归档总数: ' + _fmtN(_vTotal) : ''}</small>
+                        <small class="text-muted ms-auto">抽样比例: ${_vPct !== null ? Math.round(Number(_vPct)) + '%' : '-'}${_vTotal > 0 ? '　归档总数: ' + _fmtN(_vTotal) : ''}</small>
+                    </div>`;
+                    } else if (!_isTapeV && _vPct !== null) {
+                        verifyLiveHtml += `
+                    <div class="d-flex align-items-center mt-1">
+                        <small class="text-muted">抽样比例:</small>
+                        <small class="text-muted ms-auto">${Math.round(Number(_vPct))}%</small>
                     </div>`;
                     }
                     if (vl && vl.kind === 'tape' && vl.index > 0) {
@@ -1663,10 +1710,15 @@
                     const _vp = Number(vl.percent) || 0;
                     if (vl.kind === 'directory') {
                         if (vl.phase === 'scan') {
+                            const _rateTxt = vl.scan_rate > 0
+                                ? ` · ${Math.round(vl.scan_rate).toLocaleString()}/s` : '';
+                            const _etaTxt = (vl.eta_seconds !== null && vl.eta_seconds !== undefined && vl.eta_seconds > 0)
+                                ? ` · 预计 ${new Date(Date.now() + vl.eta_seconds * 1000).toLocaleTimeString('zh-CN', {hour12: false, hour:'2-digit', minute:'2-digit'})} 完成`
+                                : '';
                             verifyLiveHtml += `
                     <div class="d-flex align-items-center mt-1">
                         <small class="text-muted">扫描中:</small>
-                        <small class="text-muted ms-auto">已扫描 ${vl.scanned} 个文件</small>
+                        <small class="text-muted ms-auto">已扫描 ${vl.scanned.toLocaleString()} 个文件${_rateTxt}${_etaTxt}</small>
                     </div>`;
                         } else {
                             const _vName = vl.name || '准备中';
@@ -1676,7 +1728,7 @@
                             verifyLiveHtml += `
                     <div class="d-flex align-items-center mt-1">
                         <small class="text-muted text-truncate" style="max-width:55%;" title="${vl.name}">验证中: ${_vName}</small>
-                        <small class="text-muted ms-auto">已抽样 ${vl.sampled}（通过 ${vl.passed} / <span${vl.failed > 0 ? ' class="text-danger"' : ''}${_dFailTip ? ` title="${_dFailTip}" style="cursor:help;"` : ''}>失败 ${vl.failed}</span>）</small>
+                        <small class="text-muted ms-auto">已抽样 ${vl.sampled}${(vl.scanned > 0 && vl.sampled > 0) ? '（' + (vl.sampled * 100 / vl.scanned).toFixed(2) + '%）' : ''}（通过 ${vl.passed} / <span${vl.failed > 0 ? ' class="text-danger"' : ''}${_dFailTip ? ` title="${_dFailTip}" style="cursor:help;"` : ''}>失败 ${vl.failed}</span>）</small>
                     </div>
                     ${vl.total_bytes > 0 ? `
                     <div class="d-flex align-items-center">
@@ -1775,30 +1827,44 @@
                     : (_num(/失败\s*(\d+)/) || 0);
                 const _scannedLabel = _vtDone === 'tape' ? '归档总数' : '已扫描文件';
 
-                const _mkVerifyRow = (label, valueHtml, title) => {
+                // 两列布局：同一行放两项（标签左、数值右），两列各自左右对齐
+                const _mkVerifyRowPair = (l1, v1, l2, v2, t1, t2) => {
                     const row = document.createElement('div');
-                    row.className = 'd-flex justify-content-between';
-                    row.innerHTML = `<small class="text-muted">${label}</small>`
-                        + `<small class="text-muted"${title ? ` title="${title}"` : ''}>${valueHtml}</small>`;
+                    row.className = 'd-flex align-items-baseline';
+                    row.style.gap = '12px';
+                    // 每格：label 左、value 右；两端都 nowrap，避免窄列里
+                    // label 和数值被挤成上下两行（曾出现"已扫描文件:"与数值分行）
+                    const cell = (label, valueHtml, title) =>
+                        `<div class="d-flex justify-content-between align-items-baseline flex-fill" style="min-width:0;">`
+                        + `<small class="text-muted flex-shrink-0" style="white-space:nowrap;">${label}</small>`
+                        + `<small class="text-muted text-end" style="font-variant-numeric: tabular-nums; white-space:nowrap;"`
+                        + `${title ? ` title="${title}"` : ''}>${valueHtml}</small></div>`;
+                    row.innerHTML = cell(l1, v1, t1) + cell(l2, v2, t2);
                     body.appendChild(row);
                 };
 
-                _mkVerifyRow('验证类型:', _vtype);
-                _mkVerifyRow('抽样比例:', _pct !== null ? `${_pct}%` : '—',
-                    '该次运行实际使用的抽样比例');
-                _mkVerifyRow(_scannedLabel + ':',
-                    _scanned !== null ? Number(_scanned).toLocaleString() : '—');
-                _mkVerifyRow('已抽样验证:',
-                    _sampled !== null ? Number(_sampled).toLocaleString() : '—');
-                _mkVerifyRow('通过:',
-                    `<span class="text-success">${_passed !== null ? Number(_passed).toLocaleString() : '—'}</span>`);
-                _mkVerifyRow('失败数:',
-                    `<span class="${_failed > 0 ? 'text-danger fw-semibold' : ''}"${(function(){
-                        const el = Array.isArray(task.verify_error_details) ? task.verify_error_details : [];
-                        return (_failed > 0 && el.length)
-                            ? ` title="${el.join('\n').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;')}" style="cursor:help;"`
-                            : '';
-                    })()}>${Number(_failed).toLocaleString()}</span>`);
+                _mkVerifyRowPair('验证类型:', _vtype,
+                    '抽样比例:', _pct !== null ? `${Math.round(Number(_pct))}%` : '—',
+                    '', '该次运行实际使用的抽样比例');
+                // 已抽样验证后面的括号是**实际抽样率**（抽样数/已扫描），保留 2 位小数
+                const _actualRate = (_scanned !== null && _scanned > 0 && _sampled !== null)
+                    ? `（${(_sampled * 100 / _scanned).toFixed(2)}%）` : '';
+                const _failTip = (function(){
+                    const el = Array.isArray(task.verify_error_details) ? task.verify_error_details : [];
+                    return (_failed > 0 && el.length)
+                        ? el.join('\n').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;')
+                        : '';
+                })();
+                _mkVerifyRowPair(_scannedLabel + ':',
+                    _scanned !== null ? Number(_scanned).toLocaleString() : '—',
+                    '已抽样验证:',
+                    _sampled !== null ? Number(_sampled).toLocaleString() + _actualRate : '—');
+                _mkVerifyRowPair('通过:',
+                    `<span class="text-success">${_passed !== null ? Number(_passed).toLocaleString() : '—'}</span>`,
+                    '失败数:',
+                    `<span class="${_failed > 0 ? 'text-danger fw-semibold' : ''}"`
+                    + `${_failTip ? ` title="${_failTip}" style="cursor:help;"` : ''}>${Number(_failed).toLocaleString()}</span>`,
+                    '', _failTip);
 
                 // 失败明细（文件/归档级）：任务不因此判失败，但明细必须可见
                 const _errList = Array.isArray(task.verify_error_details)

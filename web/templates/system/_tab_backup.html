@@ -182,6 +182,18 @@
                         <small class="form-text text-secondary">单次暂停的最长等待，超时该组报错</small>
                     </div>
 
+                    <!-- ── 归档清单落库 ── -->
+                    <div class="mb-3">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" role="switch" id="archiveManifestPersist">
+                            <label class="form-check-label" for="archiveManifestPersist">压缩完成后写入归档文件清单</label>
+                        </div>
+                        <small class="form-text text-secondary">
+                            把每个归档包含哪些文件写进数据库：恢复检索秒开、磁带验证跳过解压。
+                            代价：每 12TB 备份约多写 1.7GB 数据（写入在每组压缩完成后异步进行，不影响备份）。
+                        </small>
+                    </div>
+
                     <!-- ── 大小文件组调度 ── -->
                     <div class="mb-3">
                         <div class="form-check form-switch">

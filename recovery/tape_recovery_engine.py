@@ -2001,9 +2001,12 @@ class TapeRecoveryEngine:
                 archive_size = archive_path.stat().st_size if archive_path.exists() else None
 
                 row = await conn.fetchrow(
+                    # 卷标放宽：备份阶段写库时卷标未定（空串），
+                    # set_id + archive_filename 已能唯一定位归档
                     "SELECT COUNT(*) as cnt FROM tape_archive_contents "
-                    "WHERE tape_label = $1 AND set_id = $2 AND archive_filename = $3",
-                    tape_label, set_id, archive_filename,
+                    "WHERE set_id = $1 AND archive_filename = $2 "
+                    "AND (tape_label = $3 OR tape_label = '' OR tape_label IS NULL)",
+                    set_id, archive_filename, tape_label,
                 )
                 if row and row['cnt'] > 0:
                     count = row['cnt']
@@ -2093,9 +2096,10 @@ class TapeRecoveryEngine:
                 # 总数
                 total_row = await conn.fetchrow(
                     "SELECT COUNT(*) as total FROM tape_archive_contents "
-                    "WHERE tape_label = $1 AND set_id = $2 AND archive_filename = $3 "
+                    "WHERE set_id = $1 AND archive_filename = $2 "
+                    "AND (tape_label = $3 OR tape_label = '' OR tape_label IS NULL) "
                     "AND is_dir = FALSE",
-                    tape_label, set_id, archive_filename,
+                    set_id, archive_filename, tape_label,
                 )
                 total = total_row['total'] if total_row else 0
 
@@ -2103,11 +2107,12 @@ class TapeRecoveryEngine:
                 rows = await conn.fetch(
                     "SELECT file_path, file_size, is_dir, modified_time "
                     "FROM tape_archive_contents "
-                    "WHERE tape_label = $1 AND set_id = $2 AND archive_filename = $3 "
+                    "WHERE set_id = $1 AND archive_filename = $2 "
+                    "AND (tape_label = $3 OR tape_label = '' OR tape_label IS NULL) "
                     "AND is_dir = FALSE "
                     "ORDER BY file_path "
                     "LIMIT $4 OFFSET $5",
-                    tape_label, set_id, archive_filename, page_size, offset,
+                    set_id, archive_filename, tape_label, page_size, offset,
                 )
 
                 entries = []

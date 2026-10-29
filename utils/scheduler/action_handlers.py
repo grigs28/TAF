@@ -1070,6 +1070,9 @@ class VerifyActionHandler(ActionHandler):
             # 这里合并而不是覆盖，保证任务结束后仍能查到"当时用的抽样比例"
             final_summary = self._verify_params_from_config(config)
             final_summary.update(result)
+            # 验证的数据量写进任务表：列表"数据大小"列直接读这两个字段。
+            # 磁带验证=抽样归档总字节；目录验证=扫描到的文件总字节。
+            _v_bytes = int(result.get('total_bytes') or 0)
             await self._update_verify_progress(
                 task_id,
                 status=final_status,
@@ -1078,7 +1081,8 @@ class VerifyActionHandler(ActionHandler):
                 scan_status='completed',
                 description=result.get('message', ''),
                 result_summary=json.dumps(final_summary, ensure_ascii=False),
-                completed_at=now()
+                completed_at=now(),
+                **({'total_bytes': _v_bytes, 'processed_bytes': _v_bytes} if _v_bytes > 0 else {})
             )
 
             await log_system(
@@ -1241,6 +1245,7 @@ class VerifyActionHandler(ActionHandler):
                 pass
 
             archives = []
+            _tape_bytes_total = 0   # 磁带中全部归档总字节（任务列表"数据大小"列）
             unstable_skipped = 0
             system_dirs = {'.LTFS', 'lost+found', '.Trash', '.Trashes',
                           '$RECYCLE.BIN', 'System Volume Information'}
@@ -1263,6 +1268,10 @@ class VerifyActionHandler(ActionHandler):
                         unstable_skipped += 1
                         continue
                     archives.append(f)
+                    try:
+                        _tape_bytes_total += f.stat().st_size   # 磁带中全部归档总字节
+                    except OSError:
+                        pass
 
             if unstable_skipped:
                 logger.warning(
@@ -1448,6 +1457,7 @@ class VerifyActionHandler(ActionHandler):
                 "failed": failed,
                 "corrupt": corrupt,
                 "verify_errors": verify_errors,
+                "total_bytes": _tape_bytes_total,
             }
             # 结构化统计落库（卡片按验证类型显示，不再解析 description）
             if task_id:
@@ -1654,85 +1664,213 @@ class VerifyActionHandler(ActionHandler):
                     break
                 errors.append(err_msg)
 
-        for src in source_paths:
-            if stop_event is not None and stop_event.is_set():
-                logger.warning("[目录验证] 收到停止信号，终止验证")
-                break
-            src_path = Path(src)
-            if not src_path.exists():
-                logger.warning(f"[目录验证] 路径不存在: {src}")
-                continue
-            if src_path.is_file():
-                if exclude_patterns and self._should_exclude_file(str(src_path), exclude_patterns):
-                    excluded_count += 1
-                    continue
-                total_scanned += 1
-                sampled_list = [src_path]
-                p, f, s, e = self._verify_batch_sync(sampled_list, verify_enabled, verify_temp, _live)
-                passed += p
-                failed += f
-                total_sampled += s
-                _live['scanned'] = total_scanned
-                _live['sampled'] = total_sampled
-                _live['passed'] = passed
-                _live['failed'] = failed
-                for err_msg in e:
-                    logger.warning(f"[目录验证] 验证失败: {err_msg}")
-                _add_errors(e)
-            elif src_path.is_dir():
-                batch = []
-                for root, dirs, files in os.walk(str(src_path)):
+        # ===== 扫描 / 验证分离（生产者-消费者）=====
+        # 扫描线程只枚举元数据（os.scandir + READDIRPLUS + 预编译排除，
+        # 对齐 UI 的 SCAN_ENGINE=nfs 引擎），4 个验证线程消费抽样文件做全文件读取。
+        # 收益：扫描不再被验证阻塞；验证并发提升读吞吐；权限错误可见（不再静默）。
+        # 抽样语义不变：每攒 BATCH_SIZE 个文件按比例抽一批（流式扫描总数未知）。
+        import queue as _queue
+        import threading as _threading
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        from fnmatch import fnmatch as _fnmatch_verify
+
+        try:
+            from backup.simple_scanner import _compile_excludes
+            _name_re, _path_patterns = _compile_excludes(exclude_patterns)
+        except Exception as _ce:
+            logger.warning(f"[目录验证] 排除预编译失败，回退逐模式匹配: {_ce}")
+            _name_re, _path_patterns = None, []
+
+        VERIFY_WORKERS = 4        # 固定 4 并发验证
+        QUEUE_MAXSIZE = 100       # 背压：最多积压 100 批抽样
+
+        _vq = _queue.Queue(maxsize=QUEUE_MAXSIZE)
+        _stats_lock = _threading.Lock()
+        _err_lock = _threading.Lock()
+        _counters = {'scanned': 0, 'excluded': 0, 'sampled': 0, 'passed': 0,
+                     'failed': 0, 'bytes': 0}
+
+        def _is_excluded(name: str, full_path: str) -> bool:
+            if _name_re is not None and _name_re.match(name):
+                return True
+            for _p in _path_patterns:
+                if _fnmatch_verify(full_path, _p):
+                    return True
+            return False
+
+        def _enqueue_batch(batch):
+            """按比例抽样后入队（抽样语义与原来一致）"""
+            if not batch:
+                return
+            _n = max(1, math.ceil(len(batch) * verify_percent / 100))
+            _n = min(_n, len(batch))
+            _vq.put(random.sample(batch, _n))
+
+        def _scanner():
+            """扫描线程：只枚举元数据，不读文件内容"""
+            try:
+                for src in source_paths:
                     if stop_event is not None and stop_event.is_set():
-                        logger.warning("[目录验证] 收到停止信号，终止扫描/验证")
+                        logger.warning("[目录验证] 收到停止信号，扫描终止")
                         break
-                    if exclude_patterns:
-                        dirs[:] = [d for d in dirs if not self._should_exclude_file(str(Path(root) / d), exclude_patterns)]
-                    for f in files:
-                        file_path = Path(root) / f
-                        if exclude_patterns and self._should_exclude_file(str(file_path), exclude_patterns):
-                            excluded_count += 1
+                    src_path = Path(src)
+                    if not src_path.exists():
+                        logger.warning(f"[目录验证] 路径不存在: {src}")
+                        continue
+                    if src_path.is_file():
+                        if _is_excluded(src_path.name, str(src_path)):
+                            with _stats_lock:
+                                _counters['excluded'] += 1
                             continue
-                        batch.append(file_path)
-                        total_scanned += 1
-                        _live['scanned'] = total_scanned
-                        # 每10秒更新扫描进度（即使未满一批）
-                        _try_db_update('scan', 'running', '扫描文件中...')
-                        if len(batch) >= BATCH_SIZE:
-                            sample_count = max(1, math.ceil(len(batch) * verify_percent / 100))
-                            sampled_list = random.sample(batch, min(sample_count, len(batch)))
-                            p, f, s, e = self._verify_batch_sync(sampled_list, verify_enabled, verify_temp, _live)
-                            passed += p
-                            failed += f
-                            total_sampled += s
-                            _live['sampled'] = total_sampled
-                            _live['passed'] = passed
-                            _live['failed'] = failed
-                            for err_msg in e:
-                                logger.warning(f"[目录验证] 验证失败: {err_msg}")
-                            _add_errors(e)
-                            batch = []
-                            # 批次验证后更新进度（走 10 秒节流，避免每批一次 UPDATE）
-                            _try_db_update('verify', 'completed', '验证文件中...')
-                            # 每60秒输出一次进度日志
-                            now_ts = time.monotonic()
-                            if now_ts - last_progress_log >= 60:
-                                logger.info(f"[目录验证] 进度: 已扫描 {total_scanned} 个文件, 抽样 {total_sampled}, 通过 {passed}, 失败 {failed}")
-                                last_progress_log = now_ts
-                # 处理剩余的文件
-                if batch:
-                    sample_count = max(1, math.ceil(len(batch) * verify_percent / 100))
-                    sampled_list = random.sample(batch, min(sample_count, len(batch)))
-                    p, f, s, e = self._verify_batch_sync(sampled_list, verify_enabled, verify_temp, _live)
-                    passed += p
-                    failed += f
-                    total_sampled += s
-                    _live['sampled'] = total_sampled
-                    _live['passed'] = passed
-                    _live['failed'] = failed
-                    for err_msg in e:
-                        logger.warning(f"[目录验证] 验证失败: {err_msg}")
-                    _add_errors(e)
-                    _try_db_update('verify', 'completed', '验证文件中...', force=True)
+                        with _stats_lock:
+                            _counters['scanned'] += 1
+                        _enqueue_batch([src_path])
+                        continue
+                    dirs_to_scan = [str(src_path)]
+                    seen_dirs = set()
+                    batch = []
+                    while dirs_to_scan:
+                        if stop_event is not None and stop_event.is_set():
+                            logger.warning("[目录验证] 收到停止信号，扫描终止")
+                            break
+                        cur = dirs_to_scan.pop()
+                        try:
+                            cur_str = str(Path(cur).resolve())
+                        except Exception:
+                            cur_str = cur
+                        if cur_str in seen_dirs:
+                            continue
+                        seen_dirs.add(cur_str)
+                        if _is_excluded(cur_str.rsplit('/', 1)[-1], cur_str):
+                            with _stats_lock:
+                                _counters['excluded'] += 1
+                            continue
+                        try:
+                            with os.scandir(cur_str) as entries:
+                                for entry in entries:
+                                    if stop_event is not None and stop_event.is_set():
+                                        break
+                                    try:
+                                        if _is_excluded(entry.name, entry.path):
+                                            with _stats_lock:
+                                                _counters['excluded'] += 1
+                                            continue
+                                        # 符号链接跳过（与备份扫描器一致）
+                                        if entry.is_symlink():
+                                            continue
+                                        if entry.is_dir(follow_symlinks=False):
+                                            dirs_to_scan.append(entry.path)
+                                            continue
+                                        if entry.is_file(follow_symlinks=False):
+                                            batch.append(Path(entry.path))
+                                            # 顺带统计字节数（stat 来自 READDIRPLUS 缓存）
+                                            try:
+                                                _fsize = entry.stat(follow_symlinks=False).st_size
+                                            except OSError:
+                                                _fsize = 0
+                                            with _stats_lock:
+                                                _counters['scanned'] += 1
+                                                _counters['bytes'] += _fsize
+                                            if len(batch) >= BATCH_SIZE:
+                                                _enqueue_batch(batch)
+                                                batch = []
+                                    except OSError:
+                                        continue
+                        except (PermissionError, OSError) as _de:
+                            # 目录读不了：记录并计数（os.walk 时代整棵子树静默消失）
+                            logger.warning(f"[目录验证] 目录不可读，跳过: {cur_str} ({_de})")
+                            with _stats_lock:
+                                _counters['excluded'] += 1
+                            continue
+                    if batch:
+                        _enqueue_batch(batch)
+            except Exception as _se:
+                logger.error(f"[目录验证] 扫描线程异常: {_se}", exc_info=True)
+            finally:
+                for _ in range(VERIFY_WORKERS):
+                    _vq.put(None)      # 哨兵：每个验证线程一个
+
+        def _verifier():
+            """验证线程：消费抽样文件，全文件读取校验"""
+            while True:
+                try:
+                    item = _vq.get(timeout=1)
+                except _queue.Empty:
+                    if stop_event is not None and stop_event.is_set():
+                        return
+                    continue
+                if item is None:
+                    _vq.put(None)      # 传哨兵给其余线程
+                    return
+                for _fp in item:
+                    if stop_event is not None and stop_event.is_set():
+                        continue
+                    if _live is not None:
+                        _live['phase'] = 'verify'
+                        _live['name'] = _fp.name
+                        _live['done'] = 0
+                        try:
+                            _live['total'] = _fp.stat().st_size
+                        except OSError:
+                            _live['total'] = 0
+                    _ok, _err = self._verify_single_file(
+                        _fp, verify_enabled, verify_temp, _live)
+                    with _stats_lock:
+                        _counters['sampled'] += 1
+                        if _ok:
+                            _counters['passed'] += 1
+                        else:
+                            _counters['failed'] += 1
+                        _live['scanned'] = _counters['scanned']
+                        _live['sampled'] = _counters['sampled']
+                        _live['passed'] = _counters['passed']
+                        _live['failed'] = _counters['failed']
+                    if _err:
+                        with _err_lock:
+                            if len(errors) < MAX_ERRORS:
+                                errors.append(_err)
+                        logger.warning(f"[目录验证] 验证失败: {_err}")
+
+        _scan_thread = _threading.Thread(target=_scanner, name='dirverify-scan', daemon=True)
+        _scan_thread.start()
+        with _TPE(max_workers=VERIFY_WORKERS, thread_name_prefix='dirverify') as _pool:
+            _futs = [_pool.submit(_verifier) for _ in range(VERIFY_WORKERS)]
+            while True:
+                # 主线程：刷新计数器 + 进度
+                with _stats_lock:
+                    total_scanned = _counters['scanned']
+                    total_sampled = _counters['sampled']
+                    passed = _counters['passed']
+                    failed = _counters['failed']
+                    excluded_count = _counters['excluded']
+                _try_db_update('scan', 'running', '扫描+验证中...')
+                _now_ts = time.monotonic()
+                if _now_ts - last_progress_log >= 60:
+                    # 队列深度是"扫描是否喂饱验证"的直接指标：
+                    #   qsize 持续顶满(100) → 扫描快于验证，验证是瓶颈（正常）
+                    #   qsize 长期接近 0   → 验证快于扫描，扫描是瓶颈（需优化遍历）
+                    logger.info(
+                        f"[目录验证] 进度: 已扫描 {total_scanned} 个文件, "
+                        f"抽样 {total_sampled}, 通过 {passed}, 失败 {failed} "
+                        f"| 队列 {_vq.qsize()}/{QUEUE_MAXSIZE} 验证线程 {VERIFY_WORKERS}")
+                    last_progress_log = _now_ts
+                if all(_f.done() for _f in _futs):
+                    break
+                time.sleep(2)
+            for _f in _futs:
+                try:
+                    _f.result(timeout=1)
+                except Exception:
+                    pass
+        _scan_thread.join(timeout=300)
+        with _stats_lock:
+            total_scanned = _counters['scanned']
+            total_sampled = _counters['sampled']
+            passed = _counters['passed']
+            failed = _counters['failed']
+            excluded_count = _counters['excluded']
+        # 全部验证完 → 阶段切 verify（此前 scan/verify 交替跳变）
+        _try_db_update('verify', 'completed', '验证完成', force=True)
 
         # 清除卡片实时进度（含异常/取消路径外的正常收尾）
         if _sys_live is not None:
@@ -1758,6 +1896,8 @@ class VerifyActionHandler(ActionHandler):
             "sampled": total_sampled,
             "passed": passed,
             "failed": failed,
+            # 扫描到的文件总字节（任务列表"数据大小"列 + 卡片显示）
+            "total_bytes": _counters['bytes'],
         }
         # 结构化统计落库（线程中运行：提交到主事件循环）
         if task_id and loop:
@@ -1774,6 +1914,65 @@ class VerifyActionHandler(ActionHandler):
         if errors:
             result["errors"] = errors[:20]
         return result
+
+    def _verify_single_file(self, file_path: Path, verify_enabled: bool,
+                            verify_temp: Path, live: Optional[dict] = None) -> tuple:
+        """验证单个文件，返回 (ok, 错误描述或 None)
+
+        普通文件：**全文件读取**并核对字节数（原来只读 4KB，发现不了文件中后部
+        的损坏/截断）。归档文件：解压验证全部成员。
+        live 传入时逐块更新已读字节，供卡片实时进度使用。
+        """
+        try:
+            if (file_path.name.endswith(('.tar.zst', '.tar.gz', '.tgz', '.tar', '.7z', '.zip'))
+                    and verify_enabled):
+                verify_temp.mkdir(parents=True, exist_ok=True)
+                valid, detail = self._verify_archive_extract(
+                    file_path, verify_temp, None, live)
+                # 清理临时文件
+                if verify_temp.exists():
+                    for item in verify_temp.iterdir():
+                        try:
+                            if item.is_dir():
+                                shutil.rmtree(str(item))
+                            else:
+                                item.unlink()
+                        except Exception:
+                            pass
+                return (True, None) if valid else (False, f"{file_path}: {detail}")
+
+            try:
+                size_before = file_path.stat().st_size
+            except FileNotFoundError:
+                logger.warning(f"[目录验证] 文件已消失，跳过: {file_path}")
+                return True, None
+            read_total = 0
+            try:
+                with open(str(file_path), 'rb') as f:
+                    while True:
+                        chunk = f.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        read_total += len(chunk)
+                        if live is not None:
+                            live['done'] = read_total
+            except FileNotFoundError:
+                logger.warning(f"[目录验证] 文件读取前已消失，跳过: {file_path}")
+                return True, None
+            try:
+                size_after = file_path.stat().st_size
+            except OSError:
+                size_after = size_before
+            if size_before != size_after:
+                logger.warning(
+                    f"[目录验证] 文件在验证期间发生变化，跳过: {file_path} "
+                    f"({size_before} -> {size_after})")
+                return True, None
+            if read_total != size_before:
+                return False, f"{file_path}: 读取字节数不符 ({read_total} != {size_before})"
+            return True, None
+        except Exception as e:
+            return False, f"{file_path}: {str(e)}"
 
     def _verify_batch_sync(self, sampled: list, verify_enabled: bool, verify_temp: Path,
                            live: Optional[dict] = None) -> tuple:

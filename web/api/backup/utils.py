@@ -244,7 +244,14 @@ def _build_stage_info(description: Optional[str], scan_status: Optional[str], st
                     # 失败时若无法定位当前阶段，按 scan_done 兜底
                     step_status = "failed" if (cur_idx < 0 and idx == 0) else "pending"
             elif is_running:
-                if cur_idx >= 0:
+                # 目录验证是"扫描 + 验证并发"（扫描线程枚举、4 个验证线程同时读文件），
+                # 单一 operation_stage 只能是 scan，会让"验证完整性"整轮都不亮。
+                # 扫描进行中时把 verify 也点亮（两个 current 并列显示）。
+                _dir_concurrent = (not is_tape_verify) and cur_stage == 'scan'
+                if _dir_concurrent and code == "verify":
+                    step_status = "active"
+                    label = "验证文件中"
+                elif cur_idx >= 0:
                     if idx < cur_idx:
                         step_status = "completed"
                         if code == "scan":

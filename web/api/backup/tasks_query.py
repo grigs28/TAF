@@ -202,6 +202,30 @@ async def get_backup_tasks(
                         _v_total = int(_vl.get('total') or 0)
                         _v_started = float(_vl.get('started') or 0)
                         _v_elapsed = max(0.001, time.time() - _v_started) if _v_started else 0
+                        # 目录验证预计完成：总量参照"上次已完成的目录验证任务扫描总数"，
+                        # 剩余时间按本次实测扫描速率推算（本次总量流式未知）。
+                        # 查不到上次任务 → 不给预计（前端不显示）。
+                        _eta_seconds = None
+                        _v_kind = str(_vl.get('kind') or 'tape')
+                        _v_scanned = int(_vl.get('scanned') or 0)
+                        if _v_kind == 'directory' and _v_scanned > 0:
+                            try:
+                                _prev = await conn.fetchval(
+                                    """
+                                    SELECT total_files FROM backup_tasks
+                                    WHERE task_type = 'verify'::backuptasktype
+                                      AND status = 'completed'::backuptaskstatus
+                                      AND result_summary->>'verify_type' = 'directory'
+                                      AND total_files > 0
+                                    ORDER BY id DESC LIMIT 1
+                                    """
+                                )
+                                if _prev and int(_prev) > _v_scanned:
+                                    _rate = _v_scanned / _v_elapsed      # 文件/秒
+                                    if _rate > 0:
+                                        _eta_seconds = int((int(_prev) - _v_scanned) / _rate)
+                            except Exception as _eta_err:
+                                logger.debug(f"[任务查询] 验证 ETA 计算失败: {_eta_err}")
                         verify_live = {
                             'kind': str(_vl.get('kind') or 'tape'),
                             'phase': str(_vl.get('phase') or 'verify'),
@@ -217,10 +241,14 @@ async def get_backup_tasks(
                             'members': int(_vl.get('members') or 0),
                             'scanned': int(_vl.get('scanned') or 0),
                             'sampled': int(_vl.get('sampled') or 0),
+                            # 扫描速度（文件/秒）：卡片显示"1,061/s"
+                            'scan_rate': round(_v_scanned / _v_elapsed, 0) if (_v_elapsed and _v_scanned) else 0,
                             'percent': round(_v_done / _v_total * 100, 1) if _v_total > 0 else 0,
                             'speed_mbps': round(_v_done / _v_elapsed / 1048576, 1) if _v_elapsed else 0,
                             # 最近失败明细（滚动 5 条，卡片 hover"失败数"显示）
                             'errors': [str(x) for x in (_vl.get('errors') or [])][-5:],
+                            # 预计剩余秒数（None=无参照数据，前端不显示预计）
+                            'eta_seconds': _eta_seconds,
                         }
                     # 压缩喂不饱写带：FinalDirMonitor 累计的 final 空等时间
                     try:

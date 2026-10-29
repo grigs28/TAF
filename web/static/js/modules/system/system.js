@@ -948,6 +948,13 @@ async function loadAllSystemConfig() {
                     }
                 }
             }
+            // 归档清单落库开关（默认关闭）
+            const amk = document.getElementById('archiveManifestPersist');
+            if (amk) {
+                amk.checked = (config.archive_manifest_persist !== undefined)
+                    ? !!config.archive_manifest_persist
+                    : false;
+            }
             // 大小文件组调度开关（默认启用）+ 计划05 参数
             const gsch = document.getElementById('groupSchedEnabled');
             if (gsch) {
@@ -1140,6 +1147,10 @@ async function saveEnvConfigSection() {
             })(),
             group_sched_enabled: (() => {
                 const sw = document.getElementById('groupSchedEnabled');
+                return sw ? !!sw.checked : null;
+            })(),
+            archive_manifest_persist: (() => {
+                const sw = document.getElementById('archiveManifestPersist');
                 return sw ? !!sw.checked : null;
             })(),
             group_sched_ratio: (() => {
