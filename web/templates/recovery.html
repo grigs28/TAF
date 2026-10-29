@@ -1598,6 +1598,46 @@
     function searchAllArchives(keyword) {
         if (!selectedSetId) { alert('请先选择备份集'); return; }
         if (_searchRunning) return;
+        // 先查清单缓存覆盖率：未缓存的归档要逐个解压读带（9TB 约 10 小时），
+        // 必须让用户知情后再确认，避免误触发一次长时间读带。
+        _checkCacheCoverageThenSearch(keyword);
+    }
+
+    function _checkCacheCoverageThenSearch(keyword) {
+        var covUrl = '/api/recovery/backup-sets/' + encodeURIComponent(selectedSetId)
+            + '/cache-coverage?_t=' + Date.now();
+        fetch(covUrl, { credentials: 'same-origin' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (cov) {
+                if (!cov || !cov.total || cov.uncached <= 0) {
+                    _doSearchAllArchives(keyword);
+                    return;
+                }
+                // 估算：归档平均 ~7.7GB，磁带读 ~250MB/s → 每个约 30 秒
+                var avgSec = 30;
+                var etaSec = cov.uncached * avgSec;
+                var etaTxt = etaSec >= 3600
+                    ? (etaSec / 3600).toFixed(1) + ' 小时'
+                    : Math.max(1, Math.round(etaSec / 60)) + ' 分钟';
+                var covered = cov.total > 0 ? Math.round(cov.cached * 100 / cov.total) : 0;
+                var msg = '当前备份集共 ' + cov.total + ' 个归档，其中 '
+                    + cov.cached + ' 个已有文件清单缓存（' + covered + '%）。\n\n'
+                    + '剩余 ' + cov.uncached + ' 个归档尚未缓存，需要逐个解压读取磁带；\n'
+                    + '按磁带读速估算约需 ' + etaTxt + '（9TB 全量约 10 小时）。\n\n'
+                    + '建议：先做一次磁带验证（或开启"压缩完成后写入归档文件清单"），'
+                    + '之后检索即可秒开。\n\n'
+                    + '仍然要现在全盘检索吗？';
+                if (!confirm(msg)) { return; }
+                _doSearchAllArchives(keyword);
+            })
+            .catch(function () {
+                // 覆盖率查询失败不阻断检索
+                _doSearchAllArchives(keyword);
+            });
+    }
+
+    function _doSearchAllArchives(keyword) {
+        if (_searchRunning) return;
         _searchRunning = true;
         var scanLog = document.getElementById('scanLog');
         if (scanLog) scanLog.innerHTML = '';

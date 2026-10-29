@@ -107,11 +107,16 @@ class TapeRecoveryEngine:
     # Step 1: 磁带检测
     # ================================================================
 
-    async def get_tape_status(self) -> Dict[str, Any]:
-        """检查磁带状态（是否加载、是否已挂载 LTFS）"""
+    async def get_tape_status(self, quick: bool = False) -> Dict[str, Any]:
+        """检查磁带状态（是否加载、是否已挂载 LTFS）
+
+        quick=True：跳过 check_tape_in_drive()（它会触发 mt load，最坏等 6 分钟），
+        只用挂载点状态 + 上次读到的卷标。恢复页的"展开归档/搜索"这类高频调用
+        用它——否则每次展开一个归档都要等磁带设备探测。
+        """
         result = {
             "tape_loaded": False,
-            "tape_label": None,
+            "tape_label": getattr(self, '_last_tape_label', None),
             "device": "",
             "ltfs_mounted": False,
             "mount_point": None,
@@ -119,6 +124,20 @@ class TapeRecoveryEngine:
         }
 
         try:
+            if self.tape_handler and quick:
+                # 快速路径：不碰设备，只看挂载点
+                result["device"] = self.tape_handler._get_tape_device()
+                mp = self._get_mount_point()
+                if mp.exists() and mp.is_mount():
+                    result["ltfs_mounted"] = True
+                    result["tape_loaded"] = True
+                    result["status_message"] = "磁带已挂载"
+                    if not result["tape_label"]:
+                        result["tape_label"] = await self._read_tape_label(mp)
+                else:
+                    result["status_message"] = "LTFS 未挂载"
+                result["mount_point"] = str(mp)
+                return result
             if self.tape_handler:
                 in_drive, drive_msg = await self.tape_handler.check_tape_in_drive()
                 result["tape_loaded"] = in_drive
@@ -161,6 +180,8 @@ class TapeRecoveryEngine:
                 if tape_ops and hasattr(tape_ops, '_read_tape_label'):
                     label_info = await tape_ops._read_tape_label()
                     if label_info and label_info.get('tape_id'):
+                        # 记住卷标：后续 quick 模式直接用，不再探测设备
+                        self._last_tape_label = label_info['tape_id']
                         return label_info['tape_id']
         except Exception:
             pass
@@ -1084,6 +1105,52 @@ class TapeRecoveryEngine:
             return {"set_id": set_id, "entries": [], "total_entries": 0,
                     "total_files": 0, "total_dirs": 0, "archives": [], "error": str(e)}
 
+    async def get_cache_coverage(self, set_id: str) -> Dict[str, Any]:
+        """统计"文件清单缓存覆盖情况"：磁带上的归档数 vs DB 已缓存归档数。
+
+        搜索文件时未缓存的归档要逐个解压读带；9TB 带子全量解压约 10 小时，
+        前端据 total/cached 之差弹窗提示用户。
+        """
+        try:
+            from utils.scheduler.db_utils import get_opengauss_connection
+            set_dir = self._get_mount_point() / set_id
+            total = 0
+            size_pending = 0
+            if set_dir.exists():
+                for f in set_dir.iterdir():
+                    if f.is_file():
+                        total += 1
+                        try:
+                            size_pending += f.stat().st_size
+                        except OSError:
+                            pass
+            cached = 0
+            async with get_opengauss_connection() as conn:
+                # 必须带上实际卷标（验证任务按卷标写入）+ 空串（备份阶段写入），
+                # tape_label 放首列才走索引，避免 100 万行全表扫
+                try:
+                    _st = await self.get_tape_status()
+                    _lbl = _st.get("tape_label") or ""
+                except Exception:
+                    _lbl = ""
+                row = await conn.fetchval(
+                    "SELECT COUNT(DISTINCT archive_filename) FROM tape_archive_contents "
+                    "WHERE tape_label IN ($1, '') AND set_id = $2",
+                    _lbl, set_id,
+                )
+                cached = int(row or 0)
+            return {
+                "set_id": set_id,
+                "total": total,
+                "cached": cached,
+                "uncached": max(0, total - cached),
+                "total_bytes": size_pending,
+            }
+        except Exception as e:
+            logger.warning(f"[恢复] 计算缓存覆盖率失败: {e}")
+            return {"set_id": set_id, "total": 0, "cached": 0, "uncached": 0,
+                    "total_bytes": 0, "error": str(e)}
+
     async def search_files_db_first_streaming(self, set_id: str, keyword: str,
                                                tape_label: str = None) -> AsyncGenerator[Dict, None]:
         """数据库优先搜索文件名：先查 DB，DB 无数据时逐个解压归档并缓存
@@ -2001,12 +2068,10 @@ class TapeRecoveryEngine:
                 archive_size = archive_path.stat().st_size if archive_path.exists() else None
 
                 row = await conn.fetchrow(
-                    # 卷标放宽：备份阶段写库时卷标未定（空串），
-                    # set_id + archive_filename 已能唯一定位归档
+                    # tape_label 放首列以走索引；IN('') 兼容备份阶段写的空卷标
                     "SELECT COUNT(*) as cnt FROM tape_archive_contents "
-                    "WHERE set_id = $1 AND archive_filename = $2 "
-                    "AND (tape_label = $3 OR tape_label = '' OR tape_label IS NULL)",
-                    set_id, archive_filename, tape_label,
+                    "WHERE tape_label IN ($1, '') AND set_id = $2 AND archive_filename = $3",
+                    tape_label, set_id, archive_filename,
                 )
                 if row and row['cnt'] > 0:
                     count = row['cnt']
@@ -2095,11 +2160,13 @@ class TapeRecoveryEngine:
             async with get_opengauss_connection() as conn:
                 # 总数
                 total_row = await conn.fetchrow(
+                    # tape_label 必须在首列才能走 (tape_label,set_id,archive_filename)
+                    # 索引；用 IN('') 同时兼容"备份阶段写的空卷标"，
+                    # 不能写成 OR/IS NULL——那会让索引失效、全表扫 100 万行
                     "SELECT COUNT(*) as total FROM tape_archive_contents "
-                    "WHERE set_id = $1 AND archive_filename = $2 "
-                    "AND (tape_label = $3 OR tape_label = '' OR tape_label IS NULL) "
+                    "WHERE tape_label IN ($1, '') AND set_id = $2 AND archive_filename = $3 "
                     "AND is_dir = FALSE",
-                    set_id, archive_filename, tape_label,
+                    tape_label, set_id, archive_filename,
                 )
                 total = total_row['total'] if total_row else 0
 
@@ -2107,12 +2174,11 @@ class TapeRecoveryEngine:
                 rows = await conn.fetch(
                     "SELECT file_path, file_size, is_dir, modified_time "
                     "FROM tape_archive_contents "
-                    "WHERE set_id = $1 AND archive_filename = $2 "
-                    "AND (tape_label = $3 OR tape_label = '' OR tape_label IS NULL) "
+                    "WHERE tape_label IN ($1, '') AND set_id = $2 AND archive_filename = $3 "
                     "AND is_dir = FALSE "
                     "ORDER BY file_path "
                     "LIMIT $4 OFFSET $5",
-                    set_id, archive_filename, tape_label, page_size, offset,
+                    tape_label, set_id, archive_filename, page_size, offset,
                 )
 
                 entries = []

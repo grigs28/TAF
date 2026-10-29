@@ -89,9 +89,14 @@ def _get_engine(request: Request):
 
 @router.get("/tape-status")
 async def get_tape_status(request: Request):
-    """获取磁带状态（是否加载、是否挂载 LTFS）"""
+    """获取磁带状态（是否加载、是否挂载 LTFS）
+
+    quick 模式：恢复页轮询这个接口，不能让它触发 mt load
+    （状态"未知"时 check_tape_in_drive 会去装带，最坏等 6 分钟，
+    页面就一直停在"检测中..."）。
+    """
     engine = _get_engine(request)
-    return await engine.get_tape_status()
+    return await engine.get_tape_status(quick=True)
 
 
 @router.post("/mount-tape")
@@ -262,7 +267,8 @@ async def get_archive_contents(set_id: str, archive: str, request: Request,
     _reject_if_backup_running(request)
     engine = _get_engine(request)
 
-    tape_status = await engine.get_tape_status()
+    # quick 模式：展开归档不需要探测设备（否则每次可能等 mt load 几分钟）
+    tape_status = await engine.get_tape_status(quick=True)
     tape_label = tape_status.get("tape_label") or "unknown"
 
     # 已标记损坏的归档：直接返回错误，不再读带重试
@@ -336,7 +342,7 @@ async def expand_all_stream(set_id: str, tape_label: str, request: Request):
 
     # 如果没有传 tape_label，尝试获取
     if not tape_label:
-        status = await engine.get_tape_status()
+        status = await engine.get_tape_status(quick=True)
         tape_label = status.get("tape_label") or "unknown"
 
     async def _stream():
@@ -367,7 +373,7 @@ async def get_archive_cache_status(set_id: str, request: Request,
     """批量查询该备份集各归档的清单缓存/损坏状态（供前端显示标志）"""
     engine = _get_engine(request)
     if not tape_label:
-        status = await engine.get_tape_status()
+        status = await engine.get_tape_status(quick=True)
         tape_label = status.get("tape_label") or "unknown"
     status_map = await engine.archive_cache_status(tape_label, set_id)
     return {"tape_label": tape_label, "set_id": set_id,
@@ -383,6 +389,22 @@ async def cleanup_recovery_tmp(request: Request, set_id: str = ""):
     return {"removed": removed, "set_id": set_id or None}
 
 
+@router.get("/backup-sets/{set_id}/cache-coverage")
+async def get_cache_coverage(set_id: str, request: Request):
+    """查询"文件清单缓存覆盖率"，供搜索前提示用。
+
+    返回 total（磁带上的归档数）、cached（已缓存的归档数）。
+    未缓存的归档在搜索时要逐个解压读取（9TB 带子全量约 10 小时），
+    前端据此弹窗提示用户。
+    """
+    engine = _get_engine(request)
+    try:
+        return await engine.get_cache_coverage(set_id)
+    except Exception as e:
+        logger.warning(f"[恢复] 查询缓存覆盖率失败: {e}")
+        return {"set_id": set_id, "total": 0, "cached": 0, "error": str(e)}
+
+
 @router.get("/backup-sets/{set_id}/search-files-stream")
 async def search_files_stream(set_id: str, q: str, request: Request,
                                 tape_label: str = ""):
@@ -395,7 +417,7 @@ async def search_files_stream(set_id: str, q: str, request: Request,
     engine = _get_engine(request)
 
     if not tape_label:
-        status = await engine.get_tape_status()
+        status = await engine.get_tape_status(quick=True)
         tape_label = status.get("tape_label") or "unknown"
 
     async def _stream():
